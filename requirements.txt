@@ -1,0 +1,35 @@
+# --- Core ---
+fastapi>=0.115
+uvicorn[standard]>=0.34
+python-multipart>=0.0.18
+pydantic>=2.10
+pydantic-settings>=2.7
+
+# --- Database ---
+sqlalchemy[asyncio]>=2.0
+asyncpg>=0.30
+alembic>=1.14
+
+# --- Object storage ---
+aiofiles>=24.1
+
+# --- Stage 2: MIME detection ---
+python-magic>=0.4.27
+
+# --- Stage 3: Parsers ---
+pdfplumber>=0.11
+python-docx>=1.1
+mistune>=3.1
+beautifulsoup4>=4.12
+
+# --- Stage 5: Chunking ---
+langchain-text-splitters>=0.3
+tiktoken>=0.8
+
+# --- Stage 6: Embeddings ---
+openai>=1.60
+
+# --- Stage 7: Vector stores (install as needed) ---
+pgvector>=0.3
+# qdrant-client>=1.12
+# pinecone>=5.4
