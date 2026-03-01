@@ -5,32 +5,19 @@ import uuid
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
-from app.models.database import get_session
-from app.models.job import Job, JobStatus
-from app.storage.local import LocalStorage
+from app.config.database import get_session
+from app.persistence.models.job import Job
+from app.services.data_ingestion.DataIngestion import DataIngestion, get_data_ingestion
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
-ALLOWED_MIMES = {
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "text/markdown",
-    "text/html",
-    "text/plain",
-}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
-
-
-def get_storage() -> LocalStorage:
-    return LocalStorage(settings.upload_dir)
 
 
 @router.post("/upload", status_code=201)
 async def upload_document(
     file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_session),
-    storage: LocalStorage = Depends(get_storage),
+    data_ingestion: DataIngestion = Depends(get_data_ingestion),
 ):
     # --- read + size guard ---
     data = await file.read()
@@ -39,19 +26,8 @@ async def upload_document(
     if not data:
         raise HTTPException(400, detail="Empty file")
 
-    # --- persist to object storage ---
-    storage_key = f"{uuid.uuid4().hex}/{file.filename}"
-    await storage.save(storage_key, data)
-
-    # --- create job record ---
-    job = Job(
-        filename=file.filename or "unknown",
-        storage_key=storage_key,
-        status=JobStatus.pending,
-    )
-    db.add(job)
-    await db.commit()
-    await db.refresh(job)
+    # --- delegate to service -> DataIngestion---
+    job = await data_ingestion.ingest(data, file.filename or "unknown")
 
     return {
         "job_id": str(job.id),

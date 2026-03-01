@@ -3,7 +3,7 @@
 from pinecone import Pinecone
 
 from app.config import settings
-from app.vectorstore.base import VectorStore
+from app.persistence.vectorstore.base import VectorStore
 
 
 class PineconeVectorStore(VectorStore):
@@ -41,9 +41,10 @@ class PineconeVectorStore(VectorStore):
         ]
         index.upsert(vectors=records)
 
-    async def query(self, vector: list[float], top_k: int = 5) -> list[dict]:
+    async def query(self, vector: list[float], top_k: int = 5, filter: dict | None = None) -> list[dict]:
         index = self._get_index()
-        result = index.query(vector=vector, top_k=top_k, include_metadata=True)
+        pc_filter = {k: {"$eq": v} for k, v in filter.items()} if filter else None
+        result = index.query(vector=vector, top_k=top_k, include_metadata=True, filter=pc_filter)
         return [
             {
                 "id": match.id,

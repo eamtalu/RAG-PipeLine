@@ -6,18 +6,17 @@ in batches, and writes vectors to the configured vector store.
 
 import asyncio
 import logging
-from uuid import UUID
 
 import openai
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
-from app.models.database import async_session
-from app.models.chunk import Chunk
-from app.models.embedding_queue import EmbeddingQueueItem, QueueStatus
-from app.models.job import Job, JobStatus
-from app.vectorstore.factory import get_vector_store
+from app.settings import settings
+from app.config.database import async_session
+from app.persistence.models.chunk import Chunk
+from app.persistence.models.embedding_queue import EmbeddingQueueItem, QueueStatus
+from app.persistence.models.job import Job, JobStatus
+from app.persistence.vectorstore import get_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +62,33 @@ async def _process_batch(items: list[EmbeddingQueueItem]) -> None:
 
         texts = [chunks[item.chunk_id].text for item in items]
         ids = [str(item.chunk_id) for item in items]
-        metadatas = [chunks[item.chunk_id].metadata_ for item in items]
 
-        # Generate embeddings
-        vectors = await _generate_embeddings(texts)
+        # FIX 1: Prepend heading_breadcrumb for richer embeddings
+        contextualized_texts = []
+        for item in items:
+            chunk = chunks[item.chunk_id]
+            breadcrumb = chunk.heading_breadcrumb or ""
+            if breadcrumb:
+                contextualized_texts.append(breadcrumb + "\n\n" + chunk.text)
+            else:
+                contextualized_texts.append(chunk.text)
 
-        # Write to vector store
+        # FIX 2: Enrich metadata with heading_breadcrumb, job_id, token_count
+        enriched_metadatas = []
+        for item in items:
+            chunk = chunks[item.chunk_id]
+            meta = dict(chunk.metadata_) if chunk.metadata_ else {}
+            meta["heading_breadcrumb"] = chunk.heading_breadcrumb or ""
+            meta["job_id"] = str(item.job_id)
+            meta["token_count"] = chunk.token_count
+            enriched_metadatas.append(meta)
+
+        # Generate embeddings from contextualized texts
+        vectors = await _generate_embeddings(contextualized_texts)
+
+        # Write to vector store (store raw texts for retrieval, enriched metadata)
         store = get_vector_store()
-        await store.upsert(ids=ids, vectors=vectors, texts=texts, metadatas=metadatas)
+        await store.upsert(ids=ids, vectors=vectors, texts=texts, metadatas=enriched_metadatas)
 
         # Mark items as done
         item_ids = [item.id for item in items]

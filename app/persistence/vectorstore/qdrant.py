@@ -1,10 +1,10 @@
 """Qdrant-backed vector store."""
 
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 
 from app.config import settings
-from app.vectorstore.base import VectorStore
+from app.persistence.vectorstore.base import VectorStore
 
 
 class QdrantVectorStore(VectorStore):
@@ -41,11 +41,21 @@ class QdrantVectorStore(VectorStore):
         ]
         await self.client.upsert(collection_name=self.collection, points=points)
 
-    async def query(self, vector: list[float], top_k: int = 5) -> list[dict]:
+    async def query(self, vector: list[float], top_k: int = 5, filter: dict | None = None) -> list[dict]:
+        query_filter = None
+        if filter:
+            query_filter = Filter(
+                must=[
+                    FieldCondition(key=k, match=MatchValue(value=v))
+                    for k, v in filter.items()
+                ]
+            )
+
         results = await self.client.query_points(
             collection_name=self.collection,
             query=vector,
             limit=top_k,
+            query_filter=query_filter,
         )
         return [
             {

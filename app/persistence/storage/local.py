@@ -1,7 +1,7 @@
 import aiofiles
 from pathlib import Path
 
-from app.storage.base import ObjectStorage
+from app.persistence.storage.base import ObjectStorage
 
 
 class LocalStorage(ObjectStorage):

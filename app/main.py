@@ -5,12 +5,16 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.router import api_router
-from app.config import settings
-from app.workers.embedding_worker import run_worker
+from app.api.v1.router import api_router
+from app.settings import settings
+from app.services.workers.embedding_worker import run_worker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
+# If you want to
+# - create instances that would be available application wide or
+# - any background service that would be running applicationwide
+# you need to do it with decorator @asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

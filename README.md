@@ -212,3 +212,67 @@ All settings are driven by environment variables (see `.env.example`):
 | `CHUNK_OVERLAP` | `64` | Token overlap between chunks |
 | `VECTOR_STORE_BACKEND` | `pgvector` | `pgvector`, `qdrant`, or `pinecone` |
 | `WORKER_POLL_SECONDS` | `2.0` | Embedding worker poll interval |
+
+---
+
+## Dependencies
+
+### Core
+
+| Package | Purpose |
+|---------|---------|
+| `fastapi` | Web framework — async API endpoints, validation, OpenAPI docs |
+| `uvicorn[standard]` | ASGI server that runs FastAPI (extras add lifespan, reload, websockets) |
+| `python-multipart` | Parses `multipart/form-data` — required by FastAPI for `UploadFile` |
+| `pydantic` | Data validation & serialization (FastAPI uses it for request/response models) |
+| `pydantic-settings` | Loads `.env` files into a typed `Settings` class — all config in one place |
+
+### Database
+
+| Package | Purpose |
+|---------|---------|
+| `sqlalchemy[asyncio]` | ORM + async database toolkit — defines Job, Chunk, EmbeddingQueue tables |
+| `asyncpg` | PostgreSQL async driver — SQLAlchemy uses this under the hood for `postgresql+asyncpg://` |
+| `alembic` | Database migration tool — generates and runs schema changes (`CREATE TABLE`, `ALTER`, etc.) |
+
+### Object Storage
+
+| Package | Purpose |
+|---------|---------|
+| `aiofiles` | Async file I/O — non-blocking reads/writes for uploaded files |
+
+### Stage 2 — Detection
+
+| Package | Purpose |
+|---------|---------|
+| `python-magic` | Wraps `libmagic` — sniffs true MIME type from file bytes (not just file extension) |
+
+### Stage 3 — Parsers
+
+| Package | Purpose |
+|---------|---------|
+| `pdfplumber` | Extracts text + layout from PDFs, page by page |
+| `python-docx` | Reads `.docx` files — extracts paragraphs, heading styles |
+| `mistune` | Fast Markdown to HTML renderer — we parse headings from raw MD then strip HTML for plain text |
+| `beautifulsoup4` | HTML parser — extracts text, headings, title from HTML documents |
+
+### Stage 5 — Chunking
+
+| Package | Purpose |
+|---------|---------|
+| `langchain-text-splitters` | `RecursiveCharacterTextSplitter` — splits text at natural boundaries (paragraphs, sentences, words) |
+| `tiktoken` | OpenAI's tokenizer — counts tokens per chunk so they fit within embedding model limits |
+
+### Stage 6 — Embeddings
+
+| Package | Purpose |
+|---------|---------|
+| `openai` | Official OpenAI SDK — calls the embeddings API to turn text chunks into vectors |
+
+### Stage 7 — Vector Stores
+
+| Package | Purpose |
+|---------|---------|
+| `pgvector` | pgvector support for SQLAlchemy — stores/queries vectors directly in PostgreSQL |
+| `qdrant-client` | *(optional)* Qdrant vector DB client — uncomment in `requirements.txt` if using Qdrant |
+| `pinecone` | *(optional)* Pinecone managed vector DB client — uncomment in `requirements.txt` if using Pinecone |

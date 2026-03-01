@@ -23,8 +23,12 @@ class VectorStore(ABC):
         self,
         vector: list[float],
         top_k: int = 5,
+        filter: dict | None = None,
     ) -> list[dict]:
         """Return the top-k most similar results.
 
         Each dict: {"id": str, "score": float, "text": str, "metadata": dict}
+
+        filter — optional key/value pairs matched against stored metadata
+                 (e.g. {"job_id": "..."}) to scope the search.
         """
