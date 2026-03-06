@@ -81,6 +81,8 @@ async def _process_batch(items: list[EmbeddingQueueItem]) -> None:
             meta["heading_breadcrumb"] = chunk.heading_breadcrumb or ""
             meta["job_id"] = str(item.job_id)
             meta["token_count"] = chunk.token_count
+            meta["chunk_type"] = chunk.chunk_type
+            meta["parent_id"] = str(chunk.parent_id) if chunk.parent_id else None
             enriched_metadatas.append(meta)
 
         # Generate embeddings from contextualized texts

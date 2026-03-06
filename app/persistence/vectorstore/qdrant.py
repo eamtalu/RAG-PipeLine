@@ -3,7 +3,7 @@
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 
-from app.config import settings
+from app.settings import settings
 from app.persistence.vectorstore.base import VectorStore
 
 

@@ -31,5 +31,5 @@ openai>=1.60
 
 # --- Stage 7: Vector stores (install as needed) ---
 pgvector>=0.3
-# qdrant-client>=1.12
+qdrant-client>=1.12
 # pinecone>=5.4
