@@ -25,7 +25,13 @@ class QdrantVectorStore(VectorStore):
             )
 
         # Ensure payload indexes exist (idempotent — Qdrant skips if already created)
+        # Order matters for query planning: profile → section_root → section_parent → section_heading first,
+        # then operational fields
         for field, schema_type in [
+            ("profile", PayloadSchemaType.KEYWORD),
+            ("section_root", PayloadSchemaType.KEYWORD),
+            ("section_parent", PayloadSchemaType.KEYWORD),
+            ("section_heading", PayloadSchemaType.KEYWORD),
             ("job_id", PayloadSchemaType.KEYWORD),
             ("chunk_type", PayloadSchemaType.KEYWORD),
             ("parent_id", PayloadSchemaType.KEYWORD),
