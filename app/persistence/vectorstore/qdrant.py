@@ -1,7 +1,7 @@
 """Qdrant-backed vector store."""
 
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType
 
 from app.settings import settings
 from app.persistence.vectorstore.base import VectorStore
@@ -22,6 +22,19 @@ class QdrantVectorStore(VectorStore):
                     size=settings.embedding_dimensions,
                     distance=Distance.COSINE,
                 ),
+            )
+
+        # Ensure payload indexes exist (idempotent — Qdrant skips if already created)
+        for field, schema_type in [
+            ("job_id", PayloadSchemaType.KEYWORD),
+            ("chunk_type", PayloadSchemaType.KEYWORD),
+            ("parent_id", PayloadSchemaType.KEYWORD),
+            ("document_type", PayloadSchemaType.KEYWORD),
+        ]:
+            await self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name=field,
+                field_schema=schema_type,
             )
 
     async def upsert(

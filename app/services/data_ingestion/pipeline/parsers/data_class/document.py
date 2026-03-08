@@ -11,8 +11,9 @@
 #     - page_count, metadata — extra info passed along the pipeline
 
 """Stage 4 — Normalised ParsedDocument that every parser must produce."""
+from dataclasses import dataclass
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, dataclasses
 
 
 class HeadingNode(BaseModel):
@@ -24,6 +25,7 @@ class HeadingNode(BaseModel):
 
 class ParsedDocument(BaseModel):
     """Uniform representation produced by every format-specific parser."""
+    model_config = {"arbitrary_types_allowed": True}
 
     source_filename: str
     mime_type: str
@@ -32,3 +34,4 @@ class ParsedDocument(BaseModel):
     headings: list[HeadingNode] = Field(default_factory=list, description="Heading tree for breadcrumb-aware chunking")
     page_count: int | None = None
     metadata: dict = Field(default_factory=dict)
+    raw_lines: list = Field(default_factory=list, description="Raw lines with font metadata (PDF only)")

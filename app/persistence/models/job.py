@@ -39,6 +39,7 @@ class Job(Base):
     filename: Mapped[str] = mapped_column(String(512))
     mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     storage_key: Mapped[str] = mapped_column(String(1024))
+    document_type: Mapped[str] = mapped_column(String(64), default="general", server_default="general")
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.pending)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(String, nullable=True)

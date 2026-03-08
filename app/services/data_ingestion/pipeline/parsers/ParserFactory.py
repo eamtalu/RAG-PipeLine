@@ -1,8 +1,8 @@
-from app.services.data_ingestion.pipeline.parsers import BaseParser, PdfParser, DocxParser, MarkdownParser, HtmlParser
+from app.services.data_ingestion.pipeline.parsers import BaseParser, PDFLineExtractor, DocxParser, MarkdownParser, HtmlParser
 
 # Strategy map: MIME type → parser class
 _PARSER_REGISTRY: dict[str, type[BaseParser]] = {
-    "application/pdf": PdfParser,
+    "application/pdf": PDFLineExtractor,
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": DocxParser,
     "text/markdown": MarkdownParser,
     "text/plain": MarkdownParser,  # treat plain text as markdown

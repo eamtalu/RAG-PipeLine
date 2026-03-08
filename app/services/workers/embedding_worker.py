@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.settings import settings
 from app.config.database import async_session
 from app.persistence.models.chunk import Chunk
+from app.persistence.models.ChunkEntity import ChunkEntity
 from app.persistence.models.embedding_queue import EmbeddingQueueItem, QueueStatus
 from app.persistence.models.job import Job, JobStatus
 from app.persistence.vectorstore import get_vector_store
@@ -53,44 +54,91 @@ async def _generate_embeddings(texts: list[str]) -> list[list[float]]:
 
 
 async def _process_batch(items: list[EmbeddingQueueItem]) -> None:
-    """Embed a batch and store the vectors."""
+    """Embed a batch and store the vectors.
+
+    Handles two chunk sources:
+      - chunk_id → old Chunk model (hierarchical chunker, non-PDF)
+      - chunk_entity_id → ChunkEntity model (multipass chunker, PDF)
+    """
     async with async_session() as session:
-        # Load chunk texts
-        chunk_ids = [item.chunk_id for item in items]
-        result = await session.execute(select(Chunk).where(Chunk.id.in_(chunk_ids)))
-        chunks = {c.id: c for c in result.scalars().all()}
+        # Split items by source
+        legacy_items = [it for it in items if it.chunk_id is not None]
+        entity_items = [it for it in items if it.chunk_entity_id is not None]
 
-        texts = [chunks[item.chunk_id].text for item in items]
-        ids = [str(item.chunk_id) for item in items]
+        # Load legacy Chunk rows
+        chunks: dict = {}
+        if legacy_items:
+            chunk_ids = [it.chunk_id for it in legacy_items]
+            result = await session.execute(select(Chunk).where(Chunk.id.in_(chunk_ids)))
+            chunks = {c.id: c for c in result.scalars().all()}
 
-        # FIX 1: Prepend heading_breadcrumb for richer embeddings
-        contextualized_texts = []
+        # Load ChunkEntity rows
+        entities: dict = {}
+        if entity_items:
+            entity_ids = [it.chunk_entity_id for it in entity_items]
+            result = await session.execute(select(ChunkEntity).where(ChunkEntity.id.in_(entity_ids)))
+            entities = {e.id: e for e in result.scalars().all()}
+
+        # Load job rows to get document_type
+        job_ids = {item.job_id for item in items}
+        job_result = await session.execute(select(Job).where(Job.id.in_(job_ids)))
+        jobs = {j.id: j for j in job_result.scalars().all()}
+
+        # Build parallel lists: ids, texts (for retrieval), contextualized_texts (for embedding), metadatas
+        all_ids: list[str] = []
+        all_texts: list[str] = []
+        contextualized_texts: list[str] = []
+        enriched_metadatas: list[dict] = []
+
         for item in items:
-            chunk = chunks[item.chunk_id]
-            breadcrumb = chunk.heading_breadcrumb or ""
-            if breadcrumb:
-                contextualized_texts.append(breadcrumb + "\n\n" + chunk.text)
-            else:
-                contextualized_texts.append(chunk.text)
+            doc_type = jobs[item.job_id].document_type if item.job_id in jobs else "general"
 
-        # FIX 2: Enrich metadata with heading_breadcrumb, job_id, token_count
-        enriched_metadatas = []
-        for item in items:
-            chunk = chunks[item.chunk_id]
-            meta = dict(chunk.metadata_) if chunk.metadata_ else {}
-            meta["heading_breadcrumb"] = chunk.heading_breadcrumb or ""
-            meta["job_id"] = str(item.job_id)
-            meta["token_count"] = chunk.token_count
-            meta["chunk_type"] = chunk.chunk_type
-            meta["parent_id"] = str(chunk.parent_id) if chunk.parent_id else None
-            enriched_metadatas.append(meta)
+            if item.chunk_entity_id and item.chunk_entity_id in entities:
+                # ChunkEntity path — full_text already contains context_header + text
+                ce = entities[item.chunk_entity_id]
+                all_ids.append(str(ce.id))
+                all_texts.append(ce.text)
+                contextualized_texts.append(ce.full_text)
+                enriched_metadatas.append({
+                    "heading_breadcrumb": ce.context_header,
+                    "job_id": str(item.job_id),
+                    "token_count": ce.token_estimate,
+                    "chunk_type": ce.chunk_type,
+                    "document_type": doc_type,
+                    "profile": ce.profile,
+                    "context_path": ce.context_path,
+                    "context_depth": ce.context_depth,
+                    "page_numbers": ce.page_numbers,
+                    "section_root": ce.section_root,
+                    "section_parent": ce.section_parent,
+                    "section_heading": ce.section_heading,
+                    "source_file": ce.source_file,
+                })
+            elif item.chunk_id and item.chunk_id in chunks:
+                # Legacy Chunk path
+                chunk = chunks[item.chunk_id]
+                all_ids.append(str(chunk.id))
+                all_texts.append(chunk.text)
+                breadcrumb = chunk.heading_breadcrumb or ""
+                if breadcrumb:
+                    contextualized_texts.append(breadcrumb + "\n\n" + chunk.text)
+                else:
+                    contextualized_texts.append(chunk.text)
+                meta = dict(chunk.metadata_) if chunk.metadata_ else {}
+                meta["heading_breadcrumb"] = breadcrumb
+                meta["job_id"] = str(item.job_id)
+                meta["token_count"] = chunk.token_count
+                meta["chunk_type"] = chunk.chunk_type
+                meta["parent_id"] = str(chunk.parent_id) if chunk.parent_id else None
+                meta["document_type"] = doc_type
+                enriched_metadatas.append(meta)
 
-        # Generate embeddings from contextualized texts
+        # Generate embeddings
         vectors = await _generate_embeddings(contextualized_texts)
 
-        # Write to vector store (store raw texts for retrieval, enriched metadata)
+        # Write to vector store
         store = get_vector_store()
-        await store.upsert(ids=ids, vectors=vectors, texts=texts, metadatas=enriched_metadatas)
+        await store.upsert(ids=all_ids, vectors=vectors, texts=all_texts, metadatas=enriched_metadatas)
 
         # Mark items as done
         item_ids = [item.id for item in items]
@@ -101,7 +149,6 @@ async def _process_batch(items: list[EmbeddingQueueItem]) -> None:
         )
 
         # Check if all items for each job are done → mark job completed
-        job_ids = {item.job_id for item in items}
         for job_id in job_ids:
             remaining = await session.execute(
                 select(EmbeddingQueueItem)

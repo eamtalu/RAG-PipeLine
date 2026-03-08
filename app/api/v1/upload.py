@@ -2,7 +2,7 @@
 
 import uuid
 
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
@@ -17,6 +17,7 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 @router.post("/upload", status_code=201)
 async def upload_document(
     file: UploadFile = File(...),
+    document_type: str = Form(default="general"),
     data_ingestion: DataIngestion = Depends(get_data_ingestion),
 ):
     # --- read + size guard ---
@@ -27,7 +28,7 @@ async def upload_document(
         raise HTTPException(400, detail="Empty file")
 
     # --- delegate to service -> DataIngestion---
-    job = await data_ingestion.ingest(data, file.filename or "unknown")
+    job = await data_ingestion.ingest(data, file.filename or "unknown", document_type=document_type)
 
     return {
         "job_id": str(job.id),
