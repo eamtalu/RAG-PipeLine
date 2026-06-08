@@ -24,11 +24,14 @@ class VectorStore(ABC):
         vector: list[float],
         top_k: int = 5,
         filter: dict | None = None,
+        text_match: dict | None = None,
     ) -> list[dict]:
         """Return the top-k most similar results.
 
         Each dict: {"id": str, "score": float, "text": str, "metadata": dict}
 
-        filter — optional key/value pairs matched against stored metadata
-                 (e.g. {"job_id": "..."}) to scope the search.
+        filter     — exact key/value matches against KEYWORD-indexed metadata
+                     (e.g. {"job_id": "...", "profile": "cv"})
+        text_match — full-text substring matches against TEXT-indexed fields
+                     (e.g. {"text": "Infosapex"}) — requires TEXT index
         """

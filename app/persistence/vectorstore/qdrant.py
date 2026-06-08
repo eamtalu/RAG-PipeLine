@@ -1,7 +1,11 @@
-"""Qdrant-backed vector store."""
+"""Qdrant-backed vector store with hybrid search (vector + text match)."""
 
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType
+from qdrant_client.models import (
+    Distance, VectorParams, PointStruct,
+    Filter, FieldCondition, MatchValue, MatchText,
+    PayloadSchemaType, TextIndexParams, TokenizerType,
+)
 
 from app.settings import settings
 from app.persistence.vectorstore.base import VectorStore
@@ -24,9 +28,7 @@ class QdrantVectorStore(VectorStore):
                 ),
             )
 
-        # Ensure payload indexes exist (idempotent — Qdrant skips if already created)
-        # Order matters for query planning: profile → section_root → section_parent → section_heading first,
-        # then operational fields
+        # KEYWORD indexes — exact match filtering
         for field, schema_type in [
             ("profile", PayloadSchemaType.KEYWORD),
             ("section_root", PayloadSchemaType.KEYWORD),
@@ -42,6 +44,19 @@ class QdrantVectorStore(VectorStore):
                 field_name=field,
                 field_schema=schema_type,
             )
+
+        # TEXT index — full-text substring matching for hybrid search
+        await self.client.create_payload_index(
+            collection_name=self.collection,
+            field_name="text",
+            field_schema=TextIndexParams(
+                type="text",
+                tokenizer=TokenizerType.WORD,
+                min_token_len=2,
+                max_token_len=20,
+                lowercase=True,
+            ),
+        )
 
     async def upsert(
         self,
@@ -60,15 +75,30 @@ class QdrantVectorStore(VectorStore):
         ]
         await self.client.upsert(collection_name=self.collection, points=points)
 
-    async def query(self, vector: list[float], top_k: int = 5, filter: dict | None = None) -> list[dict]:
-        query_filter = None
+    async def query(
+        self,
+        vector: list[float],
+        top_k: int = 5,
+        filter: dict | None = None,
+        text_match: dict | None = None,
+    ) -> list[dict]:
+        conditions: list[FieldCondition] = []
+
+        # Exact match conditions (KEYWORD-indexed fields)
         if filter:
-            query_filter = Filter(
-                must=[
-                    FieldCondition(key=k, match=MatchValue(value=v))
-                    for k, v in filter.items()
-                ]
+            conditions.extend(
+                FieldCondition(key=k, match=MatchValue(value=v))
+                for k, v in filter.items()
             )
+
+        # Full-text match conditions (TEXT-indexed fields)
+        if text_match:
+            conditions.extend(
+                FieldCondition(key=k, match=MatchText(text=v))
+                for k, v in text_match.items()
+            )
+
+        query_filter = Filter(must=conditions) if conditions else None
 
         results = await self.client.query_points(
             collection_name=self.collection,

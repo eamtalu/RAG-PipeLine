@@ -97,7 +97,7 @@ async def _process_batch(items: list[EmbeddingQueueItem]) -> None:
                 # ChunkEntity path — full_text already contains context_header + text
                 ce = entities[item.chunk_entity_id]
                 all_ids.append(str(ce.id))
-                all_texts.append(ce.text)
+                all_texts.append(ce.full_text)
                 contextualized_texts.append(ce.full_text)
                 enriched_metadatas.append({
                     "heading_breadcrumb": ce.context_header,
