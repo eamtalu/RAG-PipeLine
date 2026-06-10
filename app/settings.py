@@ -40,5 +40,21 @@ class Settings(BaseSettings):
     # --- Worker ---
     worker_poll_seconds: float = 2.0
 
+    # --- Transaction log ingestion ---
+    log_format: str = "m3_dotnet"
+    log_incoming_dir: Path = Path("./logs/incoming")
+    log_processed_dir: Path = Path("./logs/processed")
+    log_failed_dir: Path = Path("./logs/failed")
+    # Read-only source dir for /logs/scan (e.g. live rotating logs). Files here are NEVER moved.
+    log_source_dir: Path = Path("./logs/source")
+    log_watcher_poll_seconds: float = 5.0
+    log_grouping_poll_seconds: float = 5.0
+
+    # --- Log debugging agent (Phase 2) ---
+    anthropic_api_key: str = ""
+    log_agent_model: str = "claude-opus-4-8"
+    log_agent_max_tokens: int = 8000
+    log_agent_max_iterations: int = 12  # safety cap on the tool-use loop
+
 
 settings = Settings()

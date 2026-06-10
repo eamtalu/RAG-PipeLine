@@ -8,6 +8,8 @@ from fastapi import FastAPI
 from app.api.v1.router import api_router
 from app.settings import settings
 from app.services.workers.embedding_worker import run_worker
+from app.services.workers.log_watcher import run_log_watcher
+from app.services.workers.log_grouping_worker import run_log_grouping_worker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -18,14 +20,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start the embedding worker as a background task
-    worker_task = asyncio.create_task(run_worker())
+    # Start background workers: embedding worker + log watcher + log grouping (Stage 2)
+    tasks = [
+        asyncio.create_task(run_worker()),
+        asyncio.create_task(run_log_watcher()),
+        asyncio.create_task(run_log_grouping_worker()),
+    ]
     yield
-    worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
+    for task in tasks:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

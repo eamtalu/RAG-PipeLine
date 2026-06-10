@@ -33,3 +33,6 @@ openai>=1.60
 pgvector>=0.3
 qdrant-client>=1.12
 # pinecone>=5.4
+
+# --- Log debugging agent (Phase 2): Claude tool-use over log_transactions/log_entries ---
+anthropic>=0.69
