@@ -164,12 +164,13 @@ def _mi_step(call: LogEntry | None, result: LogEntry | None) -> str:
 
 
 def _inputs(call: LogEntry) -> str:
+    """All params used to make the MI call (the 'Inputs:' block, else the URL query params)."""
     f = call.fields or {}
     src = f.get("inputs") if isinstance(f.get("inputs"), dict) else f.get("params")
     if not isinstance(src, dict):
         return ""
     pairs = [f"{k}={v}" for k, v in src.items() if v not in (None, "") and str(k).lower() != "m3user"]
-    return " ".join(pairs[:5])
+    return " ".join(pairs)
 
 
 def _result_outcome(result: LogEntry | None) -> str:
