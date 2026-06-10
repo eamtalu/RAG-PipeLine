@@ -7,10 +7,10 @@
 #       user BECWHLO · reqid …-500 · 10:38:53.935 → 10:38:54.818 · 0.88 s · 56 steps
 #
 #         ▶ REQUEST   WHLO BRI · Route BRI05 · user BECWHLO
-#          1  📞 PPS200MI/SearchHead      CONO=911 SUNO=…           ✅ 14 recs
+#          1  🔄 PPS200MI/SearchHead      CONO=911 SUNO=…           ✅ 14 recs
 #          2  ⚙  Stored Procedure          usp_GetReceivingLocation  ✅
 #          …
-#          3  ❌ ERROR  "Printer Error Code = 1801"
+#          3  🛑 ERROR  "Printer Error Code = 1801"
 #         ◀ RESPONSE ✅  → [{"PoNumber":"1000092",…}]
 #
 #   Every element is reconstructable from the two tables (see §6.1 field mapping). The pipeline
@@ -27,7 +27,7 @@ from app.persistence.models.log_transaction import LogTransaction, LogTransactio
 _STATUS_ICON = {
     LogTransactionStatus.success: "✅ SUCCESS",
     LogTransactionStatus.soft: "⚠️ SOFT",
-    LogTransactionStatus.error: "❌ ERROR",
+    LogTransactionStatus.error: "🛑 ERROR",
     LogTransactionStatus.incomplete: "⏳ INCOMPLETE",
 }
 
@@ -100,7 +100,7 @@ def _request_line(t: LogTransaction, req: LogEntry | None) -> str:
 
 def _response_line(t: LogTransaction, resp: LogEntry | None) -> str:
     icon = "✅" if t.status in (LogTransactionStatus.success, LogTransactionStatus.soft) else (
-        "❌" if t.status == LogTransactionStatus.error else "…")
+        "🛑" if t.status == LogTransactionStatus.error else "…")
     body = t.response_summary
     if not body and resp and resp.message:
         body = resp.message.replace("RESPONSE:", "").strip()
@@ -140,7 +140,7 @@ def _steps(entries: list[LogEntry], *, verbose: bool) -> list[str]:
                 steps.append(_mi_step(None, e))  # standalone result (soft/error result without a paired call)
         elif et == "error":
             flush_pending()
-            steps.append(f"❌ ERROR  \"{(e.result_status or e.message or '').strip()}\"")
+            steps.append(f"🛑 ERROR  \"{(e.result_status or e.message or '').strip()}\"")
         elif et == "sql":
             flush_pending()
             steps.append(f"⚙  SQL  {_sql_name(e)}")
@@ -157,7 +157,7 @@ def _mi_step(call: LogEntry | None, result: LogEntry | None) -> str:
     src = call or result
     prog = (src.mi_program or "") if src else ""
     txn = (src.mi_transaction or "") if src else ""
-    head = f"📞 {prog}/{txn}".rstrip("/")
+    head = f"🔄 {prog}/{txn}".rstrip("/")
     inputs = _inputs(call) if call else ""
     outcome = _result_outcome(result)
     return "  ".join(p for p in (head, inputs, outcome) if p)
