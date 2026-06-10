@@ -3,8 +3,8 @@
 #   Turns a derived log_transaction + its ordered log_entries into the locked, human-readable
 #   boundary view from docs/transaction-log-ingestion-design.md §6:
 #
-#       TRANSACTION 5f53035f   /api/receiving/ListOpenPOHead   ✅ SUCCESS
-#       user BECWHLO · reqid …-500 · 10:38:53.935 → 10:38:54.818 · 0.88 s · 56 steps
+#       TRANSACTION 5f53035f-06e8-4855-80d3-b3c2ad1fcdea   /api/receiving/ListOpenPOHead   ✅ SUCCESS
+#       user BECWHLO · device 3091 · 10:38:53.935 → 10:38:54.818 · 0.88 s · 56 steps
 #
 #         ▶ REQUEST   WHLO BRI · Route BRI05 · user BECWHLO
 #          1  🔄 PPS200MI/SearchHead      CONO=911 SUNO=…           ✅ 14 recs
@@ -58,15 +58,15 @@ def render_transaction(txn: LogTransaction, entries: list[LogEntry], *, verbose:
 # --------------------------------------------------------------------------- header
 def _header(t: LogTransaction) -> str:
     status = _STATUS_ICON.get(t.status, str(t.status))
-    return f"TRANSACTION {str(t.id)[:8]}   {_endpoint_path(t)}   {status}"
+    return f"TRANSACTION {t.id}   {_endpoint_path(t)}   {status}"
 
 
 def _subheader(t: LogTransaction, entries: list[LogEntry]) -> str:
     bits: list[str] = []
     if t.user_name:
         bits.append(f"user {t.user_name}")
-    if t.reqid:
-        bits.append(f"reqid …{t.reqid.rsplit('-', 1)[-1]}")
+    if t.device_id:
+        bits.append(f"device {t.device_id}")
     if t.started_at and t.ended_at:
         bits.append(f"{_hms(t.started_at)} → {_hms(t.ended_at)}")
     elif t.started_at:
