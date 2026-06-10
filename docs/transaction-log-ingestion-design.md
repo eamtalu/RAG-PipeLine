@@ -339,7 +339,10 @@ app/services/log_agent/           # Phase 2
 ### Still open
 - **Multi-server feeds** — if a source dir is fed by >1 server, add a `log_source` identity so Stage 2
   doesn't stitch different servers' streams.
-- **Concurrent/overlapping requests** in one stream — per-reqid open-transaction tracking vs. single stack.
+- ~~**Concurrent/overlapping requests** in one stream~~ — **RESOLVED 2026-06-11** by the thread-aware
+  grouper (see §10). Confirmed bug: the single-stack state machine merged interleaved requests across
+  users (17 mixed-user transactions in one real file). Fixed by demultiplexing on the `thread` column;
+  verified 0 mixed-user transactions across 6 multi-user files (3,423 txns, up to 11 concurrent users).
 - **Orphan entries** before the first REQUEST — synthetic "unknown" transaction vs. `transaction_id` NULL.
 
 ---
@@ -394,6 +397,21 @@ app/services/log_agent/           # Phase 2
     triage, get_transaction drill-down, line search for the "Index was out of range" .NET bug, and
     bad-id error handling. **LLM loop not yet run end-to-end** (no `ANTHROPIC_API_KEY` in `.env` yet —
     set it to use the endpoint). Postman: "Logs - Agent (Phase 2)" folder, 5 question variations (36 total).
+- **Concurrency-safe Stage 2 grouping — DONE** (2026-06-11): fixed a confirmed mis-stitching bug where
+  the single-stack REQUEST→RESPONSE state machine merged *interleaved* requests from concurrent users
+  into one transaction (the M3 server processes multiple users at once; the timestamp-ordered stream
+  interleaves them). Evidence: 17 transactions containing 2+ users in one real file.
+  - Persist the log `thread` (migration `b8c2d7e91a04` adds `log_entries.thread`, backfilled from
+    `raw_body`; Stage 1 now stores it). Measured correlation: a request's internal MI work stays on one
+    thread (~98%), and a POST's REQUEST BODY shares that thread (~99%); the async REQUEST/RESPONSE
+    bracket lines hop threads and the RESPONSE carries no id.
+  - `derive_transactions._group` rewritten thread-aware: open transactions keyed by thread; REQUEST
+    paired by ReqID (GET) / preceding body (POST) / User (GET work); RESPONSE matched best-effort FIFO
+    (oldest open request) — user-safe because responses carry no user. Entries re-sorted chronologically
+    before `seq` assignment.
+  - Verified: **0 mixed-user transactions** across all 6 multi-user files (3,423 txns, ≤11 concurrent
+    users) and the live DB. Orphan entries 33→0. Trade-off: a few % more `incomplete` (requests whose
+    response can't be confidently matched — honest, vs. the old blind next-response attachment).
 - **§6 renderer — DONE** (2026-06-10): `app/services/mnp_log_ingestion/render.py::render_transaction`
   turns a transaction + its ordered entries into the locked §6 text view (header · sub-header ·
   `▶ REQUEST` dims · numbered steps with `mi_call`+`mi_result` folded into one `📞 PROG/TXN inputs ✅ N recs`

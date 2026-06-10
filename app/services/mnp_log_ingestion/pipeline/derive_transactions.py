@@ -31,6 +31,7 @@ class _TxnBuilder:
 
     def __init__(self) -> None:
         self.entries: list[LogEntry] = []
+        self.open_pos: int = -1  # stream position when this transaction opened (for FIFO response match)
 
     def add(self, entry: LogEntry) -> None:
         self.entries.append(entry)
@@ -102,6 +103,13 @@ class _TxnBuilder:
         warehouse = g("Warehouse", "WHLO")
         route = g("Route")
         user_name = g("User", "m3user")
+        if not user_name:  # GET with no REQUEST bound -> fall back to a mi_call's m3user
+            for e in self.entries:
+                if e.entry_type.value == "mi_call":
+                    p = (e.fields or {}).get("params") or {}
+                    if p.get("m3user"):
+                        user_name = str(p["m3user"])
+                        break
 
         # short human request summary
         summary_bits = [b for b in (method, f"WHLO {warehouse}" if warehouse else None,
@@ -157,34 +165,163 @@ class _TxnBuilder:
         }
 
 
-def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
-    """REQUEST→RESPONSE state machine over time-ordered entries."""
-    builders: list[_TxnBuilder] = []
-    current: _TxnBuilder | None = None
+_INTERNAL = {"mi_call", "mi_result", "sql", "info", "error"}
 
-    for e in entries:
+
+def _entry_reqid(e: LogEntry) -> str | None:
+    """ReqID for a request/body entry (GET carries it in the URL params, POST in the body)."""
+    f = e.fields or {}
+    p = f.get("params") if isinstance(f.get("params"), dict) else {}
+    for d in (p, f):
+        for k in ("ReqID", "ReqId", "reqid"):
+            v = d.get(k)
+            if v:
+                return str(v)
+    return None
+
+
+def _entry_user(e: LogEntry) -> str | None:
+    """The user an entry belongs to: request/GET → params User, body → User, mi_call → m3user."""
+    f = e.fields or {}
+    et = e.entry_type.value
+    if et == "request":
+        p = f.get("params") or {}
+        return p.get("User") or p.get("m3user")
+    if et == "request_body":
+        return f.get("User")
+    if et == "mi_call":
+        p = f.get("params") or {}
+        return p.get("m3user")
+    return None
+
+
+def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
+    """Thread-aware grouping that demultiplexes concurrent requests.
+
+    The M3 server processes multiple users at once, so the timestamp-ordered stream interleaves
+    them. A single open-transaction stack mixes users (confirmed bug). Instead we key open
+    transactions by **thread** — one request's internal MI work stays on one thread (~98%), and a
+    POST's REQUEST BODY runs on that same thread (~99%). The async REQUEST (MoveNext) and RESPONSE
+    (b__1) lines hop threads and the RESPONSE carries no id, so:
+      - a REQUEST is paired to its work by ReqID (GET) or, for a POST whose MoveNext has no id, to
+        the body it immediately precedes; a GET REQUEST is bound by User once its work appears;
+      - a RESPONSE (no correlation id) is attached best-effort to the OLDEST still-open request
+        (FIFO — responses arrive in request order).
+    This guarantees no transaction mixes two users' internal work (responses carry no user, so
+    best-effort response matching cannot cause user contamination).
+    """
+    builders: list[_TxnBuilder] = []
+    open_by_thread: dict[str, _TxnBuilder] = {}
+    pending_reqs: list[LogEntry] = []  # MoveNext REQUEST lines awaiting their processing thread
+    req_pos: dict[int, int] = {}       # stream position of each pending request (for response match)
+
+    def take_by_reqid(reqid: str | None) -> LogEntry | None:
+        if reqid is None:
+            return None
+        for i, r in enumerate(pending_reqs):
+            if _entry_reqid(r) == reqid:
+                return pending_reqs.pop(i)
+        return None
+
+    def take_post_request() -> LogEntry | None:
+        # a POST's MoveNext has no ReqID; it's the most-recent id-less pending request (emitted
+        # immediately before its body).
+        for i in range(len(pending_reqs) - 1, -1, -1):
+            if _entry_reqid(pending_reqs[i]) is None:
+                return pending_reqs.pop(i)
+        return None
+
+    def take_by_user(user: str | None) -> LogEntry | None:
+        if not user:
+            return None
+        for i, r in enumerate(pending_reqs):
+            if _entry_user(r) == user:
+                return pending_reqs.pop(i)
+        return None
+
+    def bound_user(b: _TxnBuilder) -> str | None:
+        for e in b.entries:
+            u = _entry_user(e)
+            if u:
+                return u
+        return None
+
+    def has_request(b: _TxnBuilder) -> bool:
+        return any(e.entry_type.value == "request" for e in b.entries)
+
+    for i, e in enumerate(entries):
         et = e.entry_type.value
+        th = e.thread
+
         if et == "request":
-            if current is not None:
-                builders.append(current)  # previous had no RESPONSE -> closed as incomplete
-            current = _TxnBuilder()
-            current.add(e)
+            pending_reqs.append(e)
+            req_pos[id(e)] = i
+
         elif et == "request_body":
-            if current is None:
-                current = _TxnBuilder()
-            current.add(e)
+            if th is not None and th in open_by_thread:
+                builders.append(open_by_thread.pop(th))  # prior cycle on this thread: no RESPONSE
+            b = _TxnBuilder()
+            req = take_by_reqid(_entry_reqid(e)) or take_post_request()
+            if req is not None:
+                b.add(req)
+            b.add(e)
+            b.open_pos = req_pos.pop(id(req), i) if req is not None else i
+            if th is not None:
+                open_by_thread[th] = b
+            else:
+                builders.append(b)
+
+        elif et in _INTERNAL:
+            u = _entry_user(e)
+            b = open_by_thread.get(th) if th is not None else None
+            # a different user on the same thread => a new request reused it (GET, no body to reset)
+            if b is not None and u and bound_user(b) and u != bound_user(b):
+                builders.append(open_by_thread.pop(th))
+                b = None
+            if b is None:
+                b = _TxnBuilder()
+                b.open_pos = i
+                if th is not None:
+                    open_by_thread[th] = b
+            b.add(e)
+            if u and not has_request(b):  # bind a pending GET REQUEST now that we know the user
+                req = take_by_user(u)
+                if req is not None:
+                    b.add(req)
+                    b.open_pos = req_pos.pop(id(req), b.open_pos)  # opened when its REQUEST arrived
+            if th is None:
+                builders.append(b)
+
         elif et == "response":
-            if current is None:
-                current = _TxnBuilder()
-            current.add(e)
-            builders.append(current)  # RESPONSE closes the cycle
-            current = None
-        else:  # mi_call / mi_result / sql / info / error
-            if current is not None:
-                current.add(e)
-            # else: orphan internal entry (file starts mid-flow) -> left unassigned (transaction_id NULL)
-    if current is not None:
-        builders.append(current)
+            # async, no correlation id. Responses arrive in REQUEST order, so close the OLDEST
+            # still-open request (FIFO). Candidates: open thread builders (requests that did MI
+            # work) AND pending requests with no work yet (simple request→response calls). This is
+            # user-safe: a response carries no user, so a wrong guess can't mix two users' work.
+            best_thread = min(open_by_thread, key=lambda k: open_by_thread[k].open_pos, default=None)
+            best_thread_pos = open_by_thread[best_thread].open_pos if best_thread is not None else None
+            best_req = min(pending_reqs, key=lambda r: req_pos.get(id(r), 0), default=None)
+            best_req_pos = req_pos.get(id(best_req)) if best_req is not None else None
+
+            if best_thread is not None and (best_req_pos is None or best_thread_pos <= best_req_pos):
+                b = open_by_thread.pop(best_thread)
+                b.add(e)
+                builders.append(b)
+            elif best_req is not None:
+                pending_reqs.remove(best_req)
+                b = _TxnBuilder()
+                b.add(best_req)
+                b.add(e)
+                builders.append(b)
+            else:
+                b = _TxnBuilder()
+                b.add(e)
+                builders.append(b)
+
+    builders.extend(open_by_thread.values())
+    for r in pending_reqs:  # REQUESTs with no work and no RESPONSE -> their own (incomplete) txn
+        b = _TxnBuilder()
+        b.add(r)
+        builders.append(b)
     return builders
 
 
@@ -211,6 +348,9 @@ async def regroup_all(db: AsyncSession) -> dict:
     orphan_entries = len(rows)
     by_status: dict[str, int] = {}
     for b in builders:
+        # entries were attached out of stream order (a REQUEST is bound after its work appears);
+        # re-sort chronologically so seq + source_file_start/end and the rendered timeline are right.
+        b.entries.sort(key=lambda e: (e.timestamp is None, e.timestamp, e.line_number or 0))
         values = b.compute()
         txn = LogTransaction(**values)
         db.add(txn)

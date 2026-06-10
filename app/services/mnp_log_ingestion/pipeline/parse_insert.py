@@ -88,6 +88,7 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
                 "line_number": rec.line_number,
                 "timestamp": rec.timestamp,
                 "level": rec.level,
+                "thread": rec.thread,
                 "logger": rec.logger,
                 "method": rec.method,
                 "entry_type": LogEntryType(rec.entry_type),

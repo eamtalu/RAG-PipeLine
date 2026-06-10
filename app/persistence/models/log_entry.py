@@ -59,6 +59,10 @@ class LogEntry(Base):
 
     # --- log line fields ---
     level: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # thread id from the log header (e.g. "[68]"). NOT a request id, but Stage 2 uses it to
+    # demultiplex concurrent requests: one request's internal MI work stays on one thread (~98%),
+    # so it's a reliable correlation key where the async REQUEST/RESPONSE bracket lines hop threads.
+    thread: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     logger: Mapped[str | None] = mapped_column(String(256), nullable=True)
     method: Mapped[str | None] = mapped_column(String(128), nullable=True)
     entry_type: Mapped[LogEntryType] = mapped_column(Enum(LogEntryType), default=LogEntryType.info, index=True)
