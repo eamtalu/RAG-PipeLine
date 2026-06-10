@@ -261,6 +261,64 @@ async def list_transactions(
     }
 
 
+# NOTE: declared BEFORE "/transactions/{transaction_id}" so the literal "view" segment is matched
+# here instead of being parsed as a UUID path param (which would 422).
+@router.get("/transactions/view", response_class=PlainTextResponse)
+async def view_transactions(
+    db: AsyncSession = Depends(get_session),
+    limit: int = Query(default=50, ge=1, le=500, description="how many most-recent transactions to render"),
+    user: str | None = Query(default=None, description="matches user_name; omit for all users"),
+    date: date_type | None = Query(default=None, description="YYYY-MM-DD (matches the transaction date)"),
+    hour: int | None = Query(default=None, ge=0, le=23, description="hour of day 0-23 (combine with date)"),
+    verbose: bool = Query(default=False, description="also render plain INFO narration steps"),
+):
+    """Render the last N transactions as the §6 text view, oldest→newest.
+
+    Takes the most-recent `limit` transactions that match the optional filters, then prints them
+    in ascending time order. Filters stack: `user`, `date`, `hour`. With none, you get the last
+    `limit` transactions across all users.
+    """
+    conds = []
+    if user is not None:
+        conds.append(LogTransaction.user_name == user)
+    if date is not None:
+        conds.append(LogTransaction.date == date)
+    if hour is not None:
+        conds.append(func.extract("hour", LogTransaction.started_at) == hour)
+
+    # most-recent `limit` matching transactions ...
+    rows = (await db.execute(
+        select(LogTransaction).where(*conds)
+        .order_by(LogTransaction.started_at.desc().nullslast())
+        .limit(limit)
+    )).scalars().all()
+    txns = list(reversed(rows))  # ... shown oldest -> newest
+
+    header = f"Showing {len(txns)} transaction(s)" + (f" for user {user}" if user else " (all users)")
+    if date is not None:
+        header += f" on {date}"
+    if hour is not None:
+        header += f" hour {hour:02d}:00"
+    header += " — oldest → newest"
+
+    if not txns:
+        return header + "\n\n(no transactions match the given filters)"
+
+    # fetch every entry for those transactions in one query, then group by transaction
+    ids = [t.id for t in txns]
+    entry_rows = (await db.execute(
+        select(LogEntry).where(LogEntry.transaction_id.in_(ids))
+        .order_by(LogEntry.seq.asc().nullslast(), LogEntry.line_number.asc())
+    )).scalars().all()
+    by_txn: dict = {}
+    for e in entry_rows:
+        by_txn.setdefault(e.transaction_id, []).append(e)
+
+    sep = "\n\n" + ("─" * 90) + "\n\n"
+    blocks = [render_transaction(t, by_txn.get(t.id, []), verbose=verbose) for t in txns]
+    return header + sep + sep.join(blocks)
+
+
 async def _load_transaction_entries(transaction_id: uuid.UUID, db: AsyncSession):
     """Fetch a transaction + its ordered entry timeline, or 404."""
     t = await db.get(LogTransaction, transaction_id)

@@ -1079,6 +1079,130 @@
             "description": "Same §6 text view but with verbose=true so every INFO narration line is rendered as a step (not just MI calls / SQL / soft / errors)."
           },
           "response": []
+        },
+        {
+          "name": "View last N transactions (all users)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions/view?limit=100",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions",
+                "view"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "100",
+                  "description": "how many most-recent transactions to render (1-500)"
+                },
+                {
+                  "key": "user",
+                  "value": "BECWHLO",
+                  "description": "matches user_name; omit for all users",
+                  "disabled": true
+                },
+                {
+                  "key": "date",
+                  "value": "2026-06-05",
+                  "description": "YYYY-MM-DD (matches the transaction date)",
+                  "disabled": true
+                },
+                {
+                  "key": "hour",
+                  "value": "9",
+                  "description": "hour of day 0-23 (combine with date)",
+                  "disabled": true
+                },
+                {
+                  "key": "verbose",
+                  "value": "true",
+                  "description": "also render plain INFO narration steps",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Render the last N transactions as the §6 text view, shown oldest → newest. With no filters you get the last `limit` transactions across ALL users. Enable the user / date / hour / verbose params (they stack) to narrow it down."
+          },
+          "response": []
+        },
+        {
+          "name": "View last N transactions - by user",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions/view?limit=100&user=BECWHLO",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions",
+                "view"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "100"
+                },
+                {
+                  "key": "user",
+                  "value": "BECWHLO",
+                  "description": "matches user_name"
+                }
+              ]
+            },
+            "description": "Last `limit` transactions for one user (user_name), oldest → newest."
+          },
+          "response": []
+        },
+        {
+          "name": "View last N transactions - by date + hour",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions/view?limit=100&date=2026-06-05&hour=9",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions",
+                "view"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "100"
+                },
+                {
+                  "key": "date",
+                  "value": "2026-06-05",
+                  "description": "YYYY-MM-DD"
+                },
+                {
+                  "key": "hour",
+                  "value": "9",
+                  "description": "hour of day 0-23"
+                }
+              ]
+            },
+            "description": "Last `limit` transactions on a given date and hour, across all users (add a user param to scope further), oldest → newest."
+          },
+          "response": []
         }
       ]
     },
@@ -1262,8 +1386,9 @@
     },
     {
       "key": "txnId",
-      "value": "",
-      "type": "string"
+      "value": "410f42b0-6b25-470f-8462-3be46d35b23a",
+      "type": "string",
+      "description": "A sample transaction id (auto-overwritten by the 'List transactions - all' test script). Re-run that request, or any list, if this id 404s after a regroup."
     },
     {
       "key": "logFilePath",
