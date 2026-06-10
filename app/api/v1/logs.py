@@ -270,13 +270,14 @@ async def view_transactions(
     user: str | None = Query(default=None, description="matches user_name; omit for all users"),
     date: date_type | None = Query(default=None, description="YYYY-MM-DD (matches the transaction date)"),
     hour: int | None = Query(default=None, ge=0, le=23, description="hour of day 0-23 (combine with date)"),
+    status: LogTransactionStatus | None = Query(default=None, description="success / soft / error / incomplete"),
     verbose: bool = Query(default=False, description="also render plain INFO narration steps"),
 ):
     """Render the last N transactions as the §6 text view, oldest→newest.
 
     Takes the most-recent `limit` transactions that match the optional filters, then prints them
-    in ascending time order. Filters stack: `user`, `date`, `hour`. With none, you get the last
-    `limit` transactions across all users.
+    in ascending time order. Filters stack: `user`, `date`, `hour`, `status`. With none, you get
+    the last `limit` transactions across all users.
     """
     conds = []
     if user is not None:
@@ -285,6 +286,8 @@ async def view_transactions(
         conds.append(LogTransaction.date == date)
     if hour is not None:
         conds.append(func.extract("hour", LogTransaction.started_at) == hour)
+    if status is not None:
+        conds.append(LogTransaction.status == status)
 
     # most-recent `limit` matching transactions ...
     rows = (await db.execute(
@@ -295,6 +298,8 @@ async def view_transactions(
     txns = list(reversed(rows))  # ... shown oldest -> newest
 
     header = f"Showing {len(txns)} transaction(s)" + (f" for user {user}" if user else " (all users)")
+    if status is not None:
+        header += f" · status={status.value}"
     if date is not None:
         header += f" on {date}"
     if hour is not None:
