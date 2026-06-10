@@ -1,0 +1,1284 @@
+{
+  "info": {
+    "_postman_id": "b7e2a1c4-9f3d-4f7a-8c21-2a1f6d9e0c11",
+    "name": "RAG FAST API",
+    "description": "All endpoints for the RAG / Transaction-Log FastAPI backend.\n\nFolders:\n- Health\n- Documents - Ingestion (upload + job status)\n- Documents - Search (hybrid vector + keyword search, variations)\n- Logs - Ingestion (push a log file -> Stage 1 parse+insert)\n- Logs - Query (job status + line-level entry queries, all filter variations)\n\nCollection variables:\n- baseUrl        : server origin (default http://localhost:8000)\n- documentJobId  : auto-set by 'Upload document' test script\n- logJobId       : auto-set by 'Ingest log file' test script\n- logFilePath    : default file for log ingest (points at the real mnp-logs sample)\n- docFilePath    : default file for document upload (set your own)\n\nTip: run 'Ingest log file' (or 'Upload document') first; its test script stores the returned job_id into the collection variable, so the matching 'Get ... job' request just works.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Liveness probe. Returns {\"status\":\"ok\"}."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Documents - Ingestion",
+      "item": [
+        {
+          "name": "Upload document",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const j = pm.response.json();",
+                  "  pm.collectionVariables.set('documentJobId', j.job_id);",
+                  "  console.log('documentJobId =', j.job_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "{{docFilePath}}",
+                  "description": "The document to ingest (pdf/docx/md/html/txt)."
+                },
+                {
+                  "key": "document_type",
+                  "value": "general",
+                  "type": "text",
+                  "description": "Optional discriminator passed through the pipeline."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/documents/upload",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "upload"
+              ]
+            },
+            "description": "Validate + persist a document and create a Job. 201 returns { job_id, filename, status }."
+          },
+          "response": []
+        },
+        {
+          "name": "Get document job",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/documents/jobs/{{documentJobId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "jobs",
+                "{{documentJobId}}"
+              ]
+            },
+            "description": "Job status + chunk_count for a document upload. Uses documentJobId captured by 'Upload document'."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Documents - Search",
+      "item": [
+        {
+          "name": "Search - basic (auto keywords)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"what projects has Amin done at Infosapex\",\n  \"top_k\": 10\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/documents/search",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "search"
+              ]
+            },
+            "description": "Hybrid search; entity keywords auto-extracted from the query."
+          },
+          "response": []
+        },
+        {
+          "name": "Search - explicit keywords",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"machine learning experience\",\n  \"top_k\": 10,\n  \"keywords\": [\"Infosapex\", \"Python\"]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/documents/search",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "search"
+              ]
+            },
+            "description": "Force specific entity keywords as hard text-match filters."
+          },
+          "response": []
+        },
+        {
+          "name": "Search - pure vector (keywords [])",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"summarize the candidate's leadership experience\",\n  \"top_k\": 10,\n  \"keywords\": []\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/documents/search",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "search"
+              ]
+            },
+            "description": "Empty keywords disables keyword extraction -> pure vector similarity."
+          },
+          "response": []
+        },
+        {
+          "name": "Search - with metadata filters",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"data pipeline design\",\n  \"top_k\": 5,\n  \"document_type\": \"general\",\n  \"chunk_type\": \"text\",\n  \"job_id\": \"{{documentJobId}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/documents/search",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "search"
+              ]
+            },
+            "description": "Exact-match filters (document_type / chunk_type / job_id) combined with vector ranking."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Logs - Ingestion",
+      "item": [
+        {
+          "name": "Ingest log file",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const j = pm.response.json();",
+                  "  pm.collectionVariables.set('logJobId', j.job_id);",
+                  "  console.log('logJobId =', j.job_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "{{logFilePath}}",
+                  "description": "An M3 WMS .NET server log file (e.g. eSmartServerLog.txt)."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/ingest",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "ingest"
+              ]
+            },
+            "description": "Stage 1: parse the log file and insert raw log_entries. 201 returns { job_id, filename, status }. Test script captures job_id -> logJobId."
+          },
+          "response": []
+        },
+        {
+          "name": "Scan directory (read-only, deduped)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/scan?directory={{mnpLogsDir}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "scan"
+              ],
+              "query": [
+                {
+                  "key": "directory",
+                  "value": "{{mnpLogsDir}}",
+                  "description": "absolute path to a folder of log files. Files are read-only — never moved/deleted. Omit to use settings.log_source_dir."
+                }
+              ]
+            },
+            "description": "Read-only ingest of every file in a directory (e.g. your live rotating logs in mnp-logs). Safe to re-run any time: content-level dedup (entry_hash) skips already-ingested lines, so re-scanning the folder — or the growing active log — only adds genuinely-new entries."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Logs - Query",
+      "item": [
+        {
+          "name": "Get log job",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/jobs/{{logJobId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "jobs",
+                "{{logJobId}}"
+              ]
+            },
+            "description": "Ingestion job status + entry_count for a log file. Uses logJobId captured by 'Ingest log file'."
+          },
+          "response": []
+        },
+        {
+          "name": "List entries - all (default)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/entries?limit=50&offset=0",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "entries"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "Most recent-ordered entries across all ingested files."
+          },
+          "response": []
+        },
+        {
+          "name": "List entries - by job_id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/entries?job_id={{logJobId}}&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "entries"
+              ],
+              "query": [
+                {
+                  "key": "job_id",
+                  "value": "{{logJobId}}"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "All entries for one ingested file/job."
+          },
+          "response": []
+        },
+        {
+          "name": "List entries - errors (entry_type=error)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/entries?entry_type=error&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "entries"
+              ],
+              "query": [
+                {
+                  "key": "entry_type",
+                  "value": "error",
+                  "description": "one of: request, request_body, mi_call, mi_result, sql, response, info, error"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "ERROR-level entries (e.g. Printer Error Code 1801)."
+          },
+          "response": []
+        },
+        {
+          "name": "List entries - MI results (entry_type=mi_result)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/entries?entry_type=mi_result&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "entries"
+              ],
+              "query": [
+                {
+                  "key": "entry_type",
+                  "value": "mi_result"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "M3 MI call results (OK + soft errors carried in result_status)."
+          },
+          "response": []
+        },
+        {
+          "name": "List entries - requests (entry_type=request)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/entries?entry_type=request&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "entries"
+              ],
+              "query": [
+                {
+                  "key": "entry_type",
+                  "value": "request"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "Inbound API REQUEST lines (start of a transaction)."
+          },
+          "response": []
+        },
+        {
+          "name": "List entries - by MI program (mi_program=MMS200MI)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/entries?mi_program=MMS200MI&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "entries"
+              ],
+              "query": [
+                {
+                  "key": "mi_program",
+                  "value": "MMS200MI",
+                  "description": "e.g. MMS200MI, MMS060MI, MWS420MI, CUSEXTMI, OIS100MI"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "All calls/results for a given M3 MI program."
+          },
+          "response": []
+        },
+        {
+          "name": "List entries - by level (WARN)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/entries?level=WARN&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "entries"
+              ],
+              "query": [
+                {
+                  "key": "level",
+                  "value": "WARN",
+                  "description": "INFO | DEBUG | WARN | ERROR (case-insensitive)"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "Filter by raw log level."
+          },
+          "response": []
+        },
+        {
+          "name": "List entries - search message (q)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/entries?q=Printer&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "entries"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "Printer",
+                  "description": "case-insensitive substring match on message"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "Free-text search over the entry message."
+          },
+          "response": []
+        },
+        {
+          "name": "List entries - time range",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/entries?time_from=2026-05-19T13:00:00&time_to=2026-05-19T16:00:00&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "entries"
+              ],
+              "query": [
+                {
+                  "key": "time_from",
+                  "value": "2026-05-19T13:00:00",
+                  "description": "ISO 8601"
+                },
+                {
+                  "key": "time_to",
+                  "value": "2026-05-19T16:00:00",
+                  "description": "ISO 8601"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "Entries whose log timestamp falls in [time_from, time_to]."
+          },
+          "response": []
+        },
+        {
+          "name": "List entries - combined filters",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/entries?entry_type=mi_result&mi_program=MMS010MI&q=does not exist&limit=25&offset=0",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "entries"
+              ],
+              "query": [
+                {
+                  "key": "entry_type",
+                  "value": "mi_result"
+                },
+                {
+                  "key": "mi_program",
+                  "value": "MMS010MI"
+                },
+                {
+                  "key": "q",
+                  "value": "does not exist"
+                },
+                {
+                  "key": "limit",
+                  "value": "25"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "Example of stacking filters: soft-error MI results for a specific program."
+          },
+          "response": []
+        },
+        {
+          "name": "List entries - pagination (limit/offset)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/entries?limit=20&offset=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "entries"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "max 1000"
+                },
+                {
+                  "key": "offset",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Page through results with limit + offset."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Logs - Transactions (Stage 2)",
+      "item": [
+        {
+          "name": "Regroup (rebuild transactions)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/regroup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "regroup"
+              ]
+            },
+            "description": "Run Stage 2: (re)derive log_transactions from all log_entries. Returns grouping stats. NOTE: the grouping worker also runs this automatically when new entries are ingested, so you usually don't need to call it."
+          },
+          "response": []
+        },
+        {
+          "name": "List transactions - all",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const txns = pm.response.json().transactions;",
+                  "if (txns && txns.length) {",
+                  "  pm.collectionVariables.set('txnId', txns[0].id);",
+                  "  console.log('txnId =', txns[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions?limit=50&offset=0",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "Most-recent-first list of derived transactions. Test script stores the first id into txnId for the detail request."
+          },
+          "response": []
+        },
+        {
+          "name": "Count - by user + date",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions?user=BECWHLO&date=2026-05-19&limit=1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "user",
+                  "value": "BECWHLO",
+                  "description": "matches user_name"
+                },
+                {
+                  "key": "date",
+                  "value": "2026-05-19",
+                  "description": "YYYY-MM-DD"
+                },
+                {
+                  "key": "limit",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "'How many transactions did a user perform on a date' — read the `total` field of the response."
+          },
+          "response": []
+        },
+        {
+          "name": "List transactions - errors",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions?status=error&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "error",
+                  "description": "success | soft | error | incomplete"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "Transactions that hit a real ERROR-level failure."
+          },
+          "response": []
+        },
+        {
+          "name": "List transactions - soft errors",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions?status=soft&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "soft"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "Transactions where M3 returned a handled soft result (not-found / needs-value)."
+          },
+          "response": []
+        },
+        {
+          "name": "List transactions - by method",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions?method=ConfirmPickLine&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "method",
+                  "value": "ConfirmPickLine",
+                  "description": "endpoint MethodName"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "All transactions for one API endpoint."
+          },
+          "response": []
+        },
+        {
+          "name": "List transactions - by delivery_number",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions?delivery_number=10655&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "delivery_number",
+                  "value": "10655"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "Everything that touched a given delivery."
+          },
+          "response": []
+        },
+        {
+          "name": "List transactions - by reqid",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions?reqid=REPLACE_WITH_REQID&limit=10",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "reqid",
+                  "value": "REPLACE_WITH_REQID",
+                  "description": "M3 correlation id, e.g. 3091-2025-12-07_21:52:04.149-9080"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            },
+            "description": "Look up a transaction by its M3 ReqID."
+          },
+          "response": []
+        },
+        {
+          "name": "List transactions - time range",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions?time_from=2026-05-19T13:00:00&time_to=2026-05-19T16:00:00&limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "time_from",
+                  "value": "2026-05-19T13:00:00"
+                },
+                {
+                  "key": "time_to",
+                  "value": "2026-05-19T16:00:00"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "Transactions started within a time window."
+          },
+          "response": []
+        },
+        {
+          "name": "Get transaction detail (canonical view)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions/{{txnId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions",
+                "{{txnId}}"
+              ]
+            },
+            "description": "Canonical Transaction Detail View (JSON): a `rendered` field (the human-readable §6 text view), the transaction header, and the ordered step-by-step entry timeline (request -> M3 calls/results -> response, with soft/hard errors in context). Uses txnId captured by 'List transactions - all'."
+          },
+          "response": []
+        },
+        {
+          "name": "Get transaction view (§6 rendered text)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions/{{txnId}}/view",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions",
+                "{{txnId}}",
+                "view"
+              ]
+            },
+            "description": "Canonical §6 Transaction Detail View as human-readable text/plain: header, sub-header (user / reqid / time span / duration / steps), the request line, numbered steps (mi_call+mi_result folded into one '📞 PROG/TXN inputs ✅ N recs' line, plus SQL / soft / error markers), and the response line. Default collapses plain INFO narration. Uses txnId captured by 'List transactions - all'."
+          },
+          "response": []
+        },
+        {
+          "name": "Get transaction view - verbose (incl. INFO steps)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions/{{txnId}}/view?verbose=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions",
+                "{{txnId}}",
+                "view"
+              ],
+              "query": [
+                {
+                  "key": "verbose",
+                  "value": "true",
+                  "description": "also render plain INFO narration steps"
+                }
+              ]
+            },
+            "description": "Same §6 text view but with verbose=true so every INFO narration line is rendered as a step (not just MI calls / SQL / soft / errors)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Logs - Agent (Phase 2)",
+      "description": "Claude tool-use debugging agent. POST a natural-language question; the agent picks read-only SQL-backed tools over log_transactions/log_entries and answers with cited transaction ids. Requires ANTHROPIC_API_KEY in the server .env.",
+      "item": [
+        {
+          "name": "Ask - count for a user on a date",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"How many transactions did user SGIAMPORCA run on 2026-06-09, and how many of them errored?\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/debug/ask",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "debug",
+                "ask"
+              ]
+            },
+            "description": "Exercises count_transactions / find_errors aggregation."
+          },
+          "response": []
+        },
+        {
+          "name": "Ask - triage today's errors",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"What are the most recent errors in the warehouse logs and what caused them?\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/debug/ask",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "debug",
+                "ask"
+              ]
+            },
+            "description": "Exercises find_errors -> get_transaction drill-down."
+          },
+          "response": []
+        },
+        {
+          "name": "Ask - explain a specific transaction",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"Explain what happened in transaction {{txnId}} step by step and whether it succeeded.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/debug/ask",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "debug",
+                "ask"
+              ]
+            },
+            "description": "Exercises get_transaction on the {{txnId}} variable (set it from a Logs - Transactions response first)."
+          },
+          "response": []
+        },
+        {
+          "name": "Ask - find a specific failure",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"Is there a transaction failing with \\\"Index was out of range\\\"? Which API and user does it affect?\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/debug/ask",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "debug",
+                "ask"
+              ]
+            },
+            "description": "Exercises search_entries -> get_transaction."
+          },
+          "response": []
+        },
+        {
+          "name": "Ask - pick failures for a delivery",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"Did any pick confirmations fail for delivery 15936? If so, why?\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/debug/ask",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "debug",
+                "ask"
+              ]
+            },
+            "description": "Exercises search_transactions/find_errors filtered by delivery_number."
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "documentJobId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "logJobId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "txnId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "logFilePath",
+      "value": "/Users/amintalukder/myworkspace/personal/python work/mnp-logs/eSmartServerLog.txt",
+      "type": "string"
+    },
+    {
+      "key": "mnpLogsDir",
+      "value": "/Users/amintalukder/myworkspace/personal/python work/mnp-logs",
+      "type": "string"
+    },
+    {
+      "key": "docFilePath",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}

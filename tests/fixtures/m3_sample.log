@@ -1,0 +1,49 @@
+2026-05-19 13:42:33,362 (BECWHLO) [94] INFO  M3WebServiceClassLib.Managers.M3ItemManager LookupAltUoMConversionFactorAndForm - Calling MMS200 - LstItmAltUnitMs
+2026-05-19 13:42:33,391 (BECWHLO) [94] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPICall - Calling WebService: >>
+MI Program: MMS200MI  Transaction: LstItmAltUnitMs  NumberOfRecs: DEFAULT
+URL: https://mingle-ionapi.eu1.inforcloudsuite.com:443/U7LY7UGZWXXLQB9J_TST/M3/m3api-rest/v2/execute/MMS200MI/LstItmAltUnitMs;returncols=ALUN,COFA,DMCF,DCCD?CONO=911&FITN=104399&TITN=104399&FAUT=1&TAUT=1&m3user=BECWHLO
+
+Inputs:
+   CONO :  911
+   FITN :  104399
+   TITN :  104399
+   FAUT :  1
+   TAUT :  1
+
+Outputs:
+   ALUN
+   COFA
+   DMCF
+   DCCD
+
+2026-05-19 13:42:33,467 (BECWHLO) [94] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPIResult - MI Program: MMS200MI  Transaction: LstItmAltUnitMs     Result: OK
+ Record: 1
+    ALUN = CS
+    DCCD = 0
+    COFA = 3.000000000
+    DMCF = 1
+Record: 2
+    ALUN = EA
+    DCCD = 0
+    COFA = 0.333333333
+    DMCF = 1
+Record: 3
+    ALUN = KG
+    DCCD = 4
+    COFA = 1.000000000
+    DMCF = 1
+
+2026-05-19 13:42:33,469 (BECWHLO) [94] INFO  M3WebServiceClassLib.Managers.M3ItemManager CallSite.Target - Downloaded 3 Records
+2026-05-19 13:42:33,920 (BECWHLO) [21] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST: http://192.168.0.124:60948/api/balance/GetOldestItemBalanceAcrossZones?Company=911&Warehouse=BRI&User=BECWHLO&ItemNumber=104399&UserID=1&Division=TMP&MethodName=GetOldestItemBalanceAPI&DeviceID=3091&ReqID=3091-2025-11-20_21%3a04%3a47.319-9750&Facility=TMP&EmployeeName=BEC&TransactionName=Brighton+Stock+Pick&DeviceName=25171E0100&Password=HIDDEN
+2026-05-19 13:42:34,381 ((null)) [94] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__0 - REQUEST BODY: {"Company":"911","Warehouse":"BRI","PickListSuffix":"2","TransactionType":"002001","User":"BECWHLO","ReportingNumber":"20764","OrderNumber":"1000000796","ItemNumber":"104399","DeliveryNumber":"10630","MethodName":"ConfirmPickLine","TransactionName":"Brighton Stock Pick","DeviceName":"25171E0100"}
+2026-05-19 13:42:34,781 ((null)) [94] DEBUG SQLServerClassLib.ModelManagers.ActivityManager WriteActivityLog - Stored Procedure Executed is >>
+usp_ActivityLog_InsertJson
+@JsonData NVARCHAR(MAX /* Specified as -1 */) = '{"TerminalNumber":3091,"TransactionType":"002001","TransactionName":"Brighton Stock Pick","ItemNumber":"104399"}';
+
+2026-05-19 15:06:51,166 ((null)) [66] ERROR SQLServerClassLib.CommonCode.RawPrinterHelper SendBytesToPrinter - Printer Error Code = 1801
+2026-05-19 15:06:51,178 ((null)) [46] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__1 - RESPONSE: "10655/1-1"
+2026-05-19 15:03:12,794 (BECWHLO) [46] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPIResult - MI Program: MMS010MI  Transaction: GetLocation     Result: Transaction GetLocation in program MMS010MI requires a value for field WHSL
+
+2026-05-19 15:03:12,860 (BECWHLO) [46] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPIResult - MI Program: MMS010MI  Transaction: GetLocation     Result: Location  does not exist
+
+2026-05-19 15:01:26,167 () [66] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST: http://192.168.0.124:60948/api/server/CheckServer?User=&DeviceID=25171E0100&MethodName=CheckServer&Retry=False&VersionNumber=0.1.13
