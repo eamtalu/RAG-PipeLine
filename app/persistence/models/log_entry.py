@@ -63,6 +63,10 @@ class LogEntry(Base):
     # demultiplex concurrent requests: one request's internal MI work stays on one thread (~98%),
     # so it's a reliable correlation key where the async REQUEST/RESPONSE bracket lines hop threads.
     thread: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    # log4net context user from the header prefix "(CPRICE)". Present on EVERY line — including the
+    # async RESPONSE line, which has no user in its payload and no ReqID. Stage 2 uses it to attach
+    # a response to the oldest open request *for that same user*, so a response can never cross users.
+    user_ctx: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     logger: Mapped[str | None] = mapped_column(String(256), nullable=True)
     method: Mapped[str | None] = mapped_column(String(128), nullable=True)
     entry_type: Mapped[LogEntryType] = mapped_column(Enum(LogEntryType), default=LogEntryType.info, index=True)

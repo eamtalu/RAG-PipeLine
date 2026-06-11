@@ -412,6 +412,26 @@ app/services/log_agent/           # Phase 2
   - Verified: **0 mixed-user transactions** across all 6 multi-user files (3,423 txns, ≤11 concurrent
     users) and the live DB. Orphan entries 33→0. Trade-off: a few % more `incomplete` (requests whose
     response can't be confidently matched — honest, vs. the old blind next-response attachment).
+- **User-aware Stage 2 grouping (thread+user) — DONE** (2026-06-11): hardened the thread-only grouper
+  after two residual leaks surfaced on the full 28-file corpus (193,864 entries): (1) trailing `info`
+  narration lines of the *next* request leaked into the previous transaction because the user-change
+  split only fired on `mi_call` m3user, not on narration; (2) genuine **.NET async thread reuse** —
+  a thread runs user A's call, is reused mid-await for user B's continuation, then resumes A — which
+  thread-only keying mixed (seen as A→B→A on one thread).
+  - Root signal: **every** log line carries the log4net context user in its header (`(CPRICE)`), incl.
+    the async RESPONSE line (no payload user / no ReqID, but a header user). Migration `c9d3e8f02b15`
+    adds `log_entries.user_ctx` (backfilled from `raw_body`); Stage 1 now persists it (already parsed
+    as `LogRecord.user`, previously dropped).
+  - `_group` re-keyed from `thread` → **`(thread, user)`**: a line *with* a user routes to its
+    `(thread,user)` builder and marks that stream current on the thread; a line with **no** user
+    (16–54% of internal lines log as `(null)`) **inherits** the thread's current stream. This
+    de-interleaves async reuse (A→B→A re-merges A correctly, B gets its own txn) with no fragmentation.
+    RESPONSE now closes the oldest open request **for the response's own `user_ctx`** (FIFO within user),
+    so a response can never cross users either.
+  - Verified on the live DB (11,012 txns): **cross-user (user_ctx) = 0, response-user mismatch = 0,
+    multi-request = 0, multi-response = 0**; 9,606 txns have request-thread ≠ response-thread all
+    correctly stitched. (One `m3user`-differs case is a *legitimate* single `/loading/Load` POST whose
+    internal MI calls act on different data owners — not a mis-stitch: one body, one response, one thread.)
 - **§6 renderer — DONE** (2026-06-10): `app/services/mnp_log_ingestion/render.py::render_transaction`
   turns a transaction + its ordered entries into the locked §6 text view (header · sub-header ·
   `▶ REQUEST` dims · numbered steps with `mi_call`+`mi_result` folded into one `📞 PROG/TXN inputs ✅ N recs`

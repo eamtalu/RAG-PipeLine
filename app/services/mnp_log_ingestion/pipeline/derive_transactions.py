@@ -196,22 +196,32 @@ def _entry_user(e: LogEntry) -> str | None:
 
 
 def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
-    """Thread-aware grouping that demultiplexes concurrent requests.
+    """Thread+user-aware grouping that demultiplexes concurrent requests.
 
-    The M3 server processes multiple users at once, so the timestamp-ordered stream interleaves
-    them. A single open-transaction stack mixes users (confirmed bug). Instead we key open
-    transactions by **thread** — one request's internal MI work stays on one thread (~98%), and a
-    POST's REQUEST BODY runs on that same thread (~99%). The async REQUEST (MoveNext) and RESPONSE
-    (b__1) lines hop threads and the RESPONSE carries no id, so:
+    The M3 server processes many users at once, so the timestamp-ordered stream interleaves them,
+    and — because it's .NET async — a thread can even be reused MID-request to run another user's
+    continuation, then resume the first. So thread alone is not a clean per-request lock. We key an
+    open transaction by **(thread, user)**: every log line carries the log4net context user
+    (`user_ctx`, e.g. "(CPRICE)"), so two users sharing a thread get two separate open builders and
+    a thread that flips A→B→A re-merges A's work correctly instead of mixing or fragmenting it.
+
+    Rules:
+      - a line WITH a user routes to its (thread, user) builder (creating one if needed) and marks
+        that stream as the thread's current one;
+      - a line with NO user (some narration / mi bodies log as "(null)") inherits the thread's
+        current stream — it belongs to whatever request is live on that thread right now;
       - a REQUEST is paired to its work by ReqID (GET) or, for a POST whose MoveNext has no id, to
         the body it immediately precedes; a GET REQUEST is bound by User once its work appears;
-      - a RESPONSE (no correlation id) is attached best-effort to the OLDEST still-open request
-        (FIFO — responses arrive in request order).
-    This guarantees no transaction mixes two users' internal work (responses carry no user, so
-    best-effort response matching cannot cause user contamination).
+      - a RESPONSE (no payload user/id, but a header user) closes the OLDEST still-open request FOR
+        THAT USER (FIFO within the user).
+    Net guarantee: a transaction can never contain two users' lines, and a response can never be
+    stitched onto another user's request.
     """
     builders: list[_TxnBuilder] = []
-    open_by_thread: dict[str, _TxnBuilder] = {}
+    # an open transaction is keyed by (thread, user). user is None only for anonymous streams that
+    # never saw a user (then the stream position is appended to keep them distinct).
+    open_by_key: dict[tuple, _TxnBuilder] = {}
+    current_by_thread: dict[str | None, tuple] = {}  # thread -> its currently-active key (null inherit)
     pending_reqs: list[LogEntry] = []  # MoveNext REQUEST lines awaiting their processing thread
     req_pos: dict[int, int] = {}       # stream position of each pending request (for response match)
 
@@ -235,7 +245,7 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
         if not user:
             return None
         for i, r in enumerate(pending_reqs):
-            if _entry_user(r) == user:
+            if req_user(r) == user:
                 return pending_reqs.pop(i)
         return None
 
@@ -249,6 +259,23 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
     def has_request(b: _TxnBuilder) -> bool:
         return any(e.entry_type.value == "request" for e in b.entries)
 
+    def txn_user(b: _TxnBuilder) -> str | None:
+        """The user a builder belongs to. Prefer the log4net context user (`user_ctx`) — it's on
+        every line — then fall back to a request/body User or mi_call m3user."""
+        for e in b.entries:
+            if e.user_ctx:
+                return e.user_ctx
+        return bound_user(b)
+
+    def req_user(r: LogEntry) -> str | None:
+        return r.user_ctx or _entry_user(r)
+
+    def close(key: tuple) -> _TxnBuilder | None:
+        b = open_by_key.pop(key, None)
+        if b is not None and current_by_thread.get(key[0]) == key:
+            del current_by_thread[key[0]]
+        return b
+
     for i, e in enumerate(entries):
         et = e.entry_type.value
         th = e.thread
@@ -258,52 +285,71 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
             req_pos[id(e)] = i
 
         elif et == "request_body":
-            if th is not None and th in open_by_thread:
-                builders.append(open_by_thread.pop(th))  # prior cycle on this thread: no RESPONSE
+            # the POST body line itself usually logs as "(null)"; its user is the JSON "User" field.
+            u = e.user_ctx or _entry_user(e)
+            key = (th, u)
+            if key in open_by_key:
+                builders.append(close(key))  # prior cycle for this (thread,user): no RESPONSE
             b = _TxnBuilder()
             req = take_by_reqid(_entry_reqid(e)) or take_post_request()
             if req is not None:
                 b.add(req)
             b.add(e)
             b.open_pos = req_pos.pop(id(req), i) if req is not None else i
-            if th is not None:
-                open_by_thread[th] = b
-            else:
-                builders.append(b)
+            open_by_key[key] = b
+            current_by_thread[th] = key
 
         elif et in _INTERNAL:
-            u = _entry_user(e)
-            b = open_by_thread.get(th) if th is not None else None
-            # a different user on the same thread => a new request reused it (GET, no body to reset)
-            if b is not None and u and bound_user(b) and u != bound_user(b):
-                builders.append(open_by_thread.pop(th))
-                b = None
-            if b is None:
-                b = _TxnBuilder()
-                b.open_pos = i
-                if th is not None:
-                    open_by_thread[th] = b
+            u = e.user_ctx
+            if u is not None:
+                key = (th, u)
+                b = open_by_key.get(key)
+                if b is None:
+                    b = _TxnBuilder()
+                    b.open_pos = i
+                    open_by_key[key] = b
+                current_by_thread[th] = key
+            else:
+                # no user on this line -> it belongs to whatever stream is live on this thread now
+                key = current_by_thread.get(th)
+                b = open_by_key.get(key) if key is not None else None
+                if b is None:
+                    key = (th, None, i)  # anonymous stream (no user seen yet on this thread)
+                    b = _TxnBuilder()
+                    b.open_pos = i
+                    open_by_key[key] = b
+                    current_by_thread[th] = key
             b.add(e)
-            if u and not has_request(b):  # bind a pending GET REQUEST now that we know the user
-                req = take_by_user(u)
+            bu = u or _entry_user(e)
+            if bu and not has_request(b):  # bind a pending GET REQUEST now that we know the user
+                req = take_by_user(bu)
                 if req is not None:
                     b.add(req)
                     b.open_pos = req_pos.pop(id(req), b.open_pos)  # opened when its REQUEST arrived
-            if th is None:
-                builders.append(b)
 
         elif et == "response":
-            # async, no correlation id. Responses arrive in REQUEST order, so close the OLDEST
-            # still-open request (FIFO). Candidates: open thread builders (requests that did MI
-            # work) AND pending requests with no work yet (simple request→response calls). This is
-            # user-safe: a response carries no user, so a wrong guess can't mix two users' work.
-            best_thread = min(open_by_thread, key=lambda k: open_by_thread[k].open_pos, default=None)
-            best_thread_pos = open_by_thread[best_thread].open_pos if best_thread is not None else None
-            best_req = min(pending_reqs, key=lambda r: req_pos.get(id(r), 0), default=None)
+            # async: no payload user/id, but the log4net header carries the context user. Restrict
+            # candidates to that user so a response can never close another user's request, then pick
+            # the OLDEST still-open request (FIFO). Candidates: open (thread,user) builders that did
+            # work AND pending requests with no work yet. If the user filter leaves nothing (user-less
+            # response, or its request isn't open), fall back to all candidates so it still lands.
+            ru = e.user_ctx
+            keys = list(open_by_key)
+            if ru is not None:
+                u_keys = [k for k in keys if txn_user(open_by_key[k]) == ru]
+                u_reqs = [r for r in pending_reqs if req_user(r) == ru]
+                if not u_keys and not u_reqs:
+                    u_keys, u_reqs = keys, pending_reqs
+            else:
+                u_keys, u_reqs = keys, pending_reqs
+
+            best_key = min(u_keys, key=lambda k: open_by_key[k].open_pos, default=None)
+            best_key_pos = open_by_key[best_key].open_pos if best_key is not None else None
+            best_req = min(u_reqs, key=lambda r: req_pos.get(id(r), 0), default=None)
             best_req_pos = req_pos.get(id(best_req)) if best_req is not None else None
 
-            if best_thread is not None and (best_req_pos is None or best_thread_pos <= best_req_pos):
-                b = open_by_thread.pop(best_thread)
+            if best_key is not None and (best_req_pos is None or best_key_pos <= best_req_pos):
+                b = close(best_key)
                 b.add(e)
                 builders.append(b)
             elif best_req is not None:
@@ -317,7 +363,7 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
                 b.add(e)
                 builders.append(b)
 
-    builders.extend(open_by_thread.values())
+    builders.extend(open_by_key.values())
     for r in pending_reqs:  # REQUESTs with no work and no RESPONSE -> their own (incomplete) txn
         b = _TxnBuilder()
         b.add(r)
