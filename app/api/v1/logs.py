@@ -20,7 +20,7 @@ from app.persistence.models.job import Job
 from app.persistence.models.log_entry import LogEntry, LogEntryType
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.services.mnp_log_ingestion.LogIngestion import LogIngestion, get_log_ingestion, DOCUMENT_TYPE
-from app.services.mnp_log_ingestion.pipeline.derive_transactions import regroup_all
+from app.services.mnp_log_ingestion.pipeline.derive_transactions import regroup_all, regroup_incremental
 from app.services.mnp_log_ingestion.render import render_transaction
 from app.services.log_agent.agent import LogDebugAgent, get_log_debug_agent
 
@@ -191,10 +191,16 @@ def _txn_summary(t: LogTransaction) -> dict:
 
 
 @router.post("/regroup")
-async def regroup_transactions(db: AsyncSession = Depends(get_session)):
-    """Run Stage 2: (re)derive log_transactions from all log_entries. Returns grouping stats."""
-    stats = await regroup_all(db)
-    return stats
+async def regroup_transactions(
+    db: AsyncSession = Depends(get_session),
+    incremental: bool = Query(default=False, description="True = only regroup the unsealed live tail (fast, what the worker runs); False = full rebuild of all transactions (historical backfill / repair)."),
+):
+    """Run Stage 2 grouping. Default is a FULL rebuild; `incremental=true` regroups only the live tail.
+
+    Both produce DETERMINISTIC transaction ids (uuid5 of each transaction's anchor entry), so a
+    transaction keeps the same id across regroups — saved/cited ids stay valid.
+    """
+    return await (regroup_incremental(db) if incremental else regroup_all(db))
 
 
 @router.get("/transactions")

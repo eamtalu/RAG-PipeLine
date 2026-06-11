@@ -17,7 +17,7 @@ import enum
 import uuid
 from datetime import datetime, date, timezone
 
-from sqlalchemy import String, DateTime, Date, Enum, Integer, Text, ForeignKey
+from sqlalchemy import String, DateTime, Date, Enum, Integer, Text, Boolean, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,8 +36,13 @@ class LogTransaction(Base):
     __tablename__ = "log_transactions"
 
     # --- pk / lineage ---
+    # id is DETERMINISTIC: uuid5 of the transaction's anchor entry hash (see derive_transactions).
+    # So the same transaction keeps the same id across regroups — references stay valid.
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    # sealed = no new entry can join this transaction (its end is older than the seal window), so
+    # incremental Stage 2 never recomputes it. Only the unsealed "live tail" is reprocessed per cycle.
+    sealed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False, index=True)
     flow_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)  # Phase-3 hook (no FK yet)
     source_file_start: Mapped[str | None] = mapped_column(String(512), nullable=True)
     source_file_end: Mapped[str | None] = mapped_column(String(512), nullable=True)

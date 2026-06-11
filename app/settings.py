@@ -49,6 +49,20 @@ class Settings(BaseSettings):
     log_source_dir: Path = Path("./logs/source")
     log_watcher_poll_seconds: float = 5.0
     log_grouping_poll_seconds: float = 5.0
+    # Stage 2 incremental grouping: a TERMINAL transaction (has a RESPONSE / hard error) whose end is
+    # older than this (relative to the newest log timestamp) is SEALED — never recomputed, so its id
+    # is permanent and each cycle only reprocesses the recent "live tail". Must be >> the longest real
+    # transaction (measured ≤2 min), to be safe against a late-arriving RESPONSE. 15 min default.
+    log_seal_window_seconds: int = 900
+    # An INCOMPLETE transaction (REQUEST seen, no RESPONSE yet) is kept unsealed far longer, so a
+    # slow/late response can still join it; only after this long "abandon" window is it sealed as
+    # permanently incomplete. Keeps the unsealed pool tiny without ever splitting a slow request.
+    log_abandon_window_seconds: int = 3600
+    # Stage 2 grouping staleness guard: an open transaction idle longer than this is ABANDONED
+    # (flushed as incomplete) so a far-later RESPONSE — especially a user-less one matched by FIFO —
+    # can't bind across a huge time gap and create a bloated multi-day transaction. Real
+    # transactions are ≤2 min, so 5 min is safe.
+    log_open_gap_seconds: int = 300
 
     # --- Log debugging agent (Phase 2) ---
     anthropic_api_key: str = ""

@@ -432,6 +432,29 @@ app/services/log_agent/           # Phase 2
     multi-request = 0, multi-response = 0**; 9,606 txns have request-thread ≠ response-thread all
     correctly stitched. (One `m3user`-differs case is a *legitimate* single `/loading/Load` POST whose
     internal MI calls act on different data owners — not a mis-stitch: one body, one response, one thread.)
+- **Scalable incremental Stage 2 + deterministic ids — DONE** (2026-06-11): the old worker FULL-rebuilt
+  log_transactions on every ingest (O(whole table)) and reassigned random `uuid4` ids — not viable for
+  continuous ingestion, and it invalidated every saved/cited transaction id each cycle.
+  - **Deterministic ids**: `LogTransaction.id = uuid5(NS, anchor)` where anchor = the transaction's
+    REQUEST/REQUEST-BODY entry `entry_hash` (content-unique, permanent) — so a regroup reproduces the
+    SAME id instead of a new one. Full rebuild is now idempotent (verified: two rebuilds → identical id
+    set). entry_hash is 0-null / 0-dup, so ids are collision-free by construction.
+  - **Sealed-window incremental** (`regroup_incremental`, migration `d4e7a1b9c206` adds
+    `log_transactions.sealed`): a TERMINAL txn older than `log_seal_window_seconds` (15 min ≫ ≤2 min real
+    duration) is sealed and never recomputed; an INCOMPLETE one waits until `log_abandon_window_seconds`
+    (1 h) so a slow response can still join. Each cycle frees only the unsealed "live tail" + new entries
+    and regroups just those → **per-cycle cost bounded by the window, not history** (measured: 0.4% of
+    193,864 entries scanned). The grouping worker now calls this; `POST /logs/regroup` (default) stays a
+    FULL rebuild for backfill/repair (`?incremental=true` for the tail path).
+  - **Staleness guard** in `_group`: an open builder idle > `log_open_gap_seconds` (5 min) is abandoned
+    (flushed incomplete) so a far-later user-less RESPONSE can't FIFO-bind across a huge gap — fixed
+    pre-existing multi-day "bloat" transactions (max duration 24 d → 317 s). **Crash-proof `_persist`**:
+    skips (with a warning) any builder whose id is already sealed — only possible under out-of-order/bulk
+    ingest via the incremental path; full regroup is the repair — so one clash never kills a grouping cycle.
+  - Faithful in-order live-replay simulation (`scripts/simulate_continuous_ingestion.py`, 4,036 ticks):
+    bounded 0.4% tail/cycle, 0 id-skips, 0 unassigned, 0 cross-user, max 317 s, and **99.87% of ids
+    identical to a full rebuild**. Incremental is EVENTUALLY-CONSISTENT with full — ~0.15–0.25% of
+    *boundary* transactions group differently (bidirectional, benign); a periodic full regroup reconciles.
 - **§6 renderer — DONE** (2026-06-10): `app/services/mnp_log_ingestion/render.py::render_transaction`
   turns a transaction + its ordered entries into the locked §6 text view (header · sub-header ·
   `▶ REQUEST` dims · numbered steps with `mi_call`+`mi_result` folded into one `📞 PROG/TXN inputs ✅ N recs`

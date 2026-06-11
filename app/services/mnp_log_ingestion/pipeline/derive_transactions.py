@@ -1,22 +1,30 @@
 # derive_transactions.py — Stage 2 of the log pipeline (derive transactions from entries)
 #
-#   Reads log_entries ORDERED BY timestamp (across ALL files), runs the REQUEST→RESPONSE state
-#   machine, and builds log_transactions — promoting the common WMS dimensions to columns and
-#   keeping the rest in attributes JSONB. Because it reads the whole table in time order, a
-#   transaction whose REQUEST and RESPONSE live in different rotated files is stitched naturally.
+#   Reads log_entries ORDERED BY timestamp, runs the REQUEST→RESPONSE state machine, and builds
+#   log_transactions — promoting the common WMS dimensions to columns and keeping the rest in
+#   attributes JSONB. Because it reads in time order, a transaction whose REQUEST and RESPONSE live
+#   in different rotated files is stitched naturally.
 #
-#   This pass is a FULL REBUILD: it deletes existing log_transactions (which sets every
-#   log_entries.transaction_id back to NULL via ON DELETE SET NULL) and regroups from scratch.
-#   That keeps it simple, correct, and safely re-runnable (it never touches the raw entries).
+#   Two entry points:
+#     - regroup_all(db)         FULL rebuild — deletes ALL transactions, regroups every entry. Use
+#                               for historical backfill / repair. Idempotent (deterministic ids).
+#     - regroup_incremental(db) LIVE path — keeps SEALED transactions untouched, frees only the
+#                               unsealed "live tail" + new entries, regroups just those. O(recent),
+#                               so it scales for continuous ingestion. This is what the worker runs.
+#
+#   Transaction ids are DETERMINISTIC (uuid5 of the anchor entry's content hash), so regrouping the
+#   same entries reproduces the same id — saved/cited ids stay valid across cycles.
 
 """Stage 2 — group raw log_entries into log_transactions."""
 
 import logging
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.settings import settings
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 
@@ -24,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 # request params / body keys we never want to keep verbatim in attributes
 _SENSITIVE = {"password", "accesstoken", "m3credentials", "m3usercredentials", "cipher"}
+
+# namespace for deterministic (uuid5) transaction ids — fixed so ids are reproducible forever
+_TXN_NS = uuid.UUID("6f9c2a1e-7b54-4e2d-9a3c-1d0e8f5b4a21")
 
 
 class _TxnBuilder:
@@ -276,9 +287,30 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
             del current_by_thread[key[0]]
         return b
 
+    def last_ts(b: _TxnBuilder) -> datetime | None:
+        return next((e.timestamp for e in reversed(b.entries) if e.timestamp is not None), None)
+
+    gap = timedelta(seconds=settings.log_open_gap_seconds)
+
+    def evict_stale(now: datetime) -> None:
+        """Abandon open builders / pending requests idle longer than the gap, so a far-later RESPONSE
+        (esp. a user-less FIFO match) can't bind across a huge time gap into a bloated transaction."""
+        horizon = now - gap
+        for k in [k for k, bd in open_by_key.items()
+                  if (lt := last_ts(bd)) is not None and lt < horizon]:
+            builders.append(close(k))
+        for r in [r for r in pending_reqs if r.timestamp is not None and r.timestamp < horizon]:
+            pending_reqs.remove(r)
+            nb = _TxnBuilder()
+            nb.add(r)
+            nb.open_pos = req_pos.pop(id(r), -1)
+            builders.append(nb)
+
     for i, e in enumerate(entries):
         et = e.entry_type.value
         th = e.thread
+        if e.timestamp is not None:
+            evict_stale(e.timestamp)
 
         if et == "request":
             pending_reqs.append(e)
@@ -371,49 +403,134 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
     return builders
 
 
-async def regroup_all(db: AsyncSession) -> dict:
-    """Full rebuild: delete existing transactions and regroup ALL entries by timestamp."""
-    # 1. wipe derived transactions (entries.transaction_id -> NULL via FK ON DELETE SET NULL)
-    await db.execute(delete(LogTransaction))
-    await db.commit()
+def _anchor(entries: list[LogEntry]) -> str:
+    """Stable seed for a transaction's deterministic id. Prefer the REQUEST/REQUEST BODY entry's
+    content hash (the natural, content-unique start); else the earliest entry's. `entry_hash` is
+    sha256(raw_body) incl. the ms timestamp, so it uniquely & permanently identifies the line."""
+    req = next((e for e in entries if e.entry_type.value in ("request", "request_body")), None)
+    e = req or entries[0]
+    return e.entry_hash or f"{e.source_file}:{e.line_number}"
 
-    # 2. fetch all entries in stream order (timestamp, then file + line as tiebreak)
-    rows = list(
-        (await db.execute(
-            select(LogEntry).order_by(
-                LogEntry.timestamp.asc().nullslast(),
-                LogEntry.source_file.asc(),
-                LogEntry.line_number.asc(),
-            )
-        )).scalars().all()
-    )
 
-    # 3. group + persist
-    builders = _group(rows)
-    created = 0
-    orphan_entries = len(rows)
+def _txn_id(entries: list[LogEntry]) -> uuid.UUID:
+    return uuid.uuid5(_TXN_NS, _anchor(entries))
+
+
+async def _cutoffs(db: AsyncSession) -> tuple[datetime | None, datetime | None]:
+    """(seal_cutoff, abandon_cutoff) measured against the NEWEST log timestamp (the log's notion of
+    'now'), not wall-clock — so batch / back-dated ingestion seals correctly too. Terminal
+    transactions seal at seal_cutoff; incomplete ones only at the much-older abandon_cutoff."""
+    max_ts = await db.scalar(select(func.max(LogEntry.timestamp)))
+    if max_ts is None:
+        return None, None
+    return (max_ts - timedelta(seconds=settings.log_seal_window_seconds),
+            max_ts - timedelta(seconds=settings.log_abandon_window_seconds))
+
+
+def _is_sealed(values: dict, seal_cutoff: datetime | None, abandon_cutoff: datetime | None) -> bool:
+    """Seal a transaction (never recompute it) once nothing more can join it:
+      - TERMINAL (has a RESPONSE / hard error) and ended before the short seal window; or
+      - INCOMPLETE (no response yet) but so old it's past the long abandon window — a late response
+        is no longer plausible, so stop waiting. Incomplete-and-recent stays UNSEALED so a slow
+        response can still join it (never split a slow request)."""
+    ended = values.get("ended_at")
+    if ended is None or seal_cutoff is None:
+        return False
+    if values["status"] == LogTransactionStatus.incomplete:
+        return abandon_cutoff is not None and ended < abandon_cutoff
+    return ended < seal_cutoff
+
+
+async def _persist(db: AsyncSession, builders: list[_TxnBuilder],
+                   seal_cutoff: datetime | None, abandon_cutoff: datetime | None) -> dict:
+    """Compute + insert each builder with a deterministic id, assign its entries, and seal those
+    nothing more can join. Caller commits.
+
+    Crash-proof against a deterministic-id clash: in the live in-order path, ids are unique by
+    construction (each transaction's anchor entry is unique). A clash only arises from OUT-OF-ORDER
+    / bulk ingestion via the incremental path (a tail builder reconstructs a transaction whose id a
+    prior cycle already sealed). We SKIP such a builder (leaving its entries unassigned) and warn —
+    the repair path is a full regroup — rather than letting one clash kill the whole grouping cycle.
+    """
+    created = sealed = assigned = skipped = 0
     by_status: dict[str, int] = {}
+    seen: set[uuid.UUID] = set()
+    existing: set[uuid.UUID] = set((await db.execute(select(LogTransaction.id))).scalars().all())
     for b in builders:
         # entries were attached out of stream order (a REQUEST is bound after its work appears);
         # re-sort chronologically so seq + source_file_start/end and the rendered timeline are right.
         b.entries.sort(key=lambda e: (e.timestamp is None, e.timestamp, e.line_number or 0))
+        tid = _txn_id(b.entries)
+        if tid in seen or tid in existing:
+            skipped += 1
+            continue
+        seen.add(tid)
         values = b.compute()
-        txn = LogTransaction(**values)
+        is_sealed = _is_sealed(values, seal_cutoff, abandon_cutoff)
+        txn = LogTransaction(id=tid, sealed=is_sealed, **values)
         db.add(txn)
         await db.flush()  # get txn.id
         for i, e in enumerate(b.entries):
             e.transaction_id = txn.id
             e.seq = i
-        orphan_entries -= len(b.entries)
+        assigned += len(b.entries)
         created += 1
+        sealed += int(is_sealed)
         by_status[txn.status.value] = by_status.get(txn.status.value, 0) + 1
+    if skipped:
+        logger.warning("Stage 2: skipped %d builder(s) with an already-sealed id (out-of-order/bulk "
+                       "ingest). Run a full regroup (POST /logs/regroup) to rebuild cleanly.", skipped)
+    return {"transactions_created": created, "transactions_sealed": sealed,
+            "entries_assigned": assigned, "transactions_skipped": skipped, "by_status": by_status}
 
+
+async def regroup_all(db: AsyncSession) -> dict:
+    """FULL rebuild: delete every transaction and regroup ALL entries by timestamp. For historical
+    backfill / repair. Idempotent — deterministic ids mean a rebuild reproduces the same ids."""
+    await db.execute(delete(LogTransaction))  # entries.transaction_id -> NULL via ON DELETE SET NULL
     await db.commit()
-    stats = {
-        "entries_scanned": len(rows),
-        "transactions_created": created,
-        "orphan_entries": orphan_entries,
-        "by_status": by_status,
-    }
-    logger.info("Stage 2 regroup: %s", stats)
+
+    rows = list((await db.execute(
+        select(LogEntry).order_by(
+            LogEntry.timestamp.asc().nullslast(),
+            LogEntry.source_file.asc(),
+            LogEntry.line_number.asc(),
+        )
+    )).scalars().all())
+
+    seal_cutoff, abandon_cutoff = await _cutoffs(db)
+    result = await _persist(db, _group(rows), seal_cutoff, abandon_cutoff)
+    await db.commit()
+    stats = {"mode": "full", "entries_scanned": len(rows),
+             "orphan_entries": len(rows) - result["entries_assigned"], **result}
+    logger.info("Stage 2 regroup (full): %s", stats)
+    return stats
+
+
+async def regroup_incremental(db: AsyncSession) -> dict:
+    """LIVE path: keep SEALED transactions untouched; free only the unsealed tail, regroup it
+    together with newly-ingested (unassigned) entries. Per-cycle work is bounded by the seal window,
+    so this scales for continuous ingestion. Sealed transactions keep their (deterministic) ids."""
+    # 1. free unsealed transactions only (their entries.transaction_id -> NULL); sealed rows stay
+    await db.execute(delete(LogTransaction).where(LogTransaction.sealed.is_(False)))
+    await db.commit()
+
+    # 2. the live tail = every still-unassigned entry (freed unsealed + brand-new), in stream order
+    rows = list((await db.execute(
+        select(LogEntry).where(LogEntry.transaction_id.is_(None)).order_by(
+            LogEntry.timestamp.asc().nullslast(),
+            LogEntry.source_file.asc(),
+            LogEntry.line_number.asc(),
+        )
+    )).scalars().all())
+    if not rows:
+        return {"mode": "incremental", "entries_scanned": 0, "transactions_created": 0,
+                "transactions_sealed": 0, "by_status": {}}
+
+    seal_cutoff, abandon_cutoff = await _cutoffs(db)
+    result = await _persist(db, _group(rows), seal_cutoff, abandon_cutoff)
+    await db.commit()
+    stats = {"mode": "incremental", "entries_scanned": len(rows),
+             "orphan_entries": len(rows) - result["entries_assigned"], **result}
+    logger.info("Stage 2 regroup (incremental): %s", stats)
     return stats
