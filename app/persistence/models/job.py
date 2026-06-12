@@ -36,6 +36,9 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # tenant — which customer's M3 deployment this file came from. Every downstream row (log_entries,
+    # log_transactions) carries it too, so queries/grouping/the agent stay scoped to one customer.
+    customer_code: Mapped[str] = mapped_column(String(64), index=True)
     filename: Mapped[str] = mapped_column(String(512))
     mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     storage_key: Mapped[str] = mapped_column(String(1024))

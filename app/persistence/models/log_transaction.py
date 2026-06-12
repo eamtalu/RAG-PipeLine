@@ -17,7 +17,7 @@ import enum
 import uuid
 from datetime import datetime, date, timezone
 
-from sqlalchemy import String, DateTime, Date, Enum, Integer, Text, Boolean, ForeignKey
+from sqlalchemy import String, DateTime, Date, Enum, Integer, Text, Boolean, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -35,11 +35,19 @@ class LogTransactionStatus(str, enum.Enum):
 class LogTransaction(Base):
     __tablename__ = "log_transactions"
 
+    # composite indexes for the common tenant-scoped filters (every read pins customer_code first).
+    __table_args__ = (
+        Index("ix_log_transactions_customer_date", "customer_code", "date"),
+        Index("ix_log_transactions_customer_user", "customer_code", "user_name"),
+    )
+
     # --- pk / lineage ---
     # id is DETERMINISTIC: uuid5 of the transaction's anchor entry hash (see derive_transactions).
     # So the same transaction keeps the same id across regroups — references stay valid.
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    # tenant (denormalized from the job/entries) — Stage 2 stamps it; every read & the agent filter by it.
+    customer_code: Mapped[str] = mapped_column(String(64), index=True)
     # sealed = no new entry can join this transaction (its end is older than the seal window), so
     # incremental Stage 2 never recomputes it. Only the unsealed "live tail" is reprocessed per cycle.
     sealed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False, index=True)

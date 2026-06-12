@@ -16,6 +16,7 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
+from app.api.deps import get_current_customer
 from app.settings import settings
 from app.services.log_agent.tools import TOOLS, execute_tool
 
@@ -49,8 +50,9 @@ guessing. Be concise and concrete."""
 class LogDebugAgent:
     """Runs the tool-use loop for a single question against a request-scoped DB session."""
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, customer_code: str):
         self.db = db
+        self.customer_code = customer_code  # every tool call is hard-scoped to this tenant
         self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
 
     async def ask(self, question: str) -> dict:
@@ -92,7 +94,7 @@ class LogDebugAgent:
             for block in response.content:
                 if block.type != "tool_use":
                     continue
-                result_json = await execute_tool(block.name, block.input, self.db)
+                result_json = await execute_tool(block.name, block.input, self.db, self.customer_code)
                 tool_calls.append({"tool": block.name, "input": block.input})
                 results.append({
                     "type": "tool_result",
@@ -121,6 +123,7 @@ class LogDebugAgent:
         }
 
 
-def get_log_debug_agent(db: AsyncSession = Depends(get_session)) -> LogDebugAgent:
-    """FastAPI dependency — one agent bound to the request's DB session."""
-    return LogDebugAgent(db)
+def get_log_debug_agent(db: AsyncSession = Depends(get_session),
+                        customer: str = Depends(get_current_customer)) -> LogDebugAgent:
+    """FastAPI dependency — one agent bound to the request's DB session and tenant."""
+    return LogDebugAgent(db, customer)

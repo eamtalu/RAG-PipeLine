@@ -22,14 +22,15 @@ class LogIngestion:
         self.storage = storage
         self.job_repo = job_repo
 
-    async def ingest(self, data: bytes, filename: str, *, background: bool = True) -> Job:
-        # 1. Persist file to object storage
-        storage_key = f"{uuid4().hex}/{filename}"
+    async def ingest(self, data: bytes, filename: str, customer_code: str, *, background: bool = True) -> Job:
+        # 1. Persist file to object storage, namespaced by customer for per-tenant isolation
+        storage_key = f"{customer_code}/{uuid4().hex}/{filename}"
         await self.storage.save(storage_key, data)
 
         # 2. Create Job record (document_type discriminates this from the document pipeline)
         job = await self.job_repo.create(
-            filename=filename, storage_key=storage_key, document_type=DOCUMENT_TYPE
+            filename=filename, storage_key=storage_key,
+            document_type=DOCUMENT_TYPE, customer_code=customer_code,
         )
 
         # 3. Run Stage 1 (parse → insert). Background by default (fire-and-forget like DataIngestion);

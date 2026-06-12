@@ -10,6 +10,12 @@ class Settings(BaseSettings):
     app_name: str = "RAG Backend"
     debug: bool = False
 
+    # --- Multi-tenant (per-customer log segregation) ---
+    # Tenant of pre-existing rows at migration time (logs ingested before customer_code existed), and
+    # the fallback code for document-pipeline jobs (which have no tenant concept). Valid tenants are
+    # now governed by the `customers` registry table, not a static list.
+    default_customer_code: str = "legacy"
+
     # --- Postgres --- user/pass and database name all as "rag"
     database_url: str = "postgresql+asyncpg://rag:rag@localhost:5432/rag"
 

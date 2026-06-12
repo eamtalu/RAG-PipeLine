@@ -11,11 +11,12 @@ from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.settings import settings
+from app.api.deps import get_current_customer, get_active_customer
 from app.persistence.models.job import Job
 from app.persistence.models.log_entry import LogEntry, LogEntryType
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
@@ -32,6 +33,7 @@ MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB — rotating log files can be large
 @router.post("/ingest", status_code=201)
 async def ingest_log(
     file: UploadFile = File(...),
+    customer: str = Depends(get_active_customer),
     log_ingestion: LogIngestion = Depends(get_log_ingestion),
 ):
     """Push a single log file for ingestion (Stage 1: parse → insert entries)."""
@@ -41,13 +43,15 @@ async def ingest_log(
     if not data:
         raise HTTPException(400, detail="Empty file")
 
-    job = await log_ingestion.ingest(data, file.filename or "unknown.log")
-    return {"job_id": str(job.id), "filename": job.filename, "status": job.status.value}
+    job = await log_ingestion.ingest(data, file.filename or "unknown.log", customer)
+    return {"job_id": str(job.id), "filename": job.filename,
+            "customer_code": job.customer_code, "status": job.status.value}
 
 
 @router.post("/scan")
 async def scan_logs(
     directory: str | None = Query(default=None, description="dir to scan; defaults to settings.log_source_dir"),
+    customer: str = Depends(get_active_customer),
     db: AsyncSession = Depends(get_session),
     log_ingestion: LogIngestion = Depends(get_log_ingestion),
 ):
@@ -67,7 +71,7 @@ async def scan_logs(
     for p in files:
         try:
             data = p.read_bytes()
-            job = await log_ingestion.ingest(data, p.name, background=False)
+            job = await log_ingestion.ingest(data, p.name, customer, background=False)
             # Stage 1 ran in its own session; read the committed count via a fresh scalar query
             # (avoids the identity-map cached, stale Job object).
             inserted = await db.scalar(select(Job.chunk_count).where(Job.id == job.id)) or 0
@@ -82,9 +86,10 @@ async def scan_logs(
 
 
 @router.get("/jobs/{job_id}")
-async def get_log_job(job_id: uuid.UUID, db: AsyncSession = Depends(get_session)):
+async def get_log_job(job_id: uuid.UUID, customer: str = Depends(get_current_customer),
+                      db: AsyncSession = Depends(get_session)):
     job = await db.get(Job, job_id)
-    if not job or job.document_type != DOCUMENT_TYPE:
+    if not job or job.document_type != DOCUMENT_TYPE or job.customer_code != customer:
         raise HTTPException(404, detail="Log job not found")
     return {
         "job_id": str(job.id),
@@ -98,6 +103,7 @@ async def get_log_job(job_id: uuid.UUID, db: AsyncSession = Depends(get_session)
 
 @router.get("/entries")
 async def list_entries(
+    customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
     job_id: uuid.UUID | None = None,
     entry_type: LogEntryType | None = None,
@@ -111,7 +117,7 @@ async def list_entries(
     offset: int = 0,
 ):
     """Line-level query over parsed log entries."""
-    stmt = select(LogEntry)
+    stmt = select(LogEntry).where(LogEntry.customer_code == customer)
     if job_id is not None:
         stmt = stmt.where(LogEntry.job_id == job_id)
     if entry_type is not None:
@@ -192,19 +198,86 @@ def _txn_summary(t: LogTransaction) -> dict:
 
 @router.post("/regroup")
 async def regroup_transactions(
+    customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
     incremental: bool = Query(default=False, description="True = only regroup the unsealed live tail (fast, what the worker runs); False = full rebuild of all transactions (historical backfill / repair)."),
 ):
-    """Run Stage 2 grouping. Default is a FULL rebuild; `incremental=true` regroups only the live tail.
+    """Run Stage 2 grouping FOR THIS CUSTOMER. Default is a FULL rebuild; `incremental=true` regroups
+    only the live tail.
 
     Both produce DETERMINISTIC transaction ids (uuid5 of each transaction's anchor entry), so a
     transaction keeps the same id across regroups — saved/cited ids stay valid.
     """
-    return await (regroup_incremental(db) if incremental else regroup_all(db))
+    return await (regroup_incremental(db, customer) if incremental else regroup_all(db, customer))
+
+
+@router.delete("/data")
+async def delete_log_data(
+    customer: str = Depends(get_current_customer),
+    date_from: date_type | None = Query(default=None, description="inclusive lower bound on LOG date (YYYY-MM-DD); for a single day set date_from = date_to"),
+    date_to: date_type | None = Query(default=None, description="inclusive upper bound on LOG date (YYYY-MM-DD)"),
+    confirm: bool = Query(default=False, description="required true to delete ALL of this customer's data when no date range is given (guard against an accidental full wipe)"),
+    db: AsyncSession = Depends(get_session),
+):
+    """Delete a customer's log data — either a LOG-date range, or everything for the tenant.
+
+    Always scoped to the X-Customer-Code tenant: one customer can never delete another's data.
+
+    - **Date range** (date_from and/or date_to): deletes log_transactions (by their `date`) and
+      log_entries (by entry `timestamp`) in the range, then runs an incremental regroup so any
+      transaction that straddled the boundary is reconciled. The file-level Job rows are kept (a file
+      can span dates), so re-scanning the same source would only re-add genuinely-new lines.
+    - **Full wipe** (no date range): deletes every log Job for the customer, which cascades to all of
+      its entries and transactions. Requires `confirm=true`.
+    """
+    # ---- full wipe (no date filter) ----
+    if date_from is None and date_to is None:
+        if not confirm:
+            raise HTTPException(
+                400,
+                detail="Refusing to delete ALL data for this customer without confirm=true. "
+                       "Pass ?confirm=true, or give date_from/date_to to delete only a range.",
+            )
+        n_ent = await db.scalar(select(func.count()).select_from(LogEntry)
+                                .where(LogEntry.customer_code == customer))
+        n_txn = await db.scalar(select(func.count()).select_from(LogTransaction)
+                                .where(LogTransaction.customer_code == customer))
+        # delete only this customer's LOG jobs; entries + transactions cascade via job_id FK.
+        res = await db.execute(delete(Job).where(
+            Job.customer_code == customer, Job.document_type == DOCUMENT_TYPE))
+        await db.commit()
+        return {"customer_code": customer, "scope": "all",
+                "jobs_deleted": res.rowcount or 0,
+                "entries_deleted": n_ent or 0, "transactions_deleted": n_txn or 0}
+
+    # ---- date-range delete ----
+    ent_conds = [LogEntry.customer_code == customer]
+    txn_conds = [LogTransaction.customer_code == customer]
+    if date_from is not None:
+        ent_conds.append(LogEntry.timestamp >= datetime.combine(date_from, datetime.min.time()))
+        txn_conds.append(LogTransaction.date >= date_from)
+    if date_to is not None:
+        ent_conds.append(LogEntry.timestamp <= datetime.combine(date_to, datetime.max.time()))
+        txn_conds.append(LogTransaction.date <= date_to)
+
+    txn_res = await db.execute(delete(LogTransaction).where(*txn_conds))
+    ent_res = await db.execute(delete(LogEntry).where(*ent_conds))
+    await db.commit()
+
+    # reconcile entries orphaned by a deleted boundary-spanning transaction (and reseal the tail)
+    regroup_stats = await regroup_incremental(db, customer)
+
+    return {"customer_code": customer, "scope": "date_range",
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+            "transactions_deleted": txn_res.rowcount or 0,
+            "entries_deleted": ent_res.rowcount or 0,
+            "regroup": regroup_stats}
 
 
 @router.get("/transactions")
 async def list_transactions(
+    customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
     user: str | None = Query(default=None, description="matches user_name"),
     date: date_type | None = Query(default=None, description="YYYY-MM-DD"),
@@ -223,7 +296,7 @@ async def list_transactions(
     offset: int = 0,
 ):
     """Filter/aggregate over derived transactions. `total` answers 'how many for X on date Y'."""
-    conds = []
+    conds = [LogTransaction.customer_code == customer]
     if user is not None:
         conds.append(LogTransaction.user_name == user)
     if date is not None:
@@ -271,6 +344,7 @@ async def list_transactions(
 # here instead of being parsed as a UUID path param (which would 422).
 @router.get("/transactions/view", response_class=PlainTextResponse)
 async def view_transactions(
+    customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
     limit: int = Query(default=50, ge=1, le=500, description="how many most-recent transactions to render"),
     user: str | None = Query(default=None, description="matches user_name; omit for all users"),
@@ -285,7 +359,7 @@ async def view_transactions(
     in ascending time order. Filters stack: `user`, `date`, `hour`, `status`. With none, you get
     the last `limit` transactions across all users.
     """
-    conds = []
+    conds = [LogTransaction.customer_code == customer]
     if user is not None:
         conds.append(LogTransaction.user_name == user)
     if date is not None:
@@ -330,10 +404,11 @@ async def view_transactions(
     return header + sep + sep.join(blocks)
 
 
-async def _load_transaction_entries(transaction_id: uuid.UUID, db: AsyncSession):
-    """Fetch a transaction + its ordered entry timeline, or 404."""
+async def _load_transaction_entries(transaction_id: uuid.UUID, customer: str, db: AsyncSession):
+    """Fetch a transaction + its ordered entry timeline, or 404. A transaction belonging to another
+    customer 404s exactly like a missing one — no cross-tenant existence leak via id probing."""
     t = await db.get(LogTransaction, transaction_id)
-    if not t:
+    if not t or t.customer_code != customer:
         raise HTTPException(404, detail="Transaction not found")
     entries = (await db.execute(
         select(LogEntry).where(LogEntry.transaction_id == transaction_id)
@@ -345,21 +420,24 @@ async def _load_transaction_entries(transaction_id: uuid.UUID, db: AsyncSession)
 @router.get("/transactions/{transaction_id}/view", response_class=PlainTextResponse)
 async def get_transaction_view(
     transaction_id: uuid.UUID,
+    customer: str = Depends(get_current_customer),
     verbose: bool = Query(default=False, description="also render plain INFO narration steps"),
     db: AsyncSession = Depends(get_session),
 ):
     """Canonical §6 Transaction Detail View as human-readable text (request → steps → response)."""
-    t, entries = await _load_transaction_entries(transaction_id, db)
+    t, entries = await _load_transaction_entries(transaction_id, customer, db)
     return render_transaction(t, entries, verbose=verbose)
 
 
 @router.get("/transactions/{transaction_id}")
-async def get_transaction(transaction_id: uuid.UUID, db: AsyncSession = Depends(get_session)):
+async def get_transaction(transaction_id: uuid.UUID,
+                          customer: str = Depends(get_current_customer),
+                          db: AsyncSession = Depends(get_session)):
     """Canonical Transaction Detail View — header + the ordered step-by-step entry timeline.
 
     Includes a `rendered` field: the §6 text view (also available raw at `/view`).
     """
-    t, entries = await _load_transaction_entries(transaction_id, db)
+    t, entries = await _load_transaction_entries(transaction_id, customer, db)
 
     return {
         "rendered": render_transaction(t, entries),

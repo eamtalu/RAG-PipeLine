@@ -40,7 +40,10 @@ async def _insert_dedup(db: AsyncSession, rows: list[dict]) -> int:
     """Bulk INSERT ... ON CONFLICT (entry_hash) DO NOTHING. Returns rows actually inserted."""
     if not rows:
         return 0
-    stmt = pg_insert(LogEntry).values(rows).on_conflict_do_nothing(index_elements=["entry_hash"])
+    # dedup is per customer: the same line for two customers is two distinct rows.
+    stmt = pg_insert(LogEntry).values(rows).on_conflict_do_nothing(
+        index_elements=["customer_code", "entry_hash"]
+    )
     result = await db.execute(stmt)
     return result.rowcount or 0
 
@@ -83,6 +86,7 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
             batch.append({
                 "id": uuid.uuid4(),
                 "job_id": job_id,
+                "customer_code": job.customer_code,
                 "entry_hash": h,
                 "source_file": job.filename,
                 "line_number": rec.line_number,

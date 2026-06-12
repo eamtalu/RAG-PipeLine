@@ -19,7 +19,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, DateTime, Enum, Integer, Text, ForeignKey
+from sqlalchemy import String, DateTime, Enum, Integer, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -41,15 +41,26 @@ class LogEntryType(str, enum.Enum):
 class LogEntry(Base):
     __tablename__ = "log_entries"
 
+    # content dedup is scoped PER CUSTOMER: two customers can legitimately emit an identical line
+    # (e.g. a health-check at the same millisecond), so the dedup key is (customer_code, entry_hash),
+    # not entry_hash alone — otherwise the second customer's line would be silently dropped.
+    __table_args__ = (
+        UniqueConstraint("customer_code", "entry_hash", name="uq_log_entries_customer_hash"),
+    )
+
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     transaction_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("log_transactions.id", ondelete="SET NULL"), nullable=True, index=True
     )
     job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    # tenant (denormalized from the job) — Stage 2 grouping partitions on this and every read filters
+    # by it, so thread ids (e.g. [94]) can never cross-stitch between customers.
+    customer_code: Mapped[str] = mapped_column(String(64), index=True)
 
-    # --- content dedup key: sha256(raw_body). UNIQUE so the same log line is never stored twice,
-    #     no matter how many times its file is (re)ingested or which rotated file it appears in. ---
-    entry_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
+    # --- content dedup key: sha256(raw_body). Unique per (customer_code, entry_hash) so the same log
+    #     line is never stored twice for a customer, no matter how many times its file is (re)ingested
+    #     or which rotated file it appears in. ---
+    entry_hash: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
 
     # --- provenance / ordering ---
     source_file: Mapped[str] = mapped_column(String(512))

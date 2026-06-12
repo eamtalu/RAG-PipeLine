@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "b7e2a1c4-9f3d-4f7a-8c21-2a1f6d9e0c11",
     "name": "RAG FAST API",
-    "description": "All endpoints for the RAG / Transaction-Log FastAPI backend.\n\nFolders:\n- Health\n- Documents - Ingestion (upload + job status)\n- Documents - Search (hybrid vector + keyword search, variations)\n- Logs - Ingestion (push a log file -> Stage 1 parse+insert)\n- Logs - Query (job status + line-level entry queries, all filter variations)\n\nCollection variables:\n- baseUrl        : server origin (default http://localhost:8000)\n- documentJobId  : auto-set by 'Upload document' test script\n- logJobId       : auto-set by 'Ingest log file' test script\n- logFilePath    : default file for log ingest (points at the real mnp-logs sample)\n- docFilePath    : default file for document upload (set your own)\n\nTip: run 'Ingest log file' (or 'Upload document') first; its test script stores the returned job_id into the collection variable, so the matching 'Get ... job' request just works.",
+    "description": "All endpoints for the RAG / Transaction-Log FastAPI backend.\n\nFolders:\n- Health\n- Documents - Ingestion (upload + job status)\n- Documents - Search (hybrid vector + keyword search, variations)\n- Logs - Ingestion (push a log file -> Stage 1 parse+insert)\n- Logs - Query (job status + line-level entry queries, all filter variations)\n\nCollection variables:\n- baseUrl        : server origin (default http://localhost:8000)\n- documentJobId  : auto-set by 'Upload document' test script\n- logJobId       : auto-set by 'Ingest log file' test script\n- logFilePath    : default file for log ingest (points at the real mnp-logs sample)\n- docFilePath    : default file for document upload (set your own)\n\nTip: run 'Ingest log file' (or 'Upload document') first; its test script stores the returned job_id into the collection variable, so the matching 'Get ... job' request just works.\n\nMULTI-TENANT: every /logs/* request must send the header `X-Customer-Code: {{customerCode}}` (default tenant `mnp`). Document/Search/Health endpoints are NOT tenant-scoped and need no header.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -24,6 +24,142 @@
               ]
             },
             "description": "Liveness probe. Returns {\"status\":\"ok\"}."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Customers (Tenants)",
+      "description": "Manage customer 'log spaces'. A customer must be created here BEFORE logs can be ingested under its code. The frontend lists these to let a user pick which tenant to view/ingest. These endpoints are NOT tenant-scoped (no X-Customer-Code header).",
+      "item": [
+        {
+          "name": "List customers (for tenant selector)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customers?include_inactive=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customers"
+              ],
+              "query": [
+                {
+                  "key": "include_inactive",
+                  "value": "true"
+                }
+              ]
+            },
+            "description": "List all tenants. include_inactive=false returns only active ones (use this to populate the frontend selector)."
+          },
+          "response": []
+        },
+        {
+          "name": "Create customer",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('customerCode', pm.response.json().customer_code);",
+                  "  console.log('customerCode =', pm.response.json().customer_code);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customer_code\": \"acme\",\n  \"display_name\": \"Acme Corp\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customers",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customers"
+              ]
+            },
+            "description": "Create a new customer log space. 201 returns the row; 409 if the code already exists. Test script sets the customerCode collection variable so subsequent /logs requests target it."
+          },
+          "response": []
+        },
+        {
+          "name": "Get customer",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customers/{{customerCode}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customers",
+                "{{customerCode}}"
+              ]
+            },
+            "description": "Fetch a single tenant by code."
+          },
+          "response": []
+        },
+        {
+          "name": "Deactivate customer",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"active\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customers/{{customerCode}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customers",
+                "{{customerCode}}"
+              ]
+            },
+            "description": "Retire a tenant from ingestion + selection (active=false) without deleting its data. Set active:true to re-enable."
           },
           "response": []
         }
@@ -256,7 +392,13 @@
           ],
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "body": {
               "mode": "formdata",
               "formdata": [
@@ -288,7 +430,13 @@
           "name": "Scan directory (read-only, deduped)",
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/scan?directory={{mnpLogsDir}}",
               "host": [
@@ -321,7 +469,13 @@
           "name": "Get log job",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/jobs/{{logJobId}}",
               "host": [
@@ -343,7 +497,13 @@
           "name": "List entries - all (default)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/entries?limit=50&offset=0",
               "host": [
@@ -374,7 +534,13 @@
           "name": "List entries - by job_id",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/entries?job_id={{logJobId}}&limit=50",
               "host": [
@@ -405,7 +571,13 @@
           "name": "List entries - errors (entry_type=error)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/entries?entry_type=error&limit=50",
               "host": [
@@ -437,7 +609,13 @@
           "name": "List entries - MI results (entry_type=mi_result)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/entries?entry_type=mi_result&limit=50",
               "host": [
@@ -468,7 +646,13 @@
           "name": "List entries - requests (entry_type=request)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/entries?entry_type=request&limit=50",
               "host": [
@@ -499,7 +683,13 @@
           "name": "List entries - by MI program (mi_program=MMS200MI)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/entries?mi_program=MMS200MI&limit=50",
               "host": [
@@ -531,7 +721,13 @@
           "name": "List entries - by level (WARN)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/entries?level=WARN&limit=50",
               "host": [
@@ -563,7 +759,13 @@
           "name": "List entries - search message (q)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/entries?q=Printer&limit=50",
               "host": [
@@ -595,7 +797,13 @@
           "name": "List entries - time range",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/entries?time_from=2026-05-19T13:00:00&time_to=2026-05-19T16:00:00&limit=50",
               "host": [
@@ -632,7 +840,13 @@
           "name": "List entries - combined filters",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/entries?entry_type=mi_result&mi_program=MMS010MI&q=does not exist&limit=25&offset=0",
               "host": [
@@ -675,7 +889,13 @@
           "name": "List entries - pagination (limit/offset)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/entries?limit=20&offset=20",
               "host": [
@@ -712,7 +932,13 @@
           "name": "Regroup (rebuild transactions)",
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/regroup",
               "host": [
@@ -748,7 +974,13 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions?limit=50&offset=0",
               "host": [
@@ -779,7 +1011,13 @@
           "name": "Count - by user + date",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions?user=BECWHLO&date=2026-05-19&limit=1",
               "host": [
@@ -816,7 +1054,13 @@
           "name": "List transactions - errors",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions?status=error&limit=50",
               "host": [
@@ -848,7 +1092,13 @@
           "name": "List transactions - soft errors",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions?status=soft&limit=50",
               "host": [
@@ -879,7 +1129,13 @@
           "name": "List transactions - by method",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions?method=ConfirmPickLine&limit=50",
               "host": [
@@ -911,7 +1167,13 @@
           "name": "List transactions - by delivery_number",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions?delivery_number=10655&limit=50",
               "host": [
@@ -942,7 +1204,13 @@
           "name": "List transactions - by reqid",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions?reqid=REPLACE_WITH_REQID&limit=10",
               "host": [
@@ -974,7 +1242,13 @@
           "name": "List transactions - time range",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions?time_from=2026-05-19T13:00:00&time_to=2026-05-19T16:00:00&limit=50",
               "host": [
@@ -1009,7 +1283,13 @@
           "name": "Get transaction detail (canonical view)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions/{{txnId}}",
               "host": [
@@ -1031,7 +1311,13 @@
           "name": "Get transaction view (§6 rendered text)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions/{{txnId}}/view",
               "host": [
@@ -1054,7 +1340,13 @@
           "name": "Get transaction view - verbose (incl. INFO steps)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions/{{txnId}}/view?verbose=true",
               "host": [
@@ -1084,7 +1376,13 @@
           "name": "View last N transactions (all users)",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions/view?limit=100",
               "host": [
@@ -1137,7 +1435,13 @@
           "name": "View last N transactions - by user",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions/view?limit=100&user=BECWHLO",
               "host": [
@@ -1170,7 +1474,13 @@
           "name": "View last N transactions - by date + hour",
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/api/v1/logs/transactions/view?limit=100&date=2026-06-05&hour=9",
               "host": [
@@ -1207,6 +1517,85 @@
       ]
     },
     {
+      "name": "Logs - Data Management",
+      "description": "Destructive, tenant-scoped deletes. Always scoped to X-Customer-Code — a customer can only ever delete its own data.",
+      "item": [
+        {
+          "name": "Delete data - date range",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/data?date_from=2026-05-19&date_to=2026-05-19",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "data"
+              ],
+              "query": [
+                {
+                  "key": "date_from",
+                  "value": "2026-05-19",
+                  "description": "inclusive lower bound on LOG date (YYYY-MM-DD); single day = same as date_to"
+                },
+                {
+                  "key": "date_to",
+                  "value": "2026-05-19",
+                  "description": "inclusive upper bound on LOG date (YYYY-MM-DD)"
+                }
+              ]
+            },
+            "description": "Delete this customer's log_entries (by entry timestamp) and log_transactions (by date) in [date_from, date_to], then reconcile via an incremental regroup. File-level Job rows are kept. Returns counts deleted."
+          },
+          "response": []
+        },
+        {
+          "name": "Delete ALL data for customer (confirm)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/data?confirm=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "data"
+              ],
+              "query": [
+                {
+                  "key": "confirm",
+                  "value": "true",
+                  "description": "REQUIRED true to wipe everything for the tenant — guards against an accidental full delete"
+                }
+              ]
+            },
+            "description": "Delete EVERYTHING for this customer: all log Jobs, which cascade to their entries + transactions. Requires confirm=true. Omit confirm (and date range) and the API refuses with 400."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "Logs - Agent (Phase 2)",
       "description": "Claude tool-use debugging agent. POST a natural-language question; the agent picks read-only SQL-backed tools over log_transactions/log_entries and answers with cited transaction ids. Requires ANTHROPIC_API_KEY in the server .env.",
       "item": [
@@ -1215,6 +1604,11 @@
           "request": {
             "method": "POST",
             "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              },
               {
                 "key": "Content-Type",
                 "value": "application/json"
@@ -1247,6 +1641,11 @@
             "method": "POST",
             "header": [
               {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              },
+              {
                 "key": "Content-Type",
                 "value": "application/json"
               }
@@ -1277,6 +1676,11 @@
           "request": {
             "method": "POST",
             "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              },
               {
                 "key": "Content-Type",
                 "value": "application/json"
@@ -1309,6 +1713,11 @@
             "method": "POST",
             "header": [
               {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              },
+              {
                 "key": "Content-Type",
                 "value": "application/json"
               }
@@ -1339,6 +1748,11 @@
           "request": {
             "method": "POST",
             "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              },
               {
                 "key": "Content-Type",
                 "value": "application/json"
@@ -1373,6 +1787,12 @@
       "key": "baseUrl",
       "value": "http://localhost:8000",
       "type": "string"
+    },
+    {
+      "key": "customerCode",
+      "value": "mnp",
+      "type": "string",
+      "description": "Customer/tenant code sent as X-Customer-Code on every /logs request. Empty server allowlist = any slug works; change this to switch tenant."
     },
     {
       "key": "documentJobId",

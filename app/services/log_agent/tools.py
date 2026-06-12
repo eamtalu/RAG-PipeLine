@@ -177,9 +177,11 @@ def _parse_dt(value: str) -> datetime | None:
         return None
 
 
-def _txn_conditions(args: dict) -> list:
-    """Translate the shared filter vocabulary into SQLAlchemy WHERE clauses."""
-    conds = []
+def _txn_conditions(args: dict, customer_code: str) -> list:
+    """Translate the shared filter vocabulary into SQLAlchemy WHERE clauses, pinned to one customer.
+    customer_code is injected server-side (never a model-exposed filter), so the agent can only ever
+    see the tenant the request is scoped to."""
+    conds = [LogTransaction.customer_code == customer_code]
     if args.get("user"):
         conds.append(LogTransaction.user_name == args["user"])
     if args.get("date"):
@@ -227,8 +229,8 @@ def _clamp(value, default: int, hi: int) -> int:
 # Tool implementations
 # ---------------------------------------------------------------------------
 
-async def _search_transactions(db: AsyncSession, args: dict) -> dict:
-    conds = _txn_conditions(args)
+async def _search_transactions(db: AsyncSession, args: dict, customer_code: str) -> dict:
+    conds = _txn_conditions(args, customer_code)
     limit = _clamp(args.get("limit"), 20, 100)
     total = await db.scalar(select(func.count()).select_from(LogTransaction).where(*conds))
     rows = (await db.execute(
@@ -240,8 +242,8 @@ async def _search_transactions(db: AsyncSession, args: dict) -> dict:
             "transactions": [_txn_summary(t) for t in rows]}
 
 
-async def _count_transactions(db: AsyncSession, args: dict) -> dict:
-    conds = _txn_conditions(args)
+async def _count_transactions(db: AsyncSession, args: dict, customer_code: str) -> dict:
+    conds = _txn_conditions(args, customer_code)
     total = await db.scalar(select(func.count()).select_from(LogTransaction).where(*conds))
     rows = (await db.execute(
         select(LogTransaction.status, func.count())
@@ -251,9 +253,9 @@ async def _count_transactions(db: AsyncSession, args: dict) -> dict:
     return {"total": total or 0, "by_status": by_status}
 
 
-async def _find_errors(db: AsyncSession, args: dict) -> dict:
+async def _find_errors(db: AsyncSession, args: dict, customer_code: str) -> dict:
     # status is owned by this tool — strip any status the caller passed before building conds
-    conds = _txn_conditions({k: v for k, v in args.items() if k != "status"})
+    conds = _txn_conditions({k: v for k, v in args.items() if k != "status"}, customer_code)
     statuses = [LogTransactionStatus.error]
     if args.get("include_soft"):
         statuses.append(LogTransactionStatus.soft)
@@ -269,14 +271,14 @@ async def _find_errors(db: AsyncSession, args: dict) -> dict:
             "transactions": [_txn_summary(t) for t in rows]}
 
 
-async def _get_transaction(db: AsyncSession, args: dict) -> dict:
+async def _get_transaction(db: AsyncSession, args: dict, customer_code: str) -> dict:
     raw = args.get("transaction_id", "")
     try:
         tid = uuid.UUID(str(raw))
     except (ValueError, AttributeError):
         return {"error": f"Not a valid transaction id: {raw!r}"}
     t = await db.get(LogTransaction, tid)
-    if not t:
+    if not t or t.customer_code != customer_code:  # another tenant's id reads as not-found
         return {"error": f"No transaction found with id {raw}"}
     max_entries = _clamp(args.get("max_entries"), 80, 200)
     entries = (await db.execute(
@@ -323,8 +325,8 @@ async def _get_transaction(db: AsyncSession, args: dict) -> dict:
     return {"transaction": header, "timeline_entries": len(timeline), "timeline": timeline}
 
 
-async def _search_entries(db: AsyncSession, args: dict) -> dict:
-    conds = []
+async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> dict:
+    conds = [LogEntry.customer_code == customer_code]
     if args.get("q"):
         conds.append(LogEntry.message.ilike(f"%{args['q']}%"))
     if args.get("mi_program"):
@@ -374,13 +376,16 @@ _DISPATCH = {
 }
 
 
-async def execute_tool(name: str, tool_input: dict, db: AsyncSession) -> str:
-    """Run one tool call and return its result as a JSON string for the tool_result block."""
+async def execute_tool(name: str, tool_input: dict, db: AsyncSession, customer_code: str) -> str:
+    """Run one tool call and return its result as a JSON string for the tool_result block.
+
+    customer_code is injected by the agent (from the request's tenant) into every tool, so the agent
+    is hard-scoped to one customer and cannot read another tenant's logs."""
     fn = _DISPATCH.get(name)
     if fn is None:
         return json.dumps({"error": f"Unknown tool: {name}"})
     try:
-        result = await fn(db, tool_input or {})
+        result = await fn(db, tool_input or {}, customer_code)
     except Exception as exc:  # surface the error to Claude instead of crashing the loop
         result = {"error": f"{type(exc).__name__}: {exc}"}
     return json.dumps(result, default=str)

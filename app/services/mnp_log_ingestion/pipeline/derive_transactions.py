@@ -137,6 +137,7 @@ class _TxnBuilder:
 
         return {
             "job_id": self.entries[0].job_id,
+            "customer_code": self.entries[0].customer_code,
             "flow_id": None,
             "source_file_start": self.entries[0].source_file,
             "source_file_end": self.entries[-1].source_file,
@@ -406,21 +407,27 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
 def _anchor(entries: list[LogEntry]) -> str:
     """Stable seed for a transaction's deterministic id. Prefer the REQUEST/REQUEST BODY entry's
     content hash (the natural, content-unique start); else the earliest entry's. `entry_hash` is
-    sha256(raw_body) incl. the ms timestamp, so it uniquely & permanently identifies the line."""
+    sha256(raw_body) incl. the ms timestamp, so it uniquely & permanently identifies the line.
+    The seed is prefixed with the customer_code so two customers with an identical anchor line can
+    never produce the same transaction id."""
     req = next((e for e in entries if e.entry_type.value in ("request", "request_body")), None)
     e = req or entries[0]
-    return e.entry_hash or f"{e.source_file}:{e.line_number}"
+    seed = e.entry_hash or f"{e.source_file}:{e.line_number}"
+    return f"{e.customer_code}:{seed}"
 
 
 def _txn_id(entries: list[LogEntry]) -> uuid.UUID:
     return uuid.uuid5(_TXN_NS, _anchor(entries))
 
 
-async def _cutoffs(db: AsyncSession) -> tuple[datetime | None, datetime | None]:
-    """(seal_cutoff, abandon_cutoff) measured against the NEWEST log timestamp (the log's notion of
-    'now'), not wall-clock — so batch / back-dated ingestion seals correctly too. Terminal
+async def _cutoffs(db: AsyncSession, customer_code: str) -> tuple[datetime | None, datetime | None]:
+    """(seal_cutoff, abandon_cutoff) measured against the NEWEST log timestamp FOR THIS CUSTOMER (the
+    log's notion of 'now'), not wall-clock — so batch / back-dated ingestion seals correctly too, and
+    one customer's stale logs still seal while another's active stream doesn't drag them. Terminal
     transactions seal at seal_cutoff; incomplete ones only at the much-older abandon_cutoff."""
-    max_ts = await db.scalar(select(func.max(LogEntry.timestamp)))
+    max_ts = await db.scalar(
+        select(func.max(LogEntry.timestamp)).where(LogEntry.customer_code == customer_code)
+    )
     if max_ts is None:
         return None, None
     return (max_ts - timedelta(seconds=settings.log_seal_window_seconds),
@@ -441,7 +448,7 @@ def _is_sealed(values: dict, seal_cutoff: datetime | None, abandon_cutoff: datet
     return ended < seal_cutoff
 
 
-async def _persist(db: AsyncSession, builders: list[_TxnBuilder],
+async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code: str,
                    seal_cutoff: datetime | None, abandon_cutoff: datetime | None) -> dict:
     """Compute + insert each builder with a deterministic id, assign its entries, and seal those
     nothing more can join. Caller commits.
@@ -455,7 +462,9 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder],
     created = sealed = assigned = skipped = 0
     by_status: dict[str, int] = {}
     seen: set[uuid.UUID] = set()
-    existing: set[uuid.UUID] = set((await db.execute(select(LogTransaction.id))).scalars().all())
+    existing: set[uuid.UUID] = set((await db.execute(
+        select(LogTransaction.id).where(LogTransaction.customer_code == customer_code)
+    )).scalars().all())
     for b in builders:
         # entries were attached out of stream order (a REQUEST is bound after its work appears);
         # re-sort chronologically so seq + source_file_start/end and the rendered timeline are right.
@@ -484,53 +493,92 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder],
             "entries_assigned": assigned, "transactions_skipped": skipped, "by_status": by_status}
 
 
-async def regroup_all(db: AsyncSession) -> dict:
-    """FULL rebuild: delete every transaction and regroup ALL entries by timestamp. For historical
-    backfill / repair. Idempotent — deterministic ids mean a rebuild reproduces the same ids."""
-    await db.execute(delete(LogTransaction))  # entries.transaction_id -> NULL via ON DELETE SET NULL
+def _merge_stats(into: dict, part: dict) -> None:
+    """Accumulate one customer's _persist result into the running totals."""
+    for k in ("transactions_created", "transactions_sealed", "entries_assigned",
+              "transactions_skipped", "entries_scanned", "orphan_entries"):
+        into[k] = into.get(k, 0) + part.get(k, 0)
+    for status, n in part.get("by_status", {}).items():
+        into["by_status"][status] = into["by_status"].get(status, 0) + n
+
+
+async def regroup_all(db: AsyncSession, customer_code: str | None = None) -> dict:
+    """FULL rebuild: delete every transaction and regroup ALL entries by timestamp, PER CUSTOMER. For
+    historical backfill / repair. Idempotent — deterministic ids mean a rebuild reproduces the same
+    ids. Grouping is partitioned by customer_code so .NET thread ids can never cross-stitch tenants.
+
+    Pass `customer_code` to rebuild only one tenant (the manual API path); None rebuilds every
+    customer (used for a full repair)."""
+    del_stmt = delete(LogTransaction)  # entries.transaction_id -> NULL via ON DELETE SET NULL
+    if customer_code is not None:
+        del_stmt = del_stmt.where(LogTransaction.customer_code == customer_code)
+    await db.execute(del_stmt)
     await db.commit()
 
-    rows = list((await db.execute(
-        select(LogEntry).order_by(
-            LogEntry.timestamp.asc().nullslast(),
-            LogEntry.source_file.asc(),
-            LogEntry.line_number.asc(),
-        )
-    )).scalars().all())
+    code_stmt = select(LogEntry.customer_code).distinct()
+    if customer_code is not None:
+        code_stmt = code_stmt.where(LogEntry.customer_code == customer_code)
+    codes = (await db.execute(code_stmt)).scalars().all()
 
-    seal_cutoff, abandon_cutoff = await _cutoffs(db)
-    result = await _persist(db, _group(rows), seal_cutoff, abandon_cutoff)
-    await db.commit()
-    stats = {"mode": "full", "entries_scanned": len(rows),
-             "orphan_entries": len(rows) - result["entries_assigned"], **result}
+    stats = {"mode": "full", "customers": len(codes), "by_status": {}}
+    for code in codes:
+        rows = list((await db.execute(
+            select(LogEntry).where(LogEntry.customer_code == code).order_by(
+                LogEntry.timestamp.asc().nullslast(),
+                LogEntry.source_file.asc(),
+                LogEntry.line_number.asc(),
+            )
+        )).scalars().all())
+        seal_cutoff, abandon_cutoff = await _cutoffs(db, code)
+        result = await _persist(db, _group(rows), code, seal_cutoff, abandon_cutoff)
+        await db.commit()
+        _merge_stats(stats, {**result, "entries_scanned": len(rows),
+                             "orphan_entries": len(rows) - result["entries_assigned"]})
     logger.info("Stage 2 regroup (full): %s", stats)
     return stats
 
 
-async def regroup_incremental(db: AsyncSession) -> dict:
+async def regroup_incremental(db: AsyncSession, customer_code: str | None = None) -> dict:
     """LIVE path: keep SEALED transactions untouched; free only the unsealed tail, regroup it
-    together with newly-ingested (unassigned) entries. Per-cycle work is bounded by the seal window,
-    so this scales for continuous ingestion. Sealed transactions keep their (deterministic) ids."""
+    together with newly-ingested (unassigned) entries, PER CUSTOMER. Per-cycle work is bounded by the
+    seal window, so this scales for continuous ingestion. Sealed transactions keep their ids.
+
+    Pass `customer_code` to touch only one tenant (manual API path); None processes every customer
+    with unassigned entries (what the background worker runs)."""
     # 1. free unsealed transactions only (their entries.transaction_id -> NULL); sealed rows stay
-    await db.execute(delete(LogTransaction).where(LogTransaction.sealed.is_(False)))
+    free_stmt = delete(LogTransaction).where(LogTransaction.sealed.is_(False))
+    if customer_code is not None:
+        free_stmt = free_stmt.where(LogTransaction.customer_code == customer_code)
+    await db.execute(free_stmt)
     await db.commit()
 
-    # 2. the live tail = every still-unassigned entry (freed unsealed + brand-new), in stream order
-    rows = list((await db.execute(
-        select(LogEntry).where(LogEntry.transaction_id.is_(None)).order_by(
-            LogEntry.timestamp.asc().nullslast(),
-            LogEntry.source_file.asc(),
-            LogEntry.line_number.asc(),
-        )
-    )).scalars().all())
-    if not rows:
-        return {"mode": "incremental", "entries_scanned": 0, "transactions_created": 0,
-                "transactions_sealed": 0, "by_status": {}}
+    # 2. customers that have any still-unassigned entry (freed unsealed + brand-new)
+    code_stmt = select(LogEntry.customer_code).where(LogEntry.transaction_id.is_(None)).distinct()
+    if customer_code is not None:
+        code_stmt = code_stmt.where(LogEntry.customer_code == customer_code)
+    codes = (await db.execute(code_stmt)).scalars().all()
+    if not codes:
+        return {"mode": "incremental", "customers": 0, "entries_scanned": 0,
+                "transactions_created": 0, "transactions_sealed": 0, "by_status": {}}
 
-    seal_cutoff, abandon_cutoff = await _cutoffs(db)
-    result = await _persist(db, _group(rows), seal_cutoff, abandon_cutoff)
-    await db.commit()
-    stats = {"mode": "incremental", "entries_scanned": len(rows),
-             "orphan_entries": len(rows) - result["entries_assigned"], **result}
+    stats = {"mode": "incremental", "customers": len(codes), "by_status": {}}
+    for code in codes:
+        # the live tail for this customer, in stream order
+        rows = list((await db.execute(
+            select(LogEntry).where(
+                LogEntry.customer_code == code, LogEntry.transaction_id.is_(None)
+            ).order_by(
+                LogEntry.timestamp.asc().nullslast(),
+                LogEntry.source_file.asc(),
+                LogEntry.line_number.asc(),
+            )
+        )).scalars().all())
+        if not rows:
+            continue
+        seal_cutoff, abandon_cutoff = await _cutoffs(db, code)
+        result = await _persist(db, _group(rows), code, seal_cutoff, abandon_cutoff)
+        await db.commit()
+        _merge_stats(stats, {**result, "entries_scanned": len(rows),
+                             "orphan_entries": len(rows) - result["entries_assigned"]})
     logger.info("Stage 2 regroup (incremental): %s", stats)
     return stats

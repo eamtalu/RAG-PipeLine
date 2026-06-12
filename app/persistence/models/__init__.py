@@ -5,6 +5,7 @@ from app.persistence.models.ChunkEntity import ChunkEntity
 from app.persistence.models.embedding_queue import EmbeddingQueueItem
 from app.persistence.models.log_transaction import LogTransaction
 from app.persistence.models.log_entry import LogEntry
+from app.persistence.models.customer import Customer
 
 __all__ = [
     "Base",
@@ -14,4 +15,5 @@ __all__ = [
     "EmbeddingQueueItem",
     "LogTransaction",
     "LogEntry",
+    "Customer",
 ]
