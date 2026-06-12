@@ -1,0 +1,35 @@
+# customer.py — Tenant registry (one row per customer "log space")
+#
+#   A customer must be created here BEFORE any log can be ingested under its code. This is the
+#   source of truth for "which tenants exist": ingestion validates against an ACTIVE row, and the
+#   frontend lists these rows so a user can pick which tenant's log space to view or ingest into.
+#
+#   customer_code is the stable slug used everywhere downstream (jobs/log_entries/log_transactions
+#   carry it). display_name is the human label shown in the UI. active=false retires a tenant from
+#   ingestion + selection without deleting its historical data.
+
+import enum  # noqa: F401  (kept for parity with sibling models; not used directly)
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import String, Boolean, DateTime
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.config.database import Base
+
+
+# Entity
+class Customer(Base):
+    __tablename__ = "customers"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    customer_code: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # stable slug
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
