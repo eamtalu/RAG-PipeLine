@@ -6,6 +6,7 @@ from app.persistence.models.embedding_queue import EmbeddingQueueItem
 from app.persistence.models.log_transaction import LogTransaction
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.customer import Customer
+from app.persistence.models.customer_display_name import CustomerDisplayName
 
 __all__ = [
     "Base",
@@ -16,4 +17,5 @@ __all__ = [
     "LogTransaction",
     "LogEntry",
     "Customer",
+    "CustomerDisplayName",
 ]

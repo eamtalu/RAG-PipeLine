@@ -60,14 +60,15 @@
           "response": []
         },
         {
-          "name": "Create customer",
+          "name": "Create customer (or attach display name)",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "if (pm.response.code === 201) {",
+                  "// 201 = new tenant created, 200 = display_name attached to an existing tenant",
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
                   "  pm.collectionVariables.set('customerCode', pm.response.json().customer_code);",
                   "  console.log('customerCode =', pm.response.json().customer_code);",
                   "}"
@@ -103,7 +104,7 @@
                 "customers"
               ]
             },
-            "description": "Create a new customer log space. 201 returns the row; 409 if the code already exists. Test script sets the customerCode collection variable so subsequent /logs requests target it."
+            "description": "Create-or-attach. If customer_code is new -> creates the tenant (201). If customer_code already exists -> attaches display_name as an additional username under that tenant (200, idempotent; the code is never duplicated). 400 on a malformed code. Response includes a display_names[] array of all usernames attached to the tenant. Test script stores customerCode for subsequent /logs requests."
           },
           "response": []
         },
@@ -124,7 +125,108 @@
                 "{{customerCode}}"
               ]
             },
-            "description": "Fetch a single tenant by code."
+            "description": "Fetch a single tenant by code. Response now also includes a display_names[] array of every username attached to this tenant."
+          },
+          "response": []
+        },
+        {
+          "name": "List display names (usernames)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customers/{{customerCode}}/display-names?include_inactive=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customers",
+                "{{customerCode}}",
+                "display-names"
+              ],
+              "query": [
+                {
+                  "key": "include_inactive",
+                  "value": "true"
+                }
+              ]
+            },
+            "description": "List every display name (username) attached to this tenant. 404 if the customer_code is unknown."
+          },
+          "response": []
+        },
+        {
+          "name": "Add display name (username)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('displayNameId', pm.response.json().id);",
+                  "  console.log('displayNameId =', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"display_name\": \"MNP Warehouse\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customers/{{customerCode}}/display-names",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customers",
+                "{{customerCode}}",
+                "display-names"
+              ]
+            },
+            "description": "Attach an additional display name (username) to an existing tenant. 201 returns the new row; 404 if the code is unknown; 409 if the same name is already attached. Test script stores the new id into displayNameId for the delete request below."
+          },
+          "response": []
+        },
+        {
+          "name": "Remove display name (username)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customers/{{customerCode}}/display-names/{{displayNameId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customers",
+                "{{customerCode}}",
+                "display-names",
+                "{{displayNameId}}"
+              ]
+            },
+            "description": "Detach a display name from a tenant by its id (204 on success). 404 if the tenant or the id is unknown. Uses the displayNameId set by 'Add display name'."
           },
           "response": []
         },

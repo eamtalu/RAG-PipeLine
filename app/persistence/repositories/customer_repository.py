@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.persistence.models.customer import Customer
+from app.persistence.models.customer_display_name import CustomerDisplayName
 
 
 class CustomerRepository:
@@ -45,6 +46,45 @@ class CustomerRepository:
         await self.db.commit()
         await self.db.refresh(cust)
         return cust
+
+    # --- additional display names (usernames) per tenant ---------------------------------------
+
+    async def list_display_names(
+        self, customer_code: str, *, include_inactive: bool = True
+    ) -> list[CustomerDisplayName]:
+        stmt = select(CustomerDisplayName).where(CustomerDisplayName.customer_code == customer_code)
+        if not include_inactive:
+            stmt = stmt.where(CustomerDisplayName.active.is_(True))
+        stmt = stmt.order_by(CustomerDisplayName.created_at.asc())
+        return list((await self.db.execute(stmt)).scalars().all())
+
+    async def get_display_name(self, customer_code: str, display_name: str) -> CustomerDisplayName | None:
+        return await self.db.scalar(
+            select(CustomerDisplayName).where(
+                CustomerDisplayName.customer_code == customer_code,
+                CustomerDisplayName.display_name == display_name,
+            )
+        )
+
+    async def add_display_name(self, customer_code: str, display_name: str) -> CustomerDisplayName:
+        row = CustomerDisplayName(customer_code=customer_code, display_name=display_name)
+        self.db.add(row)
+        await self.db.commit()
+        await self.db.refresh(row)
+        return row
+
+    async def remove_display_name(self, customer_code: str, name_id: str) -> bool:
+        row = await self.db.scalar(
+            select(CustomerDisplayName).where(
+                CustomerDisplayName.id == name_id,
+                CustomerDisplayName.customer_code == customer_code,
+            )
+        )
+        if row is None:
+            return False
+        await self.db.delete(row)
+        await self.db.commit()
+        return True
 
 
 def get_customer_repository(db: AsyncSession = Depends(get_session)) -> CustomerRepository:
