@@ -58,6 +58,16 @@ class CustomerRepository:
         stmt = stmt.order_by(CustomerDisplayName.created_at.asc())
         return list((await self.db.execute(stmt)).scalars().all())
 
+    async def list_all_display_names(
+        self, *, include_inactive: bool = True
+    ) -> list[CustomerDisplayName]:
+        """Every display name across all tenants, in one query (for the flat log-space selector)."""
+        stmt = select(CustomerDisplayName)
+        if not include_inactive:
+            stmt = stmt.where(CustomerDisplayName.active.is_(True))
+        stmt = stmt.order_by(CustomerDisplayName.customer_code.asc(), CustomerDisplayName.created_at.asc())
+        return list((await self.db.execute(stmt)).scalars().all())
+
     async def get_display_name(self, customer_code: str, display_name: str) -> CustomerDisplayName | None:
         return await self.db.scalar(
             select(CustomerDisplayName).where(

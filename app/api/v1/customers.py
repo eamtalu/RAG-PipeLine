@@ -103,6 +103,34 @@ async def list_customers(
     return {"count": len(rows), "customers": [_serialize(c) for c in rows]}
 
 
+# NOTE: must be declared BEFORE GET "/{customer_code}" — otherwise "log-spaces" is parsed as a code.
+@router.get("/log-spaces")
+async def list_log_spaces(
+    include_inactive: bool = Query(default=False, description="Include retired tenants / names."),
+    repo: CustomerRepository = Depends(get_customer_repository),
+):
+    """Flat selector list for switching log spaces: one entry per display name (username), each
+    resolving to a customer_code. A tenant with no attached display name still appears once
+    (label falls back to its display_name, then its code)."""
+    customers = await repo.list_all(include_inactive=include_inactive)
+    names = await repo.list_all_display_names(include_inactive=include_inactive)
+
+    by_code: dict[str, list[CustomerDisplayName]] = {}
+    for n in names:
+        by_code.setdefault(n.customer_code, []).append(n)
+
+    out: list[dict] = []
+    for c in customers:
+        rows = by_code.get(c.customer_code, [])
+        if rows:
+            for n in rows:
+                out.append({"label": n.display_name, "customer_code": c.customer_code, "active": c.active})
+        else:
+            out.append({"label": c.display_name or c.customer_code, "customer_code": c.customer_code,
+                        "active": c.active})
+    return {"count": len(out), "log_spaces": out}
+
+
 @router.get("/{customer_code}")
 async def get_customer(
     customer_code: str,

@@ -109,6 +109,33 @@
           "response": []
         },
         {
+          "name": "List log spaces (flat selector)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customers/log-spaces?include_inactive=false",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customers",
+                "log-spaces"
+              ],
+              "query": [
+                {
+                  "key": "include_inactive",
+                  "value": "false"
+                }
+              ]
+            },
+            "description": "Flat list for the 'switch log space' selector: one entry per display name (username), each resolving to a customer_code. A tenant with no attached name still appears once. Returns { count, log_spaces: [{ label, customer_code, active }] }."
+          },
+          "response": []
+        },
+        {
           "name": "Get customer",
           "request": {
             "method": "GET",
