@@ -4,7 +4,7 @@
 #   boundary view from docs/transaction-log-ingestion-design.md §6:
 #
 #       TRANSACTION 5f53035f-06e8-4855-80d3-b3c2ad1fcdea   /api/receiving/ListOpenPOHead   ✅ SUCCESS
-#       user BECWHLO · device 3091 · 10:38:53.935 → 10:38:54.818 · 0.88 s · 56 steps
+#       user BECWHLO · 2026-06-13 · 10:38:53.935 → 10:38:54.818 · 0.88 s · 56 steps
 #
 #         ▶ REQUEST   WHLO BRI · Route BRI05 · user BECWHLO
 #          1  🔄 PPS200MI/SearchHead      CONO=911 SUNO=…           ✅ 14 recs
@@ -65,8 +65,8 @@ def _subheader(t: LogTransaction, entries: list[LogEntry]) -> str:
     bits: list[str] = []
     if t.user_name:
         bits.append(f"user {t.user_name}")
-    if t.device_id:
-        bits.append(f"device {t.device_id}")
+    if t.started_at:
+        bits.append(_date(t.started_at))
     if t.started_at and t.ended_at:
         bits.append(f"{_hms(t.started_at)} → {_hms(t.ended_at)}")
     elif t.started_at:
@@ -197,6 +197,10 @@ def _sql_name(e: LogEntry) -> str:
     proc = (e.fields or {}).get("stored_procedure", "") if isinstance(e.fields, dict) else ""
     first = (proc or e.message or "").strip().splitlines()[0] if (proc or e.message) else ""
     return first[:60]
+
+
+def _date(dt) -> str:
+    return dt.strftime("%Y-%m-%d")
 
 
 def _hms(dt) -> str:
