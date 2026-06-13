@@ -24,8 +24,12 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(run_worker()),
         asyncio.create_task(run_log_watcher()),
-        asyncio.create_task(run_log_grouping_worker()),
     ]
+    # Stage 2 automatic incremental regroup — togglable so it can be run manually via the API instead.
+    if settings.log_grouping_worker_enabled:
+        tasks.append(asyncio.create_task(run_log_grouping_worker()))
+    else:
+        logging.getLogger(__name__).info("Log grouping worker disabled (log_grouping_worker_enabled=False)")
     yield
     for task in tasks:
         task.cancel()

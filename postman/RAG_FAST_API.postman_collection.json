@@ -551,7 +551,7 @@
                 "ingest"
               ]
             },
-            "description": "Stage 1: parse the log file and insert raw log_entries. 201 returns { job_id, filename, status }. Test script captures job_id -> logJobId."
+            "description": "Stage 1: parse the log file and insert raw log_entries. 201 returns { job_id, filename, status, pending_regroup }. Test script captures job_id -> logJobId. pending_regroup=true means the entries still need Stage 2 stitching: after your LAST file of the session, call 'Finalize regroup' (or pass finalize=true on a transaction read)."
           },
           "response": []
         },
@@ -1080,7 +1080,107 @@
                 "regroup"
               ]
             },
-            "description": "Run Stage 2: (re)derive log_transactions from all log_entries. Returns grouping stats. NOTE: the grouping worker also runs this automatically when new entries are ingested, so you usually don't need to call it."
+            "description": "Run Stage 2 over ALL of this customer's entries. Default = full rebuild (historical backfill / repair); ?incremental=true = unsealed live tail only. For a normal upload session prefer 'Finalize regroup', which regroups only the windows you just touched (scoped + lossless) instead of the whole table."
+          },
+          "response": []
+        },
+        {
+          "name": "Get regroup status (is finalize needed?)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/regroup/status",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "regroup",
+                "status"
+              ]
+            },
+            "description": "Cheap check (NOT guarded): does this customer have log windows pending regroup? Returns { pending, pending_windows, oldest_pending_at }. Call on page load so the UI can show the 'finalize' prompt without first tripping a 409 on a transaction read. pending=true means transaction reads will 409 until POST /logs/regroup/finalize completes."
+          },
+          "response": []
+        },
+        {
+          "name": "Finalize regroup (I'm done uploading)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/regroup/finalize",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "regroup",
+                "finalize"
+              ]
+            },
+            "description": "Confirm 'I'm done uploading this session' -> regroups ONLY the time windows your recent uploads touched (scoped + padded; lossless), then clears them as pending. NON-BLOCKING: returns 202 with { run_id, status:'running', poll } and runs in the background, so a long/sparse batch can't time out the request. The test script saves run_id -> regroupRunId; poll 'Get regroup run status' until status is completed (or failed). Idempotent: a run with nothing pending completes with windows:0. Call once after the last file of a session."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const j = pm.response.json();",
+                  "  pm.collectionVariables.set('regroupRunId', j.run_id);",
+                  "  console.log('regroupRunId =', j.run_id, '| poll:', j.poll);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get regroup run status (poll until completed)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/regroup/runs/{{regroupRunId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "regroup",
+                "runs",
+                "{{regroupRunId}}"
+              ]
+            },
+            "description": "Poll the async finalize started by 'Finalize regroup'. Returns { status, windows, pending_consumed, error, result, created_at, finished_at }. status is `running` until the background regroup finishes, then `completed` (with stats) or `failed` (with error; the pending windows stay open so you can retry). Uses regroupRunId captured by the finalize test script."
           },
           "response": []
         },
@@ -1129,10 +1229,16 @@
                 {
                   "key": "offset",
                   "value": "0"
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Most-recent-first list of derived transactions. Test script stores the first id into txnId for the detail request."
+            "description": "Most-recent-first list of derived transactions. Test script stores the first id into txnId for the detail request. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1172,10 +1278,16 @@
                 {
                   "key": "limit",
                   "value": "1"
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "'How many transactions did a user perform on a date' — read the `total` field of the response."
+            "description": "'How many transactions did a user perform on a date' — read the `total` field of the response. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1210,10 +1322,16 @@
                 {
                   "key": "limit",
                   "value": "50"
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Transactions that hit a real ERROR-level failure."
+            "description": "Transactions that hit a real ERROR-level failure. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1247,10 +1365,16 @@
                 {
                   "key": "limit",
                   "value": "50"
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Transactions where M3 returned a handled soft result (not-found / needs-value)."
+            "description": "Transactions where M3 returned a handled soft result (not-found / needs-value). Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1285,10 +1409,16 @@
                 {
                   "key": "limit",
                   "value": "50"
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "All transactions for one API endpoint."
+            "description": "All transactions for one API endpoint. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1322,10 +1452,16 @@
                 {
                   "key": "limit",
                   "value": "50"
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Everything that touched a given delivery."
+            "description": "Everything that touched a given delivery. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1360,10 +1496,16 @@
                 {
                   "key": "limit",
                   "value": "10"
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Look up a transaction by its M3 ReqID."
+            "description": "Look up a transaction by its M3 ReqID. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1401,10 +1543,16 @@
                 {
                   "key": "limit",
                   "value": "50"
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Transactions started within a time window."
+            "description": "Transactions started within a time window. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1430,9 +1578,17 @@
                 "logs",
                 "transactions",
                 "{{txnId}}"
+              ],
+              "query": [
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
+                }
               ]
             },
-            "description": "Canonical Transaction Detail View (JSON): a `rendered` field (the human-readable §6 text view), the transaction header, and the ordered step-by-step entry timeline (request -> M3 calls/results -> response, with soft/hard errors in context). Uses txnId captured by 'List transactions - all'."
+            "description": "Canonical Transaction Detail View (JSON): a `rendered` field (the human-readable §6 text view), the transaction header, and the ordered step-by-step entry timeline (request -> M3 calls/results -> response, with soft/hard errors in context). Uses txnId captured by 'List transactions - all'. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1459,9 +1615,17 @@
                 "transactions",
                 "{{txnId}}",
                 "view"
+              ],
+              "query": [
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
+                }
               ]
             },
-            "description": "Canonical §6 Transaction Detail View as human-readable text/plain: header, sub-header (user / reqid / time span / duration / steps), the request line, numbered steps (mi_call+mi_result folded into one '📞 PROG/TXN inputs ✅ N recs' line, plus SQL / soft / error markers), and the response line. Default collapses plain INFO narration. Uses txnId captured by 'List transactions - all'."
+            "description": "Canonical §6 Transaction Detail View as human-readable text/plain: header, sub-header (user / reqid / time span / duration / steps), the request line, numbered steps (mi_call+mi_result folded into one '📞 PROG/TXN inputs ✅ N recs' line, plus SQL / soft / error markers), and the response line. Default collapses plain INFO narration. Uses txnId captured by 'List transactions - all'. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1494,10 +1658,16 @@
                   "key": "verbose",
                   "value": "true",
                   "description": "also render plain INFO narration steps"
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Same §6 text view but with verbose=true so every INFO narration line is rendered as a step (not just MI calls / SQL / soft / errors)."
+            "description": "Same §6 text view but with verbose=true so every INFO narration line is rendered as a step (not just MI calls / SQL / soft / errors). Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1553,10 +1723,16 @@
                   "value": "true",
                   "description": "also render plain INFO narration steps",
                   "disabled": true
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Render the last N transactions as the §6 text view, shown oldest → newest. With no filters you get the last `limit` transactions across ALL users. Enable the user / date / hour / verbose params (they stack) to narrow it down."
+            "description": "Render the last N transactions as the §6 text view, shown oldest → newest. With no filters you get the last `limit` transactions across ALL users. Enable the user / date / hour / verbose params (they stack) to narrow it down. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1592,10 +1768,16 @@
                   "key": "user",
                   "value": "BECWHLO",
                   "description": "matches user_name"
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Last `limit` transactions for one user (user_name), oldest → newest."
+            "description": "Last `limit` transactions for one user (user_name), oldest → newest. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1636,10 +1818,81 @@
                   "key": "hour",
                   "value": "9",
                   "description": "hour of day 0-23"
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Last `limit` transactions on a given date and hour, across all users (add a user param to scope further), oldest → newest."
+            "description": "Last `limit` transactions on a given date and hour, across all users (add a user param to scope further), oldest → newest. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
+          },
+          "response": []
+        },
+        {
+          "name": "View last N transactions - finalize=true (apply pending regroup)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Customer-Code",
+                "value": "{{customerCode}}",
+                "description": "Tenant/customer this request operates on (required on all /logs endpoints)."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/logs/transactions/view?limit=100&finalize=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "logs",
+                "transactions",
+                "view"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "100",
+                  "description": "how many most-recent transactions to render (1-500)"
+                },
+                {
+                  "key": "user",
+                  "value": "BECWHLO",
+                  "description": "matches user_name; omit for all users",
+                  "disabled": true
+                },
+                {
+                  "key": "date",
+                  "value": "2026-06-05",
+                  "description": "YYYY-MM-DD (matches the transaction date)",
+                  "disabled": true
+                },
+                {
+                  "key": "hour",
+                  "value": "9",
+                  "description": "hour of day 0-23 (combine with date)",
+                  "disabled": true
+                },
+                {
+                  "key": "verbose",
+                  "value": "true",
+                  "description": "also render plain INFO narration steps",
+                  "disabled": true
+                },
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": false
+                }
+              ]
+            },
+            "description": "Same text view, but with finalize=true: if logs are pending regroup this first applies the scoped regroup (the 'I'm done uploading' confirm) and then renders fresh, fully-stitched results. Use this instead of the plain view when you've just uploaded files."
           },
           "response": []
         }
@@ -1758,9 +2011,17 @@
                 "logs",
                 "debug",
                 "ask"
+              ],
+              "query": [
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
+                }
               ]
             },
-            "description": "Exercises count_transactions / find_errors aggregation."
+            "description": "Exercises count_transactions / find_errors aggregation. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1794,9 +2055,17 @@
                 "logs",
                 "debug",
                 "ask"
+              ],
+              "query": [
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
+                }
               ]
             },
-            "description": "Exercises find_errors -> get_transaction drill-down."
+            "description": "Exercises find_errors -> get_transaction drill-down. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1830,9 +2099,17 @@
                 "logs",
                 "debug",
                 "ask"
+              ],
+              "query": [
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
+                }
               ]
             },
-            "description": "Exercises get_transaction on the {{txnId}} variable (set it from a Logs - Transactions response first)."
+            "description": "Exercises get_transaction on the {{txnId}} variable (set it from a Logs - Transactions response first). Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1866,9 +2143,17 @@
                 "logs",
                 "debug",
                 "ask"
+              ],
+              "query": [
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
+                }
               ]
             },
-            "description": "Exercises search_entries -> get_transaction."
+            "description": "Exercises search_entries -> get_transaction. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         },
@@ -1902,9 +2187,17 @@
                 "logs",
                 "debug",
                 "ask"
+              ],
+              "query": [
+                {
+                  "key": "finalize",
+                  "value": "true",
+                  "description": "Confirm 'I'm done uploading this session' & apply the pending scoped regroup BEFORE reading. Without it, this endpoint returns 409 while any log window is pending regroup.",
+                  "disabled": true
+                }
               ]
             },
-            "description": "Exercises search_transactions/find_errors filtered by delivery_number."
+            "description": "Exercises search_transactions/find_errors filtered by delivery_number. Guarded: returns 409 while this customer has logs pending regroup — enable the `finalize=true` param to apply the regroup and read fresh data, or POST /logs/regroup/finalize first."
           },
           "response": []
         }
@@ -1938,6 +2231,11 @@
       "value": "410f42b0-6b25-470f-8462-3be46d35b23a",
       "type": "string",
       "description": "A sample transaction id (auto-overwritten by the 'List transactions - all' test script). Re-run that request, or any list, if this id 404s after a regroup."
+    },
+    {
+      "key": "regroupRunId",
+      "value": "",
+      "description": "auto-set by 'Finalize regroup' test script; used by 'Get regroup run status'."
     },
     {
       "key": "logFilePath",

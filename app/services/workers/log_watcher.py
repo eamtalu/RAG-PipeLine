@@ -20,6 +20,7 @@ from app.persistence.repositories.job_repository import JobRepository
 from app.persistence.repositories.customer_repository import CustomerRepository
 from app.persistence.storage.local import LocalStorage
 from app.services.mnp_log_ingestion.LogIngestion import LogIngestion
+from app.services.mnp_log_ingestion.pipeline.derive_transactions import finalize_pending
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +57,17 @@ def _move(path: Path, dest_dir: Path, customer_code: str | None = None) -> None:
     path.rename(target)
 
 
-async def _drain_once() -> int:
-    """Process every file in each per-customer subdir of the staging dir. Returns count processed.
+async def _drain_once() -> tuple[int, set[str]]:
+    """Process every file in each per-customer subdir of the staging dir. Returns (count processed,
+    set of customer codes whose files were SUCCESSFULLY ingested this pass) — the caller uses the
+    latter to scope the post-drain regroup to just the tenants the watcher actually fed.
 
     Layout: incoming/<customer_code>/file.log. The customer is the immediate subdir name. A file in
     the staging root (no customer subdir) or under an invalid code is moved to failed/ — never guessed.
     """
     _ensure_dirs()
     incoming = Path(settings.log_incoming_dir)
+    ingested: set[str] = set()
 
     # stray files dropped directly in the root have no tenant — quarantine them.
     for path in sorted(p for p in incoming.iterdir() if p.is_file() and not p.name.startswith(".")):
@@ -92,6 +96,7 @@ async def _drain_once() -> int:
             try:
                 await _ingest_file(path, customer_code)
                 _move(path, settings.log_processed_dir, customer_code)
+                ingested.add(customer_code)
                 logger.info("Ingested + moved to processed: %s/%s", customer_code, path.name)
             except Exception:
                 logger.exception("Failed to ingest %s/%s — moving to failed/", customer_code, path.name)
@@ -99,7 +104,7 @@ async def _drain_once() -> int:
                     _move(path, settings.log_failed_dir, customer_code)
                 except Exception:
                     logger.exception("Could not move %s to failed/", path.name)
-    return processed
+    return processed, ingested
 
 
 def _safe(name: str) -> bool:
@@ -107,14 +112,34 @@ def _safe(name: str) -> bool:
     return name not in ("", ".", "..") and "/" not in name and "\\" not in name
 
 
+async def _finalize_customers(customer_codes: set[str]) -> None:
+    """Run a scoped Stage 2 regroup for each tenant the watcher just fed, stitching exactly the time
+    windows those files touched. One regroup per drained batch, per customer."""
+    for code in sorted(customer_codes):
+        try:
+            async with async_session() as db:
+                stats = await finalize_pending(db, code)
+            if stats.get("windows"):
+                logger.info("Post-drain regroup for %s: %s", code, stats)
+        except Exception:
+            logger.exception("Post-drain regroup failed for %s — pending rows stay open for retry", code)
+
+
 async def run_log_watcher() -> None:
-    """Main watcher loop — polls the staging dir for dropped log files."""
+    """Main watcher loop — polls the staging dir for dropped log files, and once the queue drains runs
+    a scoped regroup for the tenants it ingested (so a multi-file drop is stitched once, at the end)."""
     logger.info("Log watcher started (dir=%s, poll=%.1fs)",
                 settings.log_incoming_dir, settings.log_watcher_poll_seconds)
+    dirty: set[str] = set()  # tenants ingested but not yet regrouped (queue still draining)
     while True:
         try:
-            processed = await _drain_once()
+            processed, ingested = await _drain_once()
+            dirty |= ingested
             if processed == 0:
+                # queue is empty — the batch is in; stitch the windows it touched, then idle.
+                if dirty:
+                    await _finalize_customers(dirty)
+                    dirty.clear()
                 await asyncio.sleep(settings.log_watcher_poll_seconds)
         except Exception:
             logger.exception("Log watcher error — retrying after sleep")

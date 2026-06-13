@@ -16,13 +16,14 @@ import logging
 import uuid
 from uuid import UUID
 
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
 from app.persistence.models.job import Job, JobStatus
 from app.persistence.models.log_entry import LogEntry, LogEntryType
+from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.storage.base import ObjectStorage
 from app.services.mnp_log_ingestion.parsers.LogParserFactory import get_log_parser
 
@@ -110,6 +111,20 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
                 batch = []
                 seen_in_batch.clear()
         inserted += await flush(batch)
+
+        # Mark the time range this ingest touched as needing (re)grouping, so a later scoped regroup
+        # (console finalize / watcher drain) stitches exactly this window — not the whole table. Only
+        # the rows of THIS job are this file's genuinely-new entries (duplicates were skipped, so they
+        # carry another job_id), so their min/max timestamp is the dirty range. Skip when nothing new
+        # was inserted or every new entry is timestamp-less (a windowed regroup can't place those).
+        if inserted:
+            lo, hi = (await db.execute(
+                select(func.min(LogEntry.timestamp), func.max(LogEntry.timestamp))
+                .where(LogEntry.job_id == job_id)
+            )).one()
+            if lo is not None and hi is not None:
+                db.add(LogRegroupPending(customer_code=job.customer_code,
+                                         range_start=lo, range_end=hi))
 
         # Stage 1 done at line level. Grouping (Stage 2) runs separately.
         await db.execute(

@@ -19,14 +19,17 @@
 
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
+from app.config.database import async_session
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
+from app.persistence.models.log_regroup_pending import LogRegroupPending
+from app.persistence.models.log_regroup_run import LogRegroupRun, LogRegroupRunStatus
 
 logger = logging.getLogger(__name__)
 
@@ -582,3 +585,158 @@ async def regroup_incremental(db: AsyncSession, customer_code: str | None = None
                              "orphan_entries": len(rows) - result["entries_assigned"]})
     logger.info("Stage 2 regroup (incremental): %s", stats)
     return stats
+
+
+def _regroup_pad() -> timedelta:
+    """Pad applied around a windowed regroup. Floored at the seal window — the max a transaction can
+    span — so a misconfigured (too-small) pad can never make the rebuild lossy, only wider."""
+    return timedelta(seconds=max(settings.log_regroup_pad_seconds, settings.log_seal_window_seconds))
+
+
+async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi: datetime,
+                         commit: bool = True) -> dict:
+    """SCOPED rebuild for ONE customer over the time range a recent ingest touched ([lo, hi] = the
+    min/max entry timestamp). Cost is bounded by that span, not the whole table.
+
+    Pads to [lo - pad, hi + pad] (pad >= seal window). Deletes EVERY transaction — sealed or not —
+    whose start falls in [lo - pad, hi], frees their entries, then regroups all unassigned entries in
+    [lo - pad, hi + pad]. Deleting sealed transactions inside the window is what makes back-filling a
+    file into an already-grouped/sealed region lossless (regroup_incremental can't — it never frees
+    sealed rows, so late entries there get orphaned or clash-skipped).
+
+    Lossless because the system guarantees no transaction spans more than pad: every transaction a new
+    entry can belong to has its start in [lo - pad, hi], so it is deleted and fully rebuilt here, and
+    every entry it owns lies in [lo - pad, hi + pad], so it is all read. Transactions outside that
+    band keep their entries assigned and are excluded by the `transaction_id IS NULL` filter, so they
+    are never touched. Deterministic ids mean any innocent neighbour caught in the pad rebuilds
+    identically (idempotent).
+
+    The delete + regroup run in ONE transaction (no intermediate commit): the cascaded entries.->NULL
+    is visible to the same-transaction read, and readers see only the pre- or post-rebuild state, never
+    a torn one. Pass commit=False to fold several windows into one outer transaction (finalize_pending
+    does this so a transaction-level advisory lock can guard the whole batch)."""
+    pad = _regroup_pad()
+    lo_p, hi_p = lo - pad, hi + pad
+
+    # 1. free every transaction anchored in [lo_p, hi] (sealed included); entries -> NULL via FK.
+    await db.execute(delete(LogTransaction).where(
+        LogTransaction.customer_code == customer_code,
+        LogTransaction.started_at >= lo_p,
+        LogTransaction.started_at <= hi,
+    ))
+
+    # 2. read the now-unassigned entries across the full padded span, in stream order. The upper read
+    #    bound is hi_p (= hi + pad), not hi: a freed transaction anchored at hi can own entries up to
+    #    pad later, and we must see all of them to stitch it whole.
+    rows = list((await db.execute(
+        select(LogEntry).where(
+            LogEntry.customer_code == customer_code,
+            LogEntry.transaction_id.is_(None),
+            LogEntry.timestamp >= lo_p,
+            LogEntry.timestamp <= hi_p,
+        ).order_by(
+            LogEntry.timestamp.asc().nullslast(),
+            LogEntry.source_file.asc(),
+            LogEntry.line_number.asc(),
+        )
+    )).scalars().all())
+
+    stats = {"mode": "window", "customers": 1, "by_status": {},
+             "window_start": lo_p.isoformat(), "window_end": hi_p.isoformat()}
+    if not rows:
+        if commit:
+            await db.commit()
+        logger.info("Stage 2 regroup (window) %s..%s [%s]: no unassigned entries", lo_p, hi_p, customer_code)
+        return {**stats, "customers": 0, "entries_scanned": 0,
+                "transactions_created": 0, "transactions_sealed": 0}
+    seal_cutoff, abandon_cutoff = await _cutoffs(db, customer_code)
+    result = await _persist(db, _group(rows), customer_code, seal_cutoff, abandon_cutoff)
+    if commit:
+        await db.commit()
+    _merge_stats(stats, {**result, "entries_scanned": len(rows),
+                         "orphan_entries": len(rows) - result["entries_assigned"]})
+    logger.info("Stage 2 regroup (window): %s", stats)
+    return stats
+
+
+def _coalesce(ranges: list[tuple[datetime, datetime]], gap: timedelta) -> list[tuple[datetime, datetime]]:
+    """Merge time ranges whose padded windows would overlap into disjoint runs. Two raw ranges merge
+    when the later one starts within `gap` of the earlier one's end — at gap = 2*pad their padded
+    [s-pad, e+pad] windows touch, so merging avoids rebuilding the shared seam twice. Sparse ranges
+    (e.g. a January file and a June file) stay separate, so each is regrouped over its own narrow
+    window instead of one giant span."""
+    if not ranges:
+        return []
+    ordered = sorted(ranges)
+    merged = [ordered[0]]
+    for s, e in ordered[1:]:
+        ps, pe = merged[-1]
+        if s <= pe + gap:
+            merged[-1] = (ps, max(pe, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
+    """Consume a customer's open log_regroup_pending rows: coalesce their ranges into disjoint runs
+    and run a scoped regroup_window over each, then stamp the rows consumed. This is the single
+    "I'm done ingesting — stitch what I added" operation behind both the console finalize endpoint and
+    the watcher's drain-empty flush. Idempotent: with nothing pending it returns windows=0.
+
+    The whole batch (lock acquire -> all windows -> mark consumed) runs as ONE transaction guarded by
+    a transaction-level advisory lock, so a console finalize and a worker flush (or two clicks) for the
+    same customer serialize instead of racing into a deterministic-id clash. The lock releases
+    automatically on commit/rollback — no manual unlock to leak."""
+    try:
+        # transaction-scoped lock: held until this transaction commits/rolls back. Acquiring it starts
+        # the transaction that all the windows below share (regroup_window called with commit=False).
+        await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(customer_code))))
+
+        pend = list((await db.execute(
+            select(LogRegroupPending).where(
+                LogRegroupPending.customer_code == customer_code,
+                LogRegroupPending.consumed_at.is_(None),
+            ).order_by(LogRegroupPending.range_start.asc())
+        )).scalars().all())
+        if not pend:
+            await db.commit()  # release the lock; nothing to do
+            return {"mode": "finalize", "customer_code": customer_code, "windows": 0, "by_window": []}
+
+        runs = _coalesce([(p.range_start, p.range_end) for p in pend], gap=2 * _regroup_pad())
+        by_window = [await regroup_window(db, customer_code, lo, hi, commit=False) for lo, hi in runs]
+
+        await db.execute(
+            update(LogRegroupPending)
+            .where(LogRegroupPending.id.in_([p.id for p in pend]))
+            .values(consumed_at=datetime.now(timezone.utc))
+        )
+        await db.commit()
+        logger.info("Stage 2 finalize [%s]: %d pending rows -> %d window(s)",
+                    customer_code, len(pend), len(runs))
+        return {"mode": "finalize", "customer_code": customer_code,
+                "windows": len(runs), "pending_consumed": len(pend), "by_window": by_window}
+    except Exception:
+        await db.rollback()  # release the lock on failure; pending rows stay open for a retry
+        raise
+
+
+async def run_finalize_tracked(run_id: uuid.UUID, customer_code: str) -> None:
+    """Background entry point for the async finalize endpoint: run finalize_pending and record the
+    outcome on the log_regroup_runs row so the frontend can poll it. Uses its own session — the HTTP
+    request that scheduled this has already returned. Never raises (a background task has no caller to
+    catch it); failures are captured as status=failed with the error text, and the pending rows stay
+    open (finalize_pending rolled them back) so a later finalize retries them."""
+    async with async_session() as db:
+        try:
+            stats = await finalize_pending(db, customer_code)
+            values = dict(status=LogRegroupRunStatus.completed, windows=stats.get("windows"),
+                          pending_consumed=stats.get("pending_consumed"), result=stats,
+                          finished_at=datetime.now(timezone.utc))
+        except Exception as exc:
+            logger.exception("Tracked finalize failed (run=%s customer=%s)", run_id, customer_code)
+            await db.rollback()
+            values = dict(status=LogRegroupRunStatus.failed, error=str(exc),
+                          finished_at=datetime.now(timezone.utc))
+        await db.execute(update(LogRegroupRun).where(LogRegroupRun.id == run_id).values(**values))
+        await db.commit()

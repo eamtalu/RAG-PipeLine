@@ -303,6 +303,13 @@ app/services/log_agent/           # Phase 2
 - **Event endpoints** — `POST /logs/scan` (ingest current incoming dir), `POST /logs/ingest` (push one
   file), `POST /logs/regroup` (re-run Stage 2).
 
+> **Superseded for normal sessions (2026-06-13)** — Stage 2 is no longer auto-run by a count-change
+> worker (now disabled by default, `log_grouping_worker_enabled=False`). Each ingest marks a dirty time
+> window (`log_regroup_pending`); a **scoped** regroup runs on the explicit console
+> `POST /logs/regroup/finalize` (async — poll `GET /logs/regroup/runs/{id}`) or when the watcher's queue
+> drains. Transaction reads 409 while a regroup is pending. See §10 "Scoped (windowed) regroup" for the
+> full, current model.
+
 ### Settings additions
 `log_incoming_dir`, `log_processed_dir`, `log_failed_dir`, `log_watcher_poll_seconds`,
 `log_grouping_poll_seconds`, `log_format` (default `m3_dotnet`), plus Anthropic config (Phase 2).
@@ -455,6 +462,60 @@ app/services/log_agent/           # Phase 2
     bounded 0.4% tail/cycle, 0 id-skips, 0 unassigned, 0 cross-user, max 317 s, and **99.87% of ids
     identical to a full rebuild**. Incremental is EVENTUALLY-CONSISTENT with full — ~0.15–0.25% of
     *boundary* transactions group differently (bidirectional, benign); a periodic full regroup reconciles.
+- **Scoped (windowed) regroup + upload-session finalize + read guard — DONE** (2026-06-13): made regroup
+  cheap *and* lossless for the two real ingestion paths (web-console upload, server-directory drop), and
+  stopped reads from showing half-stitched data. This supersedes the old "regroup after every ingest"
+  worker for normal sessions.
+  - **Why `regroup_incremental` wasn't enough**: it never frees SEALED transactions, so a file
+    **back-filled into an already-sealed time region** (older logs uploaded after that region sealed)
+    leaves its entries orphaned or clash-skipped → silently split/lost transactions. Only a full
+    `regroup_all` fixed it, which is O(whole table).
+  - **`regroup_window(db, customer, lo, hi)`** (`derive_transactions.py`): rebuilds only the time range an
+    ingest touched. Pads to `[lo - PAD, hi + PAD]` where `PAD = max(log_regroup_pad_seconds,
+    log_seal_window_seconds)`, **deletes every transaction (sealed included) anchored in the window**,
+    frees their entries, and regroups the unassigned entries in the padded span. **Lossless proof**: the
+    system already guarantees no transaction spans > seal window, so every transaction a new entry can
+    join starts in `[lo - PAD, hi]` (deleted+rebuilt) and ends by `hi + PAD` (all read) — nothing
+    straddling a window edge can be split or stranded. A **bare hour bucket with no pad IS lossy** (a
+    REQUEST at 14:59:50 / RESPONSE at 15:00:10 would split) — the pad is mandatory. Reuses `_group` /
+    `_persist` / `_cutoffs` / deterministic ids unchanged.
+  - **Dirty-window tracking** (`log_regroup_pending`, migration `b1d4f6a8c290`): Stage 1 (`parse_insert`)
+    writes one row per ingested file = the `[min,max]` entry timestamp it added. `finalize_pending(db,
+    customer)` loads the open rows, coalesces ranges whose padded windows touch (gap ≤ 2·PAD), runs a
+    `regroup_window` per coalesced run inside ONE transaction guarded by a per-customer
+    `pg_advisory_xact_lock` (so a console finalize and a worker flush can't race), then stamps the rows
+    `consumed_at`. Sparse ranges (a Jan file + a Jun file) stay separate → each regrouped over its own
+    narrow window, never one 6-month span.
+  - **Two triggers** (user's design): (1) **web console** — `POST /logs/regroup/finalize` is the explicit
+    "I'm done uploading this session" confirm; (2) **directory watcher** — `run_log_watcher` flushes
+    `finalize_pending` for the tenants it ingested once the incoming queue **drains empty** (one scoped
+    regroup per batch). `_drain_once` now returns `(count, ingested_customers)` for this.
+  - **Async finalize** (`log_regroup_runs`, migration `c2e5a9f3b471`): `POST /logs/regroup/finalize` is
+    **non-blocking** — it inserts a run row, schedules `run_finalize_tracked` via `asyncio.create_task`
+    (held in a strong-ref set so it can't be GC'd), and returns **202 `{run_id, status, poll}`**. Frontend
+    polls **`GET /logs/regroup/runs/{run_id}`** → `running` → `completed` (windows/stats) or `failed`
+    (error; pending rows stay open for retry, runner never raises). A full-table finalize is ~6 s, a
+    realistic scoped one ~0.3 s — async so a long/sparse batch can't time out the HTTP request. The
+    watcher and tests call `finalize_pending()` directly (synchronous), so they're unaffected.
+  - **Read guard** (`require_regrouped` dependency on ALL 5 transaction reads — `GET /logs/transactions`,
+    `/transactions/view`, `/transactions/{id}`, `/transactions/{id}/view`, `POST /logs/debug/ask`): while a
+    customer has open pending windows, reads return **409** ("…pending regroup… re-request with
+    `finalize=true`"). `?finalize=true` applies the (synchronous) regroup inline then serves fresh data —
+    fine for small sessions; large batches should use the async endpoint + poll. So you never read
+    half-stitched data.
+  - **Pending status probe** — `GET /logs/regroup/status` (NOT guarded): `{ pending, pending_windows,
+    oldest_pending_at }`, one indexed count. Lets a UI show a "finalize" prompt on load without first
+    tripping a 409. `pending=true` ⇒ transaction reads will 409 until a finalize completes.
+  - **Old count-change worker DISABLED**: `log_grouping_worker_enabled` (default **False**) gates
+    `run_log_grouping_worker` in `main.py`; the windowed finalize path replaces it. The DELETE
+    `/logs/data` date-range path still calls `regroup_incremental` to reconcile, unchanged.
+  - **Verified on real `mnp` data** (36,638 entries / 2,066 txns, `scripts/verify_windowed_regroup.py`):
+    full-span `regroup_window` reproduces `regroup_all` **exactly** (identical id set + entry→txn map);
+    a single-hour scoped regroup leaves all out-of-window txns byte-identical and strands 0 entries; the
+    target hour was **98/98 sealed** yet rebuilt with 0 orphans (the back-fill-into-sealed fix). Async
+    flow, failure path, 409 guard, and migration round-trips all verified end-to-end through the ASGI app.
+  - **New settings**: `log_regroup_pad_seconds` (default 900, floored at seal window),
+    `log_grouping_worker_enabled` (default False).
 - **§6 renderer — DONE** (2026-06-10): `app/services/mnp_log_ingestion/render.py::render_transaction`
   turns a transaction + its ordered entries into the locked §6 text view (header · sub-header ·
   `▶ REQUEST` dims · numbered steps with `mi_call`+`mi_result` folded into one `📞 PROG/TXN inputs ✅ N recs`
@@ -468,9 +529,15 @@ app/services/log_agent/           # Phase 2
 
 ## 11. Resume here (next session) ⏸️
 
-**Where we paused (2026-06-09):** Phase 1a, Phase 1b, Step 4b, and Phase 2 are all DONE and verified.
+**Where we paused (2026-06-13):** Phase 1a, Phase 1b, Step 4b, and Phase 2 are all DONE and verified.
 The ingestion pipeline + Stage-2 grouping + read-only scan/dedup + the Claude debugging agent are all
-built and wired. See `docs/LOG_ANALYSIS_GUIDE.md` for how to run the app and do log analysis.
+built and wired. **On 2026-06-13** the regroup story was reworked (see "Scoped (windowed) regroup +
+upload-session finalize + read guard" in §10): scoped+lossless `regroup_window`, dirty-window tracking
+(`log_regroup_pending`), upload-session `finalize_pending` with two triggers (console `POST
+/logs/regroup/finalize` + watcher drain-flush), **async finalize** (202 + `run_id`, poll `GET
+/logs/regroup/runs/{id}`, tracked in `log_regroup_runs`), and a **read guard** that 409s transaction
+reads while regroup is pending. The old count-change worker is now disabled by default
+(`log_grouping_worker_enabled=False`). See `docs/LOG_ANALYSIS_GUIDE.md` for how to run the app.
 
 **One open to-do (not code — config):**
 - [ ] Add `ANTHROPIC_API_KEY=sk-ant-...` to `.env` to actually use `POST /logs/debug/ask`. Until then the
@@ -491,9 +558,15 @@ Tell Claude: *"Implement Phase 3 from `docs/transaction-log-ingestion-design.md`
 Nothing in Phase 3 requires schema churn on existing tables — the hook was designed for exactly this.
 
 **Key files to know when resuming:**
-- Ingestion/parsing: `app/services/mnp_log_ingestion/` (parser, `pipeline/parse_insert.py` Stage 1,
-  `pipeline/derive_transactions.py` Stage 2 `regroup_all`).
-- Models: `app/persistence/models/log_entry.py`, `log_transaction.py` (`flow_id` hook here).
+- Ingestion/parsing: `app/services/mnp_log_ingestion/` (parser, `pipeline/parse_insert.py` Stage 1 — also
+  writes `log_regroup_pending` dirty rows, `pipeline/derive_transactions.py` Stage 2:
+  `regroup_all` / `regroup_incremental` / `regroup_window` / `finalize_pending` / `run_finalize_tracked`).
+- Models: `app/persistence/models/log_entry.py`, `log_transaction.py` (`flow_id` hook here),
+  `log_regroup_pending.py` (dirty windows), `log_regroup_run.py` (async finalize status).
 - Agent: `app/services/log_agent/tools.py` (5 read-only tools), `agent.py` (`LogDebugAgent`).
-- API: `app/api/v1/logs.py`. Settings: `app/settings.py`. Workers: `app/main.py` lifespan.
-- Postman: `postman/RAG_FAST_API.postman_collection.json` (7 folders, 36 requests).
+- API: `app/api/v1/logs.py` (`require_regrouped` read guard + `/regroup/finalize` + `/regroup/runs/{id}`).
+  Settings: `app/settings.py` (`log_regroup_pad_seconds`, `log_grouping_worker_enabled`). Workers:
+  `app/main.py` lifespan; `app/services/workers/log_watcher.py` (drain-empty finalize flush).
+- Verification: `scripts/verify_windowed_regroup.py` (lossless + scoped proof on real data).
+- Postman: `postman/RAG_FAST_API.postman_collection.json` ("Logs - Transactions (Stage 2)" folder has
+  Finalize regroup + Get regroup run status; the 5 reads carry a `finalize` param + 409 note).

@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # Read-only source dir for /logs/scan (e.g. live rotating logs). Files here are NEVER moved.
     log_source_dir: Path = Path("./logs/source")
     log_watcher_poll_seconds: float = 5.0
+    # Background incremental-regroup worker: polls log_entries and regroups the live tail after each
+    # new file. Set False to stop AUTOMATIC regrouping only — manual POST /logs/regroup (full or
+    # incremental) and the range-reingest endpoint still work.
+    log_grouping_worker_enabled: bool = False
     log_grouping_poll_seconds: float = 5.0
     # Stage 2 incremental grouping: a TERMINAL transaction (has a RESPONSE / hard error) whose end is
     # older than this (relative to the newest log timestamp) is SEALED — never recomputed, so its id
@@ -69,6 +73,11 @@ class Settings(BaseSettings):
     # can't bind across a huge time gap and create a bloated multi-day transaction. Real
     # transactions are ≤2 min, so 5 min is safe.
     log_open_gap_seconds: int = 300
+    # Scoped (windowed) regroup PAD: a regroup of time range [lo, hi] actually rebuilds
+    # [lo - pad, hi + pad] so a transaction straddling the range boundary is never split. Must be
+    # >= log_seal_window_seconds (the max a transaction can span); the code enforces that floor, so
+    # this only ever widens the window. Same 15-min default as the seal window.
+    log_regroup_pad_seconds: int = 900
 
     # --- Log debugging agent (Phase 2) ---
     anthropic_api_key: str = ""
