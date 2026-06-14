@@ -36,6 +36,10 @@ class LogRegroupPending(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # tenant — every finalize is scoped to one customer, mirroring the rest of the log pipeline.
     customer_code: Mapped[str] = mapped_column(String(64), index=True)
+    # the ingest job that dirtied this window. Nullable for rows written before this column existed.
+    # Lets a per-upload caller answer "did MY upload still leave an open window?" (GET /logs/jobs/{id}
+    # → pending_regroup) without conflating other tenants' uploads. Finalize stays tenant-wide.
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     # min/max entry timestamp of the ingest that dirtied this window (padded later at finalize).
     range_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     range_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -123,7 +123,7 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
                 .where(LogEntry.job_id == job_id)
             )).one()
             if lo is not None and hi is not None:
-                db.add(LogRegroupPending(customer_code=job.customer_code,
+                db.add(LogRegroupPending(customer_code=job.customer_code, job_id=job_id,
                                          range_start=lo, range_end=hi))
 
         # Stage 1 done at line level. Grouping (Stage 2) runs separately.

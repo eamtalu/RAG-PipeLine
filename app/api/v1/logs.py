@@ -90,8 +90,12 @@ async def ingest_log(
         raise HTTPException(400, detail="Empty file")
 
     job = await log_ingestion.ingest(data, file.filename or "unknown.log", customer)
-    # pending_regroup tells the UI this upload still needs stitching: keep uploading, then call
-    # POST /logs/regroup/finalize ("I'm done") to regroup just the windows these files touched.
+    # pending_regroup here is OPTIMISTIC: Stage 1 runs in the background, so at this point we don't yet
+    # know whether this file added new, timestamped entries (an all-duplicate or timestamp-less upload
+    # leaves no window to stitch). Do NOT drive the banner off this value — it can disagree with reality
+    # and make the banner appear then clear itself. Poll GET /logs/jobs/{id}: once status=completed its
+    # `pending_regroup` is the authoritative per-upload signal; /logs/regroup/status is the tenant-wide
+    # one. Then call POST /logs/regroup/finalize ("I'm done") to stitch the windows these files touched.
     return {"job_id": str(job.id), "filename": job.filename,
             "customer_code": job.customer_code, "status": job.status.value,
             "pending_regroup": True}
@@ -140,11 +144,23 @@ async def get_log_job(job_id: uuid.UUID, customer: str = Depends(get_current_cus
     job = await db.get(Job, job_id)
     if not job or job.document_type != DOCUMENT_TYPE or job.customer_code != customer:
         raise HTTPException(404, detail="Log job not found")
+    # AUTHORITATIVE per-upload finalize signal — the banner should key off THIS, not the optimistic
+    # `pending_regroup` on the POST /ingest 201 (that fires before Stage 1 has run, so it can't know
+    # the outcome). True iff this upload actually left an open window: a row is written only when the
+    # file added new, timestamped entries (all-duplicate or timestamp-less uploads write none), and a
+    # tenant-wide finalize clears it — so this flips to false exactly when the work is genuinely done.
+    pending_regroup = bool(await db.scalar(
+        select(func.count()).select_from(LogRegroupPending).where(
+            LogRegroupPending.job_id == job.id,
+            LogRegroupPending.consumed_at.is_(None),
+        )
+    ))
     return {
         "job_id": str(job.id),
         "filename": job.filename,
         "status": job.status.value,
         "entry_count": job.chunk_count,
+        "pending_regroup": pending_regroup,
         "error": job.error,
         "created_at": job.created_at.isoformat(),
     }
