@@ -9,6 +9,7 @@ from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun
 from app.persistence.models.customer import Customer
 from app.persistence.models.customer_display_name import CustomerDisplayName
+from app.persistence.models.saved_view import SavedView
 
 __all__ = [
     "Base",
@@ -22,4 +23,5 @@ __all__ = [
     "LogRegroupRun",
     "Customer",
     "CustomerDisplayName",
+    "SavedView",
 ]
