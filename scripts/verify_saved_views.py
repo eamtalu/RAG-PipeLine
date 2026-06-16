@@ -208,6 +208,30 @@ async def main() -> int:
         check(r.status_code == 200 and r.json()["customer_code"] == TENANT,
               "cross-tenant get returns owner customer_code", r.text[:200])
 
+        # GET-by-id never gates on the header: a missing or garbage X-Customer-Code must NOT block the
+        # read (no 422/400/404 on header grounds — only the id matters). The Share resolver may open a
+        # link before any logspace is active.
+        r = await c.get(f"{BASE}/{main_id}", headers=hdr(None))
+        check(r.status_code == 200 and r.json()["customer_code"] == TENANT,
+              "get by id w/o X-Customer-Code → 200 (no 422)", f"got {r.status_code} {r.text[:160]}")
+        r = await c.get(f"{BASE}/{main_id}", headers=hdr("!!! not a slug !!!"))
+        check(r.status_code == 200 and r.json()["customer_code"] == TENANT,
+              "get by id w/ garbage header → 200 (no 400/404)", f"got {r.status_code} {r.text[:160]}")
+
+        # writes stay tenant-guarded: a PATCH/DELETE/comment carrying the WRONG tenant header must NOT
+        # touch a view owned by another tenant — it reads as a by-id 404 (no cross-tenant mutation).
+        print("\n[Writes stay tenant-guarded — wrong-tenant by-id → 404]")
+        r = await c.patch(f"{BASE}/{main_id}", json={"title": "hijack"}, headers=hdr(OTHER_TENANT))
+        check(r.status_code == 404, "cross-tenant PATCH → 404", f"got {r.status_code} {r.text[:160]}")
+        r = await c.post(f"{BASE}/{main_id}/comments", json={"body": "hijack"}, headers=hdr(OTHER_TENANT))
+        check(r.status_code == 404, "cross-tenant add-comment → 404", f"got {r.status_code} {r.text[:160]}")
+        r = await c.delete(f"{BASE}/{main_id}", headers=hdr(OTHER_TENANT))
+        check(r.status_code == 404, "cross-tenant DELETE → 404", f"got {r.status_code} {r.text[:160]}")
+        # …and the view is untouched: still readable, still owned by mnp, title not overwritten.
+        r = await c.get(f"{BASE}/{main_id}", headers=hdr())
+        check(r.status_code == 200 and r.json()["customer_code"] == TENANT and r.json()["title"] == "checkout",
+              "view survives wrong-tenant writes intact", r.text[:200])
+
         # ----------------------------------------------------------------- §2.4 PATCH Save
         print("\n[Save — PATCH {name, state}]")
         new_state = {**sample_state, "search": "deadlock", "scrollTop": 999}

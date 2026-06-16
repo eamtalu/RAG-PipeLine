@@ -10,7 +10,10 @@ under the tenant-scoped logs namespace `/api/v1/logs/saved-views`.
            NEVER let body/field validation surface as 422 — every body error is raised as 400.
   - 400  → all body/field validation errors (bad JSON, missing `name`/`state`/comment `body`, …).
   - 404 on list/create  → unknown/inactive tenant (get_current_customer); the client bounces.
-  - 404 on by-id routes  → "not found"; handled gracefully, no bounce.
+  - 404 on by-id routes  → "not found"; handled gracefully, no bounce. NOTE the read/write split:
+           GET-by-id resolves a view in ANY tenant (the Share deep-link) and takes NO tenant header at
+           all — it never 422/404s on header grounds. The writes (PATCH/DELETE/add-comment) stay
+           tenant-guarded, so a view owned by another tenant reads as a by-id 404 for them.
   - 409  → never returned here (saved-views are independent of the regroup lifecycle).
 
 `state`, `comments`, and `closure` are opaque JSONB and round-tripped verbatim; `name` is
@@ -147,6 +150,25 @@ async def _get_global(view_id: str, db: AsyncSession) -> SavedView:
     return view
 
 
+async def _get_tenant_scoped(view_id: str, customer: str, db: AsyncSession) -> SavedView:
+    """Look a view up by id but ONLY within `customer`'s tenant — for the WRITE routes (PATCH/DELETE/
+    add-comment). A view owned by another tenant is treated as not-found (a by-id 404, no bounce), so
+    one logspace can never mutate another's saved view. This is the deliberate counterpart to the
+    global GET-by-id: reads cross tenants for sharing, writes stay tenant-guarded.
+
+    Like `_get_global`, a malformed id is a plain 404 (never FastAPI's 422 — 422 is reserved for a
+    missing tenant header). The header itself is still validated upstream via get_current_customer, so
+    writes keep requiring a well-formed, registered tenant header."""
+    try:
+        parsed = uuid.UUID(view_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(404, detail="Saved view not found.")
+    view = await db.get(SavedView, parsed)
+    if view is None or view.customer_code != customer:
+        raise HTTPException(404, detail="Saved view not found.")
+    return view
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -218,14 +240,17 @@ async def create_saved_view(
 @router.get("/{view_id}")
 async def get_saved_view(
     view_id: str,
-    customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
 ):
     """Get one saved view by id — GLOBAL lookup (cross-tenant), used by the Share deep-link resolver.
 
-    A valid tenant header is still required (so logsFetch doesn't 422-bounce), but the row is found
-    by id regardless of which tenant owns it; the response carries its `customer_code` so the client
-    can switch logspace. 404 here is a by-id not-found (no bounce)."""
+    The X-Customer-Code header is intentionally NOT a dependency here. The Share resolver opens a link
+    whose view often lives in a different logspace than the opener's currently-active one — that is the
+    whole point of sharing — so the read must resolve by id regardless of which tenant (if any) the
+    header names. The client depends on the returned `customer_code` to decide whether to switch
+    logspace. Therefore this route never filters or denies on header grounds: a missing or garbage
+    header does NOT 422/400/404 the read. 404 here means the id exists in NO tenant — a plain by-id
+    not-found the client handles gracefully (no bounce to the logspace picker)."""
     view = await _get_global(view_id, db)
     return _serialize(view)
 
@@ -244,9 +269,11 @@ async def update_saved_view(
     `comments` are never touched here; `created_at` is immutable; `updated_at` is bumped to now.
     `state` is replaced wholesale (opaque). Closure convenience: if status flips to "completed" and
     no closure was provided, the server stamps {summary: null, closed_by: <assignee or null>,
-    closed_at: now}."""
+    closed_at: now}.
+
+    Writes are tenant-guarded: the view must belong to the request's tenant, else by-id 404."""
     body = await _read_json_object(request)
-    view = await _get_global(view_id, db)
+    view = await _get_tenant_scoped(view_id, customer, db)
 
     if "name" in body:
         view.name = _require_str(body, "name")  # if present it must be a non-empty string
@@ -291,8 +318,9 @@ async def delete_saved_view(
     customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
 ):
-    """Delete a saved view by id (global lookup). 204 on success, by-id 404 if it doesn't exist."""
-    view = await _get_global(view_id, db)
+    """Delete a saved view by id (tenant-guarded). 204 on success; by-id 404 if it doesn't exist in
+    the request's tenant (missing, or owned by another tenant)."""
+    view = await _get_tenant_scoped(view_id, customer, db)
     await db.delete(view)
     await db.commit()
     return Response(status_code=204)
@@ -309,9 +337,10 @@ async def add_comment(
 
     Body: { author?: string, body: string }. `body` is required/non-empty; `author` defaults to
     "anonymous". Returns the created comment (NOT the whole view). Comments are read back embedded in
-    every SavedView response — there is no GET-comments endpoint."""
+    every SavedView response — there is no GET-comments endpoint. Tenant-guarded like the other
+    writes: a view owned by another tenant is a by-id 404."""
     payload = await _read_json_object(request)
-    view = await _get_global(view_id, db)
+    view = await _get_tenant_scoped(view_id, customer, db)
 
     text = _require_str(payload, "body")  # required, non-empty → else 400
     author = payload.get("author")
