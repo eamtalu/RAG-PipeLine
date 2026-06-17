@@ -10,6 +10,7 @@ from app.settings import settings
 from app.services.workers.embedding_worker import run_worker
 from app.services.workers.log_watcher import run_log_watcher
 from app.services.workers.log_grouping_worker import run_log_grouping_worker
+from app.services.workers.ssh_log_fetcher import run_ssh_log_fetcher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -30,6 +31,11 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(run_log_grouping_worker()))
     else:
         logging.getLogger(__name__).info("Log grouping worker disabled (log_grouping_worker_enabled=False)")
+    # Remote SSH log fetcher (pull from the Windows Server) — off unless explicitly enabled.
+    if settings.ssh_log_fetcher_enabled:
+        tasks.append(asyncio.create_task(run_ssh_log_fetcher()))
+    else:
+        logging.getLogger(__name__).info("SSH log fetcher disabled (ssh_log_fetcher_enabled=False)")
     yield
     for task in tasks:
         task.cancel()

@@ -7,6 +7,9 @@ from app.persistence.models.log_transaction import LogTransaction
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun
+from app.persistence.models.log_ssh_source import LogSshSource
+from app.persistence.models.log_ssh_file_checkpoint import LogSshFileCheckpoint
+from app.persistence.models.log_ssh_fetch_run import LogSshFetchRun
 from app.persistence.models.customer import Customer
 from app.persistence.models.customer_display_name import CustomerDisplayName
 from app.persistence.models.saved_view import SavedView
@@ -21,6 +24,9 @@ __all__ = [
     "LogEntry",
     "LogRegroupPending",
     "LogRegroupRun",
+    "LogSshSource",
+    "LogSshFileCheckpoint",
+    "LogSshFetchRun",
     "Customer",
     "CustomerDisplayName",
     "SavedView",

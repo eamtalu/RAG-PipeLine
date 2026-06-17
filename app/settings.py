@@ -79,6 +79,19 @@ class Settings(BaseSettings):
     # this only ever widens the window. Same 15-min default as the seal window.
     log_regroup_pad_seconds: int = 900
 
+    # --- Remote SSH log source (pull-ingestion from the Windows Server) ---
+    # Background poller: connects to each enabled per-customer LogSshSource over SFTP, pulls the new
+    # tail of its remote log files, ingests, then finalizes. OFF by default — the on-demand
+    # POST /logs/fetch-remote trigger works regardless of this flag.
+    ssh_log_fetcher_enabled: bool = False
+    ssh_log_fetcher_poll_seconds: float = 60.0
+    ssh_connect_timeout_seconds: float = 20.0
+    ssh_max_file_size: int = 200 * 1024 * 1024  # 200 MB — mirror the upload cap
+    # Fernet key (urlsafe-base64, 32 bytes) used to encrypt inline private-key material / passphrase
+    # at rest. Empty ⇒ inline secrets are refused and a private_key_path (file on the backend host)
+    # must be used instead.
+    ssh_secret_key: str = ""
+
     # --- Log debugging agent (Phase 2) ---
     anthropic_api_key: str = ""
     log_agent_model: str = "claude-opus-4-8"

@@ -39,41 +39,46 @@ MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB — rotating log files can be large
 _finalize_tasks: set = set()
 
 
-async def require_regrouped(
+async def read_pending_state(
     customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
     finalize: bool = Query(
         default=False,
-        description="Confirm 'I'm done uploading this session': apply the pending scoped regroup "
-                    "before reading. Without it, a pending regroup makes transaction reads return 409 "
-                    "so you never read half-stitched results.",
+        description="Stitch first: apply the pending scoped regroup before reading, so the result "
+                    "includes the freshest ingested data. Without it, reads return the last "
+                    "fully-stitched data plus a `pending_regroup` flag (they never block).",
     ),
-) -> None:
-    """Guard for transaction READS: block while this customer has un-stitched ingests.
+) -> dict:
+    """SOFT read gate (shared by every transaction-read endpoint via Depends).
 
-    Every ingest marks the time window it touched as pending (log_regroup_pending). Until those
-    windows are regrouped the derived transactions are incomplete, so each transaction read returns
-    409 with a 'confirm to regroup' message instead of half-stitched data. Passing finalize=true is
-    that confirmation — it runs the scoped regroup first (same request session, committed), and the
-    read then proceeds on fresh data. Shared by every transaction-read endpoint via Depends."""
-    open_count = await db.scalar(
-        select(func.count()).select_from(LogRegroupPending).where(
+    Each ingest marks the time window it touched as pending (log_regroup_pending). Rather than
+    blocking reads with a 409 until those windows are stitched, reads ALWAYS succeed and carry a
+    `pending_regroup` block: the already-grouped transactions are complete and consistent (Stage 1
+    only adds entries, so a query never shows a half-built transaction) — at worst the newest,
+    not-yet-grouped tail is missing, and the flag says so. Passing finalize=true stitches first
+    (same session, committed) so the read is fully current. This never raises: a burst of new data
+    can't interrupt an analyst mid-session."""
+    count, oldest = (await db.execute(
+        select(func.count(), func.min(LogRegroupPending.created_at)).where(
             LogRegroupPending.customer_code == customer,
             LogRegroupPending.consumed_at.is_(None),
         )
-    )
-    if not open_count:
-        return
-    if finalize:
+    )).one()
+    if count and finalize:
         await finalize_pending(db, customer)
-        return
-    raise HTTPException(
-        409,
-        detail=(f"{open_count} log window(s) are pending regroup for customer {customer}, so "
-                f"transaction results would be incomplete. If you have finished uploading log files "
-                f"for this session, re-request with finalize=true to stitch them first. Otherwise "
-                f"upload the remaining files (or POST /logs/regroup/finalize), then retry."),
-    )
+        return {"pending": False, "pending_windows": 0, "oldest_pending_at": None, "finalized": True}
+    return {"pending": bool(count), "pending_windows": count or 0,
+            "oldest_pending_at": oldest.isoformat() if oldest else None}
+
+
+def _pending_notice(pending: dict) -> str:
+    """One-line banner for the plain-text views when newer data hasn't been stitched in yet."""
+    if not pending.get("pending"):
+        return ""
+    since = pending.get("oldest_pending_at")
+    when = f" since {since}" if since else ""
+    return (f"⚠ {pending['pending_windows']} newer log window(s){when} are not yet stitched in — "
+            f"re-request with finalize=true to include them.\n\n")
 
 
 @router.post("/ingest", status_code=201)
@@ -341,10 +346,11 @@ async def regroup_status(
     customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
 ):
-    """Whether this customer has log windows pending regroup — so the UI can show a 'finalize' prompt
-    on load WITHOUT first tripping a 409 on a transaction read. Cheap (one indexed count). NOT guarded
-    (it must answer while a regroup is pending). `pending=true` means transaction reads will 409 until
-    a finalize (POST /logs/regroup/finalize) completes.
+    """Whether this customer has log windows pending regroup — so the UI can show a (non-blocking)
+    'finalize' prompt. Cheap (one indexed count). Transaction reads do NOT block on this: they return
+    the last fully-stitched data plus the same flag (see read_pending_state). `pending=true` means the
+    newest ingested tail isn't stitched in yet — POST /logs/regroup/finalize (or read with
+    finalize=true) to include it.
     """
     open_rows = (await db.execute(
         select(func.count(), func.min(LogRegroupPending.created_at)).where(
@@ -429,7 +435,7 @@ async def delete_log_data(
 async def list_transactions(
     customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
-    _regroup: None = Depends(require_regrouped),
+    pending: dict = Depends(read_pending_state),
     user: str | None = Query(default=None, description="matches user_name"),
     date: date_type | None = Query(default=None, description="YYYY-MM-DD"),
     status: LogTransactionStatus | None = None,
@@ -487,6 +493,7 @@ async def list_transactions(
         "count": len(rows),
         "limit": limit,
         "offset": offset,
+        "pending_regroup": pending,
         "transactions": [_txn_summary(t) for t in rows],
     }
 
@@ -497,7 +504,7 @@ async def list_transactions(
 async def view_transactions(
     customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
-    _regroup: None = Depends(require_regrouped),
+    pending: dict = Depends(read_pending_state),
     limit: int = Query(default=50, ge=1, le=500, description="how many most-recent transactions to render"),
     user: str | None = Query(default=None, description="matches user_name; omit for all users"),
     date: date_type | None = Query(default=None, description="YYYY-MM-DD (matches the transaction date)"),
@@ -537,6 +544,7 @@ async def view_transactions(
     if hour is not None:
         header += f" hour {hour:02d}:00"
     header += " — oldest → newest"
+    header = _pending_notice(pending) + header
 
     if not txns:
         return header + "\n\n(no transactions match the given filters)"
@@ -575,18 +583,18 @@ async def get_transaction_view(
     customer: str = Depends(get_current_customer),
     verbose: bool = Query(default=False, description="also render plain INFO narration steps"),
     db: AsyncSession = Depends(get_session),
-    _regroup: None = Depends(require_regrouped),
+    pending: dict = Depends(read_pending_state),
 ):
     """Canonical §6 Transaction Detail View as human-readable text (request → steps → response)."""
     t, entries = await _load_transaction_entries(transaction_id, customer, db)
-    return render_transaction(t, entries, verbose=verbose)
+    return _pending_notice(pending) + render_transaction(t, entries, verbose=verbose)
 
 
 @router.get("/transactions/{transaction_id}")
 async def get_transaction(transaction_id: uuid.UUID,
                           customer: str = Depends(get_current_customer),
                           db: AsyncSession = Depends(get_session),
-                          _regroup: None = Depends(require_regrouped)):
+                          pending: dict = Depends(read_pending_state)):
     """Canonical Transaction Detail View — header + the ordered step-by-step entry timeline.
 
     Includes a `rendered` field: the §6 text view (also available raw at `/view`).
@@ -626,6 +634,7 @@ async def get_transaction(transaction_id: uuid.UUID,
             }
             for e in entries
         ],
+        "pending_regroup": pending,
     }
 
 
@@ -641,15 +650,21 @@ class DebugAskRequest(BaseModel):
 async def debug_ask(
     body: DebugAskRequest,
     agent: LogDebugAgent = Depends(get_log_debug_agent),
-    _regroup: None = Depends(require_regrouped),
+    pending: dict = Depends(read_pending_state),
 ):
     """Ask the debugging agent a natural-language question about the logs.
 
     Claude picks read-only SQL-backed tools (search/count/find_errors/get_transaction/
     search_entries), runs them against the relational store, and answers with cited
     transaction ids. Returns the answer plus a trace of the tool calls it made.
+
+    The answer reflects the last fully-stitched data; if `pending_regroup.pending` is true, the
+    freshest ingested tail isn't included yet (finalize to include it).
     """
     try:
-        return await agent.ask(body.question)
+        result = await agent.ask(body.question)
     except RuntimeError as exc:  # missing API key, etc.
         raise HTTPException(503, detail=str(exc))
+    if isinstance(result, dict):
+        result["pending_regroup"] = pending
+    return result

@@ -37,3 +37,6 @@ qdrant-client>=1.12
 
 # --- Log debugging agent (Phase 2): Claude tool-use over log_transactions/log_entries ---
 anthropic>=0.69
+
+# --- Remote SSH log source: async SSH/SFTP pull-ingestion from the Windows Server ---
+asyncssh>=2.14  # pulls in `cryptography` (Fernet used to encrypt stored key material)
