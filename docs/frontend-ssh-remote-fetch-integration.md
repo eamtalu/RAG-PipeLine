@@ -141,21 +141,51 @@ Defaults: if `from_timestamp` set and `mode` omitted → `mode="timestamp"`; els
   "run_id": "uuid", "customer_code": "acme", "source_id": "uuid|null",
   "mode": "incremental", "requested_from": "ISO|null",
   "status": "running",            // "running" | "completed" | "failed"
-  "files_considered": 1, "files_fetched": 0,
-  "bytes_fetched": 0, "entries_ingested": 0,
+  "phase": "fetching",            // "listing" | "fetching" | "regrouping" | "done"  (LIVE)
+  "progress": {                   // LIVE during the run; null before listing finishes
+    "current_source": "prod-wms-1", "source_index": 1, "sources_total": 1,
+    "current_file": "C:/BEC Logs/app.txt3",
+    "files_total": 12, "files_done": 3,      // per the CURRENT source
+    "bytes_so_far": 184320, "entries_so_far": 512   // cumulative across sources so far
+  },
+  "files_considered": 12,         // set as soon as listing finishes (was null mid-run before)
+  "files_fetched": null,          // FINAL totals — null until status=completed
+  "bytes_fetched": null, "entries_ingested": null,
   "error": null,
-  "result": { /* per-source/file stats; may include result.already_local: true */ },
+  "result": { /* per-source/file stats; may include result.already_local / result.errors[] */ },
   "created_at": "...", "finished_at": "...|null"
 }
 ```
 
+**Live progress contract (`phase` + `progress`).** The run row is now updated *mid-flight* on its own
+DB session, so each poll reflects real progress instead of a binary running→done flip:
+
+| `phase` | What's happening | What to show |
+|---------|------------------|--------------|
+| `listing` | connecting + globbing each server's remote dir | "Connecting & listing files…" (indeterminate) |
+| `fetching` | pulling + ingesting files (per-file loop) | progress bar `files_done/files_total`, "Fetching `current_file` (3/12)", live `bytes_so_far`/`entries_so_far` |
+| `regrouping` | Stage 2 stitching of what was ingested (the internal finalize) | "Rebuilding transactions…" (indeterminate) |
+| `done` | terminal — read `status` for outcome | hide progress; show result/ error |
+
+Notes:
+- `files_done` advances for **every** listed file, including unchanged ones skipped with no transfer —
+  so the bar moves smoothly even on a no-op incremental poll.
+- `files_total` / `files_done` / `current_source` are scoped to the **current** source; use
+  `source_index` / `sources_total` to label multi-server fetches ("Server 1/2"). `bytes_so_far` /
+  `entries_so_far` are cumulative across all sources processed so far.
+- `progress` is `null` until the first `listing` completes, and the final aggregate totals still live
+  in the top-level `files_fetched` / `bytes_fetched` / `entries_ingested` (populated only at `done`).
+
 UI: a "Fetch from server" button (per source and/or "fetch all") + optional "from timestamp" picker.
 On click → POST, then poll the run (~1500ms) until `status` is `completed`/`failed`, like
-`useUpload.ts` polls jobs. Show `files_fetched` / `entries_ingested`. Add `useRemoteFetch.ts` + a
-small progress banner (clone `regroup/FinalizeBanner.tsx`).
+`useUpload.ts` polls jobs. Drive a banner off `phase` + `progress` (clone `regroup/FinalizeBanner.tsx`)
+in `useRemoteFetch.ts`.
 
-> IMPORTANT: the run **finalizes internally** — when it reports `completed`, transaction reads are
-> already current (pending flag false). Do NOT call finalize separately after a fetch.
+> IMPORTANT: the run **finalizes internally** — the `regrouping` phase IS that finalize, so when it
+> reports `status: completed` transaction reads are already current (pending flag false). Do NOT call
+> finalize separately after a fetch.
+> A `completed` run can still carry **per-source failures** in `result.errors[]` (one server down while
+> others succeeded) — show a partial-success warning rather than assuming every server was reached.
 > If `result.already_local === true`, the requested timestamp was already covered locally and nothing
 > was pulled — surface "already available locally" rather than an error.
 

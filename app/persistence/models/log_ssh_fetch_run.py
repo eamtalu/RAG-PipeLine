@@ -29,6 +29,14 @@ class LogSshFetchMode(str, enum.Enum):
     full = "full"                # re-pull every matching remote file whole (repair / first sync)
 
 
+class LogSshFetchPhase(str, enum.Enum):
+    """Coarse stage the run is in, updated live so the UI can label progress (see `progress`)."""
+    listing = "listing"          # connecting + globbing each source's remote dir
+    fetching = "fetching"        # pulling + ingesting files (the per-file loop)
+    regrouping = "regrouping"    # finalize_pending — Stage 2 stitching of what was ingested
+    done = "done"                # terminal (run status is completed/failed)
+
+
 # Entity
 class LogSshFetchRun(Base):
     __tablename__ = "log_ssh_fetch_runs"
@@ -43,6 +51,11 @@ class LogSshFetchRun(Base):
     status: Mapped[LogSshFetchRunStatus] = mapped_column(
         Enum(LogSshFetchRunStatus), default=LogSshFetchRunStatus.running, index=True
     )
+    # live progress (updated mid-flight on its own session so the poller sees it during the run)
+    phase: Mapped[LogSshFetchPhase | None] = mapped_column(
+        Enum(LogSshFetchPhase), default=LogSshFetchPhase.listing, nullable=True
+    )
+    progress: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # current source/file + running counts
     # outcome (NULL until finished)
     files_considered: Mapped[int | None] = mapped_column(Integer, nullable=True)
     files_fetched: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -16,6 +16,7 @@
 
 import logging
 from datetime import datetime, timezone
+from typing import Awaitable, Callable
 from uuid import UUID
 
 import asyncssh
@@ -29,7 +30,7 @@ from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_ssh_source import LogSshSource
 from app.persistence.models.log_ssh_file_checkpoint import LogSshFileCheckpoint
 from app.persistence.models.log_ssh_fetch_run import (
-    LogSshFetchRun, LogSshFetchRunStatus, LogSshFetchMode,
+    LogSshFetchRun, LogSshFetchRunStatus, LogSshFetchMode, LogSshFetchPhase,
 )
 from app.persistence.repositories.job_repository import JobRepository
 from app.persistence.storage.local import LocalStorage
@@ -38,6 +39,32 @@ from app.services.mnp_log_ingestion.pipeline.derive_transactions import finalize
 from app.services.mnp_log_ingestion.remote import ssh_client
 
 logger = logging.getLogger(__name__)
+
+# Async callback that records live progress for a tracked run (None for the background poller).
+ProgressCb = Callable[..., Awaitable[None]]
+
+
+async def _write_progress(run_id: UUID, *, phase: LogSshFetchPhase | None = None,
+                          files_considered: int | None = None, progress: dict | None = None) -> None:
+    """Update the run row mid-flight on its OWN short-lived session so GET /fetch-remote/runs/{id}
+    reflects progress DURING the fetch. Deliberately decoupled from the fetch/finalize transaction
+    (which holds a per-customer advisory lock) and best-effort: a progress write must never abort the
+    fetch, so failures are logged and swallowed."""
+    values: dict = {}
+    if phase is not None:
+        values["phase"] = phase
+    if files_considered is not None:
+        values["files_considered"] = files_considered
+    if progress is not None:
+        values["progress"] = progress
+    if not values:
+        return
+    try:
+        async with async_session() as db:
+            await db.execute(update(LogSshFetchRun).where(LogSshFetchRun.id == run_id).values(**values))
+            await db.commit()
+    except Exception:  # never let progress reporting break the actual fetch
+        logger.warning("progress write failed for run %s", run_id, exc_info=True)
 
 
 def _basename(remote_path: str) -> str:
@@ -121,9 +148,15 @@ async def _save_ckpt(db: AsyncSession, source: LogSshSource, remote_path: str,
 
 
 async def _fetch_source(db: AsyncSession, source: LogSshSource, mode: LogSshFetchMode,
-                        from_ts: datetime | None) -> dict:
+                        from_ts: datetime | None, *,
+                        on_listed: ProgressCb | None = None,
+                        on_file: ProgressCb | None = None) -> dict:
     """Fetch one server. Pins the host fingerprint on first connect; per-file incremental tail or
-    whole-file (timestamp/full) reads. Returns this source's stats."""
+    whole-file (timestamp/full) reads. Returns this source's stats.
+
+    Progress hooks (no-ops for the poller): `on_listed(considered)` fires once the remote dir is
+    globbed; `on_file(files_done, files_total, current_file, bytes_so_far, entries_so_far)` fires
+    after EVERY listed file — including unchanged/skipped ones — so a progress bar advances smoothly."""
     considered = fetched = entries = total_bytes = 0
     per_file: list[dict] = []
     async with ssh_client.sftp(source) as (client, fp):
@@ -134,31 +167,36 @@ async def _fetch_source(db: AsyncSession, source: LogSshSource, mode: LogSshFetc
 
         listing = await _list(client, source)
         considered = len(listing)
+        if on_listed:
+            await on_listed(considered)
         # timestamp mode: narrow to the files whose mtime could hold entries at/after from_ts.
         selected = (_select_timestamp_files(listing, from_ts)
                     if (mode == LogSshFetchMode.timestamp and from_ts) else None)
-        for path, size, mtime in listing:
+        for idx, (path, size, mtime) in enumerate(listing):
+            start, do_pull = 0, True
             if selected is not None and path not in selected:
-                continue
-            ck = await _ckpt(db, source, path)
-            if mode == LogSshFetchMode.incremental:
+                do_pull = False  # timestamp mode narrowed this file out
+            elif mode == LogSshFetchMode.incremental:
+                ck = await _ckpt(db, source, path)
                 if ck and size == ck.last_size and mtime == ck.last_mtime:
-                    continue  # unchanged — no transfer
-                start = ck.last_offset if (ck and size >= ck.last_size) else 0  # shrink ⇒ re-read whole
-                if ck and start >= size:  # metadata changed but no new bytes
-                    await _save_ckpt(db, source, path, size, mtime, start)
-                    continue
-            elif mode == LogSshFetchMode.timestamp:
-                start = 0  # whole-file; dedup drops the overlap (selection done by the caller)
-            else:  # full
-                start = 0
+                    do_pull = False  # unchanged — no transfer
+                else:
+                    start = ck.last_offset if (ck and size >= ck.last_size) else 0  # shrink ⇒ re-read whole
+                    if ck and start >= size:  # metadata changed but no new bytes
+                        await _save_ckpt(db, source, path, size, mtime, start)
+                        do_pull = False
+            # timestamp (selected) / full: do_pull stays True, start stays 0 — dedup drops any overlap
 
-            new_off, read, ins = await _pull_range(client, path, start, size, db=db, source=source)
-            await _save_ckpt(db, source, path, size, mtime, new_off)
-            fetched += 1
-            entries += ins
-            total_bytes += read
-            per_file.append({"file": path, "bytes": read, "new_entries": ins})
+            if do_pull:
+                new_off, read, ins = await _pull_range(client, path, start, size, db=db, source=source)
+                await _save_ckpt(db, source, path, size, mtime, new_off)
+                fetched += 1
+                entries += ins
+                total_bytes += read
+                per_file.append({"file": path, "bytes": read, "new_entries": ins})
+
+            if on_file:
+                await on_file(idx + 1, considered, path, total_bytes, entries)
 
     return {"source": source.name, "files_considered": considered, "files_fetched": fetched,
             "bytes_fetched": total_bytes, "entries_ingested": entries, "by_file": per_file}
@@ -196,17 +234,27 @@ async def _local_min_ts(db: AsyncSession, customer_code: str) -> datetime | None
 
 async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | None = None,
                     mode: LogSshFetchMode = LogSshFetchMode.incremental,
-                    from_ts: datetime | None = None, enabled_only: bool = False) -> dict:
+                    from_ts: datetime | None = None, enabled_only: bool = False,
+                    on_progress: ProgressCb | None = None) -> dict:
     """Pull from the targeted source(s), then finalize ONCE so transaction reads are current.
 
     Per-source failures are isolated (one unreachable server doesn't abort the others) and recorded
     on that source's last_error; a reachable source updates last_ok_at. Returns aggregate stats incl.
-    the finalize result. Shared by the on-demand endpoint and the background poller."""
+    the finalize result. Shared by the on-demand endpoint and the background poller.
+
+    `on_progress` (the tracked endpoint passes one; the poller doesn't) is called with keyword fields
+    — phase / files_considered / progress — at each stage so the run row reflects live progress."""
     sources = await _load_sources(db, customer_code, source_id, enabled_only=enabled_only)
     agg = {"customer_code": customer_code, "mode": mode.value, "sources": len(sources),
            "files_considered": 0, "files_fetched": 0, "bytes_fetched": 0,
            "entries_ingested": 0, "by_source": [], "errors": []}
+
+    async def _regrouping() -> None:
+        if on_progress is not None:
+            await on_progress(phase=LogSshFetchPhase.regrouping)
+
     if not sources:
+        await _regrouping()
         agg["finalize"] = await finalize_pending(db, customer_code)  # idempotent (windows=0 if none)
         return agg
 
@@ -215,12 +263,40 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
         local_min = await _local_min_ts(db, customer_code)
         if local_min is not None and from_ts >= local_min:
             agg["already_local"] = True
+            await _regrouping()
             agg["finalize"] = await finalize_pending(db, customer_code)
             return agg
 
-    for source in sources:
+    # running cumulative totals across already-completed sources, so per-source hooks can report a
+    # global "so far" while a later source is still mid-flight.
+    base = {"considered": 0, "bytes": 0, "entries": 0}
+    for idx, source in enumerate(sources):
+        on_listed = on_file = None
+        if on_progress is not None:
+            def _prog(done: int, total: int, current_file: str | None,
+                      *, _name=source.name, _idx=idx) -> dict:
+                return {"current_source": _name, "source_index": _idx + 1, "sources_total": len(sources),
+                        "files_total": total, "files_done": done, "current_file": current_file,
+                        "bytes_so_far": base["bytes"], "entries_so_far": base["entries"]}
+
+            async def on_listed(total: int, *, _prog=_prog) -> None:
+                await on_progress(phase=LogSshFetchPhase.fetching,
+                                  files_considered=base["considered"] + total,
+                                  progress=_prog(0, total, None))
+
+            async def on_file(done: int, total: int, current_file: str,
+                              src_bytes: int, src_entries: int, *, _name=source.name, _idx=idx) -> None:
+                await on_progress(
+                    phase=LogSshFetchPhase.fetching,
+                    files_considered=base["considered"] + total,
+                    progress={"current_source": _name, "source_index": _idx + 1,
+                              "sources_total": len(sources), "files_total": total, "files_done": done,
+                              "current_file": current_file,
+                              "bytes_so_far": base["bytes"] + src_bytes,
+                              "entries_so_far": base["entries"] + src_entries})
+
         try:
-            stats = await _fetch_source(db, source, mode, from_ts)
+            stats = await _fetch_source(db, source, mode, from_ts, on_listed=on_listed, on_file=on_file)
             await db.execute(update(LogSshSource).where(LogSshSource.id == source.id)
                              .values(last_ok_at=datetime.now(timezone.utc), last_error=None))
             await db.commit()
@@ -229,6 +305,9 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
             agg["files_fetched"] += stats["files_fetched"]
             agg["bytes_fetched"] += stats["bytes_fetched"]
             agg["entries_ingested"] += stats["entries_ingested"]
+            base["considered"] += stats["files_considered"]
+            base["bytes"] += stats["bytes_fetched"]
+            base["entries"] += stats["entries_ingested"]
         except Exception as exc:  # isolate one bad server
             logger.exception("SSH fetch failed for source %s/%s", customer_code, source.name)
             await db.rollback()
@@ -238,6 +317,7 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
             agg["errors"].append({"source": source.name, "error": str(exc)})
 
     # one finalize for everything the sources just fed (like the watcher's drain-empty flush).
+    await _regrouping()
     agg["finalize"] = await finalize_pending(db, customer_code)
     return agg
 
@@ -247,12 +327,15 @@ async def run_ssh_fetch_tracked(run_id: UUID, customer_code: str, source_id: UUI
     """Background entry point for POST /logs/fetch-remote: run fetch_now and record the outcome on the
     log_ssh_fetch_runs row so the frontend can poll it. Own session; never raises (no caller to
     catch) — failures land as status=failed with the error text."""
+    async def _cb(**fields) -> None:  # live progress writer bound to this run
+        await _write_progress(run_id, **fields)
+
     async with async_session() as db:
         try:
             stats = await fetch_now(db, customer_code, source_id=source_id, mode=mode,
-                                    from_ts=from_ts, enabled_only=False)
+                                    from_ts=from_ts, enabled_only=False, on_progress=_cb)
             values = dict(
-                status=LogSshFetchRunStatus.completed,
+                status=LogSshFetchRunStatus.completed, phase=LogSshFetchPhase.done,
                 files_considered=stats.get("files_considered"),
                 files_fetched=stats.get("files_fetched"),
                 bytes_fetched=stats.get("bytes_fetched"),
@@ -262,7 +345,7 @@ async def run_ssh_fetch_tracked(run_id: UUID, customer_code: str, source_id: UUI
         except Exception as exc:
             logger.exception("Tracked SSH fetch failed (run=%s customer=%s)", run_id, customer_code)
             await db.rollback()
-            values = dict(status=LogSshFetchRunStatus.failed, error=str(exc),
-                          finished_at=datetime.now(timezone.utc))
+            values = dict(status=LogSshFetchRunStatus.failed, phase=LogSshFetchPhase.done,
+                          error=str(exc), finished_at=datetime.now(timezone.utc))
         await db.execute(update(LogSshFetchRun).where(LogSshFetchRun.id == run_id).values(**values))
         await db.commit()

@@ -234,6 +234,8 @@ async def get_fetch_run(run_id: uuid.UUID, customer: str = Depends(get_current_c
         "mode": run.mode.value,
         "requested_from": run.requested_from.isoformat() if run.requested_from else None,
         "status": run.status.value,
+        "phase": run.phase.value if run.phase else None,
+        "progress": run.progress,
         "files_considered": run.files_considered,
         "files_fetched": run.files_fetched,
         "bytes_fetched": run.bytes_fetched,
