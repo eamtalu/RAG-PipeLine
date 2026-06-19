@@ -98,5 +98,26 @@ class Settings(BaseSettings):
     log_agent_max_tokens: int = 8000
     log_agent_max_iterations: int = 12  # safety cap on the tool-use loop
 
+    # --- Notifications (rules → in-process bus → channels: Teams/Slack/WhatsApp) ---
+    # Background worker: evaluates rules over recently-finalized transactions, publishes events to
+    # the in-process bus, and the dispatcher fans them out to each customer's enabled channels.
+    # Delivery is durable store-and-forward (Postgres outbox + per-channel delivery rows), so a
+    # channel/internet outage never drops an alert — it is retried when connectivity returns.
+    # OFF by default.
+    notifications_enabled: bool = False
+    notification_poll_seconds: float = 10.0
+    # Streaming rules only consider transactions whose start is within this window — a flood guard so
+    # enabling the worker on an existing DB doesn't replay the entire error history at once.
+    notification_lookback_seconds: int = 3600
+    # Exponential-ish backoff schedule (seconds) indexed by attempt count; the last value is reused
+    # for every further attempt. Keeps retrying a failed delivery until it succeeds or hits the cap.
+    notification_retry_backoff_seconds: list[int] = [30, 60, 300, 900, 3600]
+    # After this many failed attempts a delivery is dead-lettered (status=dead) instead of retried
+    # forever. Kept high so long outages (overnight, multi-hour) still recover on their own.
+    notification_max_attempts: int = 50
+    # Optional public base URL of the app/frontend; when set, alert cards include a deep link to the
+    # transaction view. Empty ⇒ cards just show the transaction id/fields.
+    app_public_base_url: str = ""
+
 
 settings = Settings()

@@ -11,6 +11,8 @@ from app.services.workers.embedding_worker import run_worker
 from app.services.workers.log_watcher import run_log_watcher
 from app.services.workers.log_grouping_worker import run_log_grouping_worker
 from app.services.workers.ssh_log_fetcher import run_ssh_log_fetcher
+from app.services.workers.notification_worker import run_notification_worker
+from app.services.notifications import dispatcher as notification_dispatcher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -36,6 +38,13 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(run_ssh_log_fetcher()))
     else:
         logging.getLogger(__name__).info("SSH log fetcher disabled (ssh_log_fetcher_enabled=False)")
+    # Notifications (rules → bus → channels). Subscribe the dispatcher to the bus once, then run the
+    # worker that drives rule evaluation + store-and-forward redelivery. Off unless enabled.
+    if settings.notifications_enabled:
+        notification_dispatcher.register()
+        tasks.append(asyncio.create_task(run_notification_worker()))
+    else:
+        logging.getLogger(__name__).info("Notifications disabled (notifications_enabled=False)")
     yield
     for task in tasks:
         task.cancel()

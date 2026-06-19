@@ -13,6 +13,12 @@ from app.persistence.models.log_ssh_fetch_run import LogSshFetchRun
 from app.persistence.models.customer import Customer
 from app.persistence.models.customer_display_name import CustomerDisplayName
 from app.persistence.models.saved_view import SavedView
+from app.persistence.models.notification import (
+    CustomerNotificationChannel,
+    NotificationRule,
+    NotificationEvent,
+    NotificationDelivery,
+)
 
 __all__ = [
     "Base",
@@ -30,4 +36,8 @@ __all__ = [
     "Customer",
     "CustomerDisplayName",
     "SavedView",
+    "CustomerNotificationChannel",
+    "NotificationRule",
+    "NotificationEvent",
+    "NotificationDelivery",
 ]

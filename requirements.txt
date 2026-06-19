@@ -40,3 +40,6 @@ anthropic>=0.69
 
 # --- Remote SSH log source: async SSH/SFTP pull-ingestion from the Windows Server ---
 asyncssh>=2.14  # pulls in `cryptography` (Fernet used to encrypt stored key material)
+
+# --- Notifications: async HTTP client for posting alerts to Teams/Slack webhooks ---
+httpx>=0.27
