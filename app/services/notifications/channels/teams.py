@@ -85,5 +85,6 @@ class TeamsChannel(Channel):
         base = settings.app_public_base_url.rstrip("/") if settings.app_public_base_url else ""
         txn_id = payload.get("transaction_id")
         if base and txn_id:
-            return f"{base}/?txn={txn_id}"
+            # matches the matrix-log-explorer App Router route: src/app/transactions/[id]/page.tsx
+            return f"{base}/transactions/{txn_id}"
         return None
