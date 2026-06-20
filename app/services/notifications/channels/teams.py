@@ -17,7 +17,9 @@ from app.settings import settings
 logger = logging.getLogger(__name__)
 
 # Adaptive Card colors by severity.
-_SEVERITY_COLOR = {"error": "Attention", "warning": "Warning", "info": "Accent"}
+_SEVERITY_COLOR = {
+    "error": "Attention", "warning": "Warning", "info": "Accent", "success": "Good",
+}
 
 
 class TeamsChannel(Channel):

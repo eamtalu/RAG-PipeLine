@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -33,10 +34,12 @@ from app.services.notifications.channels import (
     KNOWN_CHANNEL_TYPES, IMPLEMENTED_CHANNEL_TYPES, get_channel,
 )
 from app.services.notifications.events import NotificationEvent as Event
+from app.services.notifications import dispatcher
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 _VALID_RULE_TYPES = {t.value for t in RuleType}
+_VALID_SEVERITIES = {"success", "info", "warning", "error"}
 
 
 # ===================================================================================================
@@ -54,6 +57,20 @@ class UpdateChannelRequest(BaseModel):
     name: str | None = None
     config: dict | None = None
     enabled: bool | None = None
+
+
+class ManualPublishRequest(BaseModel):
+    """An ad-hoc, user-initiated alert (no rule) — e.g. an analyst flagging something to the team."""
+    title: str = Field(..., max_length=512, description="Headline shown on the alert card.")
+    message: str | None = Field(default=None, description="Longer description / context.")
+    severity: str = Field(default="info", description="success | info | warning | error "
+                          "(sets the card color and the shown Status).")
+    target_channel_ids: list[str] | None = Field(
+        default=None, description="Specific channel ids to post to; null/empty ⇒ all enabled channels.")
+    posted_by: str | None = Field(default=None, description="Who is sending this (shown on the card).")
+    transaction_id: str | None = Field(default=None, description="Optional log transaction this refers "
+                                       "to — adds a deep link + fact to the card.")
+    facts: dict | None = Field(default=None, description="Extra key/value rows to show on the card.")
 
 
 class CreateRuleRequest(BaseModel):
@@ -247,6 +264,72 @@ async def create_channel_endpoint(
     row = await repo.create_channel(customer_code=code, channel_type=body.channel_type,
                                     name=body.name, config=body.config, enabled=body.enabled)
     return _ser_channel(row)
+
+
+@router.post("/{customer_code}/publish", status_code=201)
+async def publish_manual_endpoint(
+    customer_code: str, body: ManualPublishRequest,
+    repo: NotificationRepository = Depends(get_notification_repository),
+    customers: CustomerRepository = Depends(get_customer_repository),
+):
+    """Manually publish an ad-hoc alert to the customer's channel(s) — no rule involved.
+
+    Goes through the SAME durable pipeline as rule-driven alerts (outbox → per-channel delivery →
+    retry → activity), so it's tracked and resilient. Returns the created event plus the immediate
+    per-channel delivery outcome. Use this for an analyst-initiated 'notify the team' action.
+    """
+    code = await _require_customer(customer_code, customers)
+    if body.severity not in _VALID_SEVERITIES:
+        raise HTTPException(400, detail=f"Invalid severity {body.severity!r}. "
+                                        f"Expected one of {sorted(_VALID_SEVERITIES)}.")
+
+    # Resolve the destination channels up-front so the user gets immediate feedback (vs. silently
+    # persisting an event with nowhere to go).
+    enabled = await repo.list_channels(customer_code=code, enabled_only=True)
+    if body.target_channel_ids:
+        wanted = {str(c) for c in body.target_channel_ids}
+        resolved = [c for c in enabled if str(c.id) in wanted]
+        if not resolved:
+            raise HTTPException(400, detail="None of the requested channels are enabled for this "
+                                            "customer.")
+        targets = [str(c.id) for c in resolved]
+    else:
+        if not enabled:
+            raise HTTPException(400, detail="This customer has no enabled channels to publish to. "
+                                            "Add or enable a channel first.")
+        targets = None  # all enabled
+
+    facts: dict = {}
+    if body.facts:
+        facts.update({str(k): v for k, v in body.facts.items()})
+    facts["Status"] = body.severity
+    if body.posted_by:
+        facts["Posted by"] = body.posted_by
+    facts["Posted at"] = datetime.now(timezone.utc).isoformat()
+    payload: dict = {"facts": facts}
+    if body.transaction_id:
+        payload["transaction_id"] = body.transaction_id
+        facts["Transaction"] = body.transaction_id
+
+    event = Event(
+        event_type="manual",
+        customer_code=code,
+        severity=body.severity,
+        title=body.title,
+        summary=body.message,
+        # unique per click — manual alerts always send (never deduped against a prior one).
+        dedup_key=f"manual:{uuid.uuid4()}",
+        payload=payload,
+        target_channel_ids=targets,
+    )
+    # Persist outbox + create per-channel deliveries + attempt immediate send (independent of the
+    # background worker; failures are picked up by the worker's retry loop when it's running).
+    await dispatcher.handle(event)
+
+    row = await repo.get_event_by_dedup_key(event.dedup_key)
+    deliveries = await repo.get_deliveries_for_event(row.id) if row else []
+    return {"event": _ser_event(row) if row else None,
+            "deliveries": [_ser_delivery(d) for d in deliveries]}
 
 
 @router.get("/{customer_code}/channels")
