@@ -55,7 +55,54 @@
         }
        ]
       },
-      "description": "List all tenants. include_inactive=false returns only active ones (use this to populate the frontend selector)."
+      "description": "List all tenants. include_inactive=false returns only active ones (use this to populate the frontend selector). Each row now also carries timezone, timezone_set (false = needs a zone), and effective_timezone (what ingestion/display actually use). Add ?unset_timezone_only=true for just the unconfigured ones."
+     },
+     "response": []
+    },
+    {
+     "name": "List customers - needs timezone (unset)",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/customers?unset_timezone_only=true",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "customers"
+       ],
+       "query": [
+        {
+         "key": "unset_timezone_only",
+         "value": "true"
+        }
+       ]
+      },
+      "description": "The 'needs attention' view: only tenants whose timezone is not yet configured (timezone_set=false). Set each one's zone via PATCH BEFORE its logs are ingested, so stored timestamps are correct."
+     },
+     "response": []
+    },
+    {
+     "name": "List timezones (IANA picker)",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/customers/timezones",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "customers",
+        "timezones"
+       ]
+      },
+      "description": "Every valid IANA timezone name (sorted) for a searchable picker in the customer create/edit UI, plus current_default (what an unconfigured customer falls back to). Shape: { \"current_default\": \"Europe/London\", \"timezones\": [\"Africa/Abidjan\", ...] }."
      },
      "response": []
     },
@@ -86,7 +133,7 @@
       ],
       "body": {
        "mode": "raw",
-       "raw": "{\n  \"customer_code\": \"acme\",\n  \"display_name\": \"Acme Corp\"\n}",
+       "raw": "{\n  \"customer_code\": \"acme\",\n  \"display_name\": \"Acme Corp\",\n  \"timezone\": \"Europe/London\"\n}",
        "options": {
         "raw": {
          "language": "json"
@@ -104,7 +151,7 @@
         "customers"
        ]
       },
-      "description": "Create-or-attach. If customer_code is new -> creates the tenant (201). If customer_code already exists -> attaches display_name as an additional username under that tenant (200, idempotent; the code is never duplicated). 400 on a malformed code. Response includes a display_names[] array of all usernames attached to the tenant. Test script stores customerCode for subsequent /logs requests."
+      "description": "Create-or-attach. If customer_code is new -> creates the tenant (201). If customer_code already exists -> attaches display_name as an additional username under that tenant (200, idempotent; the code is never duplicated). 400 on a malformed code. Response includes a display_names[] array of all usernames attached to the tenant. Test script stores customerCode for subsequent /logs requests. | timezone (optional): IANA name of this customer's log server (e.g. 'Europe/London', 'Europe/Berlin') \u2014 used at ingestion to convert the log's wall-clock to true UTC and on read to display it back. OMIT it to leave the tenant unconfigured (stored null, timezone_set=false, flagged + warned at ingestion until set). Invalid zone -> 400. Response now also returns timezone, timezone_set, and effective_timezone."
      },
      "response": []
     },
@@ -152,7 +199,7 @@
         "{{customerCode}}"
        ]
       },
-      "description": "Fetch a single tenant by code. Response now also includes a display_names[] array of every username attached to this tenant."
+      "description": "Fetch a single tenant by code. Response now also includes a display_names[] array of every username attached to this tenant. Response also includes timezone, timezone_set, and effective_timezone."
      },
      "response": []
     },
@@ -288,7 +335,42 @@
         "{{customerCode}}"
        ]
       },
-      "description": "Retire a tenant from ingestion + selection (active=false) without deleting its data. Set active:true to re-enable."
+      "description": "Retire a tenant from ingestion + selection (active=false) without deleting its data. Set active:true to re-enable. This same PATCH also accepts {\"timezone\": \"...\"}; send active and/or timezone (at least one)."
+     },
+     "response": []
+    },
+    {
+     "name": "Set / change customer timezone",
+     "request": {
+      "method": "PATCH",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"timezone\": \"Europe/Berlin\"\n}",
+       "options": {
+        "raw": {
+         "language": "json"
+        }
+       }
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/v1/customers/{{customerCode}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "customers",
+        "{{customerCode}}"
+       ]
+      },
+      "description": "Set or change this tenant's log-server timezone (IANA name; invalid -> 400). Affects how NEW log lines are converted to UTC at ingestion and how this tenant's timestamps display; it does NOT rewrite already-stored rows (re-ingest to fix historical data). The same endpoint also accepts {\"active\": bool} \u2014 send either or both."
      },
      "response": []
     }

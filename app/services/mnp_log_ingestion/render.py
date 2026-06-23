@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
+from app.services.mnp_log_ingestion.timefmt import to_display
 
 _STATUS_ICON = {
     LogTransactionStatus.success: "✅ SUCCESS",
@@ -199,11 +200,14 @@ def _sql_name(e: LogEntry) -> str:
     return first[:60]
 
 
+# started_at/ended_at are stored as UTC instants; show them in the display zone (UK) to match the log.
 def _date(dt) -> str:
+    dt = to_display(dt)
     return dt.strftime("%Y-%m-%d")
 
 
 def _hms(dt) -> str:
+    dt = to_display(dt)
     return dt.strftime("%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
 
 

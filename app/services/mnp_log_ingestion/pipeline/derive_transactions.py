@@ -28,6 +28,8 @@ from app.settings import settings
 from app.config.database import async_session
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
+from app.persistence.repositories.customer_repository import get_customer_timezone
+from app.services.mnp_log_ingestion.timefmt import to_display, set_display_timezone
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun, LogRegroupRunStatus
 
@@ -146,7 +148,10 @@ class _TxnBuilder:
             "source_file_end": self.entries[-1].source_file,
             "started_at": started,
             "ended_at": ended,
-            "date": started.date() if started else None,
+            # `date` is the day for cheap grouping/filtering and must be the LOCAL (display-zone) day,
+            # not the UTC day — else a transaction in the first hour after local midnight (e.g. 00:30
+            # BST = 23:30 UTC the previous day) would be filed under the wrong date.
+            "date": to_display(started).date() if started else None,
             "duration_ms": duration_ms,
             "user_name": user_name,
             "user_id": g("UserID"),
@@ -462,6 +467,10 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
     prior cycle already sealed). We SKIP such a builder (leaving its entries unassigned) and warn —
     the repair path is a full regroup — rather than letting one clash kill the whole grouping cycle.
     """
+    # pin the display zone to THIS customer so each builder's `date` (computed via to_display) is the
+    # customer's LOCAL calendar day, not the host's / a global default.
+    set_display_timezone(await get_customer_timezone(db, customer_code))
+
     created = sealed = assigned = skipped = 0
     by_status: dict[str, int] = {}
     seen: set[uuid.UUID] = set()

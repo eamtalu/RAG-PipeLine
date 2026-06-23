@@ -28,6 +28,7 @@ from app.services.mnp_log_ingestion.pipeline.derive_transactions import (
     regroup_all, regroup_incremental, finalize_pending, run_finalize_tracked,
 )
 from app.services.mnp_log_ingestion.render import render_transaction
+from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc, active_timezone_name
 from app.services.log_agent.agent import LogDebugAgent, get_log_debug_agent
 
 router = APIRouter(prefix="/logs", tags=["logs"])
@@ -201,9 +202,9 @@ async def list_entries(
     if q:
         stmt = stmt.where(LogEntry.message.ilike(f"%{q}%"))
     if time_from is not None:
-        stmt = stmt.where(LogEntry.timestamp >= time_from)
+        stmt = stmt.where(LogEntry.timestamp >= from_display_to_utc(time_from))
     if time_to is not None:
-        stmt = stmt.where(LogEntry.timestamp <= time_to)
+        stmt = stmt.where(LogEntry.timestamp <= from_display_to_utc(time_to))
 
     stmt = stmt.order_by(LogEntry.timestamp, LogEntry.line_number).limit(limit).offset(offset)
     rows = (await db.execute(stmt)).scalars().all()
@@ -219,7 +220,7 @@ async def list_entries(
                 "transaction_id": str(e.transaction_id) if e.transaction_id else None,
                 "source_file": e.source_file,
                 "line_number": e.line_number,
-                "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                "timestamp": iso_display(e.timestamp),
                 "level": e.level,
                 "logger": e.logger,
                 "method": e.method,
@@ -255,8 +256,8 @@ def _txn_summary(t: LogTransaction) -> dict:
         "item_number": t.item_number,
         "delivery_number": t.delivery_number,
         "order_number": t.order_number,
-        "started_at": t.started_at.isoformat() if t.started_at else None,
-        "ended_at": t.ended_at.isoformat() if t.ended_at else None,
+        "started_at": iso_display(t.started_at),
+        "ended_at": iso_display(t.ended_at),
         "date": t.date.isoformat() if t.date else None,
         "duration_ms": t.duration_ms,
         "entry_count": t.entry_count,
@@ -477,9 +478,9 @@ async def list_transactions(
     if reqid is not None:
         conds.append(LogTransaction.reqid == reqid)
     if time_from is not None:
-        conds.append(LogTransaction.started_at >= time_from)
+        conds.append(LogTransaction.started_at >= from_display_to_utc(time_from))
     if time_to is not None:
-        conds.append(LogTransaction.started_at <= time_to)
+        conds.append(LogTransaction.started_at <= from_display_to_utc(time_to))
 
     total = await db.scalar(select(func.count()).select_from(LogTransaction).where(*conds))
     rows = (await db.execute(
@@ -524,7 +525,11 @@ async def view_transactions(
     if date is not None:
         conds.append(LogTransaction.date == date)
     if hour is not None:
-        conds.append(func.extract("hour", LogTransaction.started_at) == hour)
+        # `hour` is a LOCAL hour-of-day (matching the displayed times); started_at is a UTC instant, so
+        # convert to the customer's display zone before extracting, else this is off by the tz offset.
+        conds.append(
+            func.extract("hour", func.timezone(active_timezone_name(), LogTransaction.started_at)) == hour
+        )
     if status is not None:
         conds.append(LogTransaction.status == status)
 
@@ -623,7 +628,7 @@ async def get_transaction(transaction_id: uuid.UUID,
             {
                 "seq": e.seq,
                 "entry_type": e.entry_type.value,
-                "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                "timestamp": iso_display(e.timestamp),
                 "level": e.level,
                 "mi_program": e.mi_program,
                 "mi_transaction": e.mi_transaction,

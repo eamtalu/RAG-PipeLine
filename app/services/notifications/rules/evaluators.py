@@ -20,6 +20,7 @@ from app.persistence.models.log_transaction import LogTransaction
 from app.persistence.models.notification import NotificationRule
 from app.services.notifications.events import NotificationEvent
 from app.services.notifications.rules.base import StreamingEvaluator, WindowEvaluator
+from app.services.mnp_log_ingestion.timefmt import iso_display
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,8 @@ def transaction_payload(txn: LogTransaction) -> dict:
         "Warehouse": txn.warehouse,
         "User": txn.user_name,
         "Req ID": txn.reqid,
-        "Started": txn.started_at.isoformat() if txn.started_at else None,
+        # display-only: show the start in UK time to match the logs (storage/window math stay UTC)
+        "Started": iso_display(txn.started_at),
         "Duration (ms)": txn.duration_ms,
         "Error": txn.error_text,
     }
@@ -143,7 +145,7 @@ class ErrorDigestEvaluator(WindowEvaluator):
         facts = {
             "Customer": self.rule.customer_code,
             "Total": len(rows),
-            "Window": f"{window_start.isoformat()} → {window_end.isoformat()}",
+            "Window": f"{iso_display(window_start)} → {iso_display(window_end)}",
             "Statuses": ", ".join(statuses),
         }
         for method, count in top:
@@ -154,8 +156,8 @@ class ErrorDigestEvaluator(WindowEvaluator):
             customer_code=self.rule.customer_code,
             severity=self.rule.severity,
             title=f"[{self.rule.customer_code}] Error digest: {len(rows)} transactions",
-            summary=f"{len(rows)} matching transactions between {window_start.isoformat()} and "
-                    f"{window_end.isoformat()}.",
+            summary=f"{len(rows)} matching transactions between {iso_display(window_start)} and "
+                    f"{iso_display(window_end)}.",
             dedup_key=dedup_key,
             payload={"facts": facts},
             target_channel_ids=_target_ids(self.rule),

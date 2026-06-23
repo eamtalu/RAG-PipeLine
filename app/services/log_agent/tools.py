@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
+from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc
 
 # ---------------------------------------------------------------------------
 # Tool schemas (sent to Claude)
@@ -157,7 +158,7 @@ def _txn_summary(t: LogTransaction) -> dict:
         "item_number": t.item_number,
         "delivery_number": t.delivery_number,
         "order_number": t.order_number,
-        "started_at": t.started_at.isoformat() if t.started_at else None,
+        "started_at": iso_display(t.started_at),
         "date": t.date.isoformat() if t.date else None,
         "duration_ms": t.duration_ms,
         "entry_count": t.entry_count,
@@ -171,8 +172,10 @@ def _txn_summary(t: LogTransaction) -> dict:
 # ---------------------------------------------------------------------------
 
 def _parse_dt(value: str) -> datetime | None:
+    """Parse an inbound time filter. A naive value is interpreted as the display zone (UK) — matching
+    the times the agent surfaces — and returned as UTC-aware, so it compares to the UTC-stored column."""
     try:
-        return datetime.fromisoformat(value)
+        return from_display_to_utc(datetime.fromisoformat(value))
     except (TypeError, ValueError):
         return None
 
@@ -297,7 +300,7 @@ async def _get_transaction(db: AsyncSession, args: dict, customer_code: str) -> 
         "facility": t.facility,
         "device_id": t.device_id,
         "device_name": t.device_name,
-        "ended_at": t.ended_at.isoformat() if t.ended_at else None,
+        "ended_at": iso_display(t.ended_at),
         "mi_program_count": t.mi_program_count,
         "request_summary": t.request_summary,
         "response_summary": t.response_summary,
@@ -313,7 +316,7 @@ async def _get_transaction(db: AsyncSession, args: dict, customer_code: str) -> 
             "seq": e.seq,
             "type": e.entry_type.value,
             "level": e.level,
-            "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+            "timestamp": iso_display(e.timestamp),
             "mi_program": e.mi_program,
             "mi_transaction": e.mi_transaction,
             "result_status": e.result_status,
@@ -356,7 +359,7 @@ async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> d
             "transaction_id": str(e.transaction_id) if e.transaction_id else None,
             "type": e.entry_type.value,
             "level": e.level,
-            "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+            "timestamp": iso_display(e.timestamp),
             "mi_program": e.mi_program,
             "mi_transaction": e.mi_transaction,
             "result_status": e.result_status,

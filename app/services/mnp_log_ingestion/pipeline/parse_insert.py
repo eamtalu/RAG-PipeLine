@@ -15,6 +15,7 @@ import hashlib
 import logging
 import uuid
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -24,6 +25,7 @@ from app.settings import settings
 from app.persistence.models.job import Job, JobStatus
 from app.persistence.models.log_entry import LogEntry, LogEntryType
 from app.persistence.models.log_regroup_pending import LogRegroupPending
+from app.persistence.repositories.customer_repository import get_customer_timezone_raw
 from app.persistence.storage.base import ObjectStorage
 from app.services.mnp_log_ingestion.parsers.LogParserFactory import get_log_parser
 
@@ -67,6 +69,21 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
         parser = get_log_parser(settings.log_format)
         records = parser.parse(text)
 
+        # The parser yields the log's NAIVE local wall-clock. Attach THIS customer's configured
+        # timezone so it becomes a true UTC instant on insert — independent of the ingest host's
+        # timezone (asyncpg would otherwise assume the host's). DST is handled per-date by ZoneInfo.
+        # This is the single choke point for EVERY ingestion path (frontend upload/scan/remote-fetch,
+        # backend SSH auto-pull, watcher), so the safeguard warning below covers them all.
+        raw_tz = await get_customer_timezone_raw(db, job.customer_code)
+        if raw_tz is None:
+            logger.warning(
+                "Customer %r ingested logs with NO timezone configured — falling back to %s. If this "
+                "customer's log server is not in that zone, its stored timestamps will be wrong. Set it "
+                "via PATCH /api/v1/customers/%s {\"timezone\": \"...\"} and re-ingest.",
+                job.customer_code, settings.display_timezone, job.customer_code,
+            )
+        cust_zone = ZoneInfo(raw_tz or settings.display_timezone)
+
         # Map LogRecords → row dicts, dedup-by-content via entry_hash, insert in batches.
         # Within-file duplicates (same raw_body twice) are collapsed here so one INSERT batch
         # never carries two rows with the same entry_hash (which ON CONFLICT can't resolve).
@@ -84,6 +101,9 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
             if h in seen_in_batch:
                 continue
             seen_in_batch.add(h)
+            ts = rec.timestamp
+            if ts is not None and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=cust_zone)  # naive local wall-clock → aware (customer zone)
             batch.append({
                 "id": uuid.uuid4(),
                 "job_id": job_id,
@@ -91,7 +111,7 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
                 "entry_hash": h,
                 "source_file": job.filename,
                 "line_number": rec.line_number,
-                "timestamp": rec.timestamp,
+                "timestamp": ts,
                 "level": rec.level,
                 "thread": rec.thread,
                 "user_ctx": rec.user,

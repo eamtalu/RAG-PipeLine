@@ -18,6 +18,7 @@ import re
 from fastapi import Depends, Header, HTTPException
 
 from app.persistence.repositories.customer_repository import CustomerRepository, get_customer_repository
+from app.services.mnp_log_ingestion.timefmt import set_display_timezone
 
 # customer codes are slugs: lowercase letters, digits, hyphen/underscore, 1–64 chars.
 _CUSTOMER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -43,9 +44,13 @@ async def get_current_customer(
     code = normalize_customer_code(x_customer_code)
     if code is None:
         raise HTTPException(400, detail="Invalid X-Customer-Code (expected a slug like 'acme').")
-    if not await repo.exists(code):
+    cust = await repo.get_by_code(code)
+    if cust is None:
         raise HTTPException(404, detail=f"Unknown customer: {code!r}. Create its log space first "
                                         f"(POST /api/v1/customers).")
+    # pin this request's display zone to the customer's timezone so every timestamp this request
+    # serializes/renders comes back in that customer's local time.
+    set_display_timezone(cust.timezone)
     return code
 
 
@@ -58,7 +63,9 @@ async def get_active_customer(
     code = normalize_customer_code(x_customer_code)
     if code is None:
         raise HTTPException(400, detail="Invalid X-Customer-Code (expected a slug like 'acme').")
-    if not await repo.exists(code, must_be_active=True):
+    cust = await repo.get_by_code(code)
+    if cust is None or not cust.active:
         raise HTTPException(404, detail=f"Unknown or inactive customer: {code!r}. Create/activate its "
                                         f"log space first (POST /api/v1/customers).")
+    set_display_timezone(cust.timezone)
     return code

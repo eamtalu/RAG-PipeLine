@@ -19,8 +19,10 @@ from app.config.database import async_session
 from app.persistence.models.log_transaction import LogTransaction
 from app.persistence.models.notification import NotificationRule
 from app.persistence.repositories.notification_repository import NotificationRepository
+from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.services.notifications.bus import bus
 from app.services.notifications.rules.base import build_evaluator, is_streaming
+from app.services.mnp_log_ingestion.timefmt import set_display_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ async def _run_streaming(db: AsyncSession, repo: NotificationRepository,
         by_customer[r.customer_code].append(r)
 
     for customer_code, cust_rules in by_customer.items():
+        set_display_timezone(await get_customer_timezone(db, customer_code))  # localize message times
         txns = (await db.execute(
             select(LogTransaction).where(
                 LogTransaction.customer_code == customer_code,
@@ -84,6 +87,7 @@ async def _run_window(db: AsyncSession, repo: NotificationRepository,
                       rules: list[NotificationRule]) -> None:
     now_epoch = int(datetime.now(timezone.utc).timestamp())
     for rule in rules:
+        set_display_timezone(await get_customer_timezone(db, rule.customer_code))  # localize message times
         ev = build_evaluator(rule)
         if ev is None:
             continue

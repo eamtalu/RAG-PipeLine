@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     app_name: str = "RAG Backend"
     debug: bool = False
 
+    # --- Display timezone ---
+    # Log timestamps are stored as UTC instants (timestamptz). They are CONVERTED to this zone for
+    # human display only (API isoformat output, the §6 text view, agent answers, notification bodies)
+    # — storage/grouping/comparisons stay in UTC. Use an IANA name so DST is automatic (Europe/London
+    # → BST in summer, GMT in winter), never a fixed offset. See timefmt.py.
+    display_timezone: str = "Europe/London"
+
     # --- Multi-tenant (per-customer log segregation) ---
     # Tenant of pre-existing rows at migration time (logs ingested before customer_code existed), and
     # the fallback code for document-pipeline jobs (which have no tenant concept). Valid tenants are

@@ -26,6 +26,12 @@ class Customer(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     customer_code: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # stable slug
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # IANA timezone of THIS customer's log server (e.g. "Europe/London", "Europe/Berlin"). Used at
+    # ingestion to localize the log's naive wall-clock into a true UTC instant (independent of the
+    # ingest host's timezone), and on read to display those instants back in the customer's local time.
+    # NULL = not yet configured: behaviour falls back to settings.display_timezone, but the NULL is the
+    # detectable "needs attention" signal (ingestion warns; GET /customers reports timezone_set=false).
+    timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(

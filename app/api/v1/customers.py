@@ -5,10 +5,12 @@ these to let a user pick which tenant's log space to view or ingest into.
 """
 
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
+from app.settings import settings
 from app.api.deps import normalize_customer_code
 from app.persistence.models.customer import Customer
 from app.persistence.models.customer_display_name import CustomerDisplayName
@@ -16,14 +18,29 @@ from app.persistence.repositories.customer_repository import CustomerRepository,
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
+_TZ_HELP = ("IANA timezone of this customer's log server, e.g. 'Europe/London' or 'Europe/Berlin'. "
+            "Omit to leave it unconfigured (flagged as timezone_set=false until set).")
+
+
+def _validate_tz(tz: str) -> str:
+    """Reject anything that isn't a real IANA zone (a bad value would corrupt every timestamp)."""
+    tz = (tz or "").strip()
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        raise HTTPException(400, detail=f"Invalid timezone {tz!r}. Use an IANA name like 'Europe/London'.")
+    return tz
+
 
 class CreateCustomerRequest(BaseModel):
     customer_code: str = Field(..., description="Stable slug (lowercase letters/digits/-/_), e.g. 'acme'.")
     display_name: str | None = Field(default=None, description="Human-readable name shown in the UI.")
+    timezone: str | None = Field(default=None, description=_TZ_HELP)
 
 
 class UpdateCustomerRequest(BaseModel):
-    active: bool = Field(..., description="Set false to retire the tenant from ingestion + selection.")
+    active: bool | None = Field(default=None, description="Set false to retire the tenant from ingestion + selection.")
+    timezone: str | None = Field(default=None, description=_TZ_HELP)
 
 
 class AddDisplayNameRequest(BaseModel):
@@ -36,6 +53,9 @@ def _serialize(c: Customer) -> dict:
         "id": str(c.id),
         "customer_code": c.customer_code,
         "display_name": c.display_name,
+        "timezone": c.timezone,                                      # exactly as stored (null = unset)
+        "timezone_set": c.timezone is not None,                      # false → needs attention
+        "effective_timezone": c.timezone or settings.display_timezone,  # what ingestion/display use
         "active": c.active,
         "created_at": c.created_at.isoformat() if c.created_at else None,
     }
@@ -75,6 +95,7 @@ async def create_customer(
     code = normalize_customer_code(body.customer_code)
     if code is None:
         raise HTTPException(400, detail="Invalid customer_code (expected a slug like 'acme').")
+    tz = _validate_tz(body.timezone) if (body.timezone or "").strip() else None
 
     name = (body.display_name or "").strip() or None
     existing = await repo.get_by_code(code)
@@ -87,7 +108,7 @@ async def create_customer(
         return await _serialize_with_names(existing, repo)
 
     # new tenant → create the row, and record the display name in the names list too (when given)
-    cust = await repo.create(code, name)
+    cust = await repo.create(code, name, timezone=tz)
     if name:
         await repo.add_display_name(code, name)
     return await _serialize_with_names(cust, repo)
@@ -96,11 +117,26 @@ async def create_customer(
 @router.get("")
 async def list_customers(
     include_inactive: bool = Query(default=True, description="Include retired (inactive) tenants."),
+    unset_timezone_only: bool = Query(default=False,
+                                      description="Only tenants whose timezone is not yet configured "
+                                                  "(timezone_set=false) — for a 'needs attention' view."),
     repo: CustomerRepository = Depends(get_customer_repository),
 ):
-    """List all tenants (for the frontend's log-space selector)."""
+    """List all tenants (for the frontend's log-space selector). Each row carries `timezone`,
+    `timezone_set`, and `effective_timezone` so the UI can flag any tenant still missing a timezone."""
     rows = await repo.list_all(include_inactive=include_inactive)
+    if unset_timezone_only:
+        rows = [c for c in rows if c.timezone is None]
     return {"count": len(rows), "customers": [_serialize(c) for c in rows]}
+
+
+# NOTE: declared BEFORE GET "/{customer_code}" so "timezones" isn't parsed as a customer code.
+@router.get("/timezones")
+async def list_timezones():
+    """Every valid IANA timezone name (sorted) — for a searchable picker in the customer create/edit
+    UI. The `current_default` is what an unconfigured customer falls back to."""
+    return {"current_default": settings.display_timezone,
+            "timezones": sorted(available_timezones())}
 
 
 # NOTE: must be declared BEFORE GET "/{customer_code}" — otherwise "log-spaces" is parsed as a code.
@@ -207,10 +243,22 @@ async def update_customer(
     body: UpdateCustomerRequest,
     repo: CustomerRepository = Depends(get_customer_repository),
 ):
-    """Activate / deactivate a tenant. Deactivating retires it from ingestion + selection without
-    deleting its historical data (use DELETE /logs/data to remove the data itself)."""
+    """Activate/deactivate a tenant and/or update its timezone. Deactivating retires it from ingestion
+    + selection without deleting its historical data (use DELETE /logs/data to remove the data itself).
+
+    Changing `timezone` affects how NEW log lines are converted to UTC at ingestion and how all of this
+    tenant's timestamps are displayed; it does NOT rewrite already-stored instants."""
     code = normalize_customer_code(customer_code)
-    cust = await repo.set_active(code, body.active) if code else None
+    if code is None:
+        raise HTTPException(404, detail=f"Unknown customer: {customer_code!r}")
+    if body.active is None and body.timezone is None:
+        raise HTTPException(400, detail="Provide 'active' and/or 'timezone' to update.")
+
+    cust = await repo.get_by_code(code)
     if cust is None:
         raise HTTPException(404, detail=f"Unknown customer: {customer_code!r}")
+    if body.timezone is not None:
+        cust = await repo.set_timezone(code, _validate_tz(body.timezone))
+    if body.active is not None:
+        cust = await repo.set_active(code, body.active)
     return _serialize(cust)
