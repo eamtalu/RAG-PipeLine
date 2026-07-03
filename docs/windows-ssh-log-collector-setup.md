@@ -13,6 +13,7 @@ It is intended as a **repeatable runbook** for onboarding additional Windows hos
 |------|----|------|
 | `192.168.0.142` | Ubuntu 24.04.4 LTS | FastAPI log collector (SSH/SFTP **client**) |
 | `192.168.0.124` (`LAPTOP-DPJEJEU6`) | Windows 10 (Build 26200) | WMS log source (OpenSSH **server**) |
+| `20.254.33.155` (`TMP-AZ-BEC01`) | Windows Server (Azure, domain-joined) | WMS log source (OpenSSH **server**) |
 
 - **Service account on Windows:** `svc_logs` (non-admin local user, dedicated to log fetching)
 - **Auth model:** Ubuntu authenticates to Windows with an **ed25519 key pair** — no passwords in the collector.
@@ -69,8 +70,53 @@ Create a **dedicated, non-admin** local user for log collection. Keep it **out o
 Administrators group** — it only needs read access to the log directory.
 
 ```powershell
-$pw = Read-Host -AsSecureString "Password for svc_logs"
+# NOTE: the quoted string is only the PROMPT TEXT shown on screen.
+# You type the actual password at the prompt (input is hidden).
+# Never put the password itself inside this command / this document.
+$pw = Read-Host -AsSecureString "TQApniZASQAZKLNTvwJkk2GkNFHGVD"
 New-LocalUser -Name "svc_logs" -Password $pw -PasswordNeverExpires -AccountNeverExpires
+```
+
+> If you later lose track of the password, reset it with
+> `Set-LocalUser -Name svc_logs -Password (Read-Host -AsSecureString "New password")`.
+> A failed password login shows up in the sshd debug log as `error: 1326`.
+
+### Log on once as `svc_logs` to create the profile — **required**
+
+`New-LocalUser` creates the account but **not** its profile under `C:\Users`. Until the
+account has logged on once, Windows resolves its home directory to `C:\Windows`, so sshd
+looks for `C:\Windows\.ssh\authorized_keys` — key auth silently fails and falls back to a
+password prompt, even when everything else is correct.
+
+```powershell
+runas /user:svc_logs cmd
+# Enter the password; a cmd window opens as svc_logs — type `exit` in it.
+
+Test-Path C:\Users\svc_logs    # must print True before you continue
+```
+
+> ⚠️ **Do NOT pre-create `C:\Users\svc_logs` by hand.** If a folder with that name already
+> exists at first logon, Windows creates the profile at `C:\Users\svc_logs.<HOSTNAME>`
+> instead and sshd looks in the wrong place. If you already created it, delete it first
+> (you may need `icacls <file> /grant "Administrators:F"` on locked-down files inside).
+
+### Hardened servers: check `AllowGroups` in sshd_config
+
+Managed/domain-joined servers often restrict who may SSH in at all. If this gate blocks
+the account, **both** key and password auth fail before they are even attempted.
+
+```powershell
+Select-String -Path C:\ProgramData\ssh\sshd_config -Pattern 'AllowGroups|AllowUsers|DenyGroups|DenyUsers'
+```
+
+If it returns something like `AllowGroups administrators "openssh users"`, add `svc_logs`
+to one of the listed **non-admin** groups (never Administrators — that changes where sshd
+looks for the key, see Section 5):
+
+```powershell
+Add-LocalGroupMember -Group "OpenSSH Users" -Member svc_logs
+Get-LocalGroupMember "OpenSSH Users"    # verify
+# No sshd restart needed — group membership is evaluated per connection.
 ```
 
 ### Verify the log path is reachable
@@ -122,23 +168,45 @@ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...FykD fastapi-log-collector
 
 ## 5. Windows Server — Install the Public Key (`authorized_keys`)
 
-Log in as `svc_logs` (or have an admin run this in that user's context) and run in
-**PowerShell**:
+**Prerequisite:** `C:\Users\svc_logs` must exist as a *real profile* (the first-logon
+step in Section 3), otherwise sshd will not look here at all.
+
+Run in an **elevated PowerShell**:
 
 ```powershell
 $keyDir = "C:\Users\svc_logs\.ssh"
 New-Item -ItemType Directory -Force -Path $keyDir
 
-# Paste the FULL public key line from Ubuntu's /keys/wms1_key.pub
-Add-Content "$keyDir\authorized_keys" "ssh-ed25519 AAAAC3Nza...FykD fastapi-log-collector"
+# Paste the FULL single-line output of `cat /keys/wmsN_key.pub` from Ubuntu between
+# the quotes. Use THIS host's key — never reuse a line from another host or from an
+# example in a document.
+Set-Content C:\Users\svc_logs\.ssh\authorized_keys "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILEjK6YFLI57ojeEJGxdNrT3AWDBlZoDyHxUcEJ/FykD fastapi-log-collector" -Encoding Asci
 
 # Lock down permissions, or sshd will silently ignore the key
 icacls "$keyDir\authorized_keys" /inheritance:r
 icacls "$keyDir\authorized_keys" /grant "svc_logs:F" /grant "SYSTEM:F"
 ```
 
+To confirm the right key landed, compare fingerprints — these two commands must print
+the **same** `SHA256:...` value:
+
+```bash
+# Ubuntu
+ssh-keygen -lf /keys/wms1_key.pub
+```
+
+```powershell
+# Windows (grant yourself temporary read access first if denied)
+ssh-keygen -lf C:\Users\svc_logs\.ssh\authorized_keys
+```
+
 > ⚠️ **Permissions matter.** Windows OpenSSH refuses to use `authorized_keys` if it is
 > writable by other users. The `icacls /inheritance:r` + explicit grants above are required.
+> Note these ACLs also lock **Administrators** out — to read/edit/delete the file later,
+> first run `icacls "$keyDir\authorized_keys" /grant "Administrators:F"`.
+
+> **Encoding matters too.** Use `Set-Content -Encoding Ascii` (or `Add-Content`).
+> `Out-File` / redirection writes UTF-16, which sshd cannot parse.
 
 > **Note on admin accounts:** For users in the Administrators group, OpenSSH reads
 > `C:\ProgramData\ssh\administrators_authorized_keys` instead. `svc_logs` is intentionally
@@ -178,15 +246,15 @@ After accepting, the host is added to `~/.ssh/known_hosts` and won't prompt agai
 
 These are the values the FastAPI collector needs per Windows host:
 
-| Parameter | Value (this host) |
-|-----------|-------------------|
-| Host / IP | `192.168.0.124` |
-| Port | `22` |
-| Username | `svc_logs` |
-| Private key path | `/keys/wms1_key` |
-| Auth method | publickey (ed25519) |
-| Log directory | `C:/BEC Logs` |
-| File glob | `*.txt*` |
+| Parameter | `LAPTOP-DPJEJEU6` | `TMP-AZ-BEC01` |
+|-----------|-------------------|----------------|
+| Host / IP | `192.168.0.124` | `20.254.33.155` |
+| Port | `22` | `22` |
+| Username | `svc_logs` | `svc_logs` |
+| Private key path | `/keys/wms1_key` | `/keys/wms1_key` |
+| Auth method | publickey (ed25519) | publickey (ed25519) |
+| Log directory | `C:/BEC Logs` | `C:/BEC Logs` |
+| File glob | `*.txt*` | `*.txt*` |
 
 ---
 
@@ -195,11 +263,13 @@ These are the values the FastAPI collector needs per Windows host:
 1. [ ] Install + enable `sshd` on the new host (Section 2)
 2. [ ] Open firewall TCP/22 (Section 2)
 3. [ ] Create the `svc_logs` service account (Section 3)
-4. [ ] Confirm the log path & glob (Section 3)
-5. [ ] Generate a **new** key pair on Ubuntu (e.g. `wms2_key`) (Section 4)
-6. [ ] Install that host's public key into `svc_logs\.ssh\authorized_keys` (Section 5)
-7. [ ] Verify `ssh -i` and `sftp -i` work without a password (Section 6)
-8. [ ] Register the host's connection params in the collector config (Section 7)
+4. [ ] **Log on once as `svc_logs`** so the `C:\Users\svc_logs` profile exists (Section 3)
+5. [ ] Check `sshd_config` for `AllowGroups` / `AllowUsers`; add `svc_logs` to an allowed group if needed (Section 3)
+6. [ ] Confirm the log path & glob (Section 3)
+7. [ ] Generate a **new** key pair on Ubuntu (e.g. `wms2_key`) (Section 4)
+8. [ ] Install **that host's** public key into `svc_logs\.ssh\authorized_keys`; verify fingerprints match (Section 5)
+9. [ ] Verify `ssh -i` and `sftp -i` work without a password (Section 6)
+10. [ ] Register the host's connection params in the collector config (Section 7)
 
 > Use a **separate key per host** (`wms1_key`, `wms2_key`, …) so a single compromised
 > key can be revoked without affecting other hosts.
@@ -208,14 +278,58 @@ These are the values the FastAPI collector needs per Windows host:
 
 ## 9. Troubleshooting
 
-| Symptom | Likely cause | Fix |
+A password prompt after installing the key means Windows rejected the key **silently**
+and fell back to password auth. Don't guess — get the reason from the logs (see
+"Reading the sshd logs" below). Confirmed causes we have hit, roughly in the order to
+check them:
+
+| Symptom / log message | Likely cause | Fix |
 |---------|-------------|-----|
-| Still prompted for password after adding key | `authorized_keys` permissions too open | Re-run the `icacls` commands in Section 5 |
+| Debug log: `trying public key file C:\Windows\.ssh/authorized_keys` | **`svc_logs` never logged on** — profile doesn't exist, home dir resolves to `C:\Windows` | First-logon step in Section 3 (`runas /user:svc_logs cmd`). Delete any hand-made `C:\Users\svc_logs` folder first |
+| Event log: `User svc_logs ... not allowed because none of user's groups are listed in AllowGroups` | Hardened `sshd_config` gates SSH logins by group | `Add-LocalGroupMember -Group "OpenSSH Users" -Member svc_logs` (Section 3) |
+| Key offered (`ssh -vvv` shows `Offering public key`) but rejected | Key in `authorized_keys` isn't this host's key (e.g. copy-pasted from another host/doc) | Compare `ssh-keygen -lf` fingerprints on both sides (Section 5) |
+| Debug log: `bad ownership or modes` | `authorized_keys` permissions too open | Re-run the `icacls` commands in Section 5 |
+| Debug log: `Windows authentication failed ... error: 1326` on password attempt | Wrong password (e.g. the `Read-Host` prompt-vs-password confusion) | `Set-LocalUser -Name svc_logs -Password (Read-Host -AsSecureString "New password")` |
 | `Permission denied (publickey)` | Wrong key, wrong user, or key not installed | Confirm `cat /keys/wms1_key.pub` matches the line in `authorized_keys` |
 | `Connection refused` | sshd not running / firewall blocking | `Get-Service sshd`; verify the firewall rule (Section 2) |
-| `Host key verification failed` | known_hosts mismatch (host reinstalled) | Remove the stale line: `ssh-keygen -R 192.168.0.124` |
+| `Host key verification failed` | known_hosts mismatch (host reinstalled) | Remove the stale line: `ssh-keygen -R <host-ip>` |
 | SFTP can't find logs | Backslashes / unquoted path with space | Use `ls "C:/BEC Logs"` |
 | Admin user key ignored | Account is in Administrators group | Use `administrators_authorized_keys` or a standard user |
+| Admin can't read/edit/delete `authorized_keys` (`Access denied`) | Section 5 ACLs lock out Administrators too — this is expected | `icacls <file> /grant "Administrators:F"`, do the change, re-run the Section 5 `icacls` lockdown |
+
+### Diagnosing from the Ubuntu side
+
+```bash
+ssh -vvv -i /keys/wms1_key svc_logs@<host> 2>&1 | grep -iE 'offering|identity|denied|sign'
+```
+
+If you see `Offering public key: /keys/wms1_key ...` followed by a password prompt, the
+client side is fine — the rejection reason is on the Windows side.
+
+### Reading the sshd logs on Windows
+
+Quick look without any config change (default INFO level — shows `AllowGroups` blocks
+and password failures, but **not** why a key was refused):
+
+```powershell
+Get-WinEvent -LogName 'OpenSSH/Operational' -MaxEvents 30 | Format-List TimeCreated, Message
+```
+
+For the full story (exact `authorized_keys` path tried + refusal reason), enable debug
+file logging. `C:\ProgramData` is a **hidden** folder — it won't show in Explorer, but
+every command below works regardless:
+
+```powershell
+notepad C:\ProgramData\ssh\sshd_config
+# change:  #SyslogFacility AUTH   ->  SyslogFacility LOCAL0
+#          #LogLevel INFO         ->  LogLevel DEBUG3
+Restart-Service sshd
+
+# Reproduce the failed login from Ubuntu once, then:
+Select-String -Path C:\ProgramData\ssh\logs\sshd.log -Pattern 'svc_logs|authorized|denied|refused|bad|trying' | Select-Object -Last 40
+```
+
+> Revert to `LogLevel INFO` and `Restart-Service sshd` when done — DEBUG3 is very verbose.
 
 ---
 
