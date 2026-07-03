@@ -155,9 +155,13 @@ async def main() -> int:
                          headers=hdr())
         check(r.status_code == 201, "add comment → 201", f"got {r.status_code} {r.text}")
         cm = r.json()
-        check(set(cm.keys()) == {"id", "author", "body", "created_at"},
-              "comment response is the comment only", str(cm.keys()))
+        check(set(cm.keys()) == {"id", "author", "body", "created_at",
+                                 "anchor", "refs", "quote", "resolved", "replies", "source"},
+              "comment response is the full CommentSchema", str(cm.keys()))
         check(cm["author"] == "amin" and cm["body"] == "looks off", "comment fields stored")
+        check(cm["anchor"] is None and cm["refs"] == [] and cm["quote"] is None
+              and cm["resolved"] is False and cm["replies"] == [] and cm["source"] == "user",
+              "new comment fields default correctly", str(cm))
 
         # default author when absent/empty
         r = await c.post(f"{BASE}/{main_id}/comments", json={"body": "no author"}, headers=hdr())

@@ -7,7 +7,13 @@
 #
 #   `state`, `comments`, and `closure` are stored as JSONB and round-tripped untouched:
 #     - `state`     — opaque blob; never inspected/validated/rewritten.
-#     - `comments`  — append-only list of {id, author, body, created_at}; mutated only via add-comment.
+#     - `comments`  — the Review thread: an append-only list of comment objects, each
+#                     {id, author, body, created_at, anchor, refs, quote, resolved, replies, source}.
+#                     `anchor` (a LineId) turns a comment into a line-anchored note; a general comment
+#                     has anchor=null. `replies[]` is a nested, append-only thread. Mutated only via
+#                     the comment/reply/resolve endpoints (see app/api/v1/saved_views.py). Stored as
+#                     JSONB (same embedding strategy as before — no separate tables): the whole thread
+#                     is small, always read/written with the view, and made of opaque client ids.
 #     - `closure`   — null until completed, then {summary, closed_by, closed_at}.
 #   `name` is client-generated and stored verbatim (never generated, mutated, or unique-constrained).
 

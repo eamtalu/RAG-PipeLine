@@ -672,4 +672,11 @@ async def debug_ask(
         raise HTTPException(503, detail=str(exc))
     if isinstance(result, dict):
         result["pending_regroup"] = pending
+        # `refs` — LineIds ("<transactionId>#<bodyLineIndex>") the answer cites, so the frontend can
+        # render jump-to-line chips / "pin as note". A valid LineId needs the line's index within the
+        # transaction's rendered body, which the agent doesn't track — computing it would require
+        # replicating the feed renderer, and the contract says do NOT guess. So we surface [] (the
+        # frontend already derives chips client-side from method names as a fallback) until a reliable
+        # index is available. Keep the key present so the shape is stable.
+        result.setdefault("refs", [])
     return result
