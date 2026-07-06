@@ -1,13 +1,19 @@
 """Repository for the Customer (tenant) registry."""
 
+from datetime import datetime
+from typing import Any
+
 from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.settings import settings
-from app.persistence.models.customer import Customer
+from app.persistence.models.customer import Customer, LogSpaceKind, LogSpaceEnvironment
 from app.persistence.models.customer_display_name import CustomerDisplayName
+
+# Sentinel so update_fields can tell "leave unchanged" apart from "set to NULL".
+_UNSET: Any = object()
 
 
 class CustomerRepository:
@@ -17,11 +23,41 @@ class CustomerRepository:
         self.db = db
 
     async def create(self, customer_code: str, display_name: str | None = None,
-                     timezone: str | None = None) -> Customer:
+                     timezone: str | None = None, *,
+                     kind: LogSpaceKind | None = None,
+                     owner_name: str | None = None,
+                     expires_at: datetime | None = None,
+                     name: str | None = None,
+                     description: str | None = None,
+                     environment: LogSpaceEnvironment | None = None) -> Customer:
         # timezone=None → NULL (not yet configured): behaviour falls back to the global default, but
         # the NULL is what lets ingestion warn and GET /customers flag it as unset.
-        cust = Customer(customer_code=customer_code, display_name=display_name, timezone=timezone)
+        # kind=None lets the column default (disposable) apply, so the legacy create path is unchanged.
+        cust = Customer(customer_code=customer_code, display_name=display_name, timezone=timezone,
+                        owner_name=owner_name, expires_at=expires_at,
+                        name=name, description=description, environment=environment)
+        if kind is not None:
+            cust.kind = kind
         self.db.add(cust)
+        await self.db.commit()
+        await self.db.refresh(cust)
+        return cust
+
+    async def update_fields(self, customer_code: str, *,
+                            name: Any = _UNSET,
+                            description: Any = _UNSET,
+                            environment: Any = _UNSET) -> Customer | None:
+        """Update the permanent-space fields. Only args explicitly passed are touched (a passed None
+        clears the column; an omitted arg leaves it unchanged)."""
+        cust = await self.get_by_code(customer_code)
+        if cust is None:
+            return None
+        if name is not _UNSET:
+            cust.name = name
+        if description is not _UNSET:
+            cust.description = description
+        if environment is not _UNSET:
+            cust.environment = environment
         await self.db.commit()
         await self.db.refresh(cust)
         return cust

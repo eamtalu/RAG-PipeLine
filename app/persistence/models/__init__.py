@@ -12,6 +12,7 @@ from app.persistence.models.log_ssh_file_checkpoint import LogSshFileCheckpoint
 from app.persistence.models.log_ssh_fetch_run import LogSshFetchRun
 from app.persistence.models.customer import Customer
 from app.persistence.models.customer_display_name import CustomerDisplayName
+from app.persistence.models.logspace_presence import LogspacePresence
 from app.persistence.models.saved_view import SavedView
 from app.persistence.models.notification import (
     CustomerNotificationChannel,
@@ -35,6 +36,7 @@ __all__ = [
     "LogSshFetchRun",
     "Customer",
     "CustomerDisplayName",
+    "LogspacePresence",
     "SavedView",
     "CustomerNotificationChannel",
     "NotificationRule",

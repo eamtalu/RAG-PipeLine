@@ -126,5 +126,18 @@ class Settings(BaseSettings):
     # transaction view. Empty ⇒ cards just show the transaction id/fields.
     app_public_base_url: str = ""
 
+    # --- Log-space cleanup (disposable auto-expiry + presence sweep) ---
+    # Background worker: hard-purges disposable log spaces whose expires_at is due (same purge as
+    # DELETE /customers/{code}) and sweeps stale presence rows. OFF by default; the DELETE endpoint
+    # works regardless of this flag.
+    logspace_cleanup_worker_enabled: bool = False
+    logspace_cleanup_poll_seconds: float = 3600.0  # hourly — expiry is a slow, day-scale process
+    # Default TTL for a newly-created disposable: expires_at = created + this. 30 days. Used only at
+    # create time to stamp expires_at; the worker then acts on the stored expires_at.
+    logspace_disposable_ttl_seconds: int = 2592000  # 30 days
+    # Presence rows not refreshed within this window are considered stale — filtered out on read and
+    # bulk-swept by the worker. 12 h, so a closed/crashed client stops showing as "present".
+    logspace_presence_ttl_seconds: int = 43200  # 12 hours
+
 
 settings = Settings()

@@ -31,6 +31,17 @@ def normalize_customer_code(value: str | None) -> str | None:
     return code if _CUSTOMER_RE.match(code) else None
 
 
+async def require_admin() -> None:
+    """Guard for admin-only log-space operations (permanent create/edit and any hard delete).
+
+    There is no authentication system yet, so this is a single, centralized permit-all placeholder: the
+    admin-only routes already depend on it, so when real auth lands only this function changes and the
+    whole Manage surface is gated at once. Raise HTTPException(403) here to enforce.
+    """
+    # TODO(auth): resolve the caller and reject non-admins once authentication exists.
+    return
+
+
 async def get_current_customer(
     x_customer_code: str = Header(..., alias="X-Customer-Code",
                                  description="Customer/tenant code the request operates on."),

@@ -7,16 +7,35 @@
 #   customer_code is the stable slug used everywhere downstream (jobs/log_entries/log_transactions
 #   carry it). display_name is the human label shown in the UI. active=false retires a tenant from
 #   ingestion + selection without deleting its historical data.
+#
+#   Each row is one "log space", of one of two KINDS (the frontend's Switch-Logspace palette):
+#     - disposable: a throwaway space owning a brand-new customer_code (1:1), created for a debugging
+#       session and auto-purged at expires_at (owner_name records who created it).
+#     - permanent: an admin-curated space with a human name/description and a live|test environment.
+#   Permanent-only columns (name/description/environment) are NULL on disposables and vice versa.
 
-import enum  # noqa: F401  (kept for parity with sibling models; not used directly)
+import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, DateTime
+from sqlalchemy import String, Boolean, DateTime, Text, Enum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.config.database import Base
+
+
+class LogSpaceKind(str, enum.Enum):
+    """Which group a log space belongs to. Defaults to disposable (every pre-existing row is one)."""
+    permanent = "permanent"
+    disposable = "disposable"
+
+
+class LogSpaceEnvironment(str, enum.Enum):
+    """Admin-set environment of a PERMANENT space. `inactive` is NOT a value here — it is derived from
+    active=false, so the palette renders an inactive permanent as INACTIVE regardless of environment."""
+    live = "live"
+    test = "test"
 
 
 # Entity
@@ -32,6 +51,21 @@ class Customer(Base):
     # NULL = not yet configured: behaviour falls back to settings.display_timezone, but the NULL is the
     # detectable "needs attention" signal (ingestion warns; GET /customers reports timezone_set=false).
     timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Which kind of log space this is. NOT NULL, defaults to disposable so legacy rows + omitted-kind
+    # creates keep working unchanged.
+    kind: Mapped[LogSpaceKind] = mapped_column(
+        Enum(LogSpaceKind), default=LogSpaceKind.disposable, server_default=LogSpaceKind.disposable.value,
+        nullable=False,
+    )
+    # --- permanent-only (NULL on disposables) ---
+    name: Mapped[str | None] = mapped_column(String(128), nullable=True)  # human name of a permanent space
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    environment: Mapped[LogSpaceEnvironment | None] = mapped_column(Enum(LogSpaceEnvironment), nullable=True)
+    # --- disposable-only (NULL on permanents) ---
+    owner_name: Mapped[str | None] = mapped_column(String(128), nullable=True)  # who created the disposable
+    # When the disposable auto-expires. NULL = never expires (legacy / omitted-kind creates); the
+    # cleanup worker only purges rows with a non-NULL expires_at that is due.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(

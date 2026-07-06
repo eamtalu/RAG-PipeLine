@@ -12,6 +12,7 @@ from app.services.workers.log_watcher import run_log_watcher
 from app.services.workers.log_grouping_worker import run_log_grouping_worker
 from app.services.workers.ssh_log_fetcher import run_ssh_log_fetcher
 from app.services.workers.notification_worker import run_notification_worker
+from app.services.workers.logspace_cleanup_worker import run_logspace_cleanup_worker
 from app.services.notifications import dispatcher as notification_dispatcher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -45,6 +46,13 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(run_notification_worker()))
     else:
         logging.getLogger(__name__).info("Notifications disabled (notifications_enabled=False)")
+    # Log-space cleanup: auto-expire disposables + sweep stale presence. Off unless explicitly enabled;
+    # DELETE /customers/{code} performs the same purge on demand regardless of this flag.
+    if settings.logspace_cleanup_worker_enabled:
+        tasks.append(asyncio.create_task(run_logspace_cleanup_worker()))
+    else:
+        logging.getLogger(__name__).info("Log-space cleanup worker disabled "
+                                         "(logspace_cleanup_worker_enabled=False)")
     yield
     for task in tasks:
         task.cancel()
