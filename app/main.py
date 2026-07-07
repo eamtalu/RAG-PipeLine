@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
             pass
     # cancel in-flight on-demand SSH fetch tasks too (they aren't part of `tasks`); each marks its
     # run failed on CancelledError, and the next startup sweep is the backstop.
-    for t in list(_ssh_fetch_tasks):
+    for t in list(_ssh_fetch_tasks.values()):
         t.cancel()
         try:
             await t

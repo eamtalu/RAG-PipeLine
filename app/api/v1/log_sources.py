@@ -7,20 +7,19 @@ existing Stage 1 ingest + Stage 2 finalize; it runs in the background and is pol
 
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from datetime import timezone
 
 from app.settings import settings
 from app.config.database import get_session
 from app.api.deps import get_current_customer, get_active_customer
 from app.persistence.models.log_ssh_source import LogSshSource
 from app.persistence.models.log_ssh_fetch_run import (
-    LogSshFetchRun, LogSshFetchRunStatus, LogSshFetchMode,
+    LogSshFetchRun, LogSshFetchRunStatus, LogSshFetchMode, LogSshFetchPhase,
 )
 from app.persistence.repositories.log_ssh_source_repository import (
     LogSshSourceRepository, get_log_ssh_source_repository,
@@ -30,8 +29,9 @@ from app.services.mnp_log_ingestion.remote.remote_fetcher import run_ssh_fetch_t
 
 router = APIRouter(prefix="/logs", tags=["log-sources"])
 
-# strong refs to in-flight background fetch tasks (asyncio only weak-refs them).
-_fetch_tasks: set = set()
+# strong refs to in-flight background fetch tasks, keyed by run_id (so cancel can find its task;
+# asyncio only weak-refs tasks). Discarded on completion via add_done_callback.
+_fetch_tasks: dict[uuid.UUID, asyncio.Task] = {}
 
 
 # --------------------------------------------------------------------------- schemas
@@ -228,39 +228,7 @@ async def test_ssh_source(source_id: uuid.UUID, customer: str = Depends(get_acti
 
 
 # --------------------------------------------------------------------------- fetch
-@router.post("/fetch-remote", status_code=202)
-async def fetch_remote(body: FetchRemoteRequest, customer: str = Depends(get_active_customer),
-                       db: AsyncSession = Depends(get_session),
-                       repo: LogSshSourceRepository = Depends(get_log_ssh_source_repository)):
-    """Trigger a background pull from the tenant's Windows Server(s). NON-BLOCKING: returns 202 + a
-    run_id; poll GET /logs/fetch-remote/runs/{run_id} until status is completed/failed. The run pulls
-    new bytes, ingests them, and finalizes — so transaction reads are current the instant it completes.
-    """
-    if body.source_id is not None and not await repo.get(customer, body.source_id):
-        raise HTTPException(404, detail="SSH source not found")
-    mode = body.mode or (LogSshFetchMode.timestamp if body.from_timestamp else LogSshFetchMode.incremental)
-
-    run = LogSshFetchRun(customer_code=customer, source_id=body.source_id, mode=mode,
-                         requested_from=body.from_timestamp)
-    db.add(run)
-    await db.commit()
-    await db.refresh(run)
-
-    task = asyncio.create_task(
-        run_ssh_fetch_tracked(run.id, customer, body.source_id, mode, body.from_timestamp)
-    )
-    _fetch_tasks.add(task)
-    task.add_done_callback(_fetch_tasks.discard)
-    return {"run_id": str(run.id), "status": run.status.value, "mode": mode.value,
-            "poll": f"/api/v1/logs/fetch-remote/runs/{run.id}"}
-
-
-@router.get("/fetch-remote/runs/{run_id}")
-async def get_fetch_run(run_id: uuid.UUID, customer: str = Depends(get_current_customer),
-                        db: AsyncSession = Depends(get_session)):
-    run = await db.get(LogSshFetchRun, run_id)
-    if not run or run.customer_code != customer:
-        raise HTTPException(404, detail="Fetch run not found")
+def _run_out(run: LogSshFetchRun) -> dict:
     return {
         "run_id": str(run.id),
         "customer_code": run.customer_code,
@@ -279,3 +247,101 @@ async def get_fetch_run(run_id: uuid.UUID, customer: str = Depends(get_current_c
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
     }
+
+
+async def _running_run_id(db: AsyncSession, customer: str, source_id: uuid.UUID | None):
+    """The id of an in-flight run for this (customer, source), or None. Used to reject a duplicate."""
+    stmt = select(LogSshFetchRun.id).where(
+        LogSshFetchRun.customer_code == customer,
+        LogSshFetchRun.status == LogSshFetchRunStatus.running,
+    )
+    stmt = stmt.where(LogSshFetchRun.source_id == source_id if source_id is not None
+                      else LogSshFetchRun.source_id.is_(None))
+    return await db.scalar(stmt)
+
+
+@router.post("/fetch-remote", status_code=202)
+async def fetch_remote(body: FetchRemoteRequest, customer: str = Depends(get_active_customer),
+                       db: AsyncSession = Depends(get_session),
+                       repo: LogSshSourceRepository = Depends(get_log_ssh_source_repository)):
+    """Trigger a background pull from the tenant's Windows Server(s). NON-BLOCKING: returns 202 + a
+    run_id; poll GET /logs/fetch-remote/runs/{run_id} until status is completed/failed/cancelled.
+
+    Ownership contract: a manual fetch of an `enabled` (auto-polled) source is 409'd — disable it
+    first; a "fetch all" (source_id omitted) pulls only the disabled sources. A second request while
+    a run is already in progress is 409'd, echoing the in-flight run_id so the UI can attach to it.
+    """
+    if body.source_id is not None:
+        src = await repo.get(customer, body.source_id)
+        if not src:
+            raise HTTPException(404, detail="SSH source not found")
+        if src.enabled:
+            raise HTTPException(409, detail="Source is auto-polled; disable it before fetching manually.")
+    existing = await _running_run_id(db, customer, body.source_id)
+    if existing is not None:
+        raise HTTPException(409, detail={"message": "A fetch is already in progress for this target",
+                                         "run_id": str(existing)})
+    mode = body.mode or (LogSshFetchMode.timestamp if body.from_timestamp else LogSshFetchMode.incremental)
+
+    run = LogSshFetchRun(customer_code=customer, source_id=body.source_id, mode=mode,
+                         requested_from=body.from_timestamp)
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+
+    task = asyncio.create_task(
+        run_ssh_fetch_tracked(run.id, customer, body.source_id, mode, body.from_timestamp)
+    )
+    _fetch_tasks[run.id] = task
+    task.add_done_callback(lambda t, rid=run.id: _fetch_tasks.pop(rid, None))
+    return {"run_id": str(run.id), "status": run.status.value, "mode": mode.value,
+            "poll": f"/api/v1/logs/fetch-remote/runs/{run.id}"}
+
+
+@router.get("/fetch-remote/runs")
+async def list_fetch_runs(customer: str = Depends(get_current_customer),
+                          db: AsyncSession = Depends(get_session),
+                          source_id: uuid.UUID | None = Query(default=None),
+                          status: LogSshFetchRunStatus | None = Query(default=None),
+                          limit: int = Query(default=50, ge=1, le=200),
+                          offset: int = Query(default=0, ge=0)):
+    """Fetch-run history for the tenant, newest first. Optional `source_id` / `status` filters."""
+    stmt = select(LogSshFetchRun).where(LogSshFetchRun.customer_code == customer)
+    if source_id is not None:
+        stmt = stmt.where(LogSshFetchRun.source_id == source_id)
+    if status is not None:
+        stmt = stmt.where(LogSshFetchRun.status == status)
+    stmt = stmt.order_by(LogSshFetchRun.created_at.desc()).limit(limit).offset(offset)
+    runs = (await db.execute(stmt)).scalars().all()
+    return {"runs": [_run_out(r) for r in runs]}
+
+
+@router.get("/fetch-remote/runs/{run_id}")
+async def get_fetch_run(run_id: uuid.UUID, customer: str = Depends(get_current_customer),
+                        db: AsyncSession = Depends(get_session)):
+    run = await db.get(LogSshFetchRun, run_id)
+    if not run or run.customer_code != customer:
+        raise HTTPException(404, detail="Fetch run not found")
+    return _run_out(run)
+
+
+@router.post("/fetch-remote/runs/{run_id}/cancel")
+async def cancel_fetch_run(run_id: uuid.UUID, customer: str = Depends(get_active_customer),
+                           db: AsyncSession = Depends(get_session)):
+    """Cancel an in-flight fetch: 404 if not the tenant's; 409 (no-op) if already terminal; otherwise
+    cancel the background task and mark the run `cancelled`. Already-ingested bytes stay (dedup-safe)
+    and the next fetch resumes from the last checkpoint."""
+    run = await db.get(LogSshFetchRun, run_id)
+    if not run or run.customer_code != customer:
+        raise HTTPException(404, detail="Fetch run not found")
+    if run.status != LogSshFetchRunStatus.running:
+        raise HTTPException(409, detail=f"Run is already {run.status.value}; nothing to cancel")
+    task = _fetch_tasks.get(run_id)
+    if task is not None:
+        task.cancel()
+    run.status = LogSshFetchRunStatus.cancelled
+    run.phase = LogSshFetchPhase.done
+    run.error = "Cancelled by operator"
+    run.finished_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"run_id": str(run_id), "status": run.status.value}

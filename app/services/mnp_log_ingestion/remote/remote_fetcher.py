@@ -274,7 +274,12 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
         for idx, (path, size, mtime) in enumerate(listing):
             start, do_pull, head_fp = 0, True, None
             if selected is not None and path not in selected:
-                do_pull = False  # timestamp mode narrowed this file out
+                # timestamp resume: seed this pre-window file's checkpoint to its current end WITHOUT
+                # ingesting, so once auto-polling resumes the incremental poller only appends new
+                # bytes and never backfills the pre-window history (forward-only resume, §4.4).
+                do_pull = False
+                head_fp = await _read_head_fp(client, path)
+                await _save_ckpt(source, path, size, mtime, size, head_fp)
             elif mode == LogSshFetchMode.incremental:
                 ck = ckpts.get(path)  # (last_size, last_mtime, last_offset, head_fingerprint) or None
                 # Fingerprint the file head to detect a reused path (rotation) even when size + mtime
@@ -333,14 +338,17 @@ def _select_timestamp_files(listing: list[tuple[str, int, float]], from_ts: date
 
 
 async def _load_sources(db: AsyncSession, customer_code: str, source_id: UUID | None,
-                        *, enabled_only: bool) -> list[LogSshSource]:
-    """Resolve the sources a fetch targets: one explicit source, or all of the customer's (the poller
-    restricts to enabled ones; an on-demand 'fetch all' includes disabled ones too)."""
+                        *, enabled_only: bool = False, disabled_only: bool = False) -> list[LogSshSource]:
+    """Resolve the sources a fetch targets: one explicit source, or all of the customer's. The poller
+    restricts to enabled ones (`enabled_only`); a manual 'fetch all' restricts to disabled ones
+    (`disabled_only`, the ownership contract — the poller owns enabled sources)."""
     stmt = select(LogSshSource).where(LogSshSource.customer_code == customer_code)
     if source_id is not None:
         stmt = stmt.where(LogSshSource.id == source_id)
     elif enabled_only:
         stmt = stmt.where(LogSshSource.enabled.is_(True))
+    elif disabled_only:
+        stmt = stmt.where(LogSshSource.enabled.is_(False))
     return list((await db.execute(stmt.order_by(LogSshSource.name.asc()))).scalars().all())
 
 
@@ -411,7 +419,8 @@ async def sweep_stale_runs() -> int:
 async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | None = None,
                     mode: LogSshFetchMode = LogSshFetchMode.incremental,
                     from_ts: datetime | None = None, enabled_only: bool = False,
-                    skip_if_busy: bool = False, drive_breaker: bool = False,
+                    disabled_only: bool = False, skip_if_busy: bool = False,
+                    drive_breaker: bool = False, force_remote: bool = False,
                     on_progress: ProgressCb | None = None) -> dict:
     """Pull from the targeted source(s), then finalize ONCE so transaction reads are current.
 
@@ -425,7 +434,8 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
 
     `on_progress` (the tracked endpoint passes one; the poller doesn't) is called with keyword fields
     — phase / files_considered / progress — at each stage so the run row reflects live progress."""
-    sources = await _load_sources(db, customer_code, source_id, enabled_only=enabled_only)
+    sources = await _load_sources(db, customer_code, source_id,
+                                  enabled_only=enabled_only, disabled_only=disabled_only)
     agg = {"customer_code": customer_code, "mode": mode.value, "sources": len(sources),
            "files_considered": 0, "files_fetched": 0, "bytes_fetched": 0,
            "entries_ingested": 0, "by_source": [], "errors": []}
@@ -439,8 +449,10 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
         agg["finalize"] = await finalize_pending(db, customer_code)  # idempotent (windows=0 if none)
         return agg
 
-    # timestamp mode: if Postgres already covers from_ts, don't touch the servers at all.
-    if mode == LogSshFetchMode.timestamp and from_ts is not None:
+    # timestamp mode: if Postgres already covers from_ts, don't touch the servers at all — UNLESS this
+    # is an explicit manual request (force_remote), which must always pull from the server (an outage
+    # resume: old local data exists, so the coverage check would wrongly suppress it).
+    if mode == LogSshFetchMode.timestamp and from_ts is not None and not force_remote:
         local_min = await _local_min_ts(db, customer_code)
         if local_min is not None and from_ts >= local_min:
             agg["already_local"] = True
@@ -450,7 +462,10 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
 
     # Release the caller's pooled connection before the (slow) network loop — _fetch_source and the
     # bookkeeping below use their own short sessions, so nothing is pinned across the SFTP transfer.
-    # expire_on_commit=False keeps the loaded `sources` usable after this.
+    # Detach the loaded `sources` FIRST: rollback() would otherwise expire them, and accessing an
+    # expired attribute later (e.g. source.host in _host_lock) would attempt sync IO in the async
+    # context (MissingGreenlet). Detached instances keep their already-loaded column values.
+    db.expunge_all()
     await db.rollback()
 
     # running cumulative totals across already-completed sources, so per-source hooks can report a
@@ -521,8 +536,11 @@ async def run_ssh_fetch_tracked(run_id: UUID, customer_code: str, source_id: UUI
 
     async with async_session() as db:
         try:
+            # Manual/on-demand semantics: always hit the server (force_remote) and, for a "fetch all"
+            # (source_id is None), only touch disabled sources — the poller owns the enabled ones.
             stats = await fetch_now(db, customer_code, source_id=source_id, mode=mode,
-                                    from_ts=from_ts, enabled_only=False, on_progress=_cb)
+                                    from_ts=from_ts, disabled_only=(source_id is None),
+                                    force_remote=True, on_progress=_cb)
             values = dict(
                 status=LogSshFetchRunStatus.completed, phase=LogSshFetchPhase.done,
                 files_considered=stats.get("files_considered"),
@@ -537,7 +555,10 @@ async def run_ssh_fetch_tracked(run_id: UUID, customer_code: str, source_id: UUI
             logger.info("Tracked SSH fetch cancelled (run=%s customer=%s)", run_id, customer_code)
             try:
                 async with async_session() as db2:
-                    await db2.execute(update(LogSshFetchRun).where(LogSshFetchRun.id == run_id).values(
+                    # only if still running — never overwrite an operator 'cancelled' terminal state
+                    await db2.execute(update(LogSshFetchRun).where(
+                        LogSshFetchRun.id == run_id,
+                        LogSshFetchRun.status == LogSshFetchRunStatus.running).values(
                         status=LogSshFetchRunStatus.failed, phase=LogSshFetchPhase.done,
                         error="Cancelled by server shutdown", finished_at=datetime.now(timezone.utc)))
                     await db2.commit()

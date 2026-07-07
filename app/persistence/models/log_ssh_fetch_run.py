@@ -21,6 +21,7 @@ class LogSshFetchRunStatus(str, enum.Enum):
     running = "running"      # scheduled / in progress
     completed = "completed"  # pull + ingest + finalize finished and committed
     failed = "failed"        # raised; see `error`
+    cancelled = "cancelled"  # cancelled by the operator via POST /fetch-remote/runs/{id}/cancel
 
 
 class LogSshFetchMode(str, enum.Enum):

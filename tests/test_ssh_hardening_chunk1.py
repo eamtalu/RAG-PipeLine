@@ -31,7 +31,8 @@ def test_new_ssh_settings_exist_with_defaults():
 # --------------------------------------------------------------------------- migration graph
 def test_single_alembic_head_and_chain():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["b3f9a1c05d27"], "migration must leave a single head"
+    # exactly one head (no divergent branches), and this chunk's migration chains off the prior head
+    assert len(script.get_heads()) == 1, "migrations must leave a single head"
     rev = script.get_revision("b3f9a1c05d27")
     assert rev.down_revision == "e5a2c9f10b34"
 
