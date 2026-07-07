@@ -13,6 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datetime import timezone
+
+from app.settings import settings
 from app.config.database import get_session
 from app.api.deps import get_current_customer, get_active_customer
 from app.persistence.models.log_ssh_source import LogSshSource
@@ -74,6 +77,27 @@ def _auth_method(src: LogSshSource) -> str:
     return "none"
 
 
+def _effective_poll_seconds(src: LogSshSource) -> float:
+    """Resolved cadence: the source's own interval, else the global default."""
+    return float(src.poll_interval_seconds) if src.poll_interval_seconds else settings.ssh_log_fetcher_poll_seconds
+
+
+def _status(src: LogSshSource) -> str:
+    """Server-computed connection status the frontend renders (single source of truth):
+    live | stale | degraded | pending | auto_disabled | disabled. See the design doc §9.6."""
+    if not src.enabled:
+        return "auto_disabled" if src.auto_disabled_at else "disabled"
+    if src.last_attempt_at is None:
+        return "pending"                 # enabled but never polled yet
+    if src.last_error:
+        return "degraded"                # enabled and currently failing (last_error clears on success)
+    if src.last_ok_at is not None:
+        age = (datetime.now(timezone.utc) - src.last_ok_at).total_seconds()
+        if age <= 3 * _effective_poll_seconds(src):
+            return "live"
+    return "stale"                       # enabled, no recent successful poll
+
+
 def _to_out(src: LogSshSource) -> dict:
     """Public view — never leaks key material or passphrases."""
     return {
@@ -87,10 +111,15 @@ def _to_out(src: LogSshSource) -> dict:
         "file_glob": src.file_glob,
         "enabled": src.enabled,
         "poll_interval_seconds": src.poll_interval_seconds,
+        "effective_poll_seconds": _effective_poll_seconds(src),
         "auth_method": _auth_method(src),
         "host_key_fingerprint": src.host_key_fingerprint,
+        "status": _status(src),
         "last_ok_at": src.last_ok_at.isoformat() if src.last_ok_at else None,
+        "last_attempt_at": src.last_attempt_at.isoformat() if src.last_attempt_at else None,
         "last_error": src.last_error,
+        "consecutive_failures": src.consecutive_failures,
+        "auto_disabled_at": src.auto_disabled_at.isoformat() if src.auto_disabled_at else None,
         "created_at": src.created_at.isoformat() if src.created_at else None,
         "updated_at": src.updated_at.isoformat() if src.updated_at else None,
     }
@@ -163,6 +192,11 @@ async def update_ssh_source(source_id: uuid.UUID, body: SshSourceUpdate,
         _encrypt_auth(values, key_path=key_path, key_pem=key_pem, passphrase=passphrase)
     if any(k in fields for k in ("host", "port", "username")):
         values["host_key_fingerprint"] = None  # re-pin on next connect
+    # Re-enabling arms the circuit breaker afresh: clear the failure counter and the auto-disable
+    # marker so a source resumed after an outage starts clean (see design doc §4.5).
+    if fields.get("enabled") is True:
+        values["consecutive_failures"] = 0
+        values["auto_disabled_at"] = None
     return _to_out(await repo.update(src, **values))
 
 

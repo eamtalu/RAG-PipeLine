@@ -350,10 +350,68 @@ async def _local_min_ts(db: AsyncSession, customer_code: str) -> datetime | None
     )
 
 
+async def _record_success(source: LogSshSource, *, drive_breaker: bool) -> None:
+    """Stamp a successful attempt: last_ok_at + last_attempt_at now, clear last_error. When driven by
+    the poller, reset the circuit breaker (consecutive_failures=0, auto_disabled_at=None). Reads the
+    row fresh so it is safe to call repeatedly on the same source object."""
+    now = datetime.now(timezone.utc)
+    async with async_session() as db:
+        row = await db.get(LogSshSource, source.id)
+        if row is None:
+            return
+        row.last_ok_at, row.last_error, row.last_attempt_at = now, None, now
+        if drive_breaker:
+            row.consecutive_failures, row.auto_disabled_at = 0, None
+        await db.commit()
+    source.consecutive_failures, source.auto_disabled_at = 0, None  # keep caller's copy in sync
+
+
+async def _record_failure(source: LogSshSource, exc: Exception, *, drive_breaker: bool) -> bool:
+    """Stamp a failed attempt: last_attempt_at + last_error. When driven by the poller, increment
+    consecutive_failures and — once it reaches ssh_auto_disable_after_failures (breaker, 0=off) on a
+    still-enabled source — flip enabled=False + auto_disabled_at (manual-only, so no retry storm and
+    no surprise backfill). Returns True if it auto-disabled. Reads the row fresh so repeated calls
+    increment correctly."""
+    now = datetime.now(timezone.utc)
+    auto_disabled = False
+    async with async_session() as db:
+        row = await db.get(LogSshSource, source.id)
+        if row is None:
+            return False
+        row.last_attempt_at, row.last_error = now, str(exc)[:2000]
+        if drive_breaker:
+            row.consecutive_failures = (row.consecutive_failures or 0) + 1
+            thr = settings.ssh_auto_disable_after_failures
+            if thr > 0 and row.consecutive_failures >= thr and row.enabled:
+                row.enabled, row.auto_disabled_at = False, now
+                row.last_error = (f"Auto-disabled after {row.consecutive_failures} consecutive "
+                                  f"failures — re-enable and run a bounded resume. "
+                                  f"Last error: {str(exc)[:1500]}")
+                auto_disabled = True
+        await db.commit()
+        source.consecutive_failures = row.consecutive_failures if drive_breaker else source.consecutive_failures
+        source.enabled = row.enabled
+    return auto_disabled
+
+
+async def sweep_stale_runs() -> int:
+    """Mark any log_ssh_fetch_runs left in `running` (a crash/restart mid-fetch) as failed. Called
+    once at startup so a run is never stuck `running` forever. Returns the number swept."""
+    async with async_session() as db:
+        result = await db.execute(
+            update(LogSshFetchRun)
+            .where(LogSshFetchRun.status == LogSshFetchRunStatus.running)
+            .values(status=LogSshFetchRunStatus.failed, phase=LogSshFetchPhase.done,
+                    error="Interrupted by server restart", finished_at=datetime.now(timezone.utc))
+        )
+        await db.commit()
+        return result.rowcount or 0
+
+
 async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | None = None,
                     mode: LogSshFetchMode = LogSshFetchMode.incremental,
                     from_ts: datetime | None = None, enabled_only: bool = False,
-                    skip_if_busy: bool = False,
+                    skip_if_busy: bool = False, drive_breaker: bool = False,
                     on_progress: ProgressCb | None = None) -> dict:
     """Pull from the targeted source(s), then finalize ONCE so transaction reads are current.
 
@@ -430,11 +488,8 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
                         {"source": source.name, "reason": "another fetch for this host is in progress"})
                     continue
                 stats = await _fetch_source(source, mode, from_ts, on_listed=on_listed, on_file=on_file)
-            # stamp success on a short session (the lock is already released; last_ok_at is bookkeeping)
-            async with async_session() as sdb:
-                await sdb.execute(update(LogSshSource).where(LogSshSource.id == source.id)
-                                  .values(last_ok_at=datetime.now(timezone.utc), last_error=None))
-                await sdb.commit()
+            # lock released; record success (+ reset breaker when driven by the poller)
+            await _record_success(source, drive_breaker=drive_breaker)
             agg["by_source"].append(stats)
             agg["files_considered"] += stats["files_considered"]
             agg["files_fetched"] += stats["files_fetched"]
@@ -445,11 +500,10 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
             base["entries"] += stats["entries_ingested"]
         except Exception as exc:  # isolate one bad server
             logger.exception("SSH fetch failed for source %s/%s", customer_code, source.name)
-            async with async_session() as sdb:
-                await sdb.execute(update(LogSshSource).where(LogSshSource.id == source.id)
-                                  .values(last_error=str(exc)[:2000]))
-                await sdb.commit()
+            auto_disabled = await _record_failure(source, exc, drive_breaker=drive_breaker)
             agg["errors"].append({"source": source.name, "error": str(exc)})
+            if auto_disabled:
+                agg.setdefault("auto_disabled", []).append(source.name)
 
     # one finalize for everything the sources just fed (like the watcher's drain-empty flush).
     await _regrouping()
@@ -477,6 +531,19 @@ async def run_ssh_fetch_tracked(run_id: UUID, customer_code: str, source_id: UUI
                 entries_ingested=stats.get("entries_ingested"),
                 result=stats, finished_at=datetime.now(timezone.utc),
             )
+        except asyncio.CancelledError:
+            # shutdown (or an explicit cancel) — mark the run terminal on a fresh session, then
+            # re-raise. The startup sweep is the backstop if this best-effort write can't complete.
+            logger.info("Tracked SSH fetch cancelled (run=%s customer=%s)", run_id, customer_code)
+            try:
+                async with async_session() as db2:
+                    await db2.execute(update(LogSshFetchRun).where(LogSshFetchRun.id == run_id).values(
+                        status=LogSshFetchRunStatus.failed, phase=LogSshFetchPhase.done,
+                        error="Cancelled by server shutdown", finished_at=datetime.now(timezone.utc)))
+                    await db2.commit()
+            except Exception:
+                logger.warning("could not mark cancelled run %s failed", run_id, exc_info=True)
+            raise
         except Exception as exc:
             logger.exception("Tracked SSH fetch failed (run=%s customer=%s)", run_id, customer_code)
             await db.rollback()

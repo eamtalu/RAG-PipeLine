@@ -11,6 +11,8 @@ from app.services.workers.embedding_worker import run_worker
 from app.services.workers.log_watcher import run_log_watcher
 from app.services.workers.log_grouping_worker import run_log_grouping_worker
 from app.services.workers.ssh_log_fetcher import run_ssh_log_fetcher
+from app.services.mnp_log_ingestion.remote.remote_fetcher import sweep_stale_runs
+from app.api.v1.log_sources import _fetch_tasks as _ssh_fetch_tasks
 from app.services.workers.notification_worker import run_notification_worker
 from app.services.workers.logspace_cleanup_worker import run_logspace_cleanup_worker
 from app.services.notifications import dispatcher as notification_dispatcher
@@ -24,6 +26,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail any SSH fetch run left `running` by a prior crash/restart (unconditional — on-demand runs
+    # exist even when the poller is disabled). See remote_fetcher.sweep_stale_runs.
+    try:
+        swept = await sweep_stale_runs()
+        if swept:
+            logging.getLogger(__name__).info("Swept %d stale SSH fetch run(s) to failed", swept)
+    except Exception:
+        logging.getLogger(__name__).warning("stale-run sweep failed at startup", exc_info=True)
     # Start background workers: embedding worker + log watcher + log grouping (Stage 2)
     tasks = [
         asyncio.create_task(run_worker()),
@@ -59,6 +69,14 @@ async def lifespan(app: FastAPI):
         try:
             await task
         except asyncio.CancelledError:
+            pass
+    # cancel in-flight on-demand SSH fetch tasks too (they aren't part of `tasks`); each marks its
+    # run failed on CancelledError, and the next startup sweep is the backstop.
+    for t in list(_ssh_fetch_tasks):
+        t.cancel()
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
             pass
 
 
