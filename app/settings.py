@@ -99,6 +99,17 @@ class Settings(BaseSettings):
     # must be used instead.
     ssh_secret_key: str = ""
 
+    # --- SSH hardening (see docs/ssh-log-fetch-hardening-and-per-customer-poller.md) ---
+    ssh_operation_timeout_seconds: float = 60.0   # per-SFTP-op (glob/stat/open/read/close) hard ceiling
+    ssh_keepalive_interval_seconds: float = 15.0  # asyncssh keepalive probe cadence
+    ssh_keepalive_count_max: int = 3              # drop the connection after this many missed probes
+    ssh_fingerprint_bytes: int = 4096             # head bytes hashed to detect log rotation (per file/poll)
+    ssh_checkpoint_retention_days: int = 30       # prune checkpoints for vanished paths older than this
+    ssh_fetch_lock_wait_seconds: float = 30.0     # on-demand: max wait to acquire the per-host fetch lock
+    ssh_poll_max_concurrent: int = 8              # global cap on concurrent per-customer fetches (DB pool guard)
+    ssh_poll_reconcile_seconds: float = 30.0      # how often the poller supervisor re-scans customers
+    ssh_auto_disable_after_failures: int = 10     # consecutive failed poller fetches before auto-disable (0 = off)
+
     # --- Log debugging agent (Phase 2) ---
     anthropic_api_key: str = ""
     log_agent_model: str = "claude-opus-4-8"

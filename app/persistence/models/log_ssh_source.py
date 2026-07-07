@@ -59,6 +59,14 @@ class LogSshSource(Base):
     # --- bookkeeping ---
     last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # --- outage / circuit breaker + computed status (see design doc §4.5, §9.6) ---
+    # last time a fetch was ATTEMPTED (success or failure); last_ok_at remains last SUCCESS.
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # consecutive failed poller fetches; reset to 0 on any success. Drives the auto-disable breaker.
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    # set when the breaker flips enabled=False after a sustained outage (null = operator disable / never).
+    auto_disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),

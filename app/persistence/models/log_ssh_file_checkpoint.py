@@ -45,3 +45,8 @@ class LogSshFileCheckpoint(Base):
     last_mtime: Mapped[float] = mapped_column(default=0.0)               # remote st_mtime
     last_offset: Mapped[int] = mapped_column(BigInteger, default=0)      # bytes ingested (newline-aligned)
     last_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # sha256 of the first settings.ssh_fingerprint_bytes of the file; if it changes for a given
+    # remote_path the file was rotated/replaced -> re-read from 0. NULL until first computed (lazy
+    # backfill). This is what makes rotation and cold-resume lossless (see design doc §5.2).
+    head_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)

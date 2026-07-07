@@ -279,6 +279,9 @@ erDiagram
         float poll_interval_seconds
         datetime last_ok_at
         text last_error
+        datetime last_attempt_at "last fetch attempt (success or fail)"
+        int consecutive_failures "circuit-breaker counter"
+        datetime auto_disabled_at "set when breaker auto-disabled"
         datetime created_at
         datetime updated_at
     }
@@ -292,6 +295,7 @@ erDiagram
         float last_mtime
         bigint last_offset
         datetime last_fetched_at
+        string head_fingerprint "sha256 of file head; rotation guard"
     }
 
     log_ssh_fetch_runs {
