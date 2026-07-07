@@ -53,6 +53,21 @@ def get_fingerprint(conn: asyncssh.SSHClientConnection) -> str:
     return conn.get_server_host_key().get_fingerprint()
 
 
+async def op(coro, what: str):
+    """Run one SFTP operation (glob/stat/open/read/close) with a hard per-op timeout.
+
+    asyncssh only bounds the initial connect; an established-but-stalled operation would otherwise
+    hang forever, wedging the poller and pinning resources. A timeout raises SshConnectionError so
+    the caller abandons the whole connection (a wait_for-cancelled SFTP channel is not safely
+    reusable) and per-source isolation takes over."""
+    try:
+        return await asyncio.wait_for(coro, timeout=settings.ssh_operation_timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        raise SshConnectionError(
+            f"SFTP {what} exceeded {settings.ssh_operation_timeout_seconds:.0f}s"
+        ) from exc
+
+
 @asynccontextmanager
 async def connect(source: LogSshSource):
     """Async context manager yielding (connection, server_fingerprint).
@@ -67,6 +82,10 @@ async def connect(source: LogSshSource):
                 host=source.host, port=source.port, username=source.username,
                 client_keys=keys, passphrase=passphrase,
                 known_hosts=None,  # we pin the fingerprint ourselves below
+                # Keepalive so a silently-dead peer is dropped (a hung read then raises instead of
+                # blocking forever); no agent/x11/port forwarding — one connection, one SFTP channel.
+                keepalive_interval=settings.ssh_keepalive_interval_seconds,
+                keepalive_count_max=settings.ssh_keepalive_count_max,
             ),
             timeout=settings.ssh_connect_timeout_seconds,
         )

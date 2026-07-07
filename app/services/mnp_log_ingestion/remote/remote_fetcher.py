@@ -14,17 +14,26 @@
 #   bytes never duplicates rows, so the byte checkpoint is a bandwidth optimisation, not a
 #   correctness dependency.
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 from uuid import UUID
 
 import asyncssh
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
-from app.config.database import async_session
+from app.config.database import async_session, engine
+
+# Fixed namespace (classid) for the per-host fetch advisory lock. Uses the TWO-INT advisory-lock
+# keyspace `pg_(try_)advisory_lock(classid, objid)`, which is disjoint from the single-bigint space
+# finalize_pending uses (`pg_advisory_xact_lock(hashtext(customer_code))`) — so the two locks can
+# never collide or deadlock even on a hash tie. objid = hashtext("host:port").
+SSH_FETCH_LOCK_CLASSID = 0x55AA
 from app.persistence.models.job import Job
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_ssh_source import LogSshSource
@@ -47,9 +56,9 @@ ProgressCb = Callable[..., Awaitable[None]]
 async def _write_progress(run_id: UUID, *, phase: LogSshFetchPhase | None = None,
                           files_considered: int | None = None, progress: dict | None = None) -> None:
     """Update the run row mid-flight on its OWN short-lived session so GET /fetch-remote/runs/{id}
-    reflects progress DURING the fetch. Deliberately decoupled from the fetch/finalize transaction
-    (which holds a per-customer advisory lock) and best-effort: a progress write must never abort the
-    fetch, so failures are logged and swallowed."""
+    reflects progress DURING the fetch. Runs on its own connection, independent of both the per-host
+    fetch advisory lock (_host_lock) and finalize_pending's per-customer pg_advisory_xact_lock; and
+    best-effort: a progress write must never abort the fetch, so failures are logged and swallowed."""
     values: dict = {}
     if phase is not None:
         values["phase"] = phase
@@ -67,34 +76,74 @@ async def _write_progress(run_id: UUID, *, phase: LogSshFetchPhase | None = None
         logger.warning("progress write failed for run %s", run_id, exc_info=True)
 
 
+@asynccontextmanager
+async def _host_lock(source: LogSshSource, *, skip_if_busy: bool):
+    """Session-scoped advisory lock keyed on host:port, held on a DEDICATED idle connection for the
+    whole fetch. Guarantees at most one live SSH connection per server across the poller and manual
+    fetches (and across tenants sharing a host), and serialises checkpoint writes. Yields whether the
+    lock was acquired.
+
+    - skip_if_busy=True (poller): non-blocking try-lock; yields False if another fetch holds it.
+    - skip_if_busy=False (on-demand): blocks up to ssh_fetch_lock_wait_seconds, else raises.
+
+    Closing the connection auto-releases the session-scoped lock, so it can never leak."""
+    objid = func.hashtext(f"{source.host.strip().lower()}:{source.port}")
+    conn = await engine.connect()
+    acquired = False
+    try:
+        if skip_if_busy:
+            acquired = bool(await conn.scalar(
+                select(func.pg_try_advisory_lock(SSH_FETCH_LOCK_CLASSID, objid))))
+        else:
+            try:
+                await asyncio.wait_for(
+                    conn.execute(select(func.pg_advisory_lock(SSH_FETCH_LOCK_CLASSID, objid))),
+                    timeout=settings.ssh_fetch_lock_wait_seconds)
+                acquired = True
+            except asyncio.TimeoutError as exc:
+                raise ssh_client.SshConnectionError(
+                    f"another fetch for {source.host}:{source.port} is in progress"
+                ) from exc
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                await conn.scalar(select(func.pg_advisory_unlock(SSH_FETCH_LOCK_CLASSID, objid)))
+            except Exception:  # the connection close below releases the lock regardless
+                pass
+        await conn.close()
+
+
 def _basename(remote_path: str) -> str:
     """POSIX basename — SFTP paths are forward-slash even on Windows OpenSSH."""
     return remote_path.rstrip("/").rsplit("/", 1)[-1] or remote_path
 
 
-async def _ingest_chunk(db: AsyncSession, source: LogSshSource, remote_path: str, data: bytes) -> int:
+async def _ingest_chunk(source: LogSshSource, remote_path: str, data: bytes) -> int:
     """Ingest one chunk via Stage 1 and return the number of NEW entries inserted (dedup-aware).
 
-    Stage 1 runs in its own session (LogIngestion does that); we read the committed chunk_count back
-    on our session, like POST /logs/scan does. The filename is namespaced by source so provenance
-    survives when two servers share a basename."""
+    Opens its OWN short session so no DB connection is held across the SFTP reads — the only thing
+    held for the whole per-source loop is the single SFTP connection. The filename is namespaced by
+    source so provenance survives when two servers share a basename."""
     filename = f"{source.name}/{_basename(remote_path)}"
-    ingestion = LogIngestion(LocalStorage(settings.upload_dir), JobRepository(db))
-    job = await ingestion.ingest(data, filename, source.customer_code, background=False)
-    return await db.scalar(select(Job.chunk_count).where(Job.id == job.id)) or 0
+    async with async_session() as db:
+        ingestion = LogIngestion(LocalStorage(settings.upload_dir), JobRepository(db))
+        job = await ingestion.ingest(data, filename, source.customer_code, background=False)
+        return await db.scalar(select(Job.chunk_count).where(Job.id == job.id)) or 0
 
 
 async def _pull_range(client, remote_path: str, start: int, size: int, *,
-                      db: AsyncSession, source: LogSshSource) -> tuple[int, int, int]:
+                      source: LogSshSource) -> tuple[int, int, int]:
     """Read [start, size) of a remote file in newline-aligned windows (≤ ssh_max_file_size each),
     ingesting each. Never ingests a partial trailing line: a window that doesn't reach EOF is trimmed
-    to its last newline. Returns (new_offset, bytes_read, entries_inserted)."""
+    to its last newline. Every SFTP call is bounded by ssh_client.op; no DB session is held across a
+    read. Returns (new_offset, bytes_read, entries_inserted)."""
     offset, bytes_read, inserted = start, 0, 0
-    f = await client.open(remote_path, "rb")
+    f = await ssh_client.op(client.open(remote_path, "rb"), f"open {remote_path}")
     try:
         while offset < size:
             window = min(settings.ssh_max_file_size, size - offset)
-            data = await f.read(size=window, offset=offset)
+            data = await ssh_client.op(f.read(size=window, offset=offset), "read")
             if not data:
                 break
             at_eof = offset + len(data) >= size
@@ -102,7 +151,7 @@ async def _pull_range(client, remote_path: str, start: int, size: int, *,
                 nl = data.rfind(b"\n")
                 # a full window with no newline = one absurdly long line; ingest it whole to progress.
                 data = data[: nl + 1] if nl != -1 else data
-            inserted += await _ingest_chunk(db, source, remote_path, data)
+            inserted += await _ingest_chunk(source, remote_path, data)
             offset += len(data)
             bytes_read += len(data)
     finally:
@@ -111,13 +160,15 @@ async def _pull_range(client, remote_path: str, start: int, size: int, *,
 
 
 async def _list(client, source: LogSshSource) -> list[tuple[str, int, float]]:
-    """(path, size, mtime) for every file matching the source's dir/glob."""
+    """(path, size, mtime) for every file matching the source's dir/glob. Glob and per-file stat are
+    each bounded by ssh_client.op; a file that vanishes between glob and stat is skipped, but an op
+    TIMEOUT propagates (it means a hung connection, not a missing file)."""
     pattern = f"{source.remote_log_dir.rstrip('/')}/{source.file_glob}"
     out: list[tuple[str, int, float]] = []
-    for m in await client.glob(pattern):
+    for m in await ssh_client.op(client.glob(pattern), "glob"):
         path = str(m)
         try:
-            attrs = await client.stat(path)
+            attrs = await ssh_client.op(client.stat(path), "stat")
         except (OSError, asyncssh.Error):
             continue  # vanished between glob and stat
         if attrs.size is None:  # directories etc.
@@ -126,44 +177,57 @@ async def _list(client, source: LogSshSource) -> list[tuple[str, int, float]]:
     return sorted(out)
 
 
-async def _ckpt(db: AsyncSession, source: LogSshSource, remote_path: str) -> LogSshFileCheckpoint | None:
-    return await db.scalar(select(LogSshFileCheckpoint).where(
-        LogSshFileCheckpoint.source_id == source.id,
-        LogSshFileCheckpoint.remote_path == remote_path,
-    ))
+async def _load_ckpts(source: LogSshSource) -> dict[str, tuple[int, float, int]]:
+    """Snapshot this source's checkpoints once (own short session) as
+    {remote_path: (last_size, last_mtime, last_offset)}, so the per-file decision loop holds no DB
+    connection during the SFTP transfer."""
+    async with async_session() as db:
+        rows = (await db.execute(select(LogSshFileCheckpoint).where(
+            LogSshFileCheckpoint.source_id == source.id))).scalars().all()
+        return {r.remote_path: (r.last_size, r.last_mtime, r.last_offset) for r in rows}
 
 
-async def _save_ckpt(db: AsyncSession, source: LogSshSource, remote_path: str,
+async def _save_ckpt(source: LogSshSource, remote_path: str,
                      size: int, mtime: float, offset: int) -> None:
-    row = await _ckpt(db, source, remote_path)
+    """Upsert the file checkpoint on its OWN short session. ON CONFLICT DO UPDATE so an overlapping
+    write (should the per-host lock ever be bypassed) can never raise a unique-constraint error."""
     now = datetime.now(timezone.utc)
-    if row is None:
-        db.add(LogSshFileCheckpoint(
+    async with async_session() as db:
+        stmt = pg_insert(LogSshFileCheckpoint).values(
             source_id=source.id, customer_code=source.customer_code, remote_path=remote_path,
             last_size=size, last_mtime=mtime, last_offset=offset, last_fetched_at=now,
-        ))
-    else:
-        row.last_size, row.last_mtime, row.last_offset, row.last_fetched_at = size, mtime, offset, now
-    await db.commit()
+        ).on_conflict_do_update(
+            index_elements=["source_id", "remote_path"],
+            set_=dict(last_size=size, last_mtime=mtime, last_offset=offset, last_fetched_at=now),
+        )
+        await db.execute(stmt)
+        await db.commit()
 
 
-async def _fetch_source(db: AsyncSession, source: LogSshSource, mode: LogSshFetchMode,
+async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
                         from_ts: datetime | None, *,
                         on_listed: ProgressCb | None = None,
                         on_file: ProgressCb | None = None) -> dict:
     """Fetch one server. Pins the host fingerprint on first connect; per-file incremental tail or
     whole-file (timestamp/full) reads. Returns this source's stats.
 
+    Holds NO long-lived DB session — the only thing held for the whole loop is the single SFTP
+    connection; every DB touch (checkpoint preload, pin, per-file save) uses its own short session.
+    The caller wraps this in _host_lock so at most one connection exists per server.
+
     Progress hooks (no-ops for the poller): `on_listed(considered)` fires once the remote dir is
     globbed; `on_file(files_done, files_total, current_file, bytes_so_far, entries_so_far)` fires
     after EVERY listed file — including unchanged/skipped ones — so a progress bar advances smoothly."""
     considered = fetched = entries = total_bytes = 0
     per_file: list[dict] = []
+    ckpts = await _load_ckpts(source)  # {path: (last_size, last_mtime, last_offset)}
     async with ssh_client.sftp(source) as (client, fp):
         if not source.host_key_fingerprint:  # pin on first successful connect
-            await db.execute(update(LogSshSource).where(LogSshSource.id == source.id)
-                             .values(host_key_fingerprint=fp))
-            await db.commit()
+            async with async_session() as db:
+                await db.execute(update(LogSshSource).where(LogSshSource.id == source.id)
+                                 .values(host_key_fingerprint=fp))
+                await db.commit()
+            source.host_key_fingerprint = fp  # keep the in-memory copy consistent
 
         listing = await _list(client, source)
         considered = len(listing)
@@ -177,19 +241,19 @@ async def _fetch_source(db: AsyncSession, source: LogSshSource, mode: LogSshFetc
             if selected is not None and path not in selected:
                 do_pull = False  # timestamp mode narrowed this file out
             elif mode == LogSshFetchMode.incremental:
-                ck = await _ckpt(db, source, path)
-                if ck and size == ck.last_size and mtime == ck.last_mtime:
+                ck = ckpts.get(path)  # (last_size, last_mtime, last_offset) or None
+                if ck and size == ck[0] and mtime == ck[1]:
                     do_pull = False  # unchanged — no transfer
                 else:
-                    start = ck.last_offset if (ck and size >= ck.last_size) else 0  # shrink ⇒ re-read whole
+                    start = ck[2] if (ck and size >= ck[0]) else 0  # shrink ⇒ re-read whole
                     if ck and start >= size:  # metadata changed but no new bytes
-                        await _save_ckpt(db, source, path, size, mtime, start)
+                        await _save_ckpt(source, path, size, mtime, start)
                         do_pull = False
             # timestamp (selected) / full: do_pull stays True, start stays 0 — dedup drops any overlap
 
             if do_pull:
-                new_off, read, ins = await _pull_range(client, path, start, size, db=db, source=source)
-                await _save_ckpt(db, source, path, size, mtime, new_off)
+                new_off, read, ins = await _pull_range(client, path, start, size, source=source)
+                await _save_ckpt(source, path, size, mtime, new_off)
                 fetched += 1
                 entries += ins
                 total_bytes += read
@@ -235,12 +299,17 @@ async def _local_min_ts(db: AsyncSession, customer_code: str) -> datetime | None
 async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | None = None,
                     mode: LogSshFetchMode = LogSshFetchMode.incremental,
                     from_ts: datetime | None = None, enabled_only: bool = False,
+                    skip_if_busy: bool = False,
                     on_progress: ProgressCb | None = None) -> dict:
     """Pull from the targeted source(s), then finalize ONCE so transaction reads are current.
 
-    Per-source failures are isolated (one unreachable server doesn't abort the others) and recorded
-    on that source's last_error; a reachable source updates last_ok_at. Returns aggregate stats incl.
-    the finalize result. Shared by the on-demand endpoint and the background poller.
+    Each source is fetched under a per-host advisory lock (_host_lock): `skip_if_busy=True` (the
+    poller) skips a host another fetch already holds and records it under agg["skipped"];
+    `skip_if_busy=False` (on-demand) waits up to ssh_fetch_lock_wait_seconds. Per-source failures are
+    isolated (one unreachable server doesn't abort the others) and recorded on that source's
+    last_error; a reachable source updates last_ok_at. The caller's `db` is used only for loading
+    sources and the final finalize — it is released (rollback) before the network loop so no pooled
+    connection is held across the SFTP transfer. Returns aggregate stats incl. the finalize result.
 
     `on_progress` (the tracked endpoint passes one; the poller doesn't) is called with keyword fields
     — phase / files_considered / progress — at each stage so the run row reflects live progress."""
@@ -266,6 +335,11 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
             await _regrouping()
             agg["finalize"] = await finalize_pending(db, customer_code)
             return agg
+
+    # Release the caller's pooled connection before the (slow) network loop — _fetch_source and the
+    # bookkeeping below use their own short sessions, so nothing is pinned across the SFTP transfer.
+    # expire_on_commit=False keeps the loaded `sources` usable after this.
+    await db.rollback()
 
     # running cumulative totals across already-completed sources, so per-source hooks can report a
     # global "so far" while a later source is still mid-flight.
@@ -296,10 +370,17 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
                               "entries_so_far": base["entries"] + src_entries})
 
         try:
-            stats = await _fetch_source(db, source, mode, from_ts, on_listed=on_listed, on_file=on_file)
-            await db.execute(update(LogSshSource).where(LogSshSource.id == source.id)
-                             .values(last_ok_at=datetime.now(timezone.utc), last_error=None))
-            await db.commit()
+            async with _host_lock(source, skip_if_busy=skip_if_busy) as got:
+                if not got:  # poller: another fetch holds this host — skip, pick it up next tick
+                    agg.setdefault("skipped", []).append(
+                        {"source": source.name, "reason": "another fetch for this host is in progress"})
+                    continue
+                stats = await _fetch_source(source, mode, from_ts, on_listed=on_listed, on_file=on_file)
+            # stamp success on a short session (the lock is already released; last_ok_at is bookkeeping)
+            async with async_session() as sdb:
+                await sdb.execute(update(LogSshSource).where(LogSshSource.id == source.id)
+                                  .values(last_ok_at=datetime.now(timezone.utc), last_error=None))
+                await sdb.commit()
             agg["by_source"].append(stats)
             agg["files_considered"] += stats["files_considered"]
             agg["files_fetched"] += stats["files_fetched"]
@@ -310,10 +391,10 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
             base["entries"] += stats["entries_ingested"]
         except Exception as exc:  # isolate one bad server
             logger.exception("SSH fetch failed for source %s/%s", customer_code, source.name)
-            await db.rollback()
-            await db.execute(update(LogSshSource).where(LogSshSource.id == source.id)
-                             .values(last_error=str(exc)[:2000]))
-            await db.commit()
+            async with async_session() as sdb:
+                await sdb.execute(update(LogSshSource).where(LogSshSource.id == source.id)
+                                  .values(last_error=str(exc)[:2000]))
+                await sdb.commit()
             agg["errors"].append({"source": source.name, "error": str(exc)})
 
     # one finalize for everything the sources just fed (like the watcher's drain-empty flush).

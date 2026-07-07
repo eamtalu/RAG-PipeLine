@@ -38,7 +38,7 @@ async def _poll_once() -> None:
         try:
             async with async_session() as db:
                 stats = await fetch_now(db, customer_code, mode=LogSshFetchMode.incremental,
-                                        enabled_only=True)
+                                        enabled_only=True, skip_if_busy=True)
             if stats.get("entries_ingested") or stats.get("errors"):
                 logger.info("SSH poll for %s: %s", customer_code,
                             {k: stats.get(k) for k in ("files_fetched", "entries_ingested", "errors")})
