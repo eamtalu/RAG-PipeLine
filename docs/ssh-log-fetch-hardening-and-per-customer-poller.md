@@ -286,7 +286,10 @@ For `timestamp`/`full` the file is read whole from 0 (dedup drops overlap); `tim
 Identity is path-based, so without a content signal a path reused by different content (log rotation) could, in a rare lagging-poller + mtime-collision case, skip never-seen bytes.
 Fix: store `head_fingerprint = sha256(first ssh_fingerprint_bytes)`, and fingerprint **every considered file each poll** (even unchanged size+mtime).
 If the stored fingerprint differs from the current one, the file was rotated/replaced -> re-read from 0.
-This makes cold resume and fast rotation lossless (dedup absorbs any overlap).
+**Stability rule:** the first-N-bytes hash is a reliable identity only once the file has `>= ssh_fingerprint_bytes` (an append-only log never rewrites its first N bytes past that point).
+Below N the window still covers appendable bytes, so the fingerprint is compared **only when both the stored and current sizes are `>= N`** - otherwise the fetcher falls back to size/mtime/offset and never mistakes a small-file append for a rotation.
+Consequence: rotation detection covers the realistic case (log files `>= N`); a reused path on a sub-N file with a size+mtime collision is the only residual (tiny) miss, and truncation is still caught by the size-shrank branch.
+This makes cold resume and fast rotation lossless for real log files (dedup absorbs any overlap).
 Cost: one small (default 4 KB) `open`+`read`+`close` per considered file per poll - negligible.
 
 ### 5.3 Newline alignment (`_pull_range`)

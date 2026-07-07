@@ -68,7 +68,7 @@ async def test_save_ckpt_upsert_is_idempotent(committed_source):
     await remote_fetcher._save_ckpt(src, path, size=250, mtime=1001.0, offset=250)
     await remote_fetcher._save_ckpt(src, path, size=250, mtime=1001.0, offset=250)  # no-op-ish repeat
     ckpts = await remote_fetcher._load_ckpts(src)
-    assert ckpts[path] == (250, 1001.0, 250)
+    assert ckpts[path][:3] == (250, 1001.0, 250)  # (size, mtime, offset); [3] is head_fingerprint
 
 
 # =========================================================== gap 2: per-host advisory lock
@@ -162,7 +162,7 @@ async def test_fetch_source_new_then_skip_then_grow_then_shrink(committed_source
     s1 = await remote_fetcher._fetch_source(src, LogSshFetchMode.incremental, None)
     assert s1["files_fetched"] == 1
     assert s1["entries_ingested"] == 2
-    assert (await remote_fetcher._load_ckpts(src))[path] == (12, 1000.0, 12)
+    assert (await remote_fetcher._load_ckpts(src))[path][:3] == (12, 1000.0, 12)
 
     # 2) unchanged (same size + mtime) -> skipped, no transfer
     s2 = await remote_fetcher._fetch_source(src, LogSshFetchMode.incremental, None)
@@ -172,10 +172,10 @@ async def test_fetch_source_new_then_skip_then_grow_then_shrink(committed_source
     files[path] = (b"line1\nline2\nline3\n", 1001.0)  # 18 bytes
     s3 = await remote_fetcher._fetch_source(src, LogSshFetchMode.incremental, None)
     assert s3["files_fetched"] == 1 and s3["entries_ingested"] == 1  # only "line3\n"
-    assert (await remote_fetcher._load_ckpts(src))[path] == (18, 1001.0, 18)
+    assert (await remote_fetcher._load_ckpts(src))[path][:3] == (18, 1001.0, 18)
 
     # 4) shrank (rotation/truncation) -> re-read whole from offset 0
     files[path] = (b"fresh\n", 1002.0)  # 6 bytes < last_size
     s4 = await remote_fetcher._fetch_source(src, LogSshFetchMode.incremental, None)
     assert s4["files_fetched"] == 1 and s4["entries_ingested"] == 1
-    assert (await remote_fetcher._load_ckpts(src))[path] == (6, 1002.0, 6)
+    assert (await remote_fetcher._load_ckpts(src))[path][:3] == (6, 1002.0, 6)

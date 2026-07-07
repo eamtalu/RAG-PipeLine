@@ -15,14 +15,15 @@
 #   correctness dependency.
 
 import asyncio
+import hashlib
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 from uuid import UUID
 
 import asyncssh
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -177,18 +178,19 @@ async def _list(client, source: LogSshSource) -> list[tuple[str, int, float]]:
     return sorted(out)
 
 
-async def _load_ckpts(source: LogSshSource) -> dict[str, tuple[int, float, int]]:
+async def _load_ckpts(source: LogSshSource) -> dict[str, tuple[int, float, int, str | None]]:
     """Snapshot this source's checkpoints once (own short session) as
-    {remote_path: (last_size, last_mtime, last_offset)}, so the per-file decision loop holds no DB
-    connection during the SFTP transfer."""
+    {remote_path: (last_size, last_mtime, last_offset, head_fingerprint)}, so the per-file decision
+    loop holds no DB connection during the SFTP transfer."""
     async with async_session() as db:
         rows = (await db.execute(select(LogSshFileCheckpoint).where(
             LogSshFileCheckpoint.source_id == source.id))).scalars().all()
-        return {r.remote_path: (r.last_size, r.last_mtime, r.last_offset) for r in rows}
+        return {r.remote_path: (r.last_size, r.last_mtime, r.last_offset, r.head_fingerprint)
+                for r in rows}
 
 
-async def _save_ckpt(source: LogSshSource, remote_path: str,
-                     size: int, mtime: float, offset: int) -> None:
+async def _save_ckpt(source: LogSshSource, remote_path: str, size: int, mtime: float, offset: int,
+                     head_fingerprint: str | None = None) -> None:
     """Upsert the file checkpoint on its OWN short session. ON CONFLICT DO UPDATE so an overlapping
     write (should the per-host lock ever be bypassed) can never raise a unique-constraint error."""
     now = datetime.now(timezone.utc)
@@ -196,12 +198,45 @@ async def _save_ckpt(source: LogSshSource, remote_path: str,
         stmt = pg_insert(LogSshFileCheckpoint).values(
             source_id=source.id, customer_code=source.customer_code, remote_path=remote_path,
             last_size=size, last_mtime=mtime, last_offset=offset, last_fetched_at=now,
+            head_fingerprint=head_fingerprint,
         ).on_conflict_do_update(
             index_elements=["source_id", "remote_path"],
-            set_=dict(last_size=size, last_mtime=mtime, last_offset=offset, last_fetched_at=now),
+            set_=dict(last_size=size, last_mtime=mtime, last_offset=offset, last_fetched_at=now,
+                      head_fingerprint=head_fingerprint),
         )
         await db.execute(stmt)
         await db.commit()
+
+
+async def _read_head_fp(client, remote_path: str) -> str:
+    """sha256 of the first ssh_fingerprint_bytes of the file — the content signature used to detect a
+    rotated/replaced file at a reused path. Cheap: one small open+read+close, each timeout-bounded."""
+    f = await ssh_client.op(client.open(remote_path, "rb"), f"open-head {remote_path}")
+    try:
+        data = await ssh_client.op(
+            f.read(size=settings.ssh_fingerprint_bytes, offset=0), "read-head")
+    finally:
+        await f.close()
+    return hashlib.sha256(data or b"").hexdigest()
+
+
+async def _prune_checkpoints(source: LogSshSource, present_paths: set[str]) -> None:
+    """Best-effort delete of checkpoints for paths no longer in the listing AND older than the
+    retention window. Skips entirely on an empty listing so a transient empty glob never wipes
+    everything. Never raises — housekeeping must not fail a fetch."""
+    if not present_paths:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=settings.ssh_checkpoint_retention_days)
+    try:
+        async with async_session() as db:
+            await db.execute(delete(LogSshFileCheckpoint).where(
+                LogSshFileCheckpoint.source_id == source.id,
+                LogSshFileCheckpoint.remote_path.notin_(present_paths),
+                LogSshFileCheckpoint.last_fetched_at < cutoff,
+            ))
+            await db.commit()
+    except Exception:
+        logger.warning("checkpoint prune failed for source %s", source.id, exc_info=True)
 
 
 async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
@@ -220,7 +255,7 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
     after EVERY listed file — including unchanged/skipped ones — so a progress bar advances smoothly."""
     considered = fetched = entries = total_bytes = 0
     per_file: list[dict] = []
-    ckpts = await _load_ckpts(source)  # {path: (last_size, last_mtime, last_offset)}
+    ckpts = await _load_ckpts(source)  # {path: (last_size, last_mtime, last_offset, head_fingerprint)}
     async with ssh_client.sftp(source) as (client, fp):
         if not source.host_key_fingerprint:  # pin on first successful connect
             async with async_session() as db:
@@ -237,23 +272,39 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
         selected = (_select_timestamp_files(listing, from_ts)
                     if (mode == LogSshFetchMode.timestamp and from_ts) else None)
         for idx, (path, size, mtime) in enumerate(listing):
-            start, do_pull = 0, True
+            start, do_pull, head_fp = 0, True, None
             if selected is not None and path not in selected:
                 do_pull = False  # timestamp mode narrowed this file out
             elif mode == LogSshFetchMode.incremental:
-                ck = ckpts.get(path)  # (last_size, last_mtime, last_offset) or None
-                if ck and size == ck[0] and mtime == ck[1]:
-                    do_pull = False  # unchanged — no transfer
+                ck = ckpts.get(path)  # (last_size, last_mtime, last_offset, head_fingerprint) or None
+                # Fingerprint the file head to detect a reused path (rotation) even when size + mtime
+                # coincidentally match. The first-N-bytes hash is a STABLE identity only once the file
+                # has >= N bytes — append-only logs never rewrite their first N bytes past that point.
+                # Below N the window still covers appendable bytes, so we fall back to size/mtime and
+                # never mistake a small-file append for a rotation.
+                N = settings.ssh_fingerprint_bytes
+                head_fp = await _read_head_fp(client, path)
+                stored_fp = ck[3] if ck else None
+                fp_reliable = ck is not None and stored_fp is not None and ck[0] >= N and size >= N
+                rotated = fp_reliable and stored_fp != head_fp
+                if ck and not rotated and size == ck[0] and mtime == ck[1]:
+                    do_pull = False  # genuinely unchanged — no transfer
+                    if stored_fp is None:  # lazy backfill so future cycles can detect rotation
+                        await _save_ckpt(source, path, size, mtime, ck[2], head_fp)
+                elif rotated or (ck and size < ck[0]):
+                    start = 0  # rotation/replace/truncation ⇒ re-read whole (dedup drops overlap)
                 else:
-                    start = ck[2] if (ck and size >= ck[0]) else 0  # shrink ⇒ re-read whole
+                    start = ck[2] if ck else 0
                     if ck and start >= size:  # metadata changed but no new bytes
-                        await _save_ckpt(source, path, size, mtime, start)
+                        await _save_ckpt(source, path, size, mtime, start, head_fp)
                         do_pull = False
             # timestamp (selected) / full: do_pull stays True, start stays 0 — dedup drops any overlap
 
             if do_pull:
+                if head_fp is None:  # non-incremental path hasn't fingerprinted yet
+                    head_fp = await _read_head_fp(client, path)
                 new_off, read, ins = await _pull_range(client, path, start, size, source=source)
-                await _save_ckpt(source, path, size, mtime, new_off)
+                await _save_ckpt(source, path, size, mtime, new_off, head_fp)
                 fetched += 1
                 entries += ins
                 total_bytes += read
@@ -261,6 +312,9 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
 
             if on_file:
                 await on_file(idx + 1, considered, path, total_bytes, entries)
+
+        # housekeeping: drop checkpoints for paths that vanished long ago (best-effort, non-empty only)
+        await _prune_checkpoints(source, {p for p, _, _ in listing})
 
     return {"source": source.name, "files_considered": considered, "files_fetched": fetched,
             "bytes_fetched": total_bytes, "entries_ingested": entries, "by_file": per_file}
