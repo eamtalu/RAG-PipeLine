@@ -132,7 +132,7 @@ The automatic poller does not create run rows; only the manual/tracked path does
 Existing:
 
 ```python
-ssh_log_fetcher_enabled: bool = False          # master switch for the background poller
+ssh_log_fetcher_enabled: bool = True           # global kill-switch (default on); per-source `enabled` drives auto-poll
 ssh_log_fetcher_poll_seconds: float = 60.0      # default per-customer cadence when no source interval is set
 ssh_connect_timeout_seconds: float = 20.0        # bounds the initial TCP/SSH handshake only
 ssh_max_file_size: int = 200 * 1024 * 1024       # per read-window cap (mirrors the upload cap)
@@ -183,7 +183,7 @@ flowchart TD
     end
 ```
 
-- **Supervisor** (`run_ssh_log_fetcher`, started in lifespan when `ssh_log_fetcher_enabled`): every `ssh_poll_reconcile_seconds` it reconciles the desired set of customers (those with >=1 enabled source) against a `dict[customer_code, asyncio.Task]`, spawning, reaping, and restarting loops. Wrapped so it never dies; cancels all children on shutdown.
+- **Supervisor** (`run_ssh_log_fetcher`, started in lifespan by default; `ssh_log_fetcher_enabled` is only a global kill-switch): every `ssh_poll_reconcile_seconds` it reconciles the desired set of customers (those with >=1 enabled source) against a `dict[customer_code, asyncio.Task]`, spawning, reaping, and restarting loops. Idle (no loops) when nothing is enabled, so auto-poll is driven entirely by the per-source `enabled` flag from the frontend. Wrapped so it never dies; cancels all children on shutdown.
 - **Per-customer loop**: acquires the global `asyncio.Semaphore(ssh_poll_max_concurrent)` only around the fetch, runs `fetch_now(..., enabled_only=True, skip_if_busy=True)`, catches everything except `CancelledError`, then sleeps its interval.
 - **Per-customer cadence** (wires up `poll_interval_seconds`): interval = the minimum non-null `poll_interval_seconds` across that customer's enabled sources, else `ssh_log_fetcher_poll_seconds`.
 - **Isolation:** a crash is caught per tenant (and the supervisor respawns); a hung server is bounded by SFTP timeouts (§7) and occupies only one semaphore slot; within a tenant, sources are processed sequentially (a tenant's slow server only delays that tenant's other servers).

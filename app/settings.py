@@ -87,10 +87,13 @@ class Settings(BaseSettings):
     log_regroup_pad_seconds: int = 900
 
     # --- Remote SSH log source (pull-ingestion from the Windows Server) ---
-    # Background poller: connects to each enabled per-customer LogSshSource over SFTP, pulls the new
-    # tail of its remote log files, ingests, then finalizes. OFF by default — the on-demand
-    # POST /logs/fetch-remote trigger works regardless of this flag.
-    ssh_log_fetcher_enabled: bool = False
+    # Background poller: a supervisor that runs one loop per customer with >= 1 ENABLED source. It is
+    # ON by default and idle when no source is enabled (a cheap "any enabled sources?" query per
+    # reconcile tick) — so auto-poll is controlled entirely from the frontend via each source's
+    # `enabled` flag, with no env to set. This flag is only a global kill-switch: set False to stop
+    # ALL background polling regardless of source flags. The on-demand POST /logs/fetch-remote trigger
+    # works regardless of this flag.
+    ssh_log_fetcher_enabled: bool = True
     ssh_log_fetcher_poll_seconds: float = 60.0
     ssh_connect_timeout_seconds: float = 20.0
     ssh_max_file_size: int = 200 * 1024 * 1024  # 200 MB — mirror the upload cap

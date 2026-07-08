@@ -29,6 +29,23 @@ Nothing else in the request/response shapes changed.
 
 ---
 
+## A. Onboarding flow (the recommended guided UX)
+
+Auto-poll is controlled **entirely from the frontend** by each source's `enabled` flag — there is **no backend env to set**. The poll supervisor always runs and stays idle until a source is enabled. Guide the user: **Add → Test → Choose mode → Manage.**
+
+1. **Add server** — `POST /ssh-sources` with `enabled:false` (create it inactive so it's verified before going live). Collect connection + auth + what-to-pull.
+2. **Test** — `POST /ssh-sources/{id}/test`. Show the pinned `fingerprint` + `sample` files ("Found N files"). Gate step 3 on a green result. (`409` mismatch / `502` unreachable → show the reason; let them fix and re-test.)
+3. **Choose how it runs** — two buttons:
+   - **Auto-poll** → `PATCH /ssh-sources/{id} { "enabled": true }`. The backend begins polling this source within one reconcile tick; its `status` goes `pending` → `live`. Nothing else to do.
+   - **Manual** → leave `enabled:false`; show a **Fetch now** button (`POST /fetch-remote {source_id}` → poll the run).
+4. **Manage** — drive each card off `status` (§7): auto cards show live/stale + last-synced + **Pause** (`PATCH enabled:false`); manual cards show **Fetch now** + **Turn on auto-poll** (`PATCH enabled:true`); an `auto_disabled` card shows **Resume** (the §8 windowed-resume recipe, then `PATCH enabled:true`).
+
+**State → control cheatsheet:**
+- `enabled:true` (auto) → the only control is **Pause** (disable). Never show **Fetch now** here (the API 409s it).
+- `enabled:false` (manual) → controls are **Fetch now** and **Turn on auto-poll**.
+
+---
+
 ## 1. `GET /logs/ssh-sources` — list sources
 
 - **Auth:** current-customer. **Returns 200.**

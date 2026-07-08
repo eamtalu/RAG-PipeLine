@@ -10,7 +10,7 @@ For the full design rationale, edge cases, and the frontend API contract, see `d
 
 Instead of a human uploading a log file, the backend reaches out over SSH/SFTP to each registered Windows Server, reads only the *new tail* of the matching log files, and feeds those bytes through the **same Stage 1 ingestion** that the upload / scan / watcher paths use, then runs Stage 2 `finalize_pending` once so the entries are stitched into transactions.
 
-It is OFF by default and enabled with `settings.ssh_log_fetcher_enabled`.
+The poller supervisor is **ON by default** and idle until a source is enabled — auto-poll is controlled entirely from the frontend via each source's `enabled` flag. `settings.ssh_log_fetcher_enabled` (default true) is only a global kill-switch to stop all background polling.
 
 Two entry points into one shared engine (`fetch_now` in `app/services/mnp_log_ingestion/remote/remote_fetcher.py`):
 
@@ -37,7 +37,7 @@ Two entry points into one shared engine (`fetch_now` in `app/services/mnp_log_in
 
 ## The background poller (per-customer isolation)
 
-`run_ssh_log_fetcher()` is a **supervisor** started in the app lifespan when `ssh_log_fetcher_enabled`.
+`run_ssh_log_fetcher()` is a **supervisor** started in the app lifespan by default (unless the `ssh_log_fetcher_enabled` kill-switch is set false).
 Every `ssh_poll_reconcile_seconds` it reconciles the set of customers with >= 1 enabled source against a dict of running tasks - spawning a loop per new customer, cancelling loops for departed ones, restarting any that finished - and cancels all children on shutdown.
 
 Each per-customer loop, under a global `asyncio.Semaphore(ssh_poll_max_concurrent)`, runs `fetch_now(..., mode=incremental, enabled_only=True, skip_if_busy=True, drive_breaker=True)`, then sleeps its cadence (min non-null `poll_interval_seconds` across the customer's enabled sources, else `ssh_log_fetcher_poll_seconds`).

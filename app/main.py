@@ -44,11 +44,12 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(run_log_grouping_worker()))
     else:
         logging.getLogger(__name__).info("Log grouping worker disabled (log_grouping_worker_enabled=False)")
-    # Remote SSH log fetcher (pull from the Windows Server) — off unless explicitly enabled.
+    # Remote SSH log fetcher: the per-customer poll supervisor. ON by default and idle until a source
+    # is enabled from the frontend (ssh_log_fetcher_enabled is only a global kill-switch).
     if settings.ssh_log_fetcher_enabled:
         tasks.append(asyncio.create_task(run_ssh_log_fetcher()))
     else:
-        logging.getLogger(__name__).info("SSH log fetcher disabled (ssh_log_fetcher_enabled=False)")
+        logging.getLogger(__name__).info("SSH log fetcher globally disabled (kill-switch)")
     # Notifications (rules → bus → channels). Subscribe the dispatcher to the bus once, then run the
     # worker that drives rule evaluation + store-and-forward redelivery. Off unless enabled.
     if settings.notifications_enabled:
