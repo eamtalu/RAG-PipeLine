@@ -10,6 +10,15 @@ class Settings(BaseSettings):
     app_name: str = "RAG Backend"
     debug: bool = False
 
+    # --- Logging ---
+    # The app logs to stdout/stderr by default. Set log_file to ALSO write to a rotating file (useful
+    # when the process is started bare, e.g. `uvicorn main:app`, where stdout isn't captured durably).
+    # Empty => no file handler. Rotation keeps log_file_max_bytes per file, log_file_backup_count files.
+    log_level: str = "INFO"
+    log_file: str = ""                       # e.g. "/var/log/rag-backend.log" or "~/rag-backend.log"
+    log_file_max_bytes: int = 10 * 1024 * 1024   # 10 MB per file before rotating
+    log_file_backup_count: int = 5               # keep this many rotated files
+
     # --- Display timezone ---
     # Log timestamps are stored as UTC instants (timestamptz). They are CONVERTED to this zone for
     # human display only (API isoformat output, the §6 text view, agent answers, notification bodies)

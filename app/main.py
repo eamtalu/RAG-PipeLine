@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import os
 
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI
 
@@ -17,7 +19,40 @@ from app.services.workers.notification_worker import run_notification_worker
 from app.services.workers.logspace_cleanup_worker import run_logspace_cleanup_worker
 from app.services.notifications import dispatcher as notification_dispatcher
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+def setup_logging() -> None:
+    """Configure root logging: always to stdout/stderr, and ALSO to a rotating file when
+    settings.log_file is set. Env-gated so bare `uvicorn main:app` (stdout not captured durably) can
+    still keep a real log file. Idempotent — safe if called more than once."""
+    fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
+
+    # stream handler (stdout/stderr) — add one if none exists yet
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler)
+               for h in root.handlers):
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
+
+    # optional rotating file handler
+    if settings.log_file:
+        path = os.path.expanduser(settings.log_file)
+        already = any(isinstance(h, RotatingFileHandler)
+                      and getattr(h, "baseFilename", None) == os.path.abspath(path)
+                      for h in root.handlers)
+        if not already:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            fh = RotatingFileHandler(path, maxBytes=settings.log_file_max_bytes,
+                                     backupCount=settings.log_file_backup_count)
+            fh.setFormatter(fmt)
+            root.addHandler(fh)
+            logging.getLogger(__name__).info("File logging enabled -> %s (maxBytes=%d, backups=%d)",
+                                             path, settings.log_file_max_bytes,
+                                             settings.log_file_backup_count)
+
+
+setup_logging()
 
 # If you want to
 # - create instances that would be available application wide or
