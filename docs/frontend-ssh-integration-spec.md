@@ -55,7 +55,7 @@ Auto-poll is controlled **entirely from the frontend** by each source's `enabled
 ## 1. `GET /logs/ssh-sources` — list sources
 
 - **Auth:** current-customer. **Returns 200.**
-- **Response:** `{ "sources": SourceOut[] }` (see §6 for `SourceOut`). Use this for the fleet/health dashboard — every item carries `status`, so no per-source calls are needed.
+- **Response:** `{ "sources": SourceOut[] }` (see §7 for `SourceOut`). Use this for the fleet/health dashboard — every item carries `status`, so no per-source calls are needed.
 
 ---
 
@@ -250,7 +250,7 @@ Backs an audit/history panel.
 
 ## 13. Suggested frontend flows
 
-- **Onboard:** create (disabled) → `test` → if OK, PATCH `enabled:true` (auto-poll) or leave disabled (manual-only).
+- **Onboard:** the full guided flow is **§A** (Add → Test → Choose mode → Manage). For Auto-poll, always route through the start-point choice (From now `mode:seed` / From a date `mode:timestamp` / All history) so you don't backfill old logs; for Manual, leave `enabled:false`.
 - **Health dashboard:** `GET /ssh-sources`, colour by `status`; show `last_attempt_at`/`last_ok_at`/`last_error`/`consecutive_failures`; badge `auto_disabled` distinctly (it's a breaker trip, not an operator disable).
 - **Manual fetch:** only when `enabled===false`; `POST /fetch-remote` → store `run_id` → poll `runs/{id}` until terminal; offer **Cancel** while `running`.
 - **Resume after outage:** the §8 windowed-resume recipe.
