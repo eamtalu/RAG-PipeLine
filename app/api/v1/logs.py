@@ -347,24 +347,41 @@ async def regroup_status(
     customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
 ):
-    """Whether this customer has log windows pending regroup — so the UI can show a (non-blocking)
-    'finalize' prompt. Cheap (one indexed count). Transaction reads do NOT block on this: they return
-    the last fully-stitched data plus the same flag (see read_pending_state). `pending=true` means the
-    newest ingested tail isn't stitched in yet — POST /logs/regroup/finalize (or read with
-    finalize=true) to include it.
+    """Stitching status for this customer — drives the UI's "is the log server up to date?" widget and
+    the (non-blocking) 'finalize' prompt. Read-only and cheap: one indexed query over the small
+    log_regroup_pending table. Transaction reads do NOT block on this; they return the last
+    fully-stitched data plus the same signal (see read_pending_state).
+
+    Fields:
+      - pending_windows   : open (not-yet-stitched) regroup windows. The backlog size.
+      - oldest_pending_at : when the oldest un-stitched window was queued (null if none).
+      - last_regroup_at   : when a window was last stitched (max consumed_at). Shows the server IS
+                            populating transactions. Null only if nothing has ever been stitched.
+      - up_to_date        : true when there is NO backlog (pending_windows == 0) — the log
+                            transactions are current with everything ingested so far.
+      - pending           : legacy alias for `not up_to_date`, kept for existing clients.
+
+    NOTE for the frontend: `up_to_date` reports the STITCHING backlog only. To also show that
+    ingestion is live, pair it with each source's `status` / `last_ok_at` (see GET /ssh-sources).
     """
-    open_rows = (await db.execute(
-        select(func.count(), func.min(LogRegroupPending.created_at)).where(
-            LogRegroupPending.customer_code == customer,
-            LogRegroupPending.consumed_at.is_(None),
-        )
+    # ONE query over this customer's pending rows: open-only aggregates via FILTER, plus the overall
+    # max(consumed_at) as the "last stitched" timestamp. No writes — safe to poll frequently.
+    row = (await db.execute(
+        select(
+            func.count().filter(LogRegroupPending.consumed_at.is_(None)),
+            func.min(LogRegroupPending.created_at).filter(LogRegroupPending.consumed_at.is_(None)),
+            func.max(LogRegroupPending.consumed_at),
+        ).where(LogRegroupPending.customer_code == customer)
     )).one()
-    count, oldest = open_rows
+    count, oldest, last_regroup = row
+    count = count or 0
     return {
         "customer_code": customer,
         "pending": bool(count),
-        "pending_windows": count or 0,
+        "pending_windows": count,
         "oldest_pending_at": oldest.isoformat() if oldest else None,
+        "last_regroup_at": last_regroup.isoformat() if last_regroup else None,
+        "up_to_date": count == 0,
     }
 
 
