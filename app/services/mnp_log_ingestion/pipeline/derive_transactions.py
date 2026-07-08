@@ -20,8 +20,9 @@
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import String, Enum as SAEnum, delete, func, inspect as sa_inspect, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
@@ -40,6 +41,19 @@ _SENSITIVE = {"password", "accesstoken", "m3credentials", "m3usercredentials", "
 
 # namespace for deterministic (uuid5) transaction ids — fixed so ids are reproducible forever
 _TXN_NS = uuid.UUID("6f9c2a1e-7b54-4e2d-9a3c-1d0e8f5b4a21")
+
+
+@lru_cache(maxsize=1)
+def _txn_str_limits() -> dict[str, int]:
+    """{attribute: max_length} for every bounded VARCHAR column on LogTransaction (Text has no limit;
+    Enum is excluded — its values are fixed and valid). Used to defensively cap promoted dimension
+    values to their column width so a single over-length source value (e.g. a composite ItemNumber the
+    WMS puts in the request URL) can never raise StringDataRightTruncationError and abort a whole
+    Stage 2 batch. Computed once from the ORM mapping, so new/resized columns are picked up for free."""
+    return {c.key: c.type.length
+            for c in sa_inspect(LogTransaction).columns
+            if isinstance(c.type, String) and not isinstance(c.type, SAEnum)
+            and getattr(c.type, "length", None)}
 
 
 class _TxnBuilder:
@@ -487,6 +501,17 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
             continue
         seen.add(tid)
         values = b.compute()
+        # Defensive length cap: coerce any promoted string dimension longer than its column to fit.
+        # The full value is preserved on the raw log_entry; only the (queryable) transaction column is
+        # capped. Without this, one over-length value (e.g. a 70-char composite ItemNumber) raises
+        # StringDataRightTruncationError, aborting the batch and — since finalize retries oldest-first —
+        # stalling ALL stitching for the tenant. See docs/stage2-stitching-stall-postmortem-and-fix.md.
+        for _k, _lim in _txn_str_limits().items():
+            _v = values.get(_k)
+            if isinstance(_v, str) and len(_v) > _lim:
+                logger.warning("Stage 2 [%s]: capped over-length %s (%d > %d) to fit column",
+                               customer_code, _k, len(_v), _lim)
+                values[_k] = _v[:_lim]
         is_sealed = _is_sealed(values, seal_cutoff, abandon_cutoff)
         txn = LogTransaction(id=tid, sealed=is_sealed, **values)
         db.add(txn)
@@ -687,47 +712,106 @@ def _coalesce(ranges: list[tuple[datetime, datetime]], gap: timedelta) -> list[t
     return merged
 
 
+def _coalesce_pending(pend: list[LogRegroupPending], gap: timedelta
+                      ) -> list[tuple[datetime, datetime, list[LogRegroupPending]]]:
+    """Like _coalesce, but keeps each merged run tied to the pending rows that formed it — so a run can
+    be marked consumed independently once (and only if) it finishes. This is what lets one poison run
+    fail in isolation without either blocking the other runs or wrongly consuming its own rows."""
+    runs: list[list] = []  # [lo, hi, [rows]]
+    for p in sorted(pend, key=lambda r: r.range_start):
+        if runs and p.range_start <= runs[-1][1] + gap:
+            runs[-1][1] = max(runs[-1][1], p.range_end)
+            runs[-1][2].append(p)
+        else:
+            runs.append([p.range_start, p.range_end, [p]])
+    return [(lo, hi, rows) for lo, hi, rows in runs]
+
+
+def _split_run(lo: datetime, hi: datetime, max_seconds: int):
+    """Yield consecutive sub-windows covering [lo, hi], each spanning at most max_seconds. regroup_window
+    pads every sub-window by >= the seal window and rebuilds with deterministic ids, so consecutive
+    sub-windows overlap at their seam and rebuild it identically — the split is lossless. max_seconds<=0
+    disables splitting (one window). Steady-state runs are seconds wide and yield a single window."""
+    if max_seconds <= 0 or (hi - lo).total_seconds() <= max_seconds:
+        yield (lo, hi)
+        return
+    step = timedelta(seconds=max_seconds)
+    cur = lo
+    while cur < hi:
+        nxt = min(cur + step, hi)
+        yield (cur, nxt)
+        cur = nxt
+
+
 async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
-    """Consume a customer's open log_regroup_pending rows: coalesce their ranges into disjoint runs
-    and run a scoped regroup_window over each, then stamp the rows consumed. This is the single
-    "I'm done ingesting — stitch what I added" operation behind both the console finalize endpoint and
-    the watcher's drain-empty flush. Idempotent: with nothing pending it returns windows=0.
+    """Consume a customer's open log_regroup_pending rows: coalesce their ranges into disjoint runs and
+    run a scoped regroup_window over each, then stamp that run's rows consumed. This is the single
+    "I'm done ingesting — stitch what I added" operation behind the console finalize endpoint, the
+    fetch/poll path, and the watcher's drain-empty flush. Idempotent: with nothing pending, windows=0.
 
-    The whole batch (lock acquire -> all windows -> mark consumed) runs as ONE transaction guarded by
-    a transaction-level advisory lock, so a console finalize and a worker flush (or two clicks) for the
-    same customer serialize instead of racing into a deterministic-id clash. The lock releases
-    automatically on commit/rollback — no manual unlock to leak."""
-    try:
-        # transaction-scoped lock: held until this transaction commits/rolls back. Acquiring it starts
-        # the transaction that all the windows below share (regroup_window called with commit=False).
-        await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(customer_code))))
+    Isolation + bounded memory (why this is NOT one big transaction):
+      - Each RUN is processed on its OWN short session and split into padded sub-windows of at most
+        settings.log_regroup_max_window_seconds; each sub-window is a scoped regroup_window that
+        COMMITS on its own. So the per-window entry set — and the session identity map — stays bounded
+        no matter how large the backlog is, and progress persists as it goes.
+      - A run that fails (any sub-window raises) is caught, logged, and recorded under `failures`; its
+        pending rows are left OPEN (retried next cycle) while every OTHER run still completes. One
+        poison record can therefore never again stall all stitching for the tenant (the original bug:
+        a single over-length ItemNumber aborted the whole batch, and the oldest-first retry meant it
+        blocked forever).
+      - Each sub-window acquires pg_advisory_xact_lock(hashtext(customer_code)) inside its own
+        transaction, so concurrent finalizes for the same customer still serialize at window
+        granularity; regroup_window is idempotent (deterministic ids), so interleaving is safe.
 
-        pend = list((await db.execute(
-            select(LogRegroupPending).where(
-                LogRegroupPending.customer_code == customer_code,
-                LogRegroupPending.consumed_at.is_(None),
-            ).order_by(LogRegroupPending.range_start.asc())
-        )).scalars().all())
-        if not pend:
-            await db.commit()  # release the lock; nothing to do
-            return {"mode": "finalize", "customer_code": customer_code, "windows": 0, "by_window": []}
+    The passed `db` is used only to READ the open pending rows; all writes happen on fresh sessions."""
+    pend = list((await db.execute(
+        select(LogRegroupPending).where(
+            LogRegroupPending.customer_code == customer_code,
+            LogRegroupPending.consumed_at.is_(None),
+        ).order_by(LogRegroupPending.range_start.asc())
+    )).scalars().all())
+    if not pend:
+        return {"mode": "finalize", "customer_code": customer_code, "windows": 0,
+                "pending_consumed": 0, "by_window": []}
 
-        runs = _coalesce([(p.range_start, p.range_end) for p in pend], gap=2 * _regroup_pad())
-        by_window = [await regroup_window(db, customer_code, lo, hi, commit=False) for lo, hi in runs]
+    runs = _coalesce_pending(pend, gap=2 * _regroup_pad())
+    max_window = settings.log_regroup_max_window_seconds
+    by_window: list[dict] = []
+    failures: list[dict] = []
+    consumed = 0
+    lock = func.pg_advisory_xact_lock(func.hashtext(customer_code))
 
-        await db.execute(
-            update(LogRegroupPending)
-            .where(LogRegroupPending.id.in_([p.id for p in pend]))
-            .values(consumed_at=datetime.now(timezone.utc))
-        )
-        await db.commit()
-        logger.info("Stage 2 finalize [%s]: %d pending rows -> %d window(s)",
-                    customer_code, len(pend), len(runs))
-        return {"mode": "finalize", "customer_code": customer_code,
-                "windows": len(runs), "pending_consumed": len(pend), "by_window": by_window}
-    except Exception:
-        await db.rollback()  # release the lock on failure; pending rows stay open for a retry
-        raise
+    for lo, hi, rows in runs:
+        try:
+            for w_lo, w_hi in _split_run(lo, hi, max_window):
+                async with async_session() as wdb:
+                    # serialize same-customer finalizes at window granularity, then rebuild + COMMIT
+                    # this window in its own transaction (releasing the lock).
+                    await wdb.execute(select(lock))
+                    by_window.append(await regroup_window(wdb, customer_code, w_lo, w_hi, commit=True))
+            # only now that every sub-window of this run committed, mark the run's pending consumed
+            async with async_session() as cdb:
+                await cdb.execute(
+                    update(LogRegroupPending)
+                    .where(LogRegroupPending.id.in_([p.id for p in rows]))
+                    .values(consumed_at=datetime.now(timezone.utc))
+                )
+                await cdb.commit()
+            consumed += len(rows)
+        except Exception as exc:
+            # isolate this run; other runs still run, and its pending rows stay open for a retry.
+            logger.exception("Stage 2 finalize [%s]: run %s..%s failed — pending stays open for retry",
+                             customer_code, lo, hi)
+            failures.append({"window_start": lo.isoformat(), "window_end": hi.isoformat(),
+                             "error": str(exc)[:2000]})
+
+    logger.info("Stage 2 finalize [%s]: %d pending rows -> %d run(s), %d window(s), %d run(s) failed",
+                customer_code, len(pend), len(runs), len(by_window), len(failures))
+    result = {"mode": "finalize", "customer_code": customer_code, "windows": len(by_window),
+              "pending_consumed": consumed, "by_window": by_window}
+    if failures:
+        result["failures"] = failures
+    return result
 
 
 async def run_finalize_tracked(run_id: uuid.UUID, customer_code: str) -> None:

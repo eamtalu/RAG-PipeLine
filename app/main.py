@@ -1,56 +1,17 @@
 import asyncio
 import logging
-import os
 
 from contextlib import asynccontextmanager
-from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI
 
 from app.api.v1.router import api_router
 from app.settings import settings
-from app.services.workers.embedding_worker import run_worker
-from app.services.workers.log_watcher import run_log_watcher
-from app.services.workers.log_grouping_worker import run_log_grouping_worker
-from app.services.workers.ssh_log_fetcher import run_ssh_log_fetcher
-from app.services.mnp_log_ingestion.remote.remote_fetcher import sweep_stale_runs
+from app.background import setup_logging, start_background_tasks, stop_background_tasks
 from app.api.v1.log_sources import _fetch_tasks as _ssh_fetch_tasks
-from app.services.workers.notification_worker import run_notification_worker
-from app.services.workers.logspace_cleanup_worker import run_logspace_cleanup_worker
-from app.services.notifications import dispatcher as notification_dispatcher
 
-
-def setup_logging() -> None:
-    """Configure root logging: always to stdout/stderr, and ALSO to a rotating file when
-    settings.log_file is set. Env-gated so bare `uvicorn main:app` (stdout not captured durably) can
-    still keep a real log file. Idempotent — safe if called more than once."""
-    fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
-    root = logging.getLogger()
-    root.setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
-
-    # stream handler (stdout/stderr) — add one if none exists yet
-    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler)
-               for h in root.handlers):
-        sh = logging.StreamHandler()
-        sh.setFormatter(fmt)
-        root.addHandler(sh)
-
-    # optional rotating file handler
-    if settings.log_file:
-        path = os.path.expanduser(settings.log_file)
-        already = any(isinstance(h, RotatingFileHandler)
-                      and getattr(h, "baseFilename", None) == os.path.abspath(path)
-                      for h in root.handlers)
-        if not already:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            fh = RotatingFileHandler(path, maxBytes=settings.log_file_max_bytes,
-                                     backupCount=settings.log_file_backup_count)
-            fh.setFormatter(fmt)
-            root.addHandler(fh)
-            logging.getLogger(__name__).info("File logging enabled -> %s (maxBytes=%d, backups=%d)",
-                                             path, settings.log_file_max_bytes,
-                                             settings.log_file_backup_count)
-
+# `setup_logging` is re-exported here so `app.main.setup_logging` keeps working (tests + habit).
+__all__ = ["app", "setup_logging", "lifespan"]
 
 setup_logging()
 
@@ -61,51 +22,19 @@ setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Fail any SSH fetch run left `running` by a prior crash/restart (unconditional — on-demand runs
-    # exist even when the poller is disabled). See remote_fetcher.sweep_stale_runs.
-    try:
-        swept = await sweep_stale_runs()
-        if swept:
-            logging.getLogger(__name__).info("Swept %d stale SSH fetch run(s) to failed", swept)
-    except Exception:
-        logging.getLogger(__name__).warning("stale-run sweep failed at startup", exc_info=True)
-    # Start background workers: embedding worker + log watcher + log grouping (Stage 2)
-    tasks = [
-        asyncio.create_task(run_worker()),
-        asyncio.create_task(run_log_watcher()),
-    ]
-    # Stage 2 automatic incremental regroup — togglable so it can be run manually via the API instead.
-    if settings.log_grouping_worker_enabled:
-        tasks.append(asyncio.create_task(run_log_grouping_worker()))
+    # Background loops run in EXACTLY ONE process. When run_background_workers is false (the web tier
+    # under gunicorn -w N), this process serves HTTP + on-demand endpoints only, and the dedicated
+    # `app.worker` process runs the loops. Default true keeps single-process / dev deployments working
+    # exactly as before. See app.background and docs/background-workers-web-worker-split.md.
+    if settings.run_background_workers:
+        tasks = await start_background_tasks()
     else:
-        logging.getLogger(__name__).info("Log grouping worker disabled (log_grouping_worker_enabled=False)")
-    # Remote SSH log fetcher: the per-customer poll supervisor. ON by default and idle until a source
-    # is enabled from the frontend (ssh_log_fetcher_enabled is only a global kill-switch).
-    if settings.ssh_log_fetcher_enabled:
-        tasks.append(asyncio.create_task(run_ssh_log_fetcher()))
-    else:
-        logging.getLogger(__name__).info("SSH log fetcher globally disabled (kill-switch)")
-    # Notifications (rules → bus → channels). Subscribe the dispatcher to the bus once, then run the
-    # worker that drives rule evaluation + store-and-forward redelivery. Off unless enabled.
-    if settings.notifications_enabled:
-        notification_dispatcher.register()
-        tasks.append(asyncio.create_task(run_notification_worker()))
-    else:
-        logging.getLogger(__name__).info("Notifications disabled (notifications_enabled=False)")
-    # Log-space cleanup: auto-expire disposables + sweep stale presence. Off unless explicitly enabled;
-    # DELETE /customers/{code} performs the same purge on demand regardless of this flag.
-    if settings.logspace_cleanup_worker_enabled:
-        tasks.append(asyncio.create_task(run_logspace_cleanup_worker()))
-    else:
-        logging.getLogger(__name__).info("Log-space cleanup worker disabled "
-                                         "(logspace_cleanup_worker_enabled=False)")
+        tasks = []
+        logging.getLogger(__name__).info(
+            "Background workers disabled in this process (run_background_workers=False) — serving "
+            "HTTP + on-demand endpoints only; the dedicated worker process runs the loops")
     yield
-    for task in tasks:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    await stop_background_tasks(tasks)
     # cancel in-flight on-demand SSH fetch tasks too (they aren't part of `tasks`); each marks its
     # run failed on CancelledError, and the next startup sweep is the backstop.
     for t in list(_ssh_fetch_tasks.values()):

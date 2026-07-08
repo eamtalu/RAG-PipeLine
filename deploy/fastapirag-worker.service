@@ -1,0 +1,27 @@
+# Dedicated background-worker unit: runs ALL background loops in ONE process, separate from the
+# gunicorn web tier. Install once on the server (see docs/background-workers-web-worker-split.md):
+#
+#   sudo cp deploy/fastapirag-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fastapirag-worker.service
+#
+# and add `Environment=RUN_BACKGROUND_WORKERS=false` to the existing fastapirag.service (web tier).
+
+[Unit]
+Description=RAG Pipeline background worker (SSH poller, Stage 2 stitching, embeddings, notifications)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=amin
+WorkingDirectory=/opt/RAG-Pipeline/RAG-PipeLine
+Environment=RUN_BACKGROUND_WORKERS=true
+ExecStart=/opt/RAG-Pipeline/RAG-PipeLine/venv/bin/python -m app.worker
+Restart=always
+RestartSec=5
+# give in-flight fetch/stitch work time to unwind on stop before SIGKILL
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

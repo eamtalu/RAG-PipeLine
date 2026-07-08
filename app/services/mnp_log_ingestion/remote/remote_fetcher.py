@@ -460,7 +460,16 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
         await _regrouping()
         try:
             async with async_session() as fdb:
-                return await finalize_pending(fdb, customer_code)
+                res = await finalize_pending(fdb, customer_code)
+            # finalize_pending now ISOLATES a failing run (commits the good ones, leaves the bad run's
+            # pending open) instead of raising. Still surface any such failure so it is not swallowed
+            # while log_regroup_pending grows: a persistent per-run failure must show up on the run
+            # row / poller error log exactly as a hard finalize failure did.
+            if res.get("failures"):
+                agg["finalize_error"] = "; ".join(
+                    f"{f.get('window_start')}..{f.get('window_end')}: {f.get('error')}"
+                    for f in res["failures"])[:2000]
+            return res
         except Exception as exc:
             logger.exception("Stage 2 finalize failed for %s — pending stays open for retry", customer_code)
             agg["finalize_error"] = str(exc)[:2000]

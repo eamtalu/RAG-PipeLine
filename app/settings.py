@@ -94,6 +94,30 @@ class Settings(BaseSettings):
     # >= log_seal_window_seconds (the max a transaction can span); the code enforces that floor, so
     # this only ever widens the window. Same 15-min default as the seal window.
     log_regroup_pad_seconds: int = 900
+    # finalize_pending caps how much wall-clock time a SINGLE regroup_window processes in one
+    # transaction. A large backlog (e.g. a first backfill of weeks of continuously-logging data)
+    # coalesces into one huge span; without a cap the whole span is deleted + rebuilt with every
+    # entry loaded into ONE session, so the identity map grows unbounded. Splitting the span into
+    # padded sub-windows (each its own committed transaction) keeps memory and transaction size
+    # bounded and lets progress persist. Sub-windows overlap by the pad and rebuild with deterministic
+    # ids, so the split stays lossless. 6 h default; steady-state poll windows (seconds of data) are
+    # far below this and never split.
+    log_regroup_max_window_seconds: int = 6 * 3600
+
+    # Background loops (embedding, watcher, Stage 2 grouping, SSH poll supervisor, notifications,
+    # log-space cleanup) must run in EXACTLY ONE process. Under gunicorn -w N the FastAPI lifespan runs
+    # per worker, so set RUN_BACKGROUND_WORKERS=false on the web service and run the dedicated
+    # `python -m app.worker` process (which always runs them, guarded by a singleton advisory lock).
+    # Default true so single-process / dev / `uvicorn main:app` deployments are unchanged.
+    # See app/background.py and docs/background-workers-web-worker-split.md.
+    run_background_workers: bool = True
+
+    # Per-statement Postgres timeout (ms) applied to every connection, 0 = disabled (default, so no
+    # behavior change on existing deployments). A safety net: with the regroup window now bounded
+    # (log_regroup_max_window_seconds) every statement is small, so a non-zero value here — e.g.
+    # 300000 (5 min) in production — kills a genuine runaway and surfaces it instead of spinning
+    # silently. Enable via DB_STATEMENT_TIMEOUT_MS in the environment.
+    db_statement_timeout_ms: int = 0
 
     # --- Remote SSH log source (pull-ingestion from the Windows Server) ---
     # Background poller: a supervisor that runs one loop per customer with >= 1 ENABLED source. It is

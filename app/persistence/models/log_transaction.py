@@ -87,7 +87,12 @@ class LogTransaction(Base):
 
     # --- business keys ---
     route: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    item_number: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 128, not 64: the WMS can send a composite/doubled ItemNumber in the request URL (observed up to
+    # 75 chars, e.g. "BEC|V1|...|521BEC|V1|...|521"). At 64 the INSERT raised StringDataRightTruncation
+    # and, because Stage 2 finalize is retried from the oldest window, one such row stalled ALL
+    # stitching. A generic length guard in _persist (derive_transactions) is the belt-and-suspenders
+    # backstop for anything still over the limit.
+    item_number: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     delivery_number: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     picklist_suffix: Mapped[str | None] = mapped_column(String(16), nullable=True)
     order_number: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
