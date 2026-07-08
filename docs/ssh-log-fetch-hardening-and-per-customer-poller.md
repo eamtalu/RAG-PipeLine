@@ -395,7 +395,7 @@ Stage 2 finalize stitches freshly ingested entries into `log_transactions`.
 Whether the operator must trigger it depends on the ingestion path, and this trips people up:
 
 - **SSH fetch (poller AND `POST /logs/fetch-remote`) finalizes automatically.**
-  Both go through `fetch_now`, which calls `finalize_pending` once at the end (`remote_fetcher.py:321`), surfacing as the `regrouping` phase in the run.
+  Both go through `fetch_now`, which finalizes once at the end via `_do_finalize` (surfacing as the `regrouping` phase). Finalize runs on a **fresh short-lived session** (not the caller's `db`, which has sat idle across the SFTP transfer and may have a dropped connection), and a finalize failure is **surfaced** — `agg["finalize_error"]`, a `failed` run row for a manual fetch ("fetched OK but stitching failed…"), and an error log on the poller path — rather than swallowed. The ingested rows are already committed and the pending windows stay open, so the next fetch retries; this prevents un-stitched `log_regroup_pending` from accumulating silently.
   So by the time a fetch run reports `completed`, the data is already stitched in - **no manual finalize is needed**, and the frontend should not prompt for one after an SSH fetch.
 - **Manual upload / scan (`POST /logs/ingest`, `/logs/scan`) does NOT auto-finalize.**
   Stage 1 runs in the background and only marks pending windows; the operator then triggers `POST /logs/regroup/finalize` ("I'm done") to stitch - deliberately, so several dropped files can be stitched once at the end.

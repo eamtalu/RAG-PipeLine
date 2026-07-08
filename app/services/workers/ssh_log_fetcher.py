@@ -70,10 +70,16 @@ async def _customer_loop(customer_code: str) -> None:
     while True:
         try:
             stats = await _poll_customer_once(customer_code)
-            if stats.get("entries_ingested") or stats.get("errors") or stats.get("auto_disabled"):
+            if (stats.get("entries_ingested") or stats.get("errors") or stats.get("auto_disabled")
+                    or stats.get("finalize_error")):
                 logger.info("SSH poll %s: %s", customer_code,
                             {k: stats.get(k) for k in
-                             ("files_fetched", "entries_ingested", "errors", "skipped", "auto_disabled")})
+                             ("files_fetched", "entries_ingested", "errors", "skipped",
+                              "auto_disabled", "finalize_error")})
+            if stats.get("finalize_error"):
+                logger.error("SSH poll %s: Stage 2 finalize failing — %d entries ingested but not "
+                             "stitched; pending is accumulating. Error: %s", customer_code,
+                             stats.get("entries_ingested") or 0, stats.get("finalize_error"))
         except asyncio.CancelledError:
             raise
         except Exception:

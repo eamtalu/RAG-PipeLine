@@ -450,9 +450,24 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
         if on_progress is not None:
             await on_progress(phase=LogSshFetchPhase.regrouping)
 
-    if not sources:
+    async def _do_finalize() -> dict:
+        """Stitch (Stage 2) on a FRESH short-lived session, NOT the caller's `db` — which by the time
+        we finalize has sat idle across the (possibly long) SFTP transfer and whose connection may
+        have been dropped. On failure, record it VISIBLY in agg instead of raising: the ingested rows
+        are already committed, and finalize_pending leaves the pending windows open, so the next fetch
+        retries. Crucially this stops a poll-path finalize failure from being swallowed silently while
+        log_regroup_pending grows unbounded."""
         await _regrouping()
-        agg["finalize"] = await finalize_pending(db, customer_code)  # idempotent (windows=0 if none)
+        try:
+            async with async_session() as fdb:
+                return await finalize_pending(fdb, customer_code)
+        except Exception as exc:
+            logger.exception("Stage 2 finalize failed for %s — pending stays open for retry", customer_code)
+            agg["finalize_error"] = str(exc)[:2000]
+            return {"error": str(exc)[:2000]}
+
+    if not sources:
+        agg["finalize"] = await _do_finalize()  # idempotent (windows=0 if none)
         return agg
 
     # timestamp mode: if Postgres already covers from_ts, don't touch the servers at all — UNLESS this
@@ -462,8 +477,7 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
         local_min = await _local_min_ts(db, customer_code)
         if local_min is not None and from_ts >= local_min:
             agg["already_local"] = True
-            await _regrouping()
-            agg["finalize"] = await finalize_pending(db, customer_code)
+            agg["finalize"] = await _do_finalize()
             return agg
 
     # Release the caller's pooled connection before the (slow) network loop — _fetch_source and the
@@ -526,9 +540,9 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
             if auto_disabled:
                 agg.setdefault("auto_disabled", []).append(source.name)
 
-    # one finalize for everything the sources just fed (like the watcher's drain-empty flush).
-    await _regrouping()
-    agg["finalize"] = await finalize_pending(db, customer_code)
+    # one finalize for everything the sources just fed (like the watcher's drain-empty flush) — on a
+    # fresh session, with failures surfaced (see _do_finalize).
+    agg["finalize"] = await _do_finalize()
     return agg
 
 
@@ -547,12 +561,17 @@ async def run_ssh_fetch_tracked(run_id: UUID, customer_code: str, source_id: UUI
             stats = await fetch_now(db, customer_code, source_id=source_id, mode=mode,
                                     from_ts=from_ts, disabled_only=(source_id is None),
                                     force_remote=True, on_progress=_cb)
+            # the pull may succeed while Stage 2 finalize fails — surface that as a failed run so the
+            # operator knows the data isn't stitched yet (pending stays open for the next retry).
+            fin_err = stats.get("finalize_error")
             values = dict(
-                status=LogSshFetchRunStatus.completed, phase=LogSshFetchPhase.done,
+                status=(LogSshFetchRunStatus.failed if fin_err else LogSshFetchRunStatus.completed),
+                phase=LogSshFetchPhase.done,
                 files_considered=stats.get("files_considered"),
                 files_fetched=stats.get("files_fetched"),
                 bytes_fetched=stats.get("bytes_fetched"),
                 entries_ingested=stats.get("entries_ingested"),
+                error=(f"fetched OK but stitching failed: {fin_err}" if fin_err else None),
                 result=stats, finished_at=datetime.now(timezone.utc),
             )
         except asyncio.CancelledError:
