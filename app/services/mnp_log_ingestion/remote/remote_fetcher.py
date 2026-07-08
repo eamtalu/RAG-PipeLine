@@ -273,7 +273,13 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
                     if (mode == LogSshFetchMode.timestamp and from_ts) else None)
         for idx, (path, size, mtime) in enumerate(listing):
             start, do_pull, head_fp = 0, True, None
-            if selected is not None and path not in selected:
+            if mode == LogSshFetchMode.seed:
+                # "start from now": mark this file as fully consumed up to its current end WITHOUT
+                # ingesting anything, so a later poll only picks up new appends (zero backfill).
+                do_pull = False
+                head_fp = await _read_head_fp(client, path)
+                await _save_ckpt(source, path, size, mtime, size, head_fp)
+            elif selected is not None and path not in selected:
                 # timestamp resume: seed this pre-window file's checkpoint to its current end WITHOUT
                 # ingesting, so once auto-polling resumes the incremental poller only appends new
                 # bytes and never backfills the pre-window history (forward-only resume, §4.4).

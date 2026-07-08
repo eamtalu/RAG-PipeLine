@@ -24,6 +24,7 @@ The earlier integration already had: CRUD on `/ssh-sources`, `POST /ssh-sources/
 3. **Run status can now be `cancelled`** — a new terminal state. Polling loops must treat `completed | failed | cancelled` as terminal.
 4. **Two NEW endpoints:** `GET /fetch-remote/runs` (history list) and `POST /fetch-remote/runs/{id}/cancel`.
 5. **Behavioral:** the Fetch action should be offered only when a source is `enabled=false`; a "fetch all" (omit `source_id`) now pulls only the disabled sources.
+6. **Start-point on enable:** enabling auto-poll on a fresh source would otherwise backfill all current files on the first poll. A new **`seed` mode** (and the existing `timestamp` mode) let you start "from now" or "from a date" with no/bounded backfill — the frontend must route the Auto-poll choice through §A step 3.
 
 Nothing else in the request/response shapes changed.
 
@@ -35,9 +36,14 @@ Auto-poll is controlled **entirely from the frontend** by each source's `enabled
 
 1. **Add server** — `POST /ssh-sources` with `enabled:false` (create it inactive so it's verified before going live). Collect connection + auth + what-to-pull.
 2. **Test** — `POST /ssh-sources/{id}/test`. Show the pinned `fingerprint` + `sample` files ("Found N files"). Gate step 3 on a green result. (`409` mismatch / `502` unreachable → show the reason; let them fix and re-test.)
-3. **Choose how it runs** — two buttons:
-   - **Auto-poll** → `PATCH /ssh-sources/{id} { "enabled": true }`. The backend begins polling this source within one reconcile tick; its `status` goes `pending` → `live`. Nothing else to do.
+3. **Choose how it runs:**
+   - **Auto-poll** — ask **from when to start** (this is what avoids backfilling months of old logs):
+     - **From now** *(recommended — zero backfill):* `POST /fetch-remote { "source_id": id, "mode": "seed" }` → poll the run to `done` → `PATCH /ssh-sources/{id} { "enabled": true }`. `seed` marks every current file as already-read and **ingests nothing**, so the poller then only picks up **new lines from here**.
+     - **From a date/time:** `POST /fetch-remote { "source_id": id, "mode": "timestamp", "from_timestamp": "<ISO>" }` → poll to `done` → `PATCH { "enabled": true }`. Pulls only files at/after T and seeds the rest forward.
+     - **All existing history:** `PATCH { "enabled": true }` directly — the first poll backfills every current file (dedup-safe, but can be large). Offer this only when the user really wants history.
    - **Manual** → leave `enabled:false`; show a **Fetch now** button (`POST /fetch-remote {source_id}` → poll the run).
+
+   Important: without a "From now" / "From a date" seed step, flipping `enabled:true` on a fresh source makes the first poll **backfill all current files** — so always route the Auto-poll choice through one of the three options above.
 4. **Manage** — drive each card off `status` (§7): auto cards show live/stale + last-synced + **Pause** (`PATCH enabled:false`); manual cards show **Fetch now** + **Turn on auto-poll** (`PATCH enabled:true`); an `auto_disabled` card shows **Resume** (the §8 windowed-resume recipe, then `PATCH enabled:true`).
 
 **State → control cheatsheet:**
@@ -164,9 +170,10 @@ Auto-poll is controlled **entirely from the frontend** by each source's `enabled
 |---|---|---|---|
 | `source_id` | uuid\|null | no | one source; **omit to fetch all the tenant's disabled sources** |
 | `from_timestamp` | ISO-8601\|null | no | windowed catch-up lower bound |
-| `mode` | enum\|null | no | `"incremental"` \| `"timestamp"` \| `"full"` |
+| `mode` | enum\|null | no | `"incremental"` \| `"timestamp"` \| `"full"` \| `"seed"` |
 
 - **Mode default:** if `mode` omitted → `timestamp` when `from_timestamp` is given, else `incremental`. Explicit `mode` wins.
+- **`seed` mode** ingests nothing — it just marks every current file as already-read to its end, so a subsequent poll starts "from now" with zero backfill. Use it in the "From now" auto-poll onboarding (§A). Runs like any other run (poll it to `done`).
 - **Errors (handle both):**
   - **409** — target `source_id` is `enabled=true`: `detail = "Source is auto-polled; disable it before fetching manually."` → prompt the user to disable it first (PATCH `enabled:false`), then retry.
   - **409** — a run is already in progress for this target: `detail = { "message": "A fetch is already in progress for this target", "run_id": "<uuid>" }` → **attach to that `run_id`** (poll it) instead of starting a new run.
@@ -211,7 +218,7 @@ Backs an audit/history panel.
   "run_id": "uuid",
   "customer_code": "acme",
   "source_id": "uuid",         // null = the run covered all (disabled) sources
-  "mode": "incremental",       // incremental | timestamp | full
+  "mode": "incremental",       // incremental | timestamp | full | seed
   "requested_from": null,      // ISO-8601 or null (the from_timestamp)
   "status": "running",         // running | completed | failed | cancelled
   "phase": "fetching",         // listing | fetching | regrouping | done | null

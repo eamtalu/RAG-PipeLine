@@ -28,6 +28,8 @@ class LogSshFetchMode(str, enum.Enum):
     incremental = "incremental"  # pull the new tail of each remote file (the poller's mode)
     timestamp = "timestamp"      # ensure coverage from `requested_from`; pull older files if missing
     full = "full"                # re-pull every matching remote file whole (repair / first sync)
+    seed = "seed"                # ingest NOTHING; seed every present file's checkpoint to its current
+                                 # end, so a subsequent poll starts "from now" with zero backfill
 
 
 class LogSshFetchPhase(str, enum.Enum):
