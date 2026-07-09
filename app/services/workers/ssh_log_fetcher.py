@@ -74,8 +74,8 @@ async def _customer_loop(customer_code: str) -> None:
                     or stats.get("finalize_error")):
                 logger.info("SSH poll %s: %s", customer_code,
                             {k: stats.get(k) for k in
-                             ("files_fetched", "entries_ingested", "errors", "skipped",
-                              "auto_disabled", "finalize_error")})
+                             ("files_fetched", "entries_ingested", "content_skipped", "errors",
+                              "skipped", "auto_disabled", "finalize_error")})
             if stats.get("finalize_error"):
                 logger.error("SSH poll %s: Stage 2 finalize failing — %d entries ingested but not "
                              "stitched; pending is accumulating. Error: %s", customer_code,

@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 from uuid import UUID
@@ -239,6 +240,56 @@ async def _prune_checkpoints(source: LogSshSource, present_paths: set[str]) -> N
         logger.warning("checkpoint prune failed for source %s", source.id, exc_info=True)
 
 
+@dataclass
+class _FetchPlan:
+    """Per-file decision for incremental mode: whether to transfer, from what offset, and (when
+    skipping) the offset to record on the path's checkpoint."""
+    do_pull: bool
+    start: int = 0
+    save_offset: int | None = None   # skip case: upsert the path checkpoint at this consumed offset
+    reason: str = ""
+
+
+def _plan_incremental(ck: tuple | None, sig_consumed: dict[tuple[str, int, float], int],
+                      size: int, mtime: float, head_fp: str | None, n: int) -> _FetchPlan:
+    """PURE per-file decision for incremental mode (no I/O), so it is exhaustively unit-testable.
+
+    - `ck` = (last_size, last_mtime, last_offset, head_fingerprint) for THIS path, or None.
+    - `sig_consumed` = {(head_fp, size, mtime): max_offset}, a content-identity index built once from
+      THIS source's pre-poll checkpoint snapshot. It lets us recognise a file whose bytes we have
+      ALREADY fully ingested under a DIFFERENT path — which is exactly what rename-cascade rotation
+      produces (app.txt -> app.txt.1 -> app.txt.2 ...) — and skip re-transferring it.
+
+    Order matters: the content-identity skip (2) is checked before the same-path rotation re-read (3),
+    because a cascaded file looks 'rotated' at its new path yet its bytes are already in the DB.
+    """
+    stored_fp = ck[3] if ck else None
+    fp_reliable = ck is not None and stored_fp is not None and ck[0] >= n and size >= n
+    rotated = fp_reliable and stored_fp != head_fp
+
+    # 1. genuinely unchanged at this path -> skip (backfill a legacy NULL fingerprint if needed).
+    if ck and not rotated and size == ck[0] and mtime == ck[1]:
+        return _FetchPlan(False, save_offset=(ck[2] if stored_fp is None else None), reason="unchanged")
+
+    # 2. content we've ALREADY fully ingested, now appearing at a new path (rotation cascade).
+    #    Match the FULL (fingerprint, size, mtime) triple — a rename preserves all three — so a false
+    #    skip is effectively impossible; any mismatch falls through to a safe (re)read, and the
+    #    entry_hash dedup remains the correctness backstop for whatever we DO transfer. Requires
+    #    size >= n so the head fingerprint is a reliable content identity (same rule as fp_reliable).
+    if head_fp is not None and size >= n and sig_consumed.get((head_fp, size, mtime), -1) >= size:
+        return _FetchPlan(False, save_offset=size, reason="rotated-content-skip")
+
+    # 3. rotation/replace/truncation ON THIS path -> re-read whole (dedup drops any overlap).
+    if rotated or (ck and size < ck[0]):
+        return _FetchPlan(True, start=0, reason="rotated-reread")
+
+    # 4. tail from the last offset (or from 0 for a brand-new path).
+    start = ck[2] if ck else 0
+    if ck and start >= size:  # metadata changed but no new bytes
+        return _FetchPlan(False, save_offset=start, reason="no-new-bytes")
+    return _FetchPlan(True, start=start, reason=("append" if ck else "new-file"))
+
+
 async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
                         from_ts: datetime | None, *,
                         on_listed: ProgressCb | None = None,
@@ -253,9 +304,18 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
     Progress hooks (no-ops for the poller): `on_listed(considered)` fires once the remote dir is
     globbed; `on_file(files_done, files_total, current_file, bytes_so_far, entries_so_far)` fires
     after EVERY listed file — including unchanged/skipped ones — so a progress bar advances smoothly."""
-    considered = fetched = entries = total_bytes = 0
+    considered = fetched = entries = total_bytes = content_skipped = 0
     per_file: list[dict] = []
     ckpts = await _load_ckpts(source)  # {path: (last_size, last_mtime, last_offset, head_fingerprint)}
+    # Content-identity index from the SAME pre-poll snapshot: (head_fp, size, mtime) -> max consumed
+    # offset. Built once and immutable during the loop, so a file processed later still sees a content
+    # signature even after we've upserted the checkpoint of the path that used to hold it this poll.
+    # This is what lets rename-cascade rotation skip re-downloading content already in the DB.
+    sig_consumed: dict[tuple[str, int, float], int] = {}
+    for (l_size, l_mtime, l_off, l_fp) in ckpts.values():
+        if l_fp is not None:
+            key = (l_fp, l_size, l_mtime)
+            sig_consumed[key] = max(sig_consumed.get(key, -1), l_off)
     async with ssh_client.sftp(source) as (client, fp):
         if not source.host_key_fingerprint:  # pin on first successful connect
             async with async_session() as db:
@@ -287,28 +347,20 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
                 head_fp = await _read_head_fp(client, path)
                 await _save_ckpt(source, path, size, mtime, size, head_fp)
             elif mode == LogSshFetchMode.incremental:
-                ck = ckpts.get(path)  # (last_size, last_mtime, last_offset, head_fingerprint) or None
-                # Fingerprint the file head to detect a reused path (rotation) even when size + mtime
-                # coincidentally match. The first-N-bytes hash is a STABLE identity only once the file
-                # has >= N bytes — append-only logs never rewrite their first N bytes past that point.
-                # Below N the window still covers appendable bytes, so we fall back to size/mtime and
-                # never mistake a small-file append for a rotation.
-                N = settings.ssh_fingerprint_bytes
+                # Fingerprint the file head (first N bytes) to identify content: it detects a reused
+                # path (rotation) even when size + mtime coincidentally match, AND — via sig_consumed —
+                # recognises content we already ingested that has cascaded to a new path, so we skip
+                # re-downloading it. The first-N-bytes hash is a STABLE identity once size >= N
+                # (append-only logs never rewrite their first N bytes); below N we fall back to
+                # size/mtime and never mistake a small-file append for a rotation.
                 head_fp = await _read_head_fp(client, path)
-                stored_fp = ck[3] if ck else None
-                fp_reliable = ck is not None and stored_fp is not None and ck[0] >= N and size >= N
-                rotated = fp_reliable and stored_fp != head_fp
-                if ck and not rotated and size == ck[0] and mtime == ck[1]:
-                    do_pull = False  # genuinely unchanged — no transfer
-                    if stored_fp is None:  # lazy backfill so future cycles can detect rotation
-                        await _save_ckpt(source, path, size, mtime, ck[2], head_fp)
-                elif rotated or (ck and size < ck[0]):
-                    start = 0  # rotation/replace/truncation ⇒ re-read whole (dedup drops overlap)
-                else:
-                    start = ck[2] if ck else 0
-                    if ck and start >= size:  # metadata changed but no new bytes
-                        await _save_ckpt(source, path, size, mtime, start, head_fp)
-                        do_pull = False
+                plan = _plan_incremental(ckpts.get(path), sig_consumed, size, mtime, head_fp,
+                                         settings.ssh_fingerprint_bytes)
+                do_pull, start = plan.do_pull, plan.start
+                if not do_pull and plan.save_offset is not None:
+                    await _save_ckpt(source, path, size, mtime, plan.save_offset, head_fp)
+                if plan.reason == "rotated-content-skip":
+                    content_skipped += 1
             # timestamp (selected) / full: do_pull stays True, start stays 0 — dedup drops any overlap
 
             if do_pull:
@@ -328,7 +380,8 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
         await _prune_checkpoints(source, {p for p, _, _ in listing})
 
     return {"source": source.name, "files_considered": considered, "files_fetched": fetched,
-            "bytes_fetched": total_bytes, "entries_ingested": entries, "by_file": per_file}
+            "bytes_fetched": total_bytes, "entries_ingested": entries,
+            "content_skipped": content_skipped, "by_file": per_file}
 
 
 def _select_timestamp_files(listing: list[tuple[str, int, float]], from_ts: datetime) -> set[str]:
@@ -444,7 +497,7 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
                                   enabled_only=enabled_only, disabled_only=disabled_only)
     agg = {"customer_code": customer_code, "mode": mode.value, "sources": len(sources),
            "files_considered": 0, "files_fetched": 0, "bytes_fetched": 0,
-           "entries_ingested": 0, "by_source": [], "errors": []}
+           "entries_ingested": 0, "content_skipped": 0, "by_source": [], "errors": []}
 
     async def _regrouping() -> None:
         if on_progress is not None:
@@ -539,6 +592,7 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
             agg["files_fetched"] += stats["files_fetched"]
             agg["bytes_fetched"] += stats["bytes_fetched"]
             agg["entries_ingested"] += stats["entries_ingested"]
+            agg["content_skipped"] += stats.get("content_skipped", 0)
             base["considered"] += stats["files_considered"]
             base["bytes"] += stats["bytes_fetched"]
             base["entries"] += stats["entries_ingested"]

@@ -267,18 +267,21 @@ This closes the loop between "connection off for a while" and "source in manual-
 
 ## 5. The engine internals
 
-### 5.1 Incremental checkpoint decision (per file, keyed on full remote_path)
+### 5.1 Incremental checkpoint decision (per file, keyed on path + content identity)
 
-Each poll stats every currently-present file, reads its head bytes (§5.2), and decides:
+Each poll stats every currently-present file, reads its head bytes (§5.2), and decides (in precedence order).
+The decision is a pure, unit-tested function, `_plan_incremental(...)` in `remote_fetcher.py`:
 
 | Current file vs checkpoint | Decision | Why |
 |---|---|---|
 | same `size` AND same `mtime` AND fingerprint matches | **skip** (no transfer) | genuinely unchanged |
+| head fingerprint + exact `size` + exact `mtime` match content **already fully ingested at another path** | **skip** (no transfer, record the new path as consumed) | rename-cascade rotation - these bytes are already in the DB (§5.2, §13.5) |
 | `size` grew, fingerprint matches | read `[last_offset, size)` | append-only growth - just the new tail |
-| fingerprint differs | re-read from `0` | path reused by different content (rotation/replace) |
+| fingerprint differs (and not matched above) | re-read from `0` | path reused by different content (rotation/replace) |
 | `size` shrank (`< last_size`) | re-read from `0` | truncation/rotation |
 | metadata changed but `offset >= size` | update checkpoint, no pull | nothing new to read |
 
+The content-identity row (second) is what stops a rename-cascade rotation (`app.txt` -> `.txt.1` -> `.txt.2` ...) from re-downloading the whole chain every rotation; see §13.5 for the incident and the safety argument.
 For `timestamp`/`full` the file is read whole from 0 (dedup drops overlap); `timestamp` additionally narrows to selected files and seeds the rest (§4.4).
 
 ### 5.2 Head fingerprint - closing the rotation miss window
@@ -291,6 +294,10 @@ Below N the window still covers appendable bytes, so the fingerprint is compared
 Consequence: rotation detection covers the realistic case (log files `>= N`); a reused path on a sub-N file with a size+mtime collision is the only residual (tiny) miss, and truncation is still caught by the size-shrank branch.
 This makes cold resume and fast rotation lossless for real log files (dedup absorbs any overlap).
 Cost: one small (default 4 KB) `open`+`read`+`close` per considered file per poll - negligible.
+
+The same fingerprint doubles as a **content identity across paths**: each poll builds an in-memory index `{(head_fingerprint, size, mtime): consumed_offset}` from the source's pre-poll checkpoint snapshot, so a file whose bytes were already fully ingested and has since been **renamed to a new path** (rename-cascade rotation) is recognised and skipped instead of re-downloaded (§5.1 row 2).
+The match uses the full `(fingerprint, size, mtime)` triple, which a rename preserves, and only when `size >= ssh_fingerprint_bytes`; any mismatch falls through to a safe (re)read, and the `entry_hash` dedup remains the correctness backstop - so a wrongful skip is not possible.
+See §13.5 for the production incident this fixed.
 
 ### 5.3 Newline alignment (`_pull_range`)
 
@@ -493,9 +500,75 @@ Primary harness: an in-process asyncssh SFTP server (deterministic, no external 
 
 ## 12. Risks & assumptions
 
-- **Single app instance assumed** for the startup stale-run sweep and the request-time 409; the advisory lock itself is cross-instance-safe. Revisit if scaled out.
+- **Single app instance assumed** for the startup stale-run sweep and the request-time 409; the advisory lock itself is cross-instance-safe. Revisit if scaled out. As of §13.4 the background loops (including the poller) run in exactly ONE process - the dedicated `app.worker`, gated by `run_background_workers` and a singleton advisory lock - so the web tier can still run `gunicorn -w N` without spawning N pollers.
 - **Pool sizing under "fetch all":** one idle lock connection per concurrently-fetching host; keep `ssh_poll_max_concurrent` within `pool_size + max_overflow` (default 15).
 - **Op timeout vs large windows:** tune `ssh_operation_timeout_seconds` / `ssh_max_file_size` together for slow links.
 - **Remote retention:** files the server itself rotated away during an outage are unrecoverable; mitigate server-side with a larger keep-count.
 - **Active-file rotation coexistence** is version-dependent on Win32-OpenSSH share modes (§7); mitigated by tail-then-close and verified in §11.
 - **Timestamp window is file-granular** (whole recent files), so you may ingest slightly more than the exact window - never less, never the old backlog.
+
+---
+
+## 13. Production incidents & fixes (2026-07-08 / 2026-07-09)
+
+This section records the incidents diagnosed and fixed on the live Ubuntu deployment (`fastapirag.service`, Postgres at `192.168.0.142`, tenant `tmp-live`), so a future session has the full what/why/impact in one place.
+Each item links to its detailed standalone doc.
+All fixes shipped with tests and a full-suite green run (no regressions).
+
+### 13.1 Stage 2 stitching stalled - over-length `item_number` aborted every finalize
+
+**Symptom:** log entries kept arriving but `log_transactions` stopped being created; the UI showed data "not stitched".
+**Root cause (confirmed):** the WMS puts a composite/doubled `ItemNumber` in the request URL (observed 70-75 chars, e.g. `BEC|V1|...|521BEC|V1|...|521`).
+Promoting it into `log_transactions.item_number` (`varchar(64)`) raised `asyncpg StringDataRightTruncationError`.
+Because Stage 2 finalize ran the whole pending batch in one all-or-nothing transaction and retried the **oldest** window first, that one row aborted the batch on every cycle and **blocked all stitching for the tenant** permanently (~2 M entries left unassigned).
+**Fix:**
+- Widen `log_transactions.item_number` `varchar(64) -> varchar(128)` (migration `a2c7e9d13f5b`), preserving the real value.
+- `_persist` now defensively caps every promoted string dimension to its column width (derived from the ORM mapping), so no over-length value of any column can ever again abort a batch.
+**Detail:** `docs/stage2-stitching-stall-postmortem-and-fix.md`.
+
+### 13.2 Stage 2 finalize made failure-isolating and memory-bounded
+
+**Why:** the same incident showed `finalize_pending` was fragile - one bad window rolled back everything, and a large backlog coalesced into a single span that loaded ~2 M entries into one session.
+**Fix:** `finalize_pending` now processes each coalesced run on its own session, split into padded sub-windows of at most `log_regroup_max_window_seconds` (default 6 h) that each commit independently (bounded memory, progress persists); a failing run is isolated (recorded under `failures`, its pending left open for retry) while other runs still complete.
+Added an optional per-statement DB timeout (`db_statement_timeout_ms`, default off) as a runaway safety net.
+**Detail:** same postmortem doc.
+
+### 13.3 `GET /logs/regroup/status` extended for the frontend "up to date?" widget
+
+**Why:** the frontend needs to show whether the log server is current.
+**Fix (additive, backward-compatible):** added `up_to_date` (no stitching backlog) and `last_regroup_at` (when a window was last stitched) alongside the existing `pending_windows` / `oldest_pending_at`.
+Read-only, one indexed query.
+**Detail:** `docs/api-logs-regroup-status.md`.
+
+### 13.4 Background workers moved to a dedicated single process (web/worker split)
+
+**Root cause:** the service ran `gunicorn -w 4`, and the FastAPI lifespan starts the background loops, so **four copies** of every loop (poller, Stage 2, embeddings, watcher, notifications, cleanup) ran at once - multiplying load and retries.
+This was a secondary problem, not the cause of the stall, but it amplified everything.
+**Fix:** the loops moved to `app/background.start_background_tasks`, started in exactly one place - the web lifespan only when `run_background_workers` is true, and the dedicated `python -m app.worker` process (guarded by a singleton advisory lock so a second worker exits instead of double-running).
+Production topology: `fastapirag.service` (`gunicorn -w N`, `RUN_BACKGROUND_WORKERS=false`) + `fastapirag-worker.service` (`Restart=always`).
+**Detail:** `docs/background-workers-web-worker-split.md`.
+
+### 13.5 Poller re-downloaded the whole log directory on every rotation (rename-cascade)
+
+**Symptom:** intermittent "1 server needs attention" / "catching up" in the UI; a source's `last_ok_at` going stale for ~20 min at a time; high CPU.
+**Root cause (confirmed, not guessed):** the remote (`C:/BEC Logs`, glob `*.txt*`) rotates by renaming a chain (`eSmartServerLog.txt` -> `.txt.1` -> ... -> `.txt.100`).
+The poller checkpointed **by path**, so after each rotation every path held different content and the byte checkpoint no longer matched - the poller re-read the **entire ~100-file, ~500 MB chain from offset 0** on every rotation.
+Evidence: 113 of 126 ingest jobs in a 45-min window produced **zero new entries** (pure re-download, deduped by `entry_hash`); only 1-2 of 101 files were actually being written; re-reads came in a burst right after each rotation then went quiet.
+The ~500 MB re-transfer held the per-host lock for the whole pass, froze the tenant's poll loop (stale `last_ok_at` -> "needs attention"), spiked CPU (SSH decryption), and surfaced transient "No such file" when a file rotated mid-pass.
+No data was lost - entry-level dedup kept transactions correct - the cost was wasted bandwidth/CPU and loop stalls.
+**Fix:** recognise content already fully ingested when it reappears at a new path, keyed on content identity not path (§5.1 row 2, §5.2).
+A `(head_fingerprint, size, mtime)` index built from the pre-poll snapshot lets a cascaded file be skipped (recorded as consumed at the new path) instead of re-downloaded.
+Safety: matches the full triple (a rename preserves all three), requires `size >= ssh_fingerprint_bytes`, and degrades to a safe re-read on any mismatch; a reused path holding **different** content of identical size+mtime is **not** skipped (fingerprint guard); `entry_hash` dedup remains the backstop.
+The per-file decision was extracted into the pure, exhaustively-tested `_plan_incremental(...)`.
+Observability: `content_skipped` is counted per source, aggregated in `fetch_now`, and logged by the poller.
+Effect: per-rotation re-download drops from ~500 MB / ~100 files to just the new active file.
+**Detail:** `docs/ssh-rename-cascade-reread-fix.md`.
+
+### Investigating this subsystem in future (runbook)
+
+- **The poller's true heartbeat is `log_ssh_sources.last_ok_at`, NOT `log_ssh_fetch_runs`** - the background poller does not write run rows (those are manual fetches only), so a "runs" view looks frozen even while polling is healthy.
+- Stitching backlog: `log_regroup_pending` open (unconsumed) rows; last stitch = `max(consumed_at)`.
+- Wasted re-download signature: `jobs` with `chunk_count = 0` (bytes transferred, all duplicates).
+- Which files are actually active: compare `log_ssh_file_checkpoints.last_mtime` to now.
+- Live stalls: `pg_stat_activity` / `pg_locks` (advisory `classid 21930` = per-host SSH fetch lock; the two-int keyspace) show a held fetch lock and its age.
+- The exact fetch error lives in `journalctl -u fastapirag-worker.service` (the worker, not the web unit).
