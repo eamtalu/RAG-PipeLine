@@ -35,6 +35,13 @@ router = APIRouter(prefix="/logs", tags=["logs"])
 
 MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB — rotating log files can be large
 
+# Runaway guard for the text-view renders. Rendering many entries into one big string is synchronous
+# CPU work; we run it off the event loop via asyncio.to_thread (so it can't block a worker's
+# heartbeat), and cap the entries a single render will materialize so a pathological selection (a
+# huge burst, or future data growth) can't balloon memory. The normal max feed (limit=500) is
+# ~14.5k entries, well under this. See docs/debugging-worker-timeout-outage.md.
+MAX_RENDER_ENTRIES = 50_000
+
 # strong refs to in-flight background finalize tasks (asyncio only weak-refs them, so without this
 # the event loop could GC a task mid-run). Discarded on completion via add_done_callback.
 _finalize_tasks: set = set()
@@ -571,32 +578,47 @@ async def view_transactions(
     if not txns:
         return header + "\n\n(no transactions match the given filters)"
 
-    # fetch every entry for those transactions in one query, then group by transaction
+    # fetch entries for those transactions, BOUNDED so a pathological selection can't balloon the
+    # worker (fetch one past the cap to detect overflow)
     ids = [t.id for t in txns]
     entry_rows = (await db.execute(
         select(LogEntry).where(LogEntry.transaction_id.in_(ids))
         .order_by(LogEntry.seq.asc().nullslast(), LogEntry.line_number.asc())
+        .limit(MAX_RENDER_ENTRIES + 1)
     )).scalars().all()
-    by_txn: dict = {}
-    for e in entry_rows:
-        by_txn.setdefault(e.transaction_id, []).append(e)
+    if len(entry_rows) > MAX_RENDER_ENTRIES:
+        return (header + f"\n\n(too many log entries to render — this selection exceeds "
+                f"{MAX_RENDER_ENTRIES:,} entries. Narrow it with a smaller `limit`, or a "
+                f"`user` / `date` / `hour` / `status` filter.)")
 
-    sep = "\n\n" + ("─" * 90) + "\n\n"
-    blocks = [render_transaction(t, by_txn.get(t.id, []), verbose=verbose) for t in txns]
-    return header + sep + sep.join(blocks)
+    # grouping + render are synchronous CPU work → run off the event loop so a large render can't
+    # block the worker heartbeat. asyncio.to_thread propagates contextvars (incl. the display
+    # timezone set in get_current_customer), which a bare run_in_executor would not.
+    def _render() -> str:
+        by_txn: dict = {}
+        for e in entry_rows:
+            by_txn.setdefault(e.transaction_id, []).append(e)
+        sep = "\n\n" + ("─" * 90) + "\n\n"
+        blocks = [render_transaction(t, by_txn.get(t.id, []), verbose=verbose) for t in txns]
+        return header + sep + sep.join(blocks)
+
+    return await asyncio.to_thread(_render)
 
 
 async def _load_transaction_entries(transaction_id: uuid.UUID, customer: str, db: AsyncSession):
-    """Fetch a transaction + its ordered entry timeline, or 404. A transaction belonging to another
-    customer 404s exactly like a missing one — no cross-tenant existence leak via id probing."""
+    """Fetch a transaction + its ordered entry timeline (bounded), or 404. Returns
+    (transaction, entries, truncated). A transaction belonging to another customer 404s exactly like a
+    missing one — no cross-tenant existence leak via id probing."""
     t = await db.get(LogTransaction, transaction_id)
     if not t or t.customer_code != customer:
         raise HTTPException(404, detail="Transaction not found")
-    entries = (await db.execute(
+    rows = (await db.execute(
         select(LogEntry).where(LogEntry.transaction_id == transaction_id)
         .order_by(LogEntry.seq.asc().nullslast(), LogEntry.line_number.asc())
+        .limit(MAX_RENDER_ENTRIES + 1)
     )).scalars().all()
-    return t, list(entries)
+    truncated = len(rows) > MAX_RENDER_ENTRIES
+    return t, list(rows[:MAX_RENDER_ENTRIES]), truncated
 
 
 @router.get("/transactions/{transaction_id}/view", response_class=PlainTextResponse)
@@ -608,8 +630,12 @@ async def get_transaction_view(
     pending: dict = Depends(read_pending_state),
 ):
     """Canonical §6 Transaction Detail View as human-readable text (request → steps → response)."""
-    t, entries = await _load_transaction_entries(transaction_id, customer, db)
-    return _pending_notice(pending) + render_transaction(t, entries, verbose=verbose)
+    t, entries, truncated = await _load_transaction_entries(transaction_id, customer, db)
+    text = await asyncio.to_thread(render_transaction, t, entries, verbose=verbose)
+    notice = _pending_notice(pending)
+    if truncated:
+        notice += f"(showing the first {MAX_RENDER_ENTRIES:,} steps — transaction truncated)\n\n"
+    return notice + text
 
 
 @router.get("/transactions/{transaction_id}")
@@ -621,10 +647,11 @@ async def get_transaction(transaction_id: uuid.UUID,
 
     Includes a `rendered` field: the §6 text view (also available raw at `/view`).
     """
-    t, entries = await _load_transaction_entries(transaction_id, customer, db)
+    t, entries, truncated = await _load_transaction_entries(transaction_id, customer, db)
 
     return {
-        "rendered": render_transaction(t, entries),
+        "rendered": await asyncio.to_thread(render_transaction, t, entries),
+        "entries_truncated": truncated,
         "transaction": {
             **_txn_summary(t),
             "http_method": t.http_method,
