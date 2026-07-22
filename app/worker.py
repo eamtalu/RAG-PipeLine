@@ -38,6 +38,13 @@ async def _amain() -> None:
     try:
         got = bool(await conn.scalar(
             select(func.pg_try_advisory_lock(_SINGLETON_CLASSID, _SINGLETON_OBJID))))
+        # Commit so this connection sits as plain "idle", NOT "idle in transaction", for the process
+        # lifetime. pg_try_advisory_lock is SESSION-scoped — it is held until the connection closes
+        # (see finally), NOT until the transaction ends — so committing keeps the singleton guarantee
+        # intact. Leaving the autobegun transaction open instead would pin the global xmin horizon for
+        # the whole run: autovacuum could not reclaim dead tuples DB-wide, and CREATE INDEX
+        # CONCURRENTLY (and any online DDL) would block on this session indefinitely.
+        await conn.commit()
         if not got:
             logger.error("Another fastapirag worker already holds the singleton lock — exiting so "
                          "the background loops are never double-run.")
