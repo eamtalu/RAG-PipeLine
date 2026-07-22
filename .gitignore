@@ -6,3 +6,4 @@ uploads/
 *.egg-info/
 dist/
 .venv/
+.claude/whats-changed.state
