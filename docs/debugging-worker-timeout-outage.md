@@ -457,3 +457,21 @@ The OS-level items below are service and deployment configuration plus guardrail
 Priority: section 1 is essential.
 Without it, more workers just means more workers to kill.
 Sections 2 and 3 are protective.
+
+---
+
+## What was actually shipped (2026-07-22)
+
+Investigation went beyond the original render bug and found the latency was mostly a missing index.
+Three changes were deployed to `main` + the server:
+
+1. **Composite index `ix_log_transactions_customer_started` on `log_transactions (customer_code, started_at DESC NULLS LAST)`** - migration `b9d4f2a7c318`. This was the real latency fix: the transaction list + text feed run `WHERE customer_code=? ORDER BY started_at DESC LIMIT n`, which previously did a ~143k-row scan + ~60k-row sort on tmp-live (223k rows). After the index: `EXPLAIN` shows an index scan (no sort), and `GET /transactions/view?limit=100` went from seconds/at-risk to ~0.7s, `limit=500` from ~46s (+worker kill) to ~3.4s.
+2. **`app/worker.py`: commit after acquiring the singleton advisory lock** (`4af69f7`). The lock connection used to sit `idle in transaction` for the whole process life (observed 13 days), pinning the DB-wide vacuum horizon and blocking `CREATE INDEX CONCURRENTLY`. The lock is session-scoped so the commit is safe. See "Deferred" note below on why this matters for future online DDL.
+3. **`app/api/v1/logs.py`: bound + `asyncio.to_thread` for the text-view renders** (`7984eb3`) - the availability guard (Axis A). `MAX_RENDER_ENTRIES = 50_000` is a runaway guard (not a normal limit; the max feed is ~14.5k). Kept because the index does not shrink a pathological render.
+
+## Deferred / future optimizations (NOT done - pick up here if latency or load regresses)
+
+- **`GET /api/v1/logs/transactions` (plural JSON list) computes `total = count(*)`** with the same filters on every call - a full scan of all matching rows (~143k on tmp-live), so that endpoint is still ~3-5s even with the index. It was left alone because **the frontend (matrix-log-explorer) does not call it** - the feed uses `/transactions/view`, and detail uses `/transactions/{id}[/view]`. If a client (API consumer, the debug agent, a future UI) starts using the JSON list and needs it fast: make `total` opt-in (`?with_total=false`) or use an estimate (`reltuples` / a capped count), since the `LIMIT n` slice itself is already fast via the composite index.
+- **Per-filter composite indexes for hot saved views**, e.g. `(customer_code, status, started_at DESC)` or `(customer_code, user_name, started_at DESC)` - only if profiling shows a specific saved-view filter+sort is slow. The base `(customer_code, started_at DESC)` index covers the unfiltered/most-recent case.
+- **Background-worker catch-up throttling (the second availability trigger).** After any downtime, `fastapirag-worker` floods into Stage-2 catch-up stitching that saturates Postgres CPU (observed load 5-7), which starves the web tier's heartbeats and briefly degrades even `/health`. The composite index makes catch-up cheaper, but if this still bites, throttle the worker's regroup batch cadence or `nice`/`ionice` the worker process (`fastapirag-worker.service`). Immediately after a deploy/restart, expect a few minutes of elevated latency until catch-up drains.
+- **Config guardrails from section 2 above** (gunicorn `--timeout`, `db_statement_timeout_ms`, systemd unit cleanup) - still worth doing as defense in depth; not yet applied.
