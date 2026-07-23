@@ -530,24 +530,24 @@ async def view_transactions(
     customer: str = Depends(get_current_customer),
     db: AsyncSession = Depends(get_session),
     pending: dict = Depends(read_pending_state),
-    limit: int = Query(default=50, ge=1, le=500, description="how many most-recent transactions to render"),
+    date: date_type = Query(..., description="YYYY-MM-DD (REQUIRED). The day to browse; the feed is scoped to this date."),
+    limit: int = Query(default=100, ge=1, le=500, description="page size (transactions per page)"),
+    offset: int = Query(default=0, ge=0, description="pagination offset; page number = offset // limit + 1"),
     user: str | None = Query(default=None, description="matches user_name; omit for all users"),
-    date: date_type | None = Query(default=None, description="YYYY-MM-DD (matches the transaction date)"),
     hour: int | None = Query(default=None, ge=0, le=23, description="hour of day 0-23 (combine with date)"),
     status: LogTransactionStatus | None = Query(default=None, description="success / soft / error / incomplete"),
     verbose: bool = Query(default=False, description="also render plain INFO narration steps"),
 ):
-    """Render the last N transactions as the §6 text view, oldest→newest.
+    """Render one PAGE of a day's transactions as the §6 text view, oldest→newest (from 00:00).
 
-    Takes the most-recent `limit` transactions that match the optional filters, then prints them
-    in ascending time order. Filters stack: `user`, `date`, `hour`, `status`. With none, you get
-    the last `limit` transactions across all users.
+    `date` is REQUIRED: the feed is always scoped to a single day, shown oldest→newest from the start
+    of that day and paginated via `limit` (page size) + `offset`. Optional `user`, `hour`, `status`
+    stack on top of the date. Pagination metadata is returned in response headers: `X-Total-Count`,
+    `X-Offset`, `X-Limit`, `X-Page`, `X-Page-Count`.
     """
-    conds = [LogTransaction.customer_code == customer]
+    conds = [LogTransaction.customer_code == customer, LogTransaction.date == date]
     if user is not None:
         conds.append(LogTransaction.user_name == user)
-    if date is not None:
-        conds.append(LogTransaction.date == date)
     if hour is not None:
         # `hour` is a LOCAL hour-of-day (matching the displayed times); started_at is a UTC instant, so
         # convert to the customer's display zone before extracting, else this is off by the tz offset.
@@ -557,28 +557,36 @@ async def view_transactions(
     if status is not None:
         conds.append(LogTransaction.status == status)
 
-    # most-recent `limit` matching transactions ...
-    rows = (await db.execute(
-        select(LogTransaction).where(*conds)
-        .order_by(LogTransaction.started_at.desc().nullslast())
-        .limit(limit)
-    )).scalars().all()
-    txns = list(reversed(rows))  # ... shown oldest -> newest
+    # total for the pager (cheap: index-only count over this day, see docs/debugging-worker-timeout-outage.md)
+    total = (await db.scalar(select(func.count()).select_from(LogTransaction).where(*conds))) or 0
 
-    header = f"Showing {len(txns)} transaction(s)" + (f" for user {user}" if user else " (all users)")
+    # this page, oldest → newest (from 00:00 of the day). `id` is a stable tiebreak so offset paging is
+    # deterministic across any equal `started_at`. Served by ix_log_transactions_customer_date_started.
+    txns = (await db.execute(
+        select(LogTransaction).where(*conds)
+        .order_by(LogTransaction.started_at.asc().nullslast(), LogTransaction.id.asc())
+        .limit(limit).offset(offset)
+    )).scalars().all()
+
+    page = offset // limit + 1
+    page_count = max(1, (total + limit - 1) // limit)
+    pager = {"X-Total-Count": str(total), "X-Offset": str(offset), "X-Limit": str(limit),
+             "X-Page": str(page), "X-Page-Count": str(page_count)}
+
+    header = f"Showing {len(txns)} of {total} transaction(s) on {date}"
+    if user:
+        header += f" for user {user}"
     if status is not None:
         header += f" · status={status.value}"
-    if date is not None:
-        header += f" on {date}"
     if hour is not None:
         header += f" hour {hour:02d}:00"
-    header += " — oldest → newest"
+    header += f" — page {page}/{page_count} — oldest → newest"
     header = _pending_notice(pending) + header
 
     if not txns:
-        return header + "\n\n(no transactions match the given filters)"
+        return PlainTextResponse(header + "\n\n(no transactions on this page)", headers=pager)
 
-    # fetch entries for those transactions, BOUNDED so a pathological selection can't balloon the
+    # fetch entries for this page's transactions, BOUNDED so a pathological page can't balloon the
     # worker (fetch one past the cap to detect overflow)
     ids = [t.id for t in txns]
     entry_rows = (await db.execute(
@@ -587,9 +595,11 @@ async def view_transactions(
         .limit(MAX_RENDER_ENTRIES + 1)
     )).scalars().all()
     if len(entry_rows) > MAX_RENDER_ENTRIES:
-        return (header + f"\n\n(too many log entries to render — this selection exceeds "
-                f"{MAX_RENDER_ENTRIES:,} entries. Narrow it with a smaller `limit`, or a "
-                f"`user` / `date` / `hour` / `status` filter.)")
+        return PlainTextResponse(
+            header + f"\n\n(too many log entries to render — this page exceeds "
+            f"{MAX_RENDER_ENTRIES:,} entries. Use a smaller `limit`.)",
+            headers=pager,
+        )
 
     # grouping + render are synchronous CPU work → run off the event loop so a large render can't
     # block the worker heartbeat. asyncio.to_thread propagates contextvars (incl. the display
@@ -602,7 +612,8 @@ async def view_transactions(
         blocks = [render_transaction(t, by_txn.get(t.id, []), verbose=verbose) for t in txns]
         return header + sep + sep.join(blocks)
 
-    return await asyncio.to_thread(_render)
+    text = await asyncio.to_thread(_render)
+    return PlainTextResponse(text, headers=pager)
 
 
 async def _load_transaction_entries(transaction_id: uuid.UUID, customer: str, db: AsyncSession):
