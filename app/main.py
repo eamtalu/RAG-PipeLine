@@ -9,6 +9,7 @@ from app.api.v1.router import api_router
 from app.settings import settings
 from app.background import setup_logging, start_background_tasks, stop_background_tasks
 from app.api.v1.log_sources import _fetch_tasks as _ssh_fetch_tasks
+from app.middleware.idempotency import IdempotencyMiddleware
 
 # `setup_logging` is re-exported here so `app.main.setup_logging` keeps working (tests + habit).
 __all__ = ["app", "setup_logging", "lifespan"]
@@ -46,6 +47,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+# Idempotency-Key de-duplication for allowlisted mutating POSTs. Opt-in (no-op unless the request
+# carries an Idempotency-Key on an allowlisted path), so it never affects reads/uploads/other routes.
+app.add_middleware(IdempotencyMiddleware)
 app.include_router(api_router)
 
 

@@ -14,6 +14,7 @@ from app.persistence.models.customer import Customer
 from app.persistence.models.customer_display_name import CustomerDisplayName
 from app.persistence.models.logspace_presence import LogspacePresence
 from app.persistence.models.saved_view import SavedView
+from app.persistence.models.idempotency_key import IdempotencyKey
 from app.persistence.models.notification import (
     CustomerNotificationChannel,
     NotificationRule,
@@ -38,6 +39,7 @@ __all__ = [
     "CustomerDisplayName",
     "LogspacePresence",
     "SavedView",
+    "IdempotencyKey",
     "CustomerNotificationChannel",
     "NotificationRule",
     "NotificationEvent",

@@ -462,6 +462,30 @@ erDiagram
 
 Note: `notification_events.rule_id` records which rule raised the event (provenance) but has no foreign key, so an event survives even if its rule is later deleted.
 
+## Subsystem 7: Idempotency keys
+
+Server-side de-duplication for mutating POSTs (see `app/middleware/idempotency.py`).
+A client sends an `Idempotency-Key` header; the first request is recorded here and its JSON response cached, so a retry or double-submit with the same key replays the stored response instead of duplicating the side effect.
+Self-contained (no foreign keys); tenant-scoped by `customer_code`, with `UNIQUE(customer_code, idem_key)` as the atomic de-dup guard and `expires_at` for TTL cleanup.
+
+```mermaid
+erDiagram
+    idempotency_keys {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string idem_key "client Idempotency-Key (unique per tenant)"
+        string method
+        string path
+        string request_fingerprint "sha256(method|path|body)"
+        string status "in_progress/completed"
+        int response_status "cached response (null until completed)"
+        jsonb response_body
+        datetime created_at
+        datetime completed_at
+        datetime expires_at "TTL"
+    }
+```
+
 ## Full relationship reference
 
 ### Enforced foreign keys (solid lines)
@@ -487,7 +511,7 @@ Note: `notification_events.rule_id` records which rule raised the event (provena
 
 | Logical parent | Referencing column | Meaning |
 | --- | --- | --- |
-| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, saved_views, and the notification tables | tenant partition key |
+| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, saved_views, idempotency_keys, and the notification tables | tenant partition key |
 | `jobs.id` | `log_regroup_pending.job_id` | nullable, no FK |
 | `log_ssh_sources.id` | `log_ssh_fetch_runs.source_id` | nullable, no FK (null = all sources) |
 | `notification_rules.id` | `notification_events.rule_id` | provenance, no FK |

@@ -119,6 +119,11 @@ class Settings(BaseSettings):
     # silently. Enable via DB_STATEMENT_TIMEOUT_MS in the environment.
     db_statement_timeout_ms: int = 0
 
+    # Idempotency-Key store retention (hours). A key row can be replayed until it expires; after that
+    # a retry with the same key is treated as a fresh request. 24 h is generous for user double-submit
+    # / network-retry windows. The expired rows are swept opportunistically.
+    idempotency_ttl_hours: int = 24
+
     # --- Remote SSH log source (pull-ingestion from the Windows Server) ---
     # Background poller: a supervisor that runs one loop per customer with >= 1 ENABLED source. It is
     # ON by default and idle when no source is enabled (a cheap "any enabled sources?" query per
