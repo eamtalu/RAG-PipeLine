@@ -442,6 +442,7 @@ The OS-level items below are service and deployment configuration plus guardrail
     - Clean the corrupted lines 14-17 (pasted shell commands that systemd is ignoring).
     - Then run: `sudo systemctl daemon-reload && sudo systemctl restart fastapirag`.
 - **`.env`** (`/opt/RAG-Pipeline/RAG-PipeLine/.env`): set `db_statement_timeout_ms=30000` (the safety net is already wired into `app/config/database.py`).
+  - NOTE (added 2026-07-24): this 30 s cap is a **web-tier** guardrail. The log-ingestion transaction now **relaxes** it (`SET LOCAL statement_timeout = 0` in `parse_insert.py`) because index-heavy `log_entries` inserts on the failing/slow production disk legitimately exceed 30 s and were being cancelled (`QueryCanceledError`). See `docs/disk-io-resilience.html`.
 - **Optional**: enable gunicorn access logging (`--access-logfile`) so a future blocking request is visible in the logs.
 
 ### 3. Immediate recovery (do first, restores service now)
