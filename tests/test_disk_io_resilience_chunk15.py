@@ -40,6 +40,14 @@ def test_is_disk_io_error_follows_the_cause_chain():
     assert is_disk_io_error(outer) is True
 
 
+def test_is_disk_io_error_classifies_slow_disk_statement_timeout():
+    # On the degraded disk a slow INSERT is cancelled by statement_timeout; treat it as skippable.
+    err = RuntimeError("(asyncpg.Error) <class 'asyncpg.exceptions.QueryCanceledError'>: "
+                       "canceling statement due to statement timeout")
+    assert is_disk_io_error(err) is True
+    assert "timeout" in disk_io_detail(err).lower()
+
+
 def test_is_disk_io_error_ignores_ordinary_errors():
     assert is_disk_io_error(ValueError("bad input")) is False
     assert is_disk_io_error(RuntimeError("connection refused")) is False

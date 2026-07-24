@@ -10,13 +10,18 @@
 
 import re
 
-# Substrings that identify a device/page read failure (lower-cased match against the whole chain).
+# Substrings that identify a failing-disk fault we should skip-and-continue on. Two kinds:
+#  1. a device/page READ failure (a dead sector), and
+#  2. a statement timeout — on this degraded disk a large INSERT/query can crawl past the
+#     statement_timeout because of bad-sector retries + saturation, and Postgres cancels it.
+# Both mean "this unit couldn't complete because of the disk"; treat them the same (skip + report).
 _IO_SIGNATURES = (
     "could not read block",     # Postgres, the exact one we see
     "input/output error",       # the OS EIO underneath
     "unrecovered read error",   # kernel/SCSI medium error text, if surfaced
     "medium error",
     "invalid page",             # a corrupt (not just unreadable) page
+    "canceling statement due to statement timeout",  # slow disk -> the statement was cancelled
 )
 
 _BLOCK_RE = re.compile(r'could not read block (\d+) in file "([^"]+)"')
@@ -47,8 +52,12 @@ def is_disk_io_error(exc: BaseException) -> bool:
 
 
 def disk_io_detail(exc: BaseException) -> str:
-    """A short 'block N in file X' locator for logs/labels, or a trimmed message if not parseable."""
-    m = _BLOCK_RE.search(str(exc))
+    """A short locator for logs/labels: the 'block N in file X' for a read failure, a note for a
+    slow-disk statement timeout, or a trimmed message otherwise."""
+    text = str(exc)
+    m = _BLOCK_RE.search(text)
     if m:
         return f"block {m.group(1)} in file {m.group(2)}"
-    return str(exc).splitlines()[0][:200]
+    if "statement timeout" in text.lower():
+        return "statement timeout (disk too slow to finish in time)"
+    return text.splitlines()[0][:200]
