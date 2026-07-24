@@ -17,7 +17,7 @@ import uuid
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import update
+from sqlalchemy import text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,7 +32,10 @@ from app.services.mnp_log_ingestion.parsers.LogParserFactory import get_log_pars
 
 logger = logging.getLogger(__name__)
 
-_INSERT_BATCH = 1000
+# Small batches: each INSERT maintains ~11 indexes on the 40 GB log_entries table, and on the
+# failing/saturated production disk a large batch can crawl past statement_timeout. Smaller
+# statements finish quicker and keep progress granular.
+_INSERT_BATCH = 200
 
 
 def _entry_hash(raw_body: str) -> str:
@@ -94,6 +97,13 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
                 job.customer_code, settings.display_timezone, job.customer_code,
             )
         cust_zone = ZoneInfo(raw_tz or settings.display_timezone)
+
+        # Ingestion runs on the dedicated worker over a degraded, slow disk: an insert maintaining
+        # ~11 indexes on a 40 GB table can legitimately exceed the (web-tier) statement_timeout and
+        # be cancelled mid-batch (QueryCanceledError). Relax the timeout FOR THIS TRANSACTION ONLY so
+        # a slow insert can complete. SET LOCAL reverts on commit, so pooled connections and the web
+        # tier keep their guardrail. A truly unreadable block still surfaces as an I/O error (caught).
+        await db.execute(text("SET LOCAL statement_timeout = '0'"))
 
         # Map LogRecords → row dicts, dedup-by-content via entry_hash, insert in batches.
         # Within-file duplicates (same raw_body twice) are collapsed here so one INSERT batch
@@ -187,11 +197,11 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
             # is visible: the disk has failing sectors.
             detail = disk_io_detail(exc)
             logger.critical(
-                "DISK I/O ERROR ingesting job %s (file=%s, customer=%s): %s — skipping this file. "
-                "The disk has an unreadable sector; data on that block is lost. Ensure backups.",
+                "DISK FAULT ingesting job %s (file=%s, customer=%s): %s — skipping this file. "
+                "The disk is failing/too slow; this file will be retried next poll. Ensure backups.",
                 job_id, filename, customer_code, detail,
             )
-            await _set_status(db, job_id, JobStatus.failed, error=f"disk I/O error (bad sector): {detail}")
+            await _set_status(db, job_id, JobStatus.failed, error=f"disk fault: {detail}")
         else:
             logger.exception("Log parse/insert failed for job %s", job_id)
             await _set_status(db, job_id, JobStatus.failed, error=str(exc))
