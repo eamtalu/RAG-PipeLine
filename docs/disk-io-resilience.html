@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Surviving a Failing Disk — Bad-Sector Resilience</title>
+<style>
+  :root {
+    --bg: #eceff4; --surface: #ffffff; --surface-2: #f5f7fa;
+    --ink: #17202e; --muted: #5a6676; --line: #d6dde6;
+    --accent: #0d7d8a; --accent-soft: #dff1f3;
+    --pad: #b0730a; --pad-soft: #f7e8cc;
+    --danger: #b1314a; --danger-soft: #f6dae0;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f151d; --surface: #161e29; --surface-2: #1b2530;
+      --ink: #e8edf3; --muted: #98a5b4; --line: #27323f;
+      --accent: #45b8c4; --accent-soft: #113037;
+      --pad: #e0a44e; --pad-soft: #362a15;
+      --danger: #e2718a; --danger-soft: #3a1f27;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f151d; --surface: #161e29; --surface-2: #1b2530;
+    --ink: #e8edf3; --muted: #98a5b4; --line: #27323f;
+    --accent: #45b8c4; --accent-soft: #113037;
+    --pad: #e0a44e; --pad-soft: #362a15;
+    --danger: #e2718a; --danger-soft: #3a1f27;
+  }
+  :root[data-theme="light"] {
+    --bg: #eceff4; --surface: #ffffff; --surface-2: #f5f7fa;
+    --ink: #17202e; --muted: #5a6676; --line: #d6dde6;
+    --accent: #0d7d8a; --accent-soft: #dff1f3;
+    --pad: #b0730a; --pad-soft: #f7e8cc;
+    --danger: #b1314a; --danger-soft: #f6dae0;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.55; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 48px 24px 72px; }
+  header { margin-bottom: 36px; }
+  .kicker { font-family: var(--mono); font-size: 12px; letter-spacing: .16em; text-transform: uppercase; color: var(--danger); margin: 0 0 10px; }
+  h1 { font-size: 30px; line-height: 1.15; margin: 0 0 10px; text-wrap: balance; letter-spacing: -.01em; }
+  .lede { font-size: 16px; color: var(--muted); max-width: 64ch; margin: 0; }
+  section { margin-top: 40px; }
+  h2 { font-size: 13px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 0 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  h2 .n { color: var(--accent); }
+  p { margin: 0 0 12px; max-width: 66ch; }
+  code.k { font-family: var(--mono); font-size: .92em; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 660px) { .ba { grid-template-columns: 1fr; } }
+  .card.bad { border-left: 3px solid var(--danger); }
+  .card.good { border-left: 3px solid var(--accent); }
+  .pill { display: inline-block; font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; margin-bottom: 10px; }
+  .pill.bad { background: var(--danger-soft); color: var(--danger); }
+  .pill.good { background: var(--accent-soft); color: var(--accent); }
+  .card h3 { font-size: 15px; margin: 0 0 8px; }
+  .card p { font-size: 13.5px; color: var(--muted); margin: 0 0 8px; max-width: none; }
+  .diagram { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 8px; }
+  .diagram svg { display: block; min-width: 560px; width: 100%; height: auto; }
+  figcaption { font-size: 13px; color: var(--muted); margin-top: 10px; }
+  svg text { font-family: var(--mono); fill: var(--ink); }
+  svg .mut { fill: var(--muted); }
+  .concept { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-top: 12px; border-top: 3px solid var(--accent); }
+  .concept h3 { font-size: 15px; margin: 0 0 6px; }
+  .concept .tagline { font-family: var(--mono); font-size: 11px; color: var(--accent); text-transform: uppercase; letter-spacing: .06em; }
+  .concept p { font-size: 13.5px; color: var(--muted); margin: 8px 0 0; }
+  dl.defs { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; font-size: 13.5px; }
+  dl.defs dt { font-family: var(--mono); font-size: 12px; color: var(--accent); white-space: nowrap; }
+  dl.defs dd { margin: 0; color: var(--muted); }
+  @media (max-width: 560px) { dl.defs { grid-template-columns: 1fr; gap: 2px 0; } dl.defs dt { margin-top: 8px; } }
+  .callout { background: var(--danger-soft); border: 1px solid var(--danger); border-radius: 10px; padding: 16px 20px; margin-top: 20px; }
+  .callout .lead { font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--danger); margin: 0 0 8px; }
+  .callout p { color: var(--ink); margin: 0; font-size: 14px; }
+  .foot { margin-top: 44px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); font-family: var(--mono); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <p class="kicker">RAG-Pipeline · reliability engineering</p>
+    <h1>Surviving a failing disk: bad-sector resilience</h1>
+    <p class="lede">The production host runs on a spinning disk with <strong>unrecoverable bad sectors</strong> that cannot be replaced. This is how the ingest (write) path and the feed (read) path were changed so a dead block is <strong>skipped, logged, and stepped over</strong> instead of taking the whole system down — and the engineering ideas behind it.</p>
+  </header>
+
+  <section>
+    <h2><span class="n">A.</span> What actually breaks</h2>
+    <div class="card">
+      <p>A bad sector is a physical region of the disk that can no longer be read. The kernel reports it as <code class="k">critical medium error … Unrecovered read error</code>, and Postgres, when a query needs a row that lives there, raises:</p>
+      <p style="font-family:var(--mono); font-size:12.5px; color:var(--danger); background:var(--surface-2); padding:10px 12px; border-radius:8px; max-width:none">could not read block 4571733 in file "base/16388/16613": Input/output error</p>
+      <p>Two dead blocks were hit: the <code class="k">log_entries</code> table (the raw data) and its <code class="k">job_id</code> index. The disk can't be replaced, so the software must <strong>treat a dead block as a fact of life</strong>: work around it where possible, and where not, fail that one small piece gracefully. Software cannot bring back the rows on a dead sector — this is graceful degradation, not repair.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">B.</span> The write / ingest path</h2>
+    <p>Root cause of the outage: after inserting a file's entries, the pipeline computed the "dirty time range" to stitch by <em>searching</em> the whole table (<code class="k">SELECT min/max(timestamp) WHERE job_id=…</code>). Finding the minimum means scanning from the oldest rows forward — straight across the dead block. So <strong>every</strong> ingest failed, and the poller retried it every ~2 minutes forever.</p>
+    <figure class="diagram" style="margin:6px 0 0">
+      <svg viewBox="0 0 820 250" role="img" aria-label="Before: after insert, a min/max scan reads old rows and hits a bad block, failing. After: INSERT RETURNING reads only the rows just written, never touching old data.">
+        <text x="16" y="26" font-size="12.5" font-weight="700" fill="var(--danger)">BEFORE — search the whole table for the range</text>
+        <rect x="16" y="40" width="150" height="40" rx="6" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <text x="91" y="58" text-anchor="middle" font-size="11.5">insert new rows</text>
+        <text x="91" y="72" text-anchor="middle" font-size="10" class="mut">(fresh pages)</text>
+        <path d="M172 60 L206 60" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ar)"/>
+        <rect x="210" y="40" width="235" height="40" rx="6" fill="var(--surface-2)" stroke="var(--danger)" stroke-width="1.3"/>
+        <text x="327" y="58" text-anchor="middle" font-size="11">SELECT min/max WHERE job_id</text>
+        <text x="327" y="72" text-anchor="middle" font-size="10" class="mut">scans OLD rows, oldest → newest</text>
+        <rect x="470" y="40" width="330" height="40" rx="6" fill="var(--surface-2)" stroke="var(--line)"/>
+        <g>
+          <rect x="478" y="46" width="40" height="28" rx="3" fill="var(--accent-soft)"/>
+          <rect x="522" y="46" width="40" height="28" rx="3" fill="var(--accent-soft)"/>
+          <rect x="566" y="46" width="40" height="28" rx="3" fill="var(--danger)" opacity=".85"/>
+          <text x="586" y="64" text-anchor="middle" font-size="13" fill="#fff" font-weight="700">✗</text>
+          <rect x="610" y="46" width="40" height="28" rx="3" fill="var(--accent-soft)"/>
+          <rect x="654" y="46" width="40" height="28" rx="3" fill="var(--accent-soft)"/>
+          <rect x="698" y="46" width="40" height="28" rx="3" fill="var(--accent-soft)"/>
+          <rect x="742" y="46" width="50" height="28" rx="3" fill="var(--accent-soft)"/>
+        </g>
+        <text x="586" y="96" text-anchor="middle" font-size="10" fill="var(--danger)">dead block</text>
+        <text x="470" y="112" font-size="11.5" fill="var(--danger)" font-weight="700">→ I/O error, every ingest fails, poller retries forever</text>
+
+        <text x="16" y="156" font-size="12.5" font-weight="700" fill="var(--accent)">AFTER — the insert hands back its own timestamps</text>
+        <rect x="16" y="170" width="150" height="40" rx="6" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <text x="91" y="188" text-anchor="middle" font-size="11.5">INSERT … RETURNING</text>
+        <text x="91" y="202" text-anchor="middle" font-size="10" class="mut">timestamp</text>
+        <path d="M172 190 L206 190" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ar)"/>
+        <rect x="210" y="170" width="200" height="40" rx="6" fill="var(--surface-2)" stroke="var(--accent)" stroke-width="1.3"/>
+        <text x="310" y="188" text-anchor="middle" font-size="11">min/max of the rows JUST written</text>
+        <text x="310" y="202" text-anchor="middle" font-size="10" class="mut">a receipt — no search</text>
+        <path d="M414 190 L448 190" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ar)"/>
+        <rect x="452" y="170" width="150" height="40" rx="6" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <text x="527" y="188" text-anchor="middle" font-size="11.5">pending range ✓</text>
+        <text x="527" y="202" text-anchor="middle" font-size="10" class="mut">persisted, as before</text>
+        <text x="16" y="238" font-size="11.5" fill="var(--accent)" font-weight="700">→ never reads old data, so it can't hit the dead block (and it deletes a ~7M-cost scan)</text>
+        <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="5" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--muted)"/></marker></defs>
+      </svg>
+      <figcaption>The key move: <strong>don't search old data you don't need.</strong> <code class="k">RETURNING</code> gives back the timestamps of the rows the INSERT just wrote, so the dirty range is computed without ever touching the region where the dead sectors live. Same persisted result, zero exposure to the bad block.</figcaption>
+    </figure>
+    <p style="margin-top:14px"><strong>And if an ingest still hits a bad block</strong> (e.g. the dead index page during a write): the poller catches it <em>per file</em> — logs it, counts <code class="k">io_skipped</code>, and moves on to the next file. One bad file never stalls the source or the poll.</p>
+  </section>
+
+  <section>
+    <h2><span class="n">C.</span> Before / after, side by side</h2>
+    <div class="ba">
+      <div class="card bad">
+        <span class="pill bad">before</span>
+        <h3>Write path</h3>
+        <p>Insert → <strong>scan the whole table</strong> for min/max → cross the dead block → <strong>I/O error</strong> → the entire file rolls back → job fails → poller re-tries every ~2 min → <strong>all ingestion stalled.</strong></p>
+      </div>
+      <div class="card good">
+        <span class="pill good">after</span>
+        <h3>Write path</h3>
+        <p>Insert with <code class="k">RETURNING</code> → range from the just-written rows → <strong>no old-data read.</strong> If a file still errors, it's <strong>skipped + logged + counted</strong>, and the rest of the poll continues.</p>
+      </div>
+      <div class="card bad">
+        <span class="pill bad">before</span>
+        <h3>Read path (feed)</h3>
+        <p>Open a day's feed → read the log entries → some sit on the dead block → <strong>unhandled 500</strong> → the whole Manage/feed panel blanks out, even though the transaction list was fine.</p>
+      </div>
+      <div class="card good">
+        <span class="pill good">after</span>
+        <h3>Read path (feed)</h3>
+        <p>Catch the I/O error → return the <strong>transaction list plus a clear notice</strong> ("some entries sit on a damaged sector"). The page still works; the failure is explicit, not a crash.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">D.</span> Isolation = smallest possible blast radius</h2>
+    <p>The whole design is one idea repeated at every layer: wrap each independent unit of work in its own fault boundary, so a dead block can only ever take down <em>that one unit</em> — never its neighbours.</p>
+    <figure class="diagram" style="margin:6px 0 0">
+      <svg viewBox="0 0 820 200" role="img" aria-label="Nested fault boundaries: a poll contains many files, a stitch contains many windows, and each read request is isolated; a bad block fails only its own unit.">
+        <rect x="14" y="20" width="792" height="70" rx="8" fill="none" stroke="var(--accent)" stroke-width="1.4"/>
+        <text x="24" y="38" font-size="11.5" fill="var(--accent)" font-weight="700">ONE POLL</text>
+        <g font-size="10.5" text-anchor="middle">
+          <rect x="150" y="30" width="120" height="44" rx="6" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/><text x="210" y="56">file 1 ✓</text>
+          <rect x="284" y="30" width="120" height="44" rx="6" fill="var(--danger-soft)" stroke="var(--danger)" stroke-width="1.3"/><text x="344" y="52" fill="var(--danger)">file 2 ✗ skipped</text><text x="344" y="66" class="mut">logged, io_skipped++</text>
+          <rect x="418" y="30" width="120" height="44" rx="6" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/><text x="478" y="56">file 3 ✓</text>
+          <rect x="552" y="30" width="120" height="44" rx="6" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/><text x="612" y="56">file 4 ✓</text>
+        </g>
+        <rect x="14" y="108" width="480" height="72" rx="8" fill="none" stroke="var(--accent)" stroke-width="1.4"/>
+        <text x="24" y="126" font-size="11.5" fill="var(--accent)" font-weight="700">ONE STITCH</text>
+        <g font-size="10.5" text-anchor="middle">
+          <rect x="150" y="120" width="100" height="44" rx="6" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/><text x="200" y="146">window ✓</text>
+          <rect x="264" y="120" width="100" height="44" rx="6" fill="var(--danger-soft)" stroke="var(--danger)" stroke-width="1.3"/><text x="314" y="142" fill="var(--danger)">window ✗</text><text x="314" y="156" class="mut">left pending</text>
+          <rect x="378" y="120" width="100" height="44" rx="6" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"/><text x="428" y="146">window ✓</text>
+        </g>
+        <rect x="516" y="108" width="290" height="72" rx="8" fill="none" stroke="var(--accent)" stroke-width="1.4"/>
+        <text x="526" y="126" font-size="11.5" fill="var(--accent)" font-weight="700">ONE READ REQUEST</text>
+        <g font-size="10.5" text-anchor="middle">
+          <rect x="536" y="132" width="250" height="38" rx="6" fill="var(--pad-soft)" stroke="var(--pad)" stroke-width="1.2"/>
+          <text x="661" y="150" fill="var(--pad)">bad block → list + notice</text>
+          <text x="661" y="163" class="mut">graceful, not a 500</text>
+        </g>
+      </svg>
+      <figcaption>Bulkheads: a poll is a boundary around its files, a stitch around its windows, a request around itself. A dead block sinks only its own compartment; everything else keeps floating.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="n">E.</span> The engineering concepts (the parts worth keeping)</h2>
+
+    <div class="concept">
+      <span class="tagline">Fault isolation · bulkheads</span>
+      <h3>Contain a failure to the smallest independent unit</h3>
+      <p>Partition work into units that can fail alone — one file, one stitch window, one request — and wrap each in its own try/except. A fault is then bounded to that unit. Like watertight compartments on a ship: one floods, the ship still floats.</p>
+    </div>
+    <div class="concept">
+      <span class="tagline">Fail-soft vs fail-fast</span>
+      <h3>Skip-and-continue when the unit is non-critical and isolated</h3>
+      <p>Fail-fast (abort everything) is right when continuing would corrupt state. Here, one unreadable file shouldn't stop the other files, so we <em>fail-soft</em>: mark it, log it, keep going. Choosing per situation is the skill.</p>
+    </div>
+    <div class="concept">
+      <span class="tagline">Avoid the hazard</span>
+      <h3>The cheapest way to survive bad data is to not read it</h3>
+      <p><code class="k">INSERT … RETURNING</code> derives the range from the rows just written, so ingestion never scans the old region where the dead sectors live. Design each query to touch the minimum data it needs — it's both safer and faster (a ~7M-cost scan disappeared).</p>
+    </div>
+    <div class="concept">
+      <span class="tagline">Transient vs permanent errors</span>
+      <h3>Match the response to the error's nature</h3>
+      <p>A dead sector is <em>permanent</em> for that block — retrying just fails again and stresses the disk, so we skip, not retry. Contrast the network layer, where a blip is <em>transient</em> and one retry heals it. And never auto-retry a non-idempotent write (it could double-submit).</p>
+    </div>
+    <div class="concept">
+      <span class="tagline">Idempotency &amp; content-hash dedup</span>
+      <h3>Safe repeats are the backbone of resilience</h3>
+      <p>Entries dedup by <code class="k">sha256(content)</code> and transactions use deterministic ids, so re-fetching or re-stitching never duplicates and always converges. That's what makes "skip now, pick it up later" safe.</p>
+    </div>
+    <div class="concept">
+      <span class="tagline">Graceful degradation</span>
+      <h3>Partial-but-honest beats a crash</h3>
+      <p>When a bad block is unavoidable on a read, return what you <em>can</em> (the transaction list) with an explicit notice, instead of a blank 500. The user keeps working and understands what happened.</p>
+    </div>
+    <div class="concept">
+      <span class="tagline">Observability · loud signals</span>
+      <h3>Never degrade silently</h3>
+      <p>Every skip emits a <code class="k">CRITICAL</code> log and bumps a counter (<code class="k">io_skipped</code>). A system that quietly limps hides a failing disk until it dies hard; make the degradation visible so a human can act.</p>
+    </div>
+    <div class="concept">
+      <span class="tagline">Source-of-truth separation</span>
+      <h3>Know what's authoritative vs derived</h3>
+      <p>The real data lives upstream in the Windows log files; the database is a <em>derived, re-ingestable</em> copy. Because of that, losing a block is tolerable and recovery is "re-fetch." Identifying which data is the source of truth is what makes a data-loss decision safe.</p>
+    </div>
+    <div class="concept" style="border-top-color: var(--danger)">
+      <span class="tagline" style="color:var(--danger)">Honest limits</span>
+      <h3>Software routes around hardware; it doesn't heal it</h3>
+      <p>All of the above keeps the app running and observable on a failing disk — it cannot recover rows on a dead sector or stop the disk degrading. Resilience is a stopgap; pair it with a routine backup so a full failure is survivable.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">F.</span> Where it lives, in code</h2>
+    <div class="card">
+      <dl class="defs">
+        <dt>io_errors.py</dt><dd>new — <code class="k">is_disk_io_error()</code> / <code class="k">disk_io_detail()</code>: one place that recognises the "could not read block … Input/output error" signature and extracts the block locator.</dd>
+        <dt>parse_insert.py</dt><dd>range now from <code class="k">INSERT … RETURNING timestamp</code> (no job_id scan); a disk-I/O error is logged loudly and the job is labelled "disk I/O error (bad sector)".</dd>
+        <dt>remote_fetcher.py</dt><dd>per-file catch → skip + <code class="k">io_skipped</code> counter + continue the poll; surfaced in the fetch stats.</dd>
+        <dt>derive_transactions.py</dt><dd>Stage-2 stitch flags a disk-I/O window distinctly and leaves it pending; other windows still commit.</dd>
+        <dt>logs.py</dt><dd>feed read returns the transaction list + a notice instead of a 500 when a page's entries are on a bad block.</dd>
+        <dt>tests</dt><dd>error-classification (direct + chained) and the <code class="k">RETURNING</code> insert the pending-range relies on — 84/84 backend tests green.</dd>
+      </dl>
+    </div>
+    <div class="callout">
+      <p class="lead">Remember</p>
+      <p>This keeps the system alive and observable on a disk with bad sectors. It does <strong>not</strong> heal the disk or recover dead-sector rows — keep a routine <code class="k">pg_dump</code>, and treat the failing disk as living on borrowed time.</p>
+    </div>
+  </section>
+
+  <p class="foot">RAG-Pipeline · disk-io-resilience · app/services/mnp_log_ingestion/io_errors.py · parse_insert.py (INSERT … RETURNING) · remote_fetcher.py (per-file io_skipped) · derive_transactions.py · api/v1/logs.py</p>
+</div>
+
+</body>
+</html>

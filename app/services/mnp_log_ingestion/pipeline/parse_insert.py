@@ -17,7 +17,7 @@ import uuid
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select, update
+from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,7 @@ from app.persistence.models.log_entry import LogEntry, LogEntryType
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.repositories.customer_repository import get_customer_timezone_raw
 from app.persistence.storage.base import ObjectStorage
+from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
 from app.services.mnp_log_ingestion.parsers.LogParserFactory import get_log_parser
 
 logger = logging.getLogger(__name__)
@@ -39,16 +40,22 @@ def _entry_hash(raw_body: str) -> str:
     return hashlib.sha256((raw_body or "").encode("utf-8")).hexdigest()
 
 
-async def _insert_dedup(db: AsyncSession, rows: list[dict]) -> int:
-    """Bulk INSERT ... ON CONFLICT (entry_hash) DO NOTHING. Returns rows actually inserted."""
+async def _insert_dedup(db: AsyncSession, rows: list[dict]) -> list:
+    """Bulk INSERT ... ON CONFLICT (entry_hash) DO NOTHING RETURNING timestamp.
+
+    Returns the timestamps of the rows ACTUALLY inserted (duplicates are skipped, so they are not
+    returned). The caller derives the ingest's dirty time-range from these — NOT from a separate
+    `SELECT min/max WHERE job_id=...` scan, which on the failing production disk reads old blocks
+    (including a dead sector) and errors. RETURNING only reports the just-written rows, so it never
+    touches old data. See app/services/mnp_log_ingestion/io_errors.py and the disk-io-resilience doc.
+    """
     if not rows:
-        return 0
+        return []
     # dedup is per customer: the same line for two customers is two distinct rows.
     stmt = pg_insert(LogEntry).values(rows).on_conflict_do_nothing(
         index_elements=["customer_code", "entry_hash"]
-    )
-    result = await db.execute(stmt)
-    return result.rowcount or 0
+    ).returning(LogEntry.timestamp)
+    return list((await db.execute(stmt)).scalars().all())
 
 
 async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectStorage) -> int:
@@ -59,6 +66,10 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
     job = await db.get(Job, job_id)
     if not job:
         raise ValueError(f"Job {job_id} not found")
+    # Capture now: after a rollback in the except handler the ORM `job` is expired, and touching its
+    # attributes there would trigger sync IO in the async context (MissingGreenlet).
+    filename = job.filename
+    customer_code = job.customer_code
 
     try:
         await _set_status(db, job_id, JobStatus.parsing)
@@ -91,9 +102,22 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
         seen_in_batch: set[str] = set()
         inserted = 0
         parsed = 0
+        # Dirty time-range of the rows we insert, accumulated from the INSERT ... RETURNING
+        # timestamps (never from a separate scan — see _insert_dedup).
+        lo = None
+        hi = None
 
         async def flush(b: list[dict]) -> int:
-            return await _insert_dedup(db, b)
+            nonlocal lo, hi
+            ts_list = await _insert_dedup(db, b)
+            for ts in ts_list:
+                if ts is None:
+                    continue
+                if lo is None or ts < lo:
+                    lo = ts
+                if hi is None or ts > hi:
+                    hi = ts
+            return len(ts_list)
 
         for rec in records:
             parsed += 1
@@ -133,18 +157,14 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
         inserted += await flush(batch)
 
         # Mark the time range this ingest touched as needing (re)grouping, so a later scoped regroup
-        # (console finalize / watcher drain) stitches exactly this window — not the whole table. Only
-        # the rows of THIS job are this file's genuinely-new entries (duplicates were skipped, so they
-        # carry another job_id), so their min/max timestamp is the dirty range. Skip when nothing new
-        # was inserted or every new entry is timestamp-less (a windowed regroup can't place those).
-        if inserted:
-            lo, hi = (await db.execute(
-                select(func.min(LogEntry.timestamp), func.max(LogEntry.timestamp))
-                .where(LogEntry.job_id == job_id)
-            )).one()
-            if lo is not None and hi is not None:
-                db.add(LogRegroupPending(customer_code=job.customer_code, job_id=job_id,
-                                         range_start=lo, range_end=hi))
+        # (console finalize / watcher drain) stitches exactly this window — not the whole table. The
+        # range is the min/max timestamp of the rows we just inserted, taken from INSERT ... RETURNING
+        # (lo/hi above) rather than a `SELECT min/max WHERE job_id` scan — that scan reads old blocks
+        # and, on the failing disk, hits a dead sector. Skip when nothing new was inserted or every
+        # new entry is timestamp-less (a windowed regroup can't place those).
+        if inserted and lo is not None and hi is not None:
+            db.add(LogRegroupPending(customer_code=customer_code, job_id=job_id,
+                                     range_start=lo, range_end=hi))
 
         # Stage 1 done at line level. Grouping (Stage 2) runs separately.
         await db.execute(
@@ -160,9 +180,21 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
         return inserted
 
     except Exception as exc:
-        logger.exception("Log parse/insert failed for job %s", job_id)
         await db.rollback()
-        await _set_status(db, job_id, JobStatus.failed, error=str(exc))
+        if is_disk_io_error(exc):
+            # A dead sector was hit while ingesting this file. We cannot repair the disk, so mark the
+            # file failed with a clear label and let the caller move on to the next file. Loud so it
+            # is visible: the disk has failing sectors.
+            detail = disk_io_detail(exc)
+            logger.critical(
+                "DISK I/O ERROR ingesting job %s (file=%s, customer=%s): %s — skipping this file. "
+                "The disk has an unreadable sector; data on that block is lost. Ensure backups.",
+                job_id, filename, customer_code, detail,
+            )
+            await _set_status(db, job_id, JobStatus.failed, error=f"disk I/O error (bad sector): {detail}")
+        else:
+            logger.exception("Log parse/insert failed for job %s", job_id)
+            await _set_status(db, job_id, JobStatus.failed, error=str(exc))
         raise
 
 

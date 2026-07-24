@@ -33,6 +33,7 @@ from app.persistence.repositories.customer_repository import get_customer_timezo
 from app.services.mnp_log_ingestion.timefmt import to_display, set_display_timezone
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun, LogRegroupRunStatus
+from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
 
 logger = logging.getLogger(__name__)
 
@@ -800,10 +801,20 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
             consumed += len(rows)
         except Exception as exc:
             # isolate this run; other runs still run, and its pending rows stay open for a retry.
-            logger.exception("Stage 2 finalize [%s]: run %s..%s failed — pending stays open for retry",
-                             customer_code, lo, hi)
-            failures.append({"window_start": lo.isoformat(), "window_end": hi.isoformat(),
-                             "error": str(exc)[:2000]})
+            if is_disk_io_error(exc):
+                logger.critical(
+                    "Stage 2 finalize [%s]: run %s..%s hit a DISK I/O error (%s) — skipping this window, "
+                    "continuing; the disk has an unreadable sector. Ensure backups.",
+                    customer_code, lo, hi, disk_io_detail(exc),
+                )
+                failures.append({"window_start": lo.isoformat(), "window_end": hi.isoformat(),
+                                 "error": f"disk I/O error (bad sector): {disk_io_detail(exc)}",
+                                 "io_error": True})
+            else:
+                logger.exception("Stage 2 finalize [%s]: run %s..%s failed — pending stays open for retry",
+                                 customer_code, lo, hi)
+                failures.append({"window_start": lo.isoformat(), "window_end": hi.isoformat(),
+                                 "error": str(exc)[:2000]})
 
     logger.info("Stage 2 finalize [%s]: %d pending rows -> %d run(s), %d window(s), %d run(s) failed",
                 customer_code, len(pend), len(runs), len(by_window), len(failures))
