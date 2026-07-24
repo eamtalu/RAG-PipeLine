@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     # ids, so the split stays lossless. 6 h default; steady-state poll windows (seconds of data) are
     # far below this and never split.
     log_regroup_max_window_seconds: int = 6 * 3600
+    # Dead-letter cap: a stitch window (log_regroup_pending run) that FAILS this many finalize attempts
+    # in a row is marked abandoned (abandoned_at set) and no longer retried, instead of being re-tried
+    # forever. Prevents a poison window (e.g. one on a permanently-dead disk block) from burning the
+    # statement_timeout every cycle. Its failure is recorded (attempts / last_error) and alerted loudly.
+    log_regroup_max_attempts: int = 3
 
     # Background loops (embedding, watcher, Stage 2 grouping, SSH poll supervisor, notifications,
     # log-space cleanup) must run in EXACTLY ONE process. Under gunicorn -w N the FastAPI lifespan runs

@@ -17,7 +17,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, DateTime, Index
+from sqlalchemy import String, DateTime, Index, Integer, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -46,3 +46,12 @@ class LogRegroupPending(Base):
     # NULL = still pending; set to the regroup time once a scoped regroup has covered this window.
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    # Dead-letter tracking (see finalize_pending): a window is retried while consumed_at IS NULL AND
+    # abandoned_at IS NULL. Each failed finalize attempt bumps `attempts` and records `last_error` /
+    # `last_attempt_at`; once attempts reaches settings.log_regroup_max_attempts the window is
+    # ABANDONED (abandoned_at set) and no longer retried — so a poison window can't retry forever.
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    abandoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
