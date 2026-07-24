@@ -25,7 +25,7 @@ from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun
 from app.services.mnp_log_ingestion.LogIngestion import LogIngestion, get_log_ingestion, DOCUMENT_TYPE
 from app.services.mnp_log_ingestion.pipeline.derive_transactions import (
-    regroup_all, regroup_incremental, finalize_pending, run_finalize_tracked,
+    regroup_all, regroup_incremental, finalize_pending, run_finalize_tracked, reset_abandoned_windows,
 )
 from app.services.mnp_log_ingestion.render import render_transaction
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc, active_timezone_name
@@ -377,23 +377,43 @@ async def regroup_status(
     """
     # ONE query over this customer's pending rows: open-only aggregates via FILTER, plus the overall
     # max(consumed_at) as the "last stitched" timestamp. No writes — safe to poll frequently.
+    _open = LogRegroupPending.consumed_at.is_(None)
     row = (await db.execute(
         select(
-            func.count().filter(LogRegroupPending.consumed_at.is_(None)),
-            func.min(LogRegroupPending.created_at).filter(LogRegroupPending.consumed_at.is_(None)),
+            # open backlog that will still be retried (excludes dead-lettered windows)
+            func.count().filter(_open, LogRegroupPending.abandoned_at.is_(None)),
+            func.min(LogRegroupPending.created_at).filter(_open, LogRegroupPending.abandoned_at.is_(None)),
             func.max(LogRegroupPending.consumed_at),
+            # dead-lettered: open but abandoned after repeated failures — parked, NOT retried
+            func.count().filter(_open, LogRegroupPending.abandoned_at.isnot(None)),
         ).where(LogRegroupPending.customer_code == customer)
     )).one()
-    count, oldest, last_regroup = row
+    count, oldest, last_regroup, abandoned = row
     count = count or 0
+    abandoned = abandoned or 0
     return {
         "customer_code": customer,
         "pending": bool(count),
         "pending_windows": count,
         "oldest_pending_at": oldest.isoformat() if oldest else None,
         "last_regroup_at": last_regroup.isoformat() if last_regroup else None,
+        # windows given up on after log_regroup_max_attempts failures; >0 means investigate (likely a
+        # disk fault). They do NOT count as backlog and can be re-armed via POST /regroup/reset-abandoned.
+        "abandoned_windows": abandoned,
         "up_to_date": count == 0,
     }
+
+
+@router.post("/regroup/reset-abandoned")
+async def reset_abandoned(
+    customer: str = Depends(get_active_customer),
+    db: AsyncSession = Depends(get_session),
+):
+    """Re-arm this tenant's dead-lettered stitch windows so finalize retries them again (clears the
+    abandoned marker + attempt counter). Use after the cause of the failures is addressed. Returns the
+    number re-armed; call POST /regroup/finalize afterwards to stitch them."""
+    n = await reset_abandoned_windows(db, customer)
+    return {"customer_code": customer, "reset": n}
 
 
 @router.delete("/data")

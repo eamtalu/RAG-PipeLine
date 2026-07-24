@@ -866,6 +866,30 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
     return result
 
 
+async def reset_abandoned_windows(db: AsyncSession, customer_code: str) -> int:
+    """Un-park (re-arm) dead-lettered stitch windows for a customer so finalize retries them again.
+
+    For every ABANDONED, not-yet-consumed log_regroup_pending row of the customer, clears abandoned_at,
+    resets attempts to 0, and clears last_error - so the next finalize picks the window up again. Use
+    once the underlying cause is addressed (disk replaced, load subsided, etc.). Returns how many
+    windows were re-armed. Commits on the passed session."""
+    res = await db.execute(
+        update(LogRegroupPending)
+        .where(
+            LogRegroupPending.customer_code == customer_code,
+            LogRegroupPending.abandoned_at.isnot(None),
+            LogRegroupPending.consumed_at.is_(None),
+        )
+        .values(abandoned_at=None, attempts=0, last_error=None)
+    )
+    await db.commit()
+    n = res.rowcount or 0
+    if n:
+        logger.info("Stage 2: re-armed %d abandoned window(s) for %s — they will be retried next finalize",
+                    n, customer_code)
+    return n
+
+
 async def run_finalize_tracked(run_id: uuid.UUID, customer_code: str) -> None:
     """Background entry point for the async finalize endpoint: run finalize_pending and record the
     outcome on the log_regroup_runs row so the frontend can poll it. Uses its own session — the HTTP

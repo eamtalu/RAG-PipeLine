@@ -239,6 +239,21 @@
         <dt>the only cap</dt><dd><strong>6 h caps the sub-window</strong> a run is sliced into for committing — <strong>never the run itself</strong>. A 14 h run → three commits (6h + 6h + 2h).</dd>
       </dl>
     </div>
+
+    <div class="callout">
+      <p class="lead">When a cluster keeps failing · retry, then dead-letter</p>
+      <p style="margin-bottom:10px">A failed cluster stays open and is retried on later polls - but <strong>not forever</strong>. Every failed stitch bumps a counter on its pending row; once it reaches <code class="k">log_regroup_max_attempts</code> (default 3) the window is <b>ABANDONED</b> and parked, with a CRITICAL alert. Without this, a poison window (a malformed row, or a permanently-dead disk sector underneath it) would burn the full 120 s stitch timeout on <em>every</em> poll, forever - starving healthy clusters behind it.</p>
+<pre class="tree"><b>attempt 1</b>  fail → <code class="k">attempts=1</code>, left pending  → retried next poll
+<b>attempt 2</b>  fail → <code class="k">attempts=2</code>, left pending  → retried next poll
+<b>attempt 3</b>  fail → <code class="k">attempts=3 ≥ max</code>        → <i>ABANDONED</i> (<code class="k">abandoned_at</code> set)
+                 ↳ no longer retried · CRITICAL log · dropped from the backlog
+                 ↳ re-arm on demand: <code class="k">POST /logs/regroup/reset-abandoned</code></pre>
+      <dl class="defs">
+        <dt>isolation</dt><dd>only the poison window is parked - every other cluster keeps stitching, so one dead disk block can't stall the whole pipeline.</dd>
+        <dt>visibility</dt><dd><code class="k">GET /logs/regroup/status</code> reports <code class="k">abandoned_windows</code> apart from the live backlog - a non-zero count means <em>investigate</em> (usually the failing disk), never "still catching up".</dd>
+        <dt>recover</dt><dd>fix the cause, then re-arm - it clears <code class="k">abandoned_at</code> and the counter so the next finalize stitches the window again.</dd>
+      </dl>
+    </div>
   </section>
 
   <section>
@@ -410,7 +425,7 @@
         <li><span class="b">◦</span><span><strong>Fetch ≠ stitch.</strong> Files only drop timestamped entries into a pool and flag a dirty time-range. Grouping happens later.</span></li>
         <li><span class="b">◦</span><span><strong>Stitch by time, not by file.</strong> <code class="k">regroup_window</code> reads every <em>unassigned</em> entry in a time window, ordered by timestamp — blind to which file delivered it.</span></li>
         <li><span class="b">◦</span><span><strong>All files ingested first, one stitch pass after.</strong> Per poll: loop files → then a single <code class="k">finalize_pending</code> over the coalesced ranges.</span></li>
-        <li><span class="b">◦</span><span><strong>Clusters, not one giant window.</strong> That one pass splits the dirty ranges by the 30-min gap rule into N clusters, each padded / ≤6 h-split / committed on its own — so a poison or stale cluster fails alone.</span></li>
+        <li><span class="b">◦</span><span><strong>Clusters, not one giant window.</strong> That one pass splits the dirty ranges by the 30-min gap rule into N clusters, each padded / ≤6 h-split / committed on its own — so a poison or stale cluster fails alone, and if it keeps failing it is dead-lettered after 3 attempts instead of retried forever.</span></li>
         <li><span class="b">◦</span><span><strong>Order-independent &amp; idempotent.</strong> Deterministic uuid5 ids mean re-running a window rebuilds identical transactions — newest-first / oldest-last fetch is safe.</span></li>
         <li><span class="b">◦</span><span><strong>Backfill is lossless.</strong> A late/old file marks its own old window dirty, forcing a delete-and-rebuild of exactly that slice.</span></li>
       </ul>

@@ -191,6 +191,53 @@ async def test_finalize_dead_letters_a_window_after_max_attempts(monkeypatch):
             await s.commit()
 
 
+async def test_reset_abandoned_windows_re_arms_for_retry(monkeypatch):
+    """reset_abandoned_windows clears the dead-letter marker + attempt counter, so a previously
+    abandoned window is picked up and retried again by the next finalize."""
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select as sa_select
+    from app.services.mnp_log_ingestion.pipeline import derive_transactions as d
+
+    cc = "TEST_CHUNK15_REARM"
+    T = datetime(2026, 7, 24, 9, 0, 0, tzinfo=timezone.utc)
+    n = settings.log_regroup_max_attempts
+
+    async def _always_fail(wdb, customer_code, lo, hi, commit=True):
+        raise RuntimeError("simulated persistent stitch failure")
+
+    monkeypatch.setattr(d, "regroup_window", _always_fail)
+
+    async def _row():
+        async with async_session() as s:
+            return (await s.execute(
+                sa_select(LogRegroupPending).where(LogRegroupPending.customer_code == cc)
+            )).scalars().one()
+
+    async with async_session() as s:
+        s.add(LogRegroupPending(customer_code=cc, range_start=T, range_end=T + timedelta(seconds=1)))
+        await s.commit()
+    try:
+        for _ in range(n):                      # drive it to abandonment
+            async with async_session() as s:
+                await d.finalize_pending(s, cc)
+        row = await _row()
+        assert row.abandoned_at is not None and row.attempts == n
+
+        async with async_session() as s:        # re-arm
+            reset = await d.reset_abandoned_windows(s, cc)
+        assert reset == 1
+        row = await _row()
+        assert row.abandoned_at is None and row.attempts == 0
+
+        async with async_session() as s:        # now it's retried again
+            await d.finalize_pending(s, cc)
+        assert (await _row()).attempts == 1
+    finally:
+        async with async_session() as s:
+            await s.execute(delete(LogRegroupPending).where(LogRegroupPending.customer_code == cc))
+            await s.commit()
+
+
 async def test_finalize_relaxes_statement_timeout_per_window(db, monkeypatch):
     """Stitch guard: each finalize window must SET LOCAL statement_timeout to the finite worker cap,
     so a slow window on the degraded disk can finish instead of dying at the 30s web guard."""

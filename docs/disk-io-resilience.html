@@ -227,6 +227,11 @@
       <p>A dead sector is <em>permanent</em> for that block — retrying just fails again and stresses the disk, so we skip, not retry. Contrast the network layer, where a blip is <em>transient</em> and one retry heals it. And never auto-retry a non-idempotent write (it could double-submit).</p>
     </div>
     <div class="concept">
+      <span class="tagline">Retry budget · dead-letter</span>
+      <h3>Bounded retries, then park it — never retry forever</h3>
+      <p>A stitch window can't be classified perfectly up front, so we give it a <em>budget</em>: retry on later polls, but count the attempts. After <code class="k">log_regroup_max_attempts</code> (3) it's <strong>dead-lettered</strong> — <code class="k">abandoned_at</code> is stamped, it drops out of the backlog, and a <code class="k">CRITICAL</code> fires. This is the circuit-breaker that stops a poison window (a permanently-dead block underneath it) from burning the 120 s timeout on every poll forever. Parking is reversible: <code class="k">POST /logs/regroup/reset-abandoned</code> re-arms it once the cause is fixed.</p>
+    </div>
+    <div class="concept">
       <span class="tagline">Idempotency &amp; content-hash dedup</span>
       <h3>Safe repeats are the backbone of resilience</h3>
       <p>Entries dedup by <code class="k">sha256(content)</code> and transactions use deterministic ids, so re-fetching or re-stitching never duplicates and always converges. That's what makes "skip now, pick it up later" safe.</p>
@@ -258,11 +263,11 @@
     <div class="card">
       <dl class="defs">
         <dt>io_errors.py</dt><dd>new — <code class="k">is_disk_io_error()</code> / <code class="k">disk_io_detail()</code>: one place that recognises the "could not read block … Input/output error" signature and extracts the block locator.</dd>
-        <dt>parse_insert.py</dt><dd>range from <code class="k">INSERT … RETURNING timestamp</code> (no old-data scan); the ingest transaction relaxes <code class="k">statement_timeout</code> (<code class="k">SET LOCAL … = 0</code>) + smaller batches so slow inserts finish; disk faults (a dead block OR a slow-disk timeout) are logged loudly and the job labelled "disk fault".</dd>
+        <dt>parse_insert.py</dt><dd>range from <code class="k">INSERT … RETURNING timestamp</code> (no old-data scan); the ingest transaction relaxes <code class="k">statement_timeout</code> to a finite worker cap (<code class="k">SET LOCAL … = 120000</code> ms — finite, never <code class="k">0</code>/disabled, so a slow insert can't hang forever) + smaller batches so slow inserts finish; disk faults (a dead block OR a slow-disk timeout) are logged loudly and the job labelled "disk fault".</dd>
         <dt>remote_fetcher.py</dt><dd>per-file catch → skip + <code class="k">io_skipped</code> counter + continue the poll; surfaced in the fetch stats.</dd>
-        <dt>derive_transactions.py</dt><dd>Stage-2 stitch flags a disk-I/O window distinctly and leaves it pending; other windows still commit.</dd>
-        <dt>logs.py</dt><dd>feed read returns the transaction list + a notice instead of a 500 when a page's entries are on a bad block.</dd>
-        <dt>tests</dt><dd>error-classification (direct + chained) and the <code class="k">RETURNING</code> insert the pending-range relies on — 84/84 backend tests green.</dd>
+        <dt>derive_transactions.py</dt><dd>Stage-2 stitch relaxes <code class="k">statement_timeout</code> per window (same 120 s cap), leaves a failed window pending while other windows still commit, and <strong>dead-letters</strong> it after <code class="k">log_regroup_max_attempts</code> failures (<code class="k">attempts</code>/<code class="k">abandoned_at</code>); <code class="k">reset_abandoned_windows()</code> re-arms parked windows.</dd>
+        <dt>logs.py</dt><dd>feed read returns the transaction list + a notice instead of a 500 when a page's entries are on a bad block; <code class="k">GET /regroup/status</code> reports <code class="k">abandoned_windows</code> and <code class="k">POST /regroup/reset-abandoned</code> re-arms them.</dd>
+        <dt>tests</dt><dd>error-classification (direct + chained), the <code class="k">RETURNING</code> insert the pending-range relies on, the finite-timeout guard, and the dead-letter + re-arm lifecycle — 91/91 backend tests green.</dd>
       </dl>
     </div>
     <div class="callout">
