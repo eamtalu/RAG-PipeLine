@@ -29,6 +29,10 @@ from app.services.mnp_log_ingestion.pipeline.derive_transactions import (
 )
 from app.services.mnp_log_ingestion.render import render_transaction
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc, active_timezone_name
+from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
+
+import logging
+logger = logging.getLogger(__name__)
 from app.services.log_agent.agent import LogDebugAgent, get_log_debug_agent
 
 router = APIRouter(prefix="/logs", tags=["logs"])
@@ -589,11 +593,24 @@ async def view_transactions(
     # fetch entries for this page's transactions, BOUNDED so a pathological page can't balloon the
     # worker (fetch one past the cap to detect overflow)
     ids = [t.id for t in txns]
-    entry_rows = (await db.execute(
-        select(LogEntry).where(LogEntry.transaction_id.in_(ids))
-        .order_by(LogEntry.seq.asc().nullslast(), LogEntry.line_number.asc())
-        .limit(MAX_RENDER_ENTRIES + 1)
-    )).scalars().all()
+    try:
+        entry_rows = (await db.execute(
+            select(LogEntry).where(LogEntry.transaction_id.in_(ids))
+            .order_by(LogEntry.seq.asc().nullslast(), LogEntry.line_number.asc())
+            .limit(MAX_RENDER_ENTRIES + 1)
+        )).scalars().all()
+    except Exception as exc:
+        # A dead disk sector under log_entries for this page must not 500 the whole feed: the
+        # transaction list above is intact, so return it with a clear notice and let the user page on.
+        if not is_disk_io_error(exc):
+            raise
+        logger.critical("DISK I/O ERROR rendering feed for %s on %s: %s — returning list without bodies.",
+                        customer, date, disk_io_detail(exc))
+        return PlainTextResponse(
+            header + "\n\n(⚠ some log entries on this page sit on a damaged disk sector and can't be "
+            "read right now — the transaction list above is complete; try another page or date.)",
+            headers=pager,
+        )
     if len(entry_rows) > MAX_RENDER_ENTRIES:
         return PlainTextResponse(
             header + f"\n\n(too many log entries to render — this page exceeds "

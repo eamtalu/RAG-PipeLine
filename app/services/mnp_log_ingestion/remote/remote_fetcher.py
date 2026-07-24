@@ -47,6 +47,7 @@ from app.persistence.repositories.job_repository import JobRepository
 from app.persistence.storage.local import LocalStorage
 from app.services.mnp_log_ingestion.LogIngestion import LogIngestion
 from app.services.mnp_log_ingestion.pipeline.derive_transactions import finalize_pending
+from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
 from app.services.mnp_log_ingestion.remote import ssh_client
 
 logger = logging.getLogger(__name__)
@@ -304,7 +305,7 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
     Progress hooks (no-ops for the poller): `on_listed(considered)` fires once the remote dir is
     globbed; `on_file(files_done, files_total, current_file, bytes_so_far, entries_so_far)` fires
     after EVERY listed file — including unchanged/skipped ones — so a progress bar advances smoothly."""
-    considered = fetched = entries = total_bytes = content_skipped = 0
+    considered = fetched = entries = total_bytes = content_skipped = io_skipped = 0
     per_file: list[dict] = []
     ckpts = await _load_ckpts(source)  # {path: (last_size, last_mtime, last_offset, head_fingerprint)}
     # Content-identity index from the SAME pre-poll snapshot: (head_fp, size, mtime) -> max consumed
@@ -366,12 +367,27 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
             if do_pull:
                 if head_fp is None:  # non-incremental path hasn't fingerprinted yet
                     head_fp = await _read_head_fp(client, path)
-                new_off, read, ins = await _pull_range(client, path, start, size, source=source)
-                await _save_ckpt(source, path, size, mtime, new_off, head_fp)
-                fetched += 1
-                entries += ins
-                total_bytes += read
-                per_file.append({"file": path, "bytes": read, "new_entries": ins})
+                try:
+                    new_off, read, ins = await _pull_range(client, path, start, size, source=source)
+                except Exception as exc:
+                    # A dead disk sector hit while ingesting THIS file must not abort the whole source
+                    # (nor the poll). Skip this file, record it, and move to the next — the checkpoint
+                    # is left unadvanced so a later retry can pick it up if the sector ever reads again.
+                    if not is_disk_io_error(exc):
+                        raise
+                    io_skipped += 1
+                    logger.critical(
+                        "DISK I/O ERROR fetching %s/%s: %s — skipping this file, continuing the poll. "
+                        "The disk has an unreadable sector; ensure backups.",
+                        source.name, _basename(path), disk_io_detail(exc),
+                    )
+                    per_file.append({"file": path, "io_error": disk_io_detail(exc)})
+                else:
+                    await _save_ckpt(source, path, size, mtime, new_off, head_fp)
+                    fetched += 1
+                    entries += ins
+                    total_bytes += read
+                    per_file.append({"file": path, "bytes": read, "new_entries": ins})
 
             if on_file:
                 await on_file(idx + 1, considered, path, total_bytes, entries)
@@ -381,7 +397,7 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
 
     return {"source": source.name, "files_considered": considered, "files_fetched": fetched,
             "bytes_fetched": total_bytes, "entries_ingested": entries,
-            "content_skipped": content_skipped, "by_file": per_file}
+            "content_skipped": content_skipped, "io_skipped": io_skipped, "by_file": per_file}
 
 
 def _select_timestamp_files(listing: list[tuple[str, int, float]], from_ts: datetime) -> set[str]:
@@ -497,7 +513,7 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
                                   enabled_only=enabled_only, disabled_only=disabled_only)
     agg = {"customer_code": customer_code, "mode": mode.value, "sources": len(sources),
            "files_considered": 0, "files_fetched": 0, "bytes_fetched": 0,
-           "entries_ingested": 0, "content_skipped": 0, "by_source": [], "errors": []}
+           "entries_ingested": 0, "content_skipped": 0, "io_skipped": 0, "by_source": [], "errors": []}
 
     async def _regrouping() -> None:
         if on_progress is not None:
@@ -593,6 +609,7 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
             agg["bytes_fetched"] += stats["bytes_fetched"]
             agg["entries_ingested"] += stats["entries_ingested"]
             agg["content_skipped"] += stats.get("content_skipped", 0)
+            agg["io_skipped"] += stats.get("io_skipped", 0)
             base["considered"] += stats["files_considered"]
             base["bytes"] += stats["bytes_fetched"]
             base["entries"] += stats["entries_ingested"]
