@@ -142,6 +142,7 @@
       <figcaption>The key move: <strong>don't search old data you don't need.</strong> <code class="k">RETURNING</code> gives back the timestamps of the rows the INSERT just wrote, so the dirty range is computed without ever touching the region where the dead sectors live. Same persisted result, zero exposure to the bad block.</figcaption>
     </figure>
     <p style="margin-top:14px"><strong>And if an ingest still hits a bad block</strong> (e.g. the dead index page during a write): the poller catches it <em>per file</em> — logs it, counts <code class="k">io_skipped</code>, and moves on to the next file. One bad file never stalls the source or the poll.</p>
+    <p style="margin-top:14px"><strong>A second, subtler failure on the same disk — slowness, not a dead block.</strong> Because the disk is failing and saturated, an index-heavy insert (each <code class="k">log_entries</code> row updates ~11 indexes on a 40&nbsp;GB table) started exceeding the <strong>30-second <code class="k">statement_timeout</code></strong> — a guardrail meant for the <em>web</em> tier — so Postgres cancelled the insert (<code class="k">QueryCanceledError</code>) and nothing ingested. Fix: the ingestion transaction <strong>relaxes that timeout for itself only</strong> (<code class="k">SET LOCAL statement_timeout = 0</code>) so a slow insert can finish, while the web tier keeps its 30&nbsp;s guard; batches were also shrunk (1000 → 200). A residual timeout is now treated as a skippable disk-fault, exactly like a dead block.</p>
   </section>
 
   <section>
@@ -257,7 +258,7 @@
     <div class="card">
       <dl class="defs">
         <dt>io_errors.py</dt><dd>new — <code class="k">is_disk_io_error()</code> / <code class="k">disk_io_detail()</code>: one place that recognises the "could not read block … Input/output error" signature and extracts the block locator.</dd>
-        <dt>parse_insert.py</dt><dd>range now from <code class="k">INSERT … RETURNING timestamp</code> (no job_id scan); a disk-I/O error is logged loudly and the job is labelled "disk I/O error (bad sector)".</dd>
+        <dt>parse_insert.py</dt><dd>range from <code class="k">INSERT … RETURNING timestamp</code> (no old-data scan); the ingest transaction relaxes <code class="k">statement_timeout</code> (<code class="k">SET LOCAL … = 0</code>) + smaller batches so slow inserts finish; disk faults (a dead block OR a slow-disk timeout) are logged loudly and the job labelled "disk fault".</dd>
         <dt>remote_fetcher.py</dt><dd>per-file catch → skip + <code class="k">io_skipped</code> counter + continue the poll; surfaced in the fetch stats.</dd>
         <dt>derive_transactions.py</dt><dd>Stage-2 stitch flags a disk-I/O window distinctly and leaves it pending; other windows still commit.</dd>
         <dt>logs.py</dt><dd>feed read returns the transaction list + a notice instead of a 500 when a page's entries are on a bad block.</dd>

@@ -104,6 +104,7 @@ Follow the existing pattern: `POST /logs/fetch-remote` and `POST /logs/regroup/f
 ### 8. Fail fast and degrade gracefully
 
 Set a per-statement safety net (`db_statement_timeout_ms`, wired in `app/config/database.py`) so a runaway query aborts instead of hanging a worker.
+This is a WEB-TIER guardrail — it applies to read / feed queries. The background log-ingestion path deliberately RELAXES it per-transaction (`SET LOCAL statement_timeout = 0` in `parse_insert.py`) because an index-heavy `log_entries` insert on the slow/failing production disk legitimately runs longer than the cap; a genuinely unreadable block still surfaces as an I/O error and is skipped (`is_disk_io_error` in `app/services/mnp_log_ingestion/io_errors.py`; see `docs/disk-io-resilience.html`).
 Return a clear, bounded response when a request exceeds a guard rather than doing unbounded work.
 
 ### 9. Remember there are multiple worker processes
