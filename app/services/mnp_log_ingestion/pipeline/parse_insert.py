@@ -100,10 +100,12 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
 
         # Ingestion runs on the dedicated worker over a degraded, slow disk: an insert maintaining
         # ~11 indexes on a 40 GB table can legitimately exceed the (web-tier) statement_timeout and
-        # be cancelled mid-batch (QueryCanceledError). Relax the timeout FOR THIS TRANSACTION ONLY so
-        # a slow insert can complete. SET LOCAL reverts on commit, so pooled connections and the web
-        # tier keep their guardrail. A truly unreadable block still surfaces as an I/O error (caught).
-        await db.execute(sa_text("SET LOCAL statement_timeout = '0'"))
+        # be cancelled mid-batch (QueryCanceledError). Relax the timeout FOR THIS TRANSACTION ONLY to a
+        # generous but FINITE cap so a slow insert can complete, while a pathological bad-sector stall is
+        # still bounded (not an indefinite hang). SET LOCAL reverts on commit, so pooled connections and
+        # the web tier keep their own guardrail. (The value must be a literal — SET can't be parameterised
+        # — but it is an int from settings, not user input.)
+        await db.execute(sa_text(f"SET LOCAL statement_timeout = {int(settings.log_worker_statement_timeout_ms)}"))
 
         # Map LogRecords → row dicts, dedup-by-content via entry_hash, insert in batches.
         # Within-file duplicates (same raw_body twice) are collapsed here so one INSERT batch
