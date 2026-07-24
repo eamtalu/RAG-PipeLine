@@ -560,6 +560,8 @@ async def view_transactions(
     user: str | None = Query(default=None, description="matches user_name; omit for all users"),
     hour: int | None = Query(default=None, ge=0, le=23, description="hour of day 0-23 (combine with date)"),
     status: LogTransactionStatus | None = Query(default=None, description="success / soft / error / incomplete"),
+    order_number: str | None = Query(default=None, description="exact match on order_number; omit for all"),
+    item_number: str | None = Query(default=None, description="exact match on item_number; omit for all"),
     verbose: bool = Query(default=False, description="also render plain INFO narration steps"),
 ):
     """Render one PAGE of a day's transactions as the §6 text view, oldest→newest (from 00:00).
@@ -580,6 +582,10 @@ async def view_transactions(
         )
     if status is not None:
         conds.append(LogTransaction.status == status)
+    if order_number is not None:
+        conds.append(LogTransaction.order_number == order_number)
+    if item_number is not None:
+        conds.append(LogTransaction.item_number == item_number)
 
     # total for the pager (cheap: index-only count over this day, see docs/debugging-worker-timeout-outage.md)
     total = (await db.scalar(select(func.count()).select_from(LogTransaction).where(*conds))) or 0
@@ -602,6 +608,10 @@ async def view_transactions(
         header += f" for user {user}"
     if status is not None:
         header += f" · status={status.value}"
+    if order_number is not None:
+        header += f" · order {order_number}"
+    if item_number is not None:
+        header += f" · item {item_number}"
     if hour is not None:
         header += f" hour {hour:02d}:00"
     header += f" — page {page}/{page_count} — oldest → newest"
