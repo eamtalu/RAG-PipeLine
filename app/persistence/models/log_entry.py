@@ -52,7 +52,9 @@ class LogEntry(Base):
     transaction_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("log_transactions.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    # FK kept (ON DELETE CASCADE); its index was dropped as unused/damaged — see migration
+    # e2a9c7b41d68. Cascade-deletes of a job now seq-scan (rare/admin-only).
+    job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"))
     # tenant (denormalized from the job) — Stage 2 grouping partitions on this and every read filters
     # by it, so thread ids (e.g. [94]) can never cross-stitch between customers.
     customer_code: Mapped[str] = mapped_column(String(64), index=True)
@@ -60,7 +62,8 @@ class LogEntry(Base):
     # --- content dedup key: sha256(raw_body). Unique per (customer_code, entry_hash) so the same log
     #     line is never stored twice for a customer, no matter how many times its file is (re)ingested
     #     or which rotated file it appears in. ---
-    entry_hash: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    # standalone index dropped (unused — the UNIQUE(customer_code, entry_hash) covers dedup); see migration e2a9c7b41d68
+    entry_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # --- provenance / ordering ---
     source_file: Mapped[str] = mapped_column(String(512))
@@ -73,17 +76,17 @@ class LogEntry(Base):
     # thread id from the log header (e.g. "[68]"). NOT a request id, but Stage 2 uses it to
     # demultiplex concurrent requests: one request's internal MI work stays on one thread (~98%),
     # so it's a reliable correlation key where the async REQUEST/RESPONSE bracket lines hop threads.
-    thread: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    thread: Mapped[str | None] = mapped_column(String(16), nullable=True)  # index dropped (unused); see migration e2a9c7b41d68
     # log4net context user from the header prefix "(CPRICE)". Present on EVERY line — including the
     # async RESPONSE line, which has no user in its payload and no ReqID. Stage 2 uses it to attach
     # a response to the oldest open request *for that same user*, so a response can never cross users.
-    user_ctx: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    user_ctx: Mapped[str | None] = mapped_column(String(64), nullable=True)  # index dropped (unused); see migration e2a9c7b41d68
     logger: Mapped[str | None] = mapped_column(String(256), nullable=True)
     method: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    entry_type: Mapped[LogEntryType] = mapped_column(Enum(LogEntryType), default=LogEntryType.info, index=True)
+    entry_type: Mapped[LogEntryType] = mapped_column(Enum(LogEntryType), default=LogEntryType.info)  # index dropped (unused); see migration e2a9c7b41d68
 
     # --- M3 MI call promoted fields ---
-    mi_program: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)      # e.g. MMS200MI
+    mi_program: Mapped[str | None] = mapped_column(String(32), nullable=True)      # e.g. MMS200MI (index dropped; migration e2a9c7b41d68)
     mi_transaction: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # e.g. LstItmAltUnitMs
     result_status: Mapped[str | None] = mapped_column(Text, nullable=True)                     # "OK" / soft-error text
     record_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
