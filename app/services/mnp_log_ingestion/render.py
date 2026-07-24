@@ -108,8 +108,8 @@ def _response_line(t: LogTransaction, resp: LogEntry | None) -> str:
     if not body and t.status == LogTransactionStatus.incomplete:
         return "◀ (no RESPONSE ingested yet — incomplete)"
     body = (body or "").strip()
-    if len(body) > 200:
-        body = body[:200] + "…"
+    if len(body) > 500:
+        body = body[:500] + "…"
     return f"◀ RESPONSE {icon}  → {body}".rstrip()
 
 

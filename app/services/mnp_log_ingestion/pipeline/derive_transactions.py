@@ -150,7 +150,7 @@ class _TxnBuilder:
 
         response_summary = None
         if response_entry and response_entry.message:
-            response_summary = response_entry.message.replace("RESPONSE:", "").strip()[:300]
+            response_summary = response_entry.message.replace("RESPONSE:", "").strip()[:500]
 
         # catch-all: keep all merged params except secrets
         clean_attrs = {k: v for k, v in attrs.items() if str(k).lower() not in _SENSITIVE}
