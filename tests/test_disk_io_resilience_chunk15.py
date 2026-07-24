@@ -17,10 +17,14 @@ import hashlib
 import uuid
 from datetime import datetime, timezone
 
-from app.persistence.models.job import Job
+from sqlalchemy import delete
+
+from app.config.database import async_session
+from app.persistence.models.job import Job, JobStatus
 from app.persistence.models.log_entry import LogEntry, LogEntryType
+from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
-from app.services.mnp_log_ingestion.pipeline.parse_insert import _insert_dedup
+from app.services.mnp_log_ingestion.pipeline.parse_insert import _insert_dedup, run_log_parse_insert
 
 _REAL_MSG = ('(sqlalchemy.dialects.postgresql.asyncpg.Error) '
              '<class \'asyncpg.exceptions.PostgresIOError\'>: could not read block 45991 in file '
@@ -77,3 +81,39 @@ async def test_insert_dedup_returns_inserted_timestamps_via_returning(db):
 
     # Re-inserting the identical rows returns nothing (ON CONFLICT DO NOTHING) -> no phantom range.
     assert await _insert_dedup(db, rows) == []
+
+
+async def test_run_log_parse_insert_runs_set_local_without_shadowing():
+    """Regression guard for the whole ingest function (the _insert_dedup unit test above does NOT
+    exercise it). parse_insert holds the file contents in a local var named `text`, and also runs
+    `SET LOCAL statement_timeout = 0` via SQLAlchemy's text() — which must be aliased (sa_text) so the
+    local does not shadow it. If that regresses, the SET LOCAL line raises 'str' object is not
+    callable and this test fails. Uses its own app sessions (like the real worker) and cleans up."""
+    cc = "TEST_CHUNK15_INGEST"
+    line = ("2026-07-24 12:00:00,000 (BENCHUSER) [1] DEBUG "
+            "Server.CommonCode.ApiLogHandler MoveNext - REQUEST: http://x/api/test\n").encode()
+
+    class _FakeStorage:
+        async def load(self, key):
+            return line
+
+        async def save(self, key, data):
+            return None
+
+    async with async_session() as s:
+        job = Job(customer_code=cc, filename="regr.log", storage_key="k")
+        s.add(job)
+        await s.commit()
+        jid = job.id
+    try:
+        async with async_session() as s:
+            # Must NOT raise "'str' object is not callable" — that is the shadowing regression.
+            await run_log_parse_insert(jid, s, _FakeStorage())
+        async with async_session() as s:
+            assert (await s.get(Job, jid)).status == JobStatus.completed
+    finally:
+        async with async_session() as s:
+            await s.execute(delete(LogEntry).where(LogEntry.customer_code == cc))
+            await s.execute(delete(LogRegroupPending).where(LogRegroupPending.customer_code == cc))
+            await s.execute(delete(Job).where(Job.id == jid))
+            await s.commit()

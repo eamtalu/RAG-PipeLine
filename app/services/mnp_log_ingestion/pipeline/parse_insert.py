@@ -17,7 +17,7 @@ import uuid
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import text, update
+from sqlalchemy import text as sa_text, update  # aliased: a local var `text` holds the file contents
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -103,7 +103,7 @@ async def run_log_parse_insert(job_id: UUID, db: AsyncSession, storage: ObjectSt
         # be cancelled mid-batch (QueryCanceledError). Relax the timeout FOR THIS TRANSACTION ONLY so
         # a slow insert can complete. SET LOCAL reverts on commit, so pooled connections and the web
         # tier keep their guardrail. A truly unreadable block still surfaces as an I/O error (caught).
-        await db.execute(text("SET LOCAL statement_timeout = '0'"))
+        await db.execute(sa_text("SET LOCAL statement_timeout = '0'"))
 
         # Map LogRecords → row dicts, dedup-by-content via entry_hash, insert in batches.
         # Within-file duplicates (same raw_body twice) are collapsed here so one INSERT batch
