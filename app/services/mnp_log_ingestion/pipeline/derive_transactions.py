@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
-from sqlalchemy import String, Enum as SAEnum, delete, func, inspect as sa_inspect, select, update
+from sqlalchemy import String, Enum as SAEnum, delete, func, inspect as sa_inspect, select, text as sa_text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
@@ -789,6 +789,13 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
                     # serialize same-customer finalizes at window granularity, then rebuild + COMMIT
                     # this window in its own transaction (releasing the lock).
                     await wdb.execute(select(lock))
+                    # Same as ingestion: a window rebuild reads + deletes + reinserts many entries and,
+                    # on the degraded disk, legitimately exceeds the 30s web-tier statement_timeout. Relax
+                    # it FOR THIS TRANSACTION to a generous but finite cap so the window can complete;
+                    # SET LOCAL reverts on commit. Pair with a smaller LOG_REGROUP_MAX_WINDOW_SECONDS so
+                    # each window is small enough to finish within the cap on a slow disk.
+                    await wdb.execute(sa_text(
+                        f"SET LOCAL statement_timeout = {int(settings.log_worker_statement_timeout_ms)}"))
                     by_window.append(await regroup_window(wdb, customer_code, w_lo, w_hi, commit=True))
             # only now that every sub-window of this run committed, mark the run's pending consumed
             async with async_session() as cdb:
@@ -808,7 +815,7 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
                     customer_code, lo, hi, disk_io_detail(exc),
                 )
                 failures.append({"window_start": lo.isoformat(), "window_end": hi.isoformat(),
-                                 "error": f"disk I/O error (bad sector): {disk_io_detail(exc)}",
+                                 "error": f"disk fault: {disk_io_detail(exc)}",
                                  "io_error": True})
             else:
                 logger.exception("Stage 2 finalize [%s]: run %s..%s failed — pending stays open for retry",

@@ -119,6 +119,13 @@ class Settings(BaseSettings):
     # silently. Enable via DB_STATEMENT_TIMEOUT_MS in the environment.
     db_statement_timeout_ms: int = 0
 
+    # Per-statement timeout (ms) the WORKER applies to its own heavy DB ops (log-entry inserts and
+    # stitch windows) via `SET LOCAL statement_timeout` — overriding the web-tier db_statement_timeout_ms
+    # for those transactions only. On a slow/degraded disk a legitimate insert or window-rebuild can run
+    # well past the web guard (30s), so this must be generous; but it is FINITE (not 0) so a pathological
+    # bad-sector stall is bounded and skipped rather than hanging the worker indefinitely. 120 s default.
+    log_worker_statement_timeout_ms: int = 120000
+
     # Idempotency-Key store retention (hours). A key row can be replayed until it expires; after that
     # a retry with the same key is treated as a fresh request. 24 h is generous for user double-submit
     # / network-retry windows. The expired rows are swept opportunistically.
