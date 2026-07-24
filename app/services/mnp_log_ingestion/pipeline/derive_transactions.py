@@ -759,7 +759,10 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
         pending rows are left OPEN (retried next cycle) while every OTHER run still completes. One
         poison record can therefore never again stall all stitching for the tenant (the original bug:
         a single over-length ItemNumber aborted the whole batch, and the oldest-first retry meant it
-        blocked forever).
+        blocked forever). A run that keeps failing is not retried forever: each failure bumps the
+        pending rows' `attempts`, and once attempts reaches settings.log_regroup_max_attempts the rows
+        are ABANDONED (abandoned_at set, excluded from the open query) and alerted — a dead-letter so a
+        permanently-broken window (e.g. one on a dead disk block) stops burning the timeout every cycle.
       - Each sub-window acquires pg_advisory_xact_lock(hashtext(customer_code)) inside its own
         transaction, so concurrent finalizes for the same customer still serialize at window
         granularity; regroup_window is idempotent (deterministic ids), so interleaving is safe.
@@ -769,17 +772,19 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
         select(LogRegroupPending).where(
             LogRegroupPending.customer_code == customer_code,
             LogRegroupPending.consumed_at.is_(None),
+            LogRegroupPending.abandoned_at.is_(None),  # dead-lettered windows are not retried
         ).order_by(LogRegroupPending.range_start.asc())
     )).scalars().all())
     if not pend:
         return {"mode": "finalize", "customer_code": customer_code, "windows": 0,
-                "pending_consumed": 0, "by_window": []}
+                "pending_consumed": 0, "abandoned": 0, "by_window": []}
 
     runs = _coalesce_pending(pend, gap=2 * _regroup_pad())
     max_window = settings.log_regroup_max_window_seconds
     by_window: list[dict] = []
     failures: list[dict] = []
     consumed = 0
+    abandoned = 0
     lock = func.pg_advisory_xact_lock(func.hashtext(customer_code))
 
     for lo, hi, rows in runs:
@@ -807,26 +812,55 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
                 await cdb.commit()
             consumed += len(rows)
         except Exception as exc:
-            # isolate this run; other runs still run, and its pending rows stay open for a retry.
-            if is_disk_io_error(exc):
+            # Isolate this run; other runs still run. Its pending rows stay OPEN for a retry — UNLESS
+            # they have now failed `log_regroup_max_attempts` times, in which case they are ABANDONED
+            # (dead-lettered) so a poison window can't be retried forever. The attempt bookkeeping is a
+            # tiny, independently-committed write on log_regroup_pending (the window rebuild itself
+            # rolled back).
+            io = is_disk_io_error(exc)
+            err_text = (f"disk fault: {disk_io_detail(exc)}" if io else str(exc))[:2000]
+            ids = [p.id for p in rows]
+            now = datetime.now(timezone.utc)
+            max_attempts = settings.log_regroup_max_attempts
+            newly_abandoned = 0
+            async with async_session() as edb:
+                await edb.execute(
+                    update(LogRegroupPending).where(LogRegroupPending.id.in_(ids)).values(
+                        attempts=LogRegroupPending.attempts + 1,
+                        last_error=err_text, last_attempt_at=now,
+                    )
+                )
+                newly_abandoned = len((await edb.execute(
+                    update(LogRegroupPending)
+                    .where(LogRegroupPending.id.in_(ids), LogRegroupPending.attempts >= max_attempts)
+                    .values(abandoned_at=now)
+                    .returning(LogRegroupPending.id)
+                )).scalars().all())
+                await edb.commit()
+            abandoned += newly_abandoned
+
+            if newly_abandoned:
                 logger.critical(
-                    "Stage 2 finalize [%s]: run %s..%s hit a DISK I/O error (%s) — skipping this window, "
-                    "continuing; the disk has an unreadable sector. Ensure backups.",
+                    "Stage 2 finalize [%s]: run %s..%s ABANDONED after %d failed attempts (%s) — it will "
+                    "NOT be retried; investigate (likely a permanent disk fault). Ensure backups.",
+                    customer_code, lo, hi, max_attempts, err_text,
+                )
+            elif io:
+                logger.critical(
+                    "Stage 2 finalize [%s]: run %s..%s hit a DISK fault (%s) — skipping, will retry.",
                     customer_code, lo, hi, disk_io_detail(exc),
                 )
-                failures.append({"window_start": lo.isoformat(), "window_end": hi.isoformat(),
-                                 "error": f"disk fault: {disk_io_detail(exc)}",
-                                 "io_error": True})
             else:
                 logger.exception("Stage 2 finalize [%s]: run %s..%s failed — pending stays open for retry",
                                  customer_code, lo, hi)
-                failures.append({"window_start": lo.isoformat(), "window_end": hi.isoformat(),
-                                 "error": str(exc)[:2000]})
+            failures.append({"window_start": lo.isoformat(), "window_end": hi.isoformat(),
+                             "error": err_text, "io_error": io, "abandoned": bool(newly_abandoned)})
 
-    logger.info("Stage 2 finalize [%s]: %d pending rows -> %d run(s), %d window(s), %d run(s) failed",
-                customer_code, len(pend), len(runs), len(by_window), len(failures))
+    logger.info("Stage 2 finalize [%s]: %d pending rows -> %d run(s), %d window(s), %d run(s) failed, "
+                "%d window(s) abandoned",
+                customer_code, len(pend), len(runs), len(by_window), len(failures), abandoned)
     result = {"mode": "finalize", "customer_code": customer_code, "windows": len(by_window),
-              "pending_consumed": consumed, "by_window": by_window}
+              "pending_consumed": consumed, "abandoned": abandoned, "by_window": by_window}
     if failures:
         result["failures"] = failures
     return result

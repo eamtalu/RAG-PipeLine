@@ -135,6 +135,62 @@ async def test_run_log_parse_insert_sets_finite_timeout_without_shadowing(monkey
             await s.commit()
 
 
+def test_regroup_max_attempts_setting_is_positive():
+    """Guard: the dead-letter cap must be a positive int — 0/negative would either abandon on the
+    first failure or never abandon (retry forever), defeating the point."""
+    assert settings.log_regroup_max_attempts and settings.log_regroup_max_attempts > 0
+
+
+async def test_finalize_dead_letters_a_window_after_max_attempts(monkeypatch):
+    """A stitch window that keeps failing is retried at most log_regroup_max_attempts times, then
+    ABANDONED (abandoned_at set) and excluded from future finalizes - never retried forever. Uses its
+    own committed app sessions (finalize's attempt bookkeeping runs on a separate connection, so the
+    row must be committed to be visible) and cleans up."""
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select as sa_select
+    from app.services.mnp_log_ingestion.pipeline import derive_transactions as d
+
+    cc = "TEST_CHUNK15_DEADLETTER"
+    T = datetime(2026, 7, 24, 9, 0, 0, tzinfo=timezone.utc)
+    n = settings.log_regroup_max_attempts
+
+    async def _always_fail(wdb, customer_code, lo, hi, commit=True):
+        raise RuntimeError("simulated persistent stitch failure")
+
+    monkeypatch.setattr(d, "regroup_window", _always_fail)
+
+    async def _row():
+        async with async_session() as s:
+            return (await s.execute(
+                sa_select(LogRegroupPending).where(LogRegroupPending.customer_code == cc)
+            )).scalars().one()
+
+    async with async_session() as s:
+        s.add(LogRegroupPending(customer_code=cc, range_start=T, range_end=T + timedelta(seconds=1)))
+        await s.commit()
+    try:
+        for attempt in range(1, n + 1):
+            async with async_session() as s:
+                res = await d.finalize_pending(s, cc)
+            row = await _row()
+            assert row.attempts == attempt
+            if attempt < n:
+                assert row.abandoned_at is None      # still retried
+                assert res["abandoned"] == 0
+            else:
+                assert row.abandoned_at is not None   # dead-lettered on the Nth failure
+                assert res["abandoned"] == 1
+        # once abandoned, later finalizes IGNORE it (excluded from the open query) — attempts frozen
+        async with async_session() as s:
+            res = await d.finalize_pending(s, cc)
+        assert res["windows"] == 0 and res.get("abandoned", 0) == 0
+        assert (await _row()).attempts == n           # not incremented — no longer attempted
+    finally:
+        async with async_session() as s:
+            await s.execute(delete(LogRegroupPending).where(LogRegroupPending.customer_code == cc))
+            await s.commit()
+
+
 async def test_finalize_relaxes_statement_timeout_per_window(db, monkeypatch):
     """Stitch guard: each finalize window must SET LOCAL statement_timeout to the finite worker cap,
     so a slow window on the degraded disk can finish instead of dying at the 30s web guard."""
