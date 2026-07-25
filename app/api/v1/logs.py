@@ -46,6 +46,21 @@ MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB — rotating log files can be large
 # ~14.5k entries, well under this. See docs/debugging-worker-timeout-outage.md.
 MAX_RENDER_ENTRIES = 50_000
 
+
+def _entry_sort_key(e: "LogEntry"):
+    """Sort key reproducing SQL `seq ASC NULLS LAST, line_number ASC NULLS LAST`.
+
+    Used to order ONE transaction's entries in Python (see view_transactions._render), replacing a
+    global cross-transaction SQL ORDER BY that spilled to disk. Both `seq` and `line_number` are
+    nullable (an entry can be unstitched, or seq unset), so the key must be NULL-safe:
+      - the `x is None` flags sort NULLs LAST (False < True), and
+      - the `x or 0` substitutions guarantee Python never compares None to None — a plain
+        `(e.seq, e.line_number)` key raises TypeError as soon as it meets a NULL, and even
+        `(e.seq is None, e.seq, ...)` raises when two rows both have seq=None.
+    """
+    return (e.seq is None, e.seq or 0, e.line_number is None, e.line_number or 0)
+
+
 # strong refs to in-flight background finalize tasks (asyncio only weak-refs them, so without this
 # the event loop could GC a task mid-run). Discarded on completion via add_done_callback.
 _finalize_tasks: set = set()
@@ -624,9 +639,14 @@ async def view_transactions(
     # worker (fetch one past the cap to detect overflow)
     ids = [t.id for t in txns]
     try:
+        # NB: no ORDER BY on purpose. A global (seq, line_number) sort across ALL of the page's
+        # transactions would spill to disk (work_mem is small) on a big/bloated table — yet _render
+        # regroups the rows per transaction below and discards that cross-transaction order anyway.
+        # We fetch unordered (no Sort node, no temp-file, and LIMIT can short-circuit) and restore
+        # the only ordering that matters — WITHIN each transaction — in Python via _entry_sort_key.
+        # See docs/transactions-view-load-spike-and-db-concepts-primer.md.
         entry_rows = (await db.execute(
             select(LogEntry).where(LogEntry.transaction_id.in_(ids))
-            .order_by(LogEntry.seq.asc().nullslast(), LogEntry.line_number.asc())
             .limit(MAX_RENDER_ENTRIES + 1)
         )).scalars().all()
     except Exception as exc:
@@ -655,6 +675,11 @@ async def view_transactions(
         by_txn: dict = {}
         for e in entry_rows:
             by_txn.setdefault(e.transaction_id, []).append(e)
+        # restore per-transaction order in Python (the DB fetch above is now unordered). Each bucket
+        # is tiny (~17 entries), so these sorts are trivial and never touch disk. Matches the old
+        # SQL "seq ASC NULLS LAST, line_number ASC" exactly, per transaction.
+        for entries in by_txn.values():
+            entries.sort(key=_entry_sort_key)
         sep = "\n\n" + ("─" * 90) + "\n\n"
         blocks = [render_transaction(t, by_txn.get(t.id, []), verbose=verbose) for t in txns]
         return header + sep + sep.join(blocks)
