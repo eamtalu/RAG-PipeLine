@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scalable Data, ML, and Agent Platform</title>
+  <meta name="description" content="Proposed architecture for scalable data processing, machine learning, and governed agent workflows.">
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "base",
+      themeVariables: {
+        fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+        primaryColor: "#e8f3ef",
+        primaryTextColor: "#102621",
+        primaryBorderColor: "#397766",
+        lineColor: "#66817a",
+        secondaryColor: "#f0ede5",
+        tertiaryColor: "#eef2f6"
+      },
+      flowchart: { curve: "basis", htmlLabels: true }
+    });
+  </script>
+  <style>
+    :root {
+      --ink: #13231f;
+      --muted: #5e6e69;
+      --paper: #f7f5ef;
+      --surface: #fffdf8;
+      --green: #236a57;
+      --green-soft: #dcece6;
+      --amber: #bd7b22;
+      --amber-soft: #f8ead2;
+      --blue: #315b7d;
+      --blue-soft: #e4edf5;
+      --red: #9a3f36;
+      --line: #d7d8d1;
+      --shadow: 0 18px 50px rgba(32, 48, 43, 0.10);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 5%, rgba(35, 106, 87, 0.12), transparent 27rem),
+        radial-gradient(circle at 92% 13%, rgba(189, 123, 34, 0.10), transparent 25rem),
+        var(--paper);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6;
+    }
+
+    a { color: var(--green); }
+    .shell { width: min(1180px, calc(100% - 36px)); margin: 0 auto; }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgba(215, 216, 209, 0.85);
+      background: rgba(247, 245, 239, 0.88);
+      backdrop-filter: blur(18px);
+    }
+    .topbar .shell {
+      min-height: 62px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+    .brand { font-weight: 800; letter-spacing: -0.02em; }
+    nav { display: flex; flex-wrap: wrap; gap: 18px; font-size: 0.9rem; }
+    nav a { color: var(--muted); text-decoration: none; }
+    nav a:hover { color: var(--ink); }
+
+    header { padding: 88px 0 64px; }
+    .eyebrow {
+      display: inline-flex;
+      padding: 7px 11px;
+      border: 1px solid #b6d1c8;
+      border-radius: 999px;
+      color: var(--green);
+      background: rgba(255, 253, 248, 0.72);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      max-width: 920px;
+      margin: 22px 0 18px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(3rem, 7vw, 6.5rem);
+      line-height: 0.95;
+      letter-spacing: -0.055em;
+      font-weight: 500;
+    }
+    .lede { max-width: 790px; color: var(--muted); font-size: clamp(1.1rem, 2vw, 1.35rem); }
+    .meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+    .pill {
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      font-size: 0.84rem;
+      font-weight: 700;
+    }
+
+    main { padding-bottom: 90px; }
+    section { padding: 34px 0; scroll-margin-top: 78px; }
+    .section-head {
+      display: grid;
+      grid-template-columns: 190px 1fr;
+      gap: 32px;
+      align-items: start;
+      margin-bottom: 26px;
+    }
+    .kicker { color: var(--green); font-weight: 800; font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; }
+    h2 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: clamp(2rem, 4vw, 3.6rem); line-height: 1.04; font-weight: 500; letter-spacing: -0.035em; }
+    h3 { margin: 0 0 8px; font-size: 1.05rem; }
+    p { margin: 0 0 14px; }
+
+    .panel {
+      padding: clamp(22px, 4vw, 42px);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: rgba(255, 253, 248, 0.94);
+      box-shadow: var(--shadow);
+    }
+    .grid { display: grid; gap: 16px; }
+    .grid.three { grid-template-columns: repeat(3, 1fr); }
+    .grid.four { grid-template-columns: repeat(4, 1fr); }
+    .card {
+      min-height: 150px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--surface);
+    }
+    .card strong { display: block; margin-bottom: 8px; font-size: 1.02rem; }
+    .card p { color: var(--muted); font-size: 0.93rem; }
+    .number { color: var(--green); font-family: Georgia, serif; font-size: 2.2rem; line-height: 1; }
+
+    .callout {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 15px;
+      padding: 18px;
+      border-radius: 16px;
+      background: var(--amber-soft);
+      border: 1px solid #e7c897;
+    }
+    .callout .icon { font-size: 1.35rem; }
+    .callout strong { display: block; margin-bottom: 3px; }
+
+    .mermaid {
+      overflow-x: auto;
+      padding: 10px 0;
+      text-align: center;
+    }
+
+    .layers { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; overflow: hidden; border-radius: 20px; }
+    .layer { min-height: 230px; padding: 22px; }
+    .layer:nth-child(1) { background: #e9ece8; }
+    .layer:nth-child(2) { background: var(--green-soft); }
+    .layer:nth-child(3) { background: var(--blue-soft); }
+    .layer:nth-child(4) { background: var(--amber-soft); }
+    .layer small { display: block; margin-bottom: 28px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+    .layer p { color: #44544f; font-size: 0.9rem; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.93rem; }
+    th, td { padding: 13px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 0.76rem; letter-spacing: 0.07em; text-transform: uppercase; }
+
+    .timeline { counter-reset: phase; display: grid; gap: 12px; }
+    .phase {
+      counter-increment: phase;
+      display: grid;
+      grid-template-columns: 50px 1fr auto;
+      gap: 16px;
+      align-items: center;
+      padding: 17px 19px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--surface);
+    }
+    .phase::before {
+      content: counter(phase);
+      display: grid;
+      width: 36px;
+      height: 36px;
+      place-items: center;
+      border-radius: 50%;
+      color: white;
+      background: var(--green);
+      font-weight: 800;
+    }
+    .phase span { color: var(--muted); font-size: 0.86rem; }
+
+    .decision-list { display: grid; gap: 10px; }
+    .decision {
+      display: grid;
+      grid-template-columns: 30px 1fr;
+      gap: 12px;
+      padding: 13px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .decision b { color: var(--green); }
+
+    footer { padding: 34px 0 60px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+
+    @media (max-width: 900px) {
+      .grid.three, .grid.four, .layers { grid-template-columns: 1fr 1fr; }
+      .section-head { grid-template-columns: 1fr; gap: 8px; }
+    }
+    @media (max-width: 620px) {
+      nav { display: none; }
+      header { padding-top: 60px; }
+      .grid.three, .grid.four, .layers { grid-template-columns: 1fr; }
+      .phase { grid-template-columns: 44px 1fr; }
+      .phase span { grid-column: 2; }
+    }
+    @media print {
+      .topbar { position: static; }
+      body { background: white; }
+      .panel, .card { box-shadow: none; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="shell">
+      <div class="brand">Codex architecture review</div>
+      <nav aria-label="Page sections">
+        <a href="#decision">Decision</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#ml">ML lifecycle</a>
+        <a href="#agents">Agent safety</a>
+        <a href="#roadmap">Roadmap</a>
+      </nav>
+    </div>
+  </div>
+
+  <header class="shell">
+    <span class="eyebrow">Proposed for review</span>
+    <h1>Data to decisions, without losing control.</h1>
+    <p class="lede">
+      A single-host-first architecture for processing more than one million log rows per day,
+      training and comparing predictive models, serving real-time risk signals, and operating
+      copilots through explicit policy and approval boundaries.
+    </p>
+    <div class="meta">
+      <span class="pill">1M+ rows / day</span>
+      <span class="pill">90M to 180M retained rows</span>
+      <span class="pill">Real-time + batch</span>
+      <span class="pill">Single host to multiple hosts</span>
+      <span class="pill">Architecture only</span>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section id="decision">
+      <div class="section-head">
+        <div class="kicker">01 / Decision</div>
+        <h2>One platform, two data planes, isolated workloads.</h2>
+      </div>
+      <div class="panel">
+        <div class="grid three">
+          <div class="card">
+            <div class="number">01</div>
+            <strong>Operational core</strong>
+            <p>PostgreSQL remains the system of record, serving store, durable job control plane, prediction ledger, and audit index.</p>
+          </div>
+          <div class="card">
+            <div class="number">02</div>
+            <strong>Analytical lane</strong>
+            <p>Verified Parquet datasets and an object-store interface isolate historical scans and training from live API workloads.</p>
+          </div>
+          <div class="card">
+            <div class="number">03</div>
+            <strong>Independent roles</strong>
+            <p>Ingestion, stitching, scoring, training, archive, notification, and actions run as separate supervised processes.</p>
+          </div>
+        </div>
+        <div class="callout" style="margin-top:20px">
+          <div class="icon">⚠</div>
+          <div>
+            <strong>Action execution is blocked until authentication and RBAC exist.</strong>
+            The current copilot should remain read-only.
+            The target design supports proposals and approvals, but infrastructure execution cannot safely ship under the current identity model.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <div class="section-head">
+        <div class="kicker">02 / Architecture</div>
+        <h2>The data path stays durable from raw evidence to action.</h2>
+      </div>
+      <div class="panel">
+        <pre class="mermaid">
+flowchart LR
+  S["Sources"] --> I["Ingest"]
+  I --> B[("Bronze<br/>raw entries")]
+  I --> Q[("Dirty windows<br/>and outbox")]
+  Q --> T["Stitch"]
+  T --> V[("Silver<br/>transactions")]
+  V --> API["Serving API"]
+  V --> F["Features"]
+  B --> P["Verified Parquet"]
+  V --> P
+  P --> L[("Object store")]
+  F --> L
+  L --> M["Train + evaluate"]
+  M --> R[("Model registry")]
+  R --> X["Score"]
+  F --> X
+  X --> PR[("Predictions")]
+  PR --> IN["Incidents"]
+  IN --> N["Notify"]
+  IN --> C["Copilot"]
+  C --> A[("Action proposal")]
+  A --> G["Policy + approval"]
+  G --> E["Allowlisted executor"]
+  E --> AU[("Audit")]
+        </pre>
+      </div>
+
+      <div class="layers" style="margin-top:18px">
+        <div class="layer">
+          <small>Bronze</small>
+          <h3>Raw, lossless, append-only</h3>
+          <p>Time-partitioned entries preserve replay, deduplication, provenance, and late-arriving evidence.</p>
+        </div>
+        <div class="layer">
+          <small>Silver</small>
+          <h3>Operational entities</h3>
+          <p>Deterministic transactions serve APIs and provide stable entity IDs for features and predictions.</p>
+        </div>
+        <div class="layer">
+          <small>Gold</small>
+          <h3>Purpose-built datasets</h3>
+          <p>Versioned failure, duration, demand, anomaly, and root-cause datasets use point-in-time contracts.</p>
+        </div>
+        <div class="layer">
+          <small>Decision</small>
+          <h3>Models and governed action</h3>
+          <p>Registered models produce auditable predictions, incidents, recommendations, and approved playbooks.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="ml">
+      <div class="section-head">
+        <div class="kicker">03 / ML lifecycle</div>
+        <h2>Compare models systematically, then promote cautiously.</h2>
+      </div>
+      <div class="panel">
+        <table>
+          <thead>
+            <tr><th>Use case</th><th>Ground truth</th><th>First method</th><th>Mode</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Failure risk</td><td>Sealed transaction status</td><td>Logistic baseline, then boosted trees</td><td>Real-time + batch</td></tr>
+            <tr><td>Duration</td><td>Final duration in milliseconds</td><td>Robust baseline, then tree regression</td><td>Real-time</td></tr>
+            <tr><td>Demand</td><td>Counts in fixed time buckets</td><td>Seasonal naive, then lag models</td><td>Scheduled batch</td></tr>
+            <tr><td>Anomaly</td><td>Operator confirmation over time</td><td>Robust statistics, then Isolation Forest</td><td>Streaming + batch</td></tr>
+            <tr><td>Root cause</td><td>Confirmed incident resolution</td><td>Embedding plus supervised classifier</td><td>After taxonomy and labels</td></tr>
+          </tbody>
+        </table>
+        <div class="grid four" style="margin-top:22px">
+          <div class="card"><strong>1. Freeze</strong><p>One point-in-time dataset, manifest, checksum, and chronological split.</p></div>
+          <div class="card"><strong>2. Tournament</strong><p>Baseline and bounded candidates train against identical evidence.</p></div>
+          <div class="card"><strong>3. Shadow</strong><p>Measure latency, drift, calibration, and alert volume without operational impact.</p></div>
+          <div class="card"><strong>4. Promote</strong><p>Approve an immutable version and retain the previous champion for rollback.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="agents">
+      <div class="section-head">
+        <div class="kicker">04 / Agent safety</div>
+        <h2>Reason freely. Execute only through policy.</h2>
+      </div>
+      <div class="panel">
+        <pre class="mermaid">
+stateDiagram-v2
+  [*] --> Proposed
+  Proposed --> Recommended: recommend only
+  Proposed --> AwaitingApproval: approval required
+  Proposed --> Authorized: pre-approved low risk
+  AwaitingApproval --> Authorized: approved and unexpired
+  AwaitingApproval --> Rejected: rejected or expired
+  Authorized --> Executing: policy revalidated
+  Executing --> Succeeded: postcondition passed
+  Executing --> Failed: error or postcondition failed
+  Failed --> Escalated: notify human
+        </pre>
+        <div class="grid three">
+          <div class="card"><strong>Recommend</strong><p>The agent records evidence and advice. No executor is invoked.</p></div>
+          <div class="card"><strong>Human approval</strong><p>An authenticated approver grants exact, expiring scope before execution.</p></div>
+          <div class="card"><strong>Pre-approved low risk</strong><p>Only named playbooks operate inside strict blast-radius, cooldown, and rate limits.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="roadmap">
+      <div class="section-head">
+        <div class="kicker">05 / Roadmap</div>
+        <h2>Prove each layer before adding the next.</h2>
+      </div>
+      <div class="timeline">
+        <div class="phase"><div><strong>Measurement, labels, and security</strong><br><span>Capacity facts, label taxonomy, SLOs, authentication and RBAC design</span></div><span>Gate 0</span></div>
+        <div class="phase"><div><strong>Scalable data foundation</strong><br><span>Partitioning, append-only raw data, verified archive, bounded replay</span></div><span>Gate 1</span></div>
+        <div class="phase"><div><strong>ML control plane</strong><br><span>Durable jobs, feature versions, training lineage, registry, artifacts</span></div><span>Gate 2</span></div>
+        <div class="phase"><div><strong>Failure-risk shadow slice</strong><br><span>Leakage-safe features, tournament, evaluation, real-time shadow scoring</span></div><span>Gate 3</span></div>
+        <div class="phase"><div><strong>Incidents and feedback</strong><br><span>Deduplicated alerts, operator resolution, confirmed labels</span></div><span>Gate 4</span></div>
+        <div class="phase"><div><strong>Broader ML portfolio</strong><br><span>Duration, demand, anomaly, and root-cause models</span></div><span>Gate 5</span></div>
+        <div class="phase"><div><strong>Governed copilot actions</strong><br><span>Proposals, approvals, allowlisted executors, audit, kill switch</span></div><span>Gate 6</span></div>
+        <div class="phase"><div><strong>Multiple-host scale-out</strong><br><span>Shared artifacts, independent worker pools, failure recovery</span></div><span>Gate 7</span></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <div class="kicker">06 / Review</div>
+        <h2>Ten decisions unlock implementation planning.</h2>
+      </div>
+      <div class="panel decision-list">
+        <div class="decision"><b>1</b><div>Approve PostgreSQL plus Parquet/object storage as the initial operational and analytical split.</div></div>
+        <div class="decision"><b>2</b><div>Approve failure-risk prediction as the first production ML use case.</div></div>
+        <div class="decision"><b>3</b><div>Choose tenant-specific, global, or hybrid model scope.</div></div>
+        <div class="decision"><b>4</b><div>Set the false-alert budget, recall target, and scoring latency budget.</div></div>
+        <div class="decision"><b>5</b><div>Define a root-cause taxonomy and label owners.</div></div>
+        <div class="decision"><b>6</b><div>Choose the initial hot-retention period between 30 and 90 days.</div></div>
+        <div class="decision"><b>7</b><div>Approve the proposed ML and action control-plane entities.</div></div>
+        <div class="decision"><b>8</b><div>Approve authentication and RBAC as execution prerequisites.</div></div>
+        <div class="decision"><b>9</b><div>Name the first pre-approved low-risk playbooks.</div></div>
+        <div class="decision"><b>10</b><div>Approve the phased roadmap and release gates.</div></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">
+      Proposed architecture, dated 2026-07-27.
+      This document describes a target state and does not indicate that the proposed schema or capabilities are implemented.
+      See <a href="platform-architecture.md">the detailed Markdown architecture</a> and <a href="implementation-roadmap.md">implementation roadmap</a>.
+    </div>
+  </footer>
+</body>
+</html>
