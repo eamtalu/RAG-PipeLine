@@ -1,0 +1,1018 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log data architecture — pipeline today &amp; target design at scale</title>
+<style>
+  :root {
+    --paper:#EDF0F3; --surface:#FFFFFF; --surface-2:#F5F7F9;
+    --ink:#1B222A; --muted:#5C6773; --line:#D6DCE2;
+    --ingest:#B0692F; --serve:#3F72A4; --archive:#5A5FA6; --ml:#B98E22;
+    --danger:#C0453B; --danger-soft:#F6DAE0; --accent:#0E7C89; --accent-soft:#DFF1F3;
+    --pad:#B0730A; --pad-soft:#F7E8CC; --good:#3C8A5B;
+    --radius:5px;
+    --maxprose:66ch; --maxwide:1040px;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:#0E1418; --surface:#161E25; --surface-2:#1B242C;
+      --ink:#E7EDF2; --muted:#94A2AF; --line:#2A353E;
+      --ingest:#D0894F; --serve:#5E97CE; --archive:#8A8FE0; --ml:#E0B441;
+      --danger:#E1685C; --danger-soft:#371F26; --accent:#3BB6C2; --accent-soft:#113037;
+      --pad:#E0A44E; --pad-soft:#362A15; --good:#5FB985;
+    }
+  }
+  :root[data-theme="light"] {
+    --paper:#EDF0F3; --surface:#FFFFFF; --surface-2:#F5F7F9;
+    --ink:#1B222A; --muted:#5C6773; --line:#D6DCE2;
+    --ingest:#B0692F; --serve:#3F72A4; --archive:#5A5FA6; --ml:#B98E22;
+    --danger:#C0453B; --danger-soft:#F6DAE0; --accent:#0E7C89; --accent-soft:#DFF1F3;
+    --pad:#B0730A; --pad-soft:#F7E8CC; --good:#3C8A5B;
+  }
+  :root[data-theme="dark"] {
+    --paper:#0E1418; --surface:#161E25; --surface-2:#1B242C;
+    --ink:#E7EDF2; --muted:#94A2AF; --line:#2A353E;
+    --ingest:#D0894F; --serve:#5E97CE; --archive:#8A8FE0; --ml:#E0B441;
+    --danger:#E1685C; --danger-soft:#371F26; --accent:#3BB6C2; --accent-soft:#113037;
+    --pad:#E0A44E; --pad-soft:#362A15; --good:#5FB985;
+  }
+
+  * { box-sizing:border-box; }
+  html { -webkit-text-size-adjust:100%; }
+  body { margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--sans); font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:var(--maxwide); margin:0 auto; padding:0 24px; }
+  .prose { max-width:var(--maxprose); }
+
+  h1,h2,h3 { font-weight:750; letter-spacing:-.02em; text-wrap:balance; line-height:1.15; margin:0; }
+  h1 { font-size:clamp(2rem,5vw,3rem); }
+  h2 { font-size:clamp(1.5rem,3.4vw,2.05rem); }
+  h3 { font-size:1.18rem; letter-spacing:-.01em; }
+  p { margin:.7em 0; }
+  strong { font-weight:680; }
+  a { color:var(--accent); }
+  em { font-style:italic; }
+  .eyebrow { font-family:var(--mono); font-size:.72rem; font-weight:600;
+    text-transform:uppercase; letter-spacing:.18em; color:var(--muted); }
+  .lead { font-size:1.2rem; }
+  .muted { color:var(--muted); }
+  code { font-family:var(--mono); font-size:.86em; background:var(--surface-2);
+    border:1px solid var(--line); border-radius:3px; padding:.08em .38em; }
+
+  header { border-bottom:1px solid var(--line); background:linear-gradient(180deg,var(--surface),transparent); }
+  header .wrap { padding-top:56px; padding-bottom:44px; }
+  .goals { display:flex; flex-wrap:wrap; gap:8px; margin-top:26px; }
+  .goal { font-family:var(--mono); font-size:.75rem; background:var(--surface); border:1px solid var(--line);
+    border-radius:var(--radius); padding:7px 11px; color:var(--muted); }
+  .goal b { color:var(--ink); font-weight:600; }
+  .toc { margin-top:24px; display:flex; flex-wrap:wrap; gap:8px 18px; font-family:var(--mono); font-size:.78rem; }
+  .toc a { color:var(--muted); text-decoration:none; } .toc a:hover { color:var(--accent); }
+  .toc b { color:var(--accent); }
+
+  section { padding:52px 0; border-bottom:1px solid var(--line); }
+  section:last-of-type { border-bottom:0; }
+  .sec-head { margin-bottom:26px; }
+  .sec-head .eyebrow { display:block; margin-bottom:10px; }
+
+  .note { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+    padding:16px 18px; margin:18px 0; max-width:var(--maxprose); }
+  .note .tag { font-family:var(--mono); font-size:.7rem; text-transform:uppercase; letter-spacing:.14em; font-weight:700; }
+  .note.plain .tag { color:var(--accent); }
+  .note.warn { border-color:color-mix(in srgb,var(--danger) 45%,var(--line)); } .note.warn .tag { color:var(--danger); }
+  .note p:first-of-type { margin-top:4px; } .note p:last-child { margin-bottom:0; }
+
+  .panel { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:26px; overflow-x:auto; }
+
+  /* ---- generic flow (target-design + data-flow) ---- */
+  .flow { display:flex; flex-direction:column; align-items:stretch; gap:0; min-width:280px; }
+  .node { border:1px solid var(--line); border-radius:var(--radius); background:var(--surface-2); padding:14px 16px; }
+  .node .lbl { font-family:var(--mono); font-size:.72rem; text-transform:uppercase; letter-spacing:.12em;
+    font-weight:700; display:flex; align-items:center; gap:8px; }
+  .node .dot { width:10px; height:10px; border-radius:2px; flex:0 0 auto; }
+  .node .desc { color:var(--muted); font-size:.92rem; margin-top:5px; }
+  .arrow { align-self:center; width:2px; height:26px; background:var(--line); position:relative; }
+  .arrow::after { content:""; position:absolute; left:50%; bottom:0; transform:translate(-50%,2px) rotate(45deg);
+    width:8px; height:8px; border-right:2px solid var(--line); border-bottom:2px solid var(--line); }
+  .arrow.accent, .arrow.accent::after { background:var(--accent); border-color:var(--accent); }
+  .l-ingest { border-left:4px solid var(--ingest); } .l-ingest .dot{background:var(--ingest);} .l-ingest .lbl{color:var(--ingest);}
+  .l-serve  { border-left:4px solid var(--serve);  } .l-serve  .dot{background:var(--serve); } .l-serve  .lbl{color:var(--serve);}
+  .l-archive{ border-left:4px solid var(--archive);} .l-archive .dot{background:var(--archive);} .l-archive .lbl{color:var(--archive);}
+  .l-ml     { border-left:4px solid var(--ml);     } .l-ml      .dot{background:var(--ml);    } .l-ml      .lbl{color:var(--ml);}
+
+  /* collision */
+  .collide { display:grid; gap:0; justify-items:center; min-width:300px; }
+  .chips3 { display:flex; flex-wrap:wrap; gap:12px; justify-content:center; }
+  .chip { font-family:var(--mono); font-size:.76rem; font-weight:600; padding:10px 14px;
+    border:1px solid var(--line); border-radius:var(--radius); background:var(--surface-2); text-align:center; }
+  .fan { display:flex; gap:60px; color:var(--muted); font-size:1.4rem; margin:6px 0; }
+  .bigtable { border:1.5px solid var(--danger); background:color-mix(in srgb,var(--danger) 8%,var(--surface));
+    border-radius:var(--radius); padding:16px 22px; text-align:center; max-width:420px; }
+  .bigtable .t { font-family:var(--mono); font-weight:700; }
+  .disk { margin-top:2px; font-family:var(--mono); font-size:.78rem; color:var(--danger); display:flex; align-items:center; gap:8px; }
+
+  /* two-stage pipeline steps (from the pipeline reference) */
+  .stage-tag { font-family:var(--mono); font-size:.68rem; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--muted); margin:14px 0 8px; }
+  .stage-tag:first-child { margin-top:0; }
+  .steps { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+  .step { background:var(--surface-2); border:1px solid var(--line); border-radius:9px; padding:9px 12px; }
+  .step .t { font-weight:640; font-size:.86rem; } .step .s { font-size:.72rem; color:var(--muted); font-family:var(--mono); }
+  .step.e { border-color:var(--accent); background:var(--accent-soft); }
+  .stepy { color:var(--muted); font-size:1rem; }
+
+  /* three numbers cards */
+  .grid3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; }
+  .num { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:18px; border-top:3px solid var(--kc); }
+  .num.data { --kc:var(--accent); } .num.cap { --kc:var(--muted); } .num.pad { --kc:var(--pad); }
+  .num .big { font-size:1.5rem; font-weight:700; letter-spacing:-.01em; }
+  .num .role { display:inline-block; font-family:var(--mono); font-size:.62rem; letter-spacing:.08em; text-transform:uppercase;
+    padding:2px 7px; border-radius:999px; margin-left:8px; background:var(--surface-2); color:var(--muted); vertical-align:middle; }
+  .num p { font-size:.86rem; color:var(--muted); margin:10px 0 0; }
+  .num code { font-size:.78rem; }
+
+  /* svg diagrams */
+  .diagram { overflow-x:auto; border:1px solid var(--line); border-radius:8px; background:var(--surface); padding:10px; margin-top:6px; }
+  .diagram svg { display:block; min-width:620px; width:100%; height:auto; }
+  figure { margin:0; }
+  figcaption { font-size:.86rem; color:var(--muted); margin-top:10px; }
+  .legend { display:flex; flex-wrap:wrap; gap:16px; margin:12px 2px 0; font-size:.78rem; color:var(--muted); }
+  .legend span { display:inline-flex; align-items:center; gap:7px; }
+  .sw { width:14px; height:14px; border-radius:3px; flex:0 0 auto; border:1px solid rgba(128,128,128,.3); }
+  svg text { font-family:var(--mono); fill:var(--ink); }
+  svg .mut { fill:var(--muted); } svg .axis { stroke:var(--line); }
+
+  /* callouts with tree + defs */
+  .callout { background:var(--surface-2); border:1px solid var(--line); border-left:3px solid var(--accent);
+    border-radius:8px; padding:18px 20px; margin-top:18px; }
+  .callout.pad-c { border-left-color:var(--pad); } .callout.pad-c .clead { color:var(--pad); }
+  .callout .clead { font-family:var(--mono); font-size:.66rem; letter-spacing:.1em; text-transform:uppercase; color:var(--accent);
+    margin:0 0 12px; font-weight:700; }
+  pre.tree { font-family:var(--mono); font-size:.78rem; line-height:1.5; margin:0 0 14px; overflow-x:auto; }
+  pre.tree b { color:var(--accent); font-weight:700; } pre.tree i { color:var(--pad); font-style:normal; }
+  dl.defs { margin:0; display:grid; grid-template-columns:max-content 1fr; gap:8px 16px; font-size:.86rem; }
+  dl.defs dt { font-family:var(--mono); font-size:.76rem; color:var(--muted); white-space:nowrap; }
+  dl.defs dd { margin:0; }
+  @media (max-width:560px){ dl.defs { grid-template-columns:1fr; gap:2px 0; } dl.defs dt { margin-top:8px; } }
+
+  ul.g { margin:0; padding:0; list-style:none; display:grid; gap:10px; }
+  ul.g li { display:flex; gap:10px; font-size:.95rem; } ul.g .b { color:var(--accent); font-weight:700; flex:0 0 auto; }
+
+  /* medallion layer cards */
+  .legend-layers { display:flex; flex-wrap:wrap; gap:14px; margin:0 0 18px; }
+  .legend-layers span { font-family:var(--mono); font-size:.74rem; color:var(--muted); display:flex; align-items:center; gap:7px; }
+  .legend-layers i { width:12px; height:12px; border-radius:3px; }
+  .layers { display:grid; gap:16px; }
+  .layer { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:20px 22px; }
+  .layer .top { display:flex; align-items:center; gap:11px; flex-wrap:wrap; }
+  .layer .sq { width:18px; height:18px; border-radius:3px; flex:0 0 auto; }
+  .layer .kind { font-family:var(--mono); font-size:.7rem; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); margin-left:auto; }
+  .layer .body { margin-top:12px; display:grid; grid-template-columns:1fr; gap:14px; }
+  @media (min-width:680px){ .layer .body { grid-template-columns:1.1fr .9fr; } }
+  .layer .body ul { margin:0; padding-left:18px; } .layer .body li { margin:.28em 0; }
+  .why { background:var(--surface-2); border:1px solid var(--line); border-radius:var(--radius); padding:12px 14px; font-size:.92rem; }
+  .why .h { font-family:var(--mono); font-size:.66rem; text-transform:uppercase; letter-spacing:.14em; color:var(--muted); font-weight:700; margin-bottom:6px; }
+  .band-ingest{border-top:3px solid var(--ingest);} .band-serve{border-top:3px solid var(--serve);}
+  .band-archive{border-top:3px solid var(--archive);} .band-ml{border-top:3px solid var(--ml);}
+
+  .compare { display:grid; gap:16px; grid-template-columns:1fr; }
+  @media (min-width:720px){ .compare { grid-template-columns:1fr 1fr; } }
+  .mini { border:1px solid var(--line); border-radius:8px; padding:18px; background:var(--surface); }
+  .mini h4 { margin:0 0 4px; font-size:.95rem; font-family:var(--mono); text-transform:uppercase; letter-spacing:.08em; }
+  .mini.bad h4 { color:var(--danger); } .mini.good h4 { color:var(--good); }
+  .stat { font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:.82rem; color:var(--muted); }
+
+  .parts { display:flex; gap:8px; flex-wrap:wrap; }
+  .part { flex:1 1 90px; min-width:80px; border:1px solid var(--line); border-radius:var(--radius); padding:10px;
+    text-align:center; background:var(--surface-2); font-family:var(--mono); font-size:.76rem; }
+  .part.hot { border-color:var(--serve); color:var(--serve); background:color-mix(in srgb,var(--serve) 8%,var(--surface)); }
+  .part.cold { border-color:var(--archive); color:var(--archive); }
+  .part.drop { border-style:dashed; color:var(--muted); opacity:.7; }
+  .part .m { font-weight:700; } .part .s { font-size:.66rem; display:block; margin-top:3px; }
+
+  ol.road { list-style:none; counter-reset:step; margin:0; padding:0; display:grid; gap:12px; }
+  ol.road li { counter-increment:step; display:grid; grid-template-columns:auto 1fr; gap:14px; align-items:start;
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:14px 16px; }
+  ol.road li::before { content:counter(step); font-family:var(--mono); font-weight:700; font-size:.9rem;
+    width:30px; height:30px; display:grid; place-items:center; border-radius:50%; background:var(--accent); color:#fff; }
+  :root[data-theme="dark"] ol.road li::before,[data-theme="dark"] ol.road li::before { color:#08121a; }
+  ol.road .t { font-weight:650; } ol.road .d { color:var(--muted); font-size:.94rem; }
+
+  /* ER entity cards */
+  .er { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; align-items:start; }
+  .ent { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--surface); }
+  .ent .eh { padding:9px 12px; font-family:var(--mono); font-weight:700; font-size:.82rem;
+    display:flex; align-items:center; gap:8px; color:#fff; }
+  .e-ingest .eh { background:var(--ingest); } .e-serve .eh { background:var(--serve); }
+  .e-archive .eh { background:var(--archive); } .e-ml .eh { background:var(--ml); color:#1B222A; }
+  .e-ctl .eh { background:var(--muted); } .e-parent .eh { background:#6b7683; }
+  .ent .eh .newtag { margin-left:auto; font-size:.58rem; letter-spacing:.06em; background:rgba(255,255,255,.28);
+    padding:1px 6px; border-radius:999px; }
+  .e-ml .eh .newtag { background:rgba(0,0,0,.16); }
+  .ent .er-rows { padding:6px 0; }
+  .ent .r { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:3px 12px;
+    font-family:var(--mono); font-size:.72rem; }
+  .ent .r .c { color:var(--ink); } .ent .r.pkey { background:var(--surface-2); }
+  .ent .bd { display:flex; gap:4px; flex:0 0 auto; }
+  .badge { font-size:.58rem; font-weight:700; letter-spacing:.03em; padding:1px 5px; border-radius:3px;
+    border:1px solid var(--line); color:var(--muted); background:var(--surface-2); }
+  .badge.pk { color:var(--accent); border-color:var(--accent); }
+  .badge.fk { color:var(--serve); border-color:var(--serve); }
+  .badge.uq { color:var(--pad); border-color:var(--pad); }
+  .badge.part { color:var(--archive); border-color:var(--archive); }
+  .badge.new { color:var(--good); border-color:var(--good); }
+  .rels { margin-top:16px; display:grid; gap:9px; }
+  .rel { font-family:var(--mono); font-size:.78rem; color:var(--muted); display:flex; gap:10px; align-items:baseline; }
+  .rel .card { color:var(--accent); font-weight:700; flex:0 0 auto; white-space:nowrap; }
+  .rel b { color:var(--ink); }
+  .er-legend { display:flex; flex-wrap:wrap; gap:12px; margin:16px 0 4px; font-family:var(--mono); font-size:.7rem; color:var(--muted); }
+  .er-legend span { display:inline-flex; align-items:center; gap:6px; }
+
+  /* edge-case grid */
+  .edges { display:grid; grid-template-columns:1fr; gap:10px; }
+  @media (min-width:680px){ .edges { grid-template-columns:1fr 1fr; } }
+  .edge { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:13px 15px; }
+  .edge .e-t { font-weight:640; font-size:.92rem; } .edge .e-d { color:var(--muted); font-size:.85rem; margin-top:3px; }
+
+  footer { padding:34px 0 60px; color:var(--muted); font-size:.86rem; }
+  footer .wrap { max-width:var(--maxprose); }
+  footer code { font-size:.8rem; }
+
+  .toggle { position:fixed; top:14px; right:14px; z-index:10; font-family:var(--mono); font-size:.72rem;
+    letter-spacing:.06em; text-transform:uppercase; cursor:pointer; background:var(--surface); color:var(--muted);
+    border:1px solid var(--line); border-radius:var(--radius); padding:7px 11px; }
+  .toggle:hover { color:var(--ink); }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  @media (prefers-reduced-motion:no-preference) {
+    .reveal { opacity:0; transform:translateY(10px); animation:rise .5s ease forwards; }
+    @keyframes rise { to { opacity:1; transform:none; } }
+  }
+</style>
+</head>
+<body>
+<button class="toggle" id="themeToggle" type="button" aria-label="Toggle light or dark theme">◐ theme</button>
+
+<header>
+  <div class="wrap">
+    <span class="eyebrow">Log data architecture &middot; central reference</span>
+    <h1 style="margin-top:12px;max-width:18ch;">How log files become transactions &mdash; today, and at 100&times; scale</h1>
+    <p class="lead prose" style="margin-top:16px;">
+      One reference for both halves: <strong>how the two-stage pipeline works today</strong> (fetch &rarr; stitch, by
+      time not by file, with backfill and catch-up), and <strong>the target design</strong> that lets the same data be
+      ingested at scale, served fast, and mined by ML &mdash; each on storage suited to its job.
+    </p>
+    <div class="goals">
+      <span class="goal"><b>~100&times;</b> ingest</span>
+      <span class="goal"><b>Feed</b> stays fast</span>
+      <span class="goal"><b>ML</b> anomaly &middot; forecast &middot; tagging</span>
+      <span class="goal"><b>1 VM</b> now, scale out later</span>
+      <span class="goal"><b>90-day</b> hot window</span>
+    </div>
+    <nav class="toc">
+      <a href="#today"><b>1.</b> Pipeline today</a>
+      <a href="#numbers"><b>2.</b> The three numbers</a>
+      <a href="#backfill"><b>3.</b> Backfill &amp; catch-up</a>
+      <a href="#problem"><b>4.</b> The problem</a>
+      <a href="#design"><b>5.</b> Target design</a>
+      <a href="#schema"><b>6.</b> Schema &amp; flow</a>
+      <a href="#bridge"><b>7.</b> Old &rarr; new</a>
+      <a href="#edges"><b>8.</b> Edge cases</a>
+      <a href="#road"><b>9.</b> Rollout</a>
+      <a href="#approach2"><b>+</b> Approach 2</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<!-- 1. PIPELINE TODAY -->
+<section id="today">
+  <div class="wrap">
+    <div class="sec-head prose">
+      <span class="eyebrow">1 &middot; How it works today</span>
+      <h2>Two decoupled stages: fetch, then stitch</h2>
+    </div>
+    <div class="prose">
+      <p>
+        <strong>Fetch</strong> pulls files and drops their lines into a pool of timestamped <code>log_entries</code> &mdash;
+        each file also flags the <em>time-range</em> it touched. <strong>Stitch</strong> later groups those entries into
+        <code>log_transactions</code> <strong>by time, not by file</strong>, so a request in one rotated file and its
+        response in the next reassemble automatically.
+      </p>
+    </div>
+    <div class="panel reveal" style="margin-top:18px;">
+      <div class="stage-tag">Stage 1 &middot; Fetch &amp; ingest &mdash; runs per file (any order)</div>
+      <div class="steps">
+        <div class="step"><div class="t">Remote files</div><div class="s">*.txt .1 .2 (SFTP)</div></div><span class="stepy">&rarr;</span>
+        <div class="step"><div class="t">Poll / tail</div><div class="s">offset + fingerprint</div></div><span class="stepy">&rarr;</span>
+        <div class="step e"><div class="t">log_entries</div><div class="s">unassigned &middot; timestamped</div></div><span class="stepy">&rarr;</span>
+        <div class="step"><div class="t">pending range</div><div class="s">min/max timestamp</div></div>
+      </div>
+      <div class="stage-tag">Stage 2 &middot; Stitch &mdash; runs once per poll (per customer), by time window</div>
+      <div class="steps">
+        <div class="step"><div class="t">finalize_pending</div><div class="s">coalesce ranges by time</div></div><span class="stepy">&rarr;</span>
+        <div class="step"><div class="t">regroup_window</div><div class="s">delete + rebuild a slice</div></div><span class="stepy">&rarr;</span>
+        <div class="step e"><div class="t">log_transactions</div><div class="s">deterministic ids</div></div><span class="stepy">&rarr;</span>
+        <div class="step"><div class="t">Feed</div><div class="s">ordered by started_at</div></div>
+      </div>
+    </div>
+    <div class="prose"><p style="margin-top:14px">
+      All of a poll's files are ingested <em>first</em> (each just drops entries and marks its dirty range); the stitch
+      then runs <em>once per customer</em> over those ranges, <strong>cluster by cluster</strong> (below). So the order
+      files arrive never affects grouping.
+    </p></div>
+
+    <h3 style="margin-top:34px;">One poll &rarr; one stitch &rarr; N clusters</h3>
+    <div class="prose"><p>
+      The stitch does <strong>not</strong> take one giant <code>min(start)&hellip;max(end)</code> window. It sorts the dirty
+      ranges and walks them: a range joins the current cluster only if it starts within <strong>30&nbsp;min</strong>
+      (= 2 &times; the 15-min pad) of that cluster's running end &mdash; otherwise it opens a <em>new</em> cluster.
+    </p></div>
+    <figure class="diagram reveal">
+      <svg viewBox="0 0 820 200" role="img" aria-label="Three dirty ranges within 30 minutes merge into cluster 1; a gap over 30 minutes starts cluster 2.">
+        <rect x="70" y="82" width="26" height="22" rx="3" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <rect x="122" y="82" width="26" height="22" rx="3" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <rect x="174" y="82" width="26" height="22" rx="3" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <text x="109" y="76" text-anchor="middle" font-size="10" class="mut">6m</text>
+        <text x="161" y="76" text-anchor="middle" font-size="10" class="mut">5m</text>
+        <path d="M64 116 L64 124 L206 124 L206 116" fill="none" stroke="var(--accent)" stroke-width="1.4"/>
+        <text x="135" y="140" text-anchor="middle" font-size="11.5" fill="var(--accent)" font-weight="700">Cluster 1</text>
+        <text x="135" y="156" text-anchor="middle" font-size="10.5" class="mut">lo=10:00  hi=10:17</text>
+        <line x1="200" y1="93" x2="560" y2="93" stroke="var(--danger)" stroke-width="1.2" stroke-dasharray="4 4"/>
+        <text x="380" y="80" text-anchor="middle" font-size="11.5" fill="var(--danger)" font-weight="700">gap &gt; 30 min &rarr; new cluster</text>
+        <rect x="560" y="82" width="26" height="22" rx="3" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <rect x="612" y="82" width="26" height="22" rx="3" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <text x="599" y="76" text-anchor="middle" font-size="10" class="mut">3m</text>
+        <path d="M554 116 L554 124 L644 124 L644 116" fill="none" stroke="var(--accent)" stroke-width="1.4"/>
+        <text x="599" y="140" text-anchor="middle" font-size="11.5" fill="var(--accent)" font-weight="700">Cluster 2</text>
+        <text x="599" y="156" text-anchor="middle" font-size="10.5" class="mut">lo=11:05  hi=11:12</text>
+        <line x1="60" y1="176" x2="780" y2="176" class="axis" stroke-width="1.5"/>
+        <g font-size="11.5" class="mut" text-anchor="middle">
+          <text x="83" y="192">10:00</text><text x="380" y="192">&rarr; log time</text><text x="625" y="192">11:12</text>
+        </g>
+      </svg>
+      <figcaption>Five dirty ranges inside one hour &rarr; <strong>2 clusters</strong>. The three on the left are &le;30&nbsp;min
+        apart so they merge; the &gt;30-min gap forces a second. A stale range weeks in the past can never merge into today's
+        live cluster, so it can't balloon a rebuild &mdash; it sits as its own tiny cluster.</figcaption>
+    </figure>
+
+    <div class="callout reveal">
+      <p class="clead">Poll &rarr; stitch &rarr; run &rarr; window &middot; keep this in your head</p>
+<pre class="tree"><b>1 POLL</b>  &mdash; fetch every file (all sources), ingest ALL of them first
+  &#9492;&#9472; <b>1 STITCH</b>  &mdash; finalize_pending, once per customer   (N = #clusters, by the 30-min-gap rule)
+       &#9500;&#9472; <b>RUN / CLUSTER #1</b>   span = <i>hi &minus; lo</i>  &middot; data-driven &middot; <i>NO max</i>
+       &#9474;     &#9492;&#9472; sliced into &le;6h sub-windows &rarr; each padded &plusmn;15m &rarr; <b>COMMIT</b>
+       &#9500;&#9472; <b>RUN / CLUSTER #2</b>   (own transaction &mdash; a failure here is isolated)
+       &#9492;&#9472; &hellip;  (one branch per cluster)</pre>
+      <dl class="defs">
+        <dt>run == cluster</dt><dd>Same thing in the code (<code>runs = _coalesce_pending(...)</code>). 1 stitch = N runs.</dd>
+        <dt>run span</dt><dd><code>hi &minus; lo</code> of the cluster &mdash; data-driven, <strong>no maximum</strong>. Minutes in steady state; hours/days after downtime.</dd>
+        <dt>the only cap</dt><dd><strong>6&nbsp;h caps the sub-window</strong> a run is sliced into &mdash; never the run itself. A 14&nbsp;h run &rarr; 3 commits.</dd>
+      </dl>
+    </div>
+
+    <div class="callout reveal">
+      <p class="clead">When a cluster keeps failing &middot; retry, then dead-letter</p>
+      <p class="muted" style="margin-top:0;font-size:.9rem;">A failed cluster stays open and retries on later polls &mdash; but not forever.
+        Each failed stitch bumps a counter; at <code>log_regroup_max_attempts</code> (default&nbsp;3) the window is
+        <strong>ABANDONED</strong> and parked with a CRITICAL alert, so a poison window (malformed row, or a dead disk
+        sector under it) can't burn the 120&nbsp;s timeout every poll and starve healthy clusters.</p>
+      <dl class="defs">
+        <dt>isolation</dt><dd>only the poison window is parked &mdash; every other cluster keeps stitching.</dd>
+        <dt>visibility</dt><dd><code>GET /logs/regroup/status</code> reports <code>abandoned_windows</code>; non-zero &rArr; investigate (usually the disk).</dd>
+        <dt>recover</dt><dd>fix the cause, then <code>POST /logs/regroup/reset-abandoned</code> re-arms it.</dd>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<!-- 2. THE THREE NUMBERS -->
+<section id="numbers">
+  <div class="wrap">
+    <div class="sec-head prose">
+      <span class="eyebrow">2 &middot; The three timing numbers</span>
+      <h2>What actually sizes a rebuild</h2>
+    </div>
+    <div class="grid3 reveal">
+      <div class="num data">
+        <span class="big">hi &minus; lo</span><span class="role">data-driven</span>
+        <p>The <strong>run / cluster width</strong> = how much contiguous log-time piled up since the last stitch.
+          <strong>Not a setting.</strong> Seconds-to-minutes in steady state; only catch-up (downtime, a big backfill file) makes it larger.</p>
+      </div>
+      <div class="num cap">
+        <span class="big">6 hours</span><span class="role">cap</span>
+        <p>A ceiling: never rebuild more than this in one bite &mdash; bigger backlogs are chopped into &le;6&nbsp;h windows.
+          <code>log_regroup_max_window_seconds</code>. Rarely hit.</p>
+      </div>
+      <div class="num pad">
+        <span class="big">&plusmn;15 min</span><span class="role">safety pad</span>
+        <p>Every rebuilt window is widened 15&nbsp;min each side so a transaction is never cut at the edge.
+          <code>log_regroup_pad</code> = the seal window. This is the overlap tax when a run is split.</p>
+      </div>
+    </div>
+
+    <h3 style="margin-top:34px;">A normal window, and slicing a &gt;6&nbsp;h cluster</h3>
+    <figure class="diagram reveal">
+      <svg viewBox="0 0 820 172" role="img" aria-label="A 40-minute run widened by a 15-minute pad each side forms one rebuilt window.">
+        <defs>
+          <pattern id="hatch" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+            <rect width="7" height="7" fill="var(--pad-soft)"/>
+            <line x1="0" y1="0" x2="0" y2="7" stroke="var(--pad)" stroke-width="1.4" opacity=".55"/>
+          </pattern>
+        </defs>
+        <rect x="60" y="52" width="720" height="58" rx="7" fill="none" stroke="var(--danger)" stroke-width="1.5" stroke-dasharray="5 4"/>
+        <text x="420" y="44" text-anchor="middle" font-size="12.5" class="mut">regroup_window rebuilds this whole padded span (delete + re-stitch)</text>
+        <rect x="60" y="62" width="154" height="38" rx="4" fill="url(#hatch)"/>
+        <rect x="214" y="62" width="411" height="38" rx="4" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+        <text x="419" y="86" text-anchor="middle" font-size="13" font-weight="700" fill="var(--accent)">run = hi &minus; lo  (example catch-up &asymp; 40 min)</text>
+        <rect x="625" y="62" width="155" height="38" rx="4" fill="url(#hatch)"/>
+        <text x="137" y="86" text-anchor="middle" font-size="11" fill="var(--pad)">+15 pad</text>
+        <text x="702" y="86" text-anchor="middle" font-size="11" fill="var(--pad)">+15 pad</text>
+        <line x1="60" y1="128" x2="780" y2="128" class="axis" stroke-width="1.5"/>
+        <g font-size="12" class="mut" text-anchor="middle">
+          <line x1="214" y1="124" x2="214" y2="132" class="axis"/><text x="214" y="148">10:00</text>
+          <line x1="625" y1="124" x2="625" y2="132" class="axis"/><text x="625" y="148">10:40</text>
+          <line x1="60" y1="124" x2="60" y2="132" class="axis"/><text x="60" y="148">09:45</text>
+          <line x1="780" y1="124" x2="780" y2="132" class="axis"/><text x="780" y="148">10:55</text>
+        </g>
+        <text x="420" y="166" text-anchor="middle" font-size="12" class="mut">&rarr; log time</text>
+      </svg>
+      <figcaption>Steady state is one <code>regroup_window</code> &rarr; one commit. The wider the run, the bigger that write burst.</figcaption>
+    </figure>
+    <figure class="diagram reveal" style="margin-top:14px;">
+      <svg viewBox="0 0 820 190" role="img" aria-label="A 24-hour continuous cluster sliced into four consecutive 6-hour windows, overlapping 15 minutes at each seam.">
+        <path d="M60 66 L60 58 L780 58 L780 66" fill="none" stroke="var(--accent)" stroke-width="1.4"/>
+        <text x="420" y="48" text-anchor="middle" font-size="12.5" fill="var(--accent)" font-weight="700">one cluster &middot; span = 24 h (continuous)</text>
+        <rect x="62" y="74" width="174" height="36" rx="4" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <rect x="242" y="74" width="174" height="36" rx="4" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <rect x="422" y="74" width="174" height="36" rx="4" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <rect x="602" y="74" width="176" height="36" rx="4" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <g text-anchor="middle" fill="var(--accent)">
+          <text x="149" y="91" font-size="12" font-weight="700">W1</text><text x="149" y="104" font-size="9.5" class="mut">&le;6h &middot; commit</text>
+          <text x="329" y="91" font-size="12" font-weight="700">W2</text><text x="329" y="104" font-size="9.5" class="mut">&le;6h &middot; commit</text>
+          <text x="509" y="91" font-size="12" font-weight="700">W3</text><text x="509" y="104" font-size="9.5" class="mut">&le;6h &middot; commit</text>
+          <text x="690" y="91" font-size="12" font-weight="700">W4</text><text x="690" y="104" font-size="9.5" class="mut">&le;6h &middot; commit</text>
+        </g>
+        <g fill="var(--pad)">
+          <rect x="235" y="70" width="8" height="44" rx="2" opacity=".55"/>
+          <rect x="415" y="70" width="8" height="44" rx="2" opacity=".55"/>
+          <rect x="595" y="70" width="8" height="44" rx="2" opacity=".55"/>
+        </g>
+        <text x="420" y="130" text-anchor="middle" font-size="10.5" fill="var(--pad)">&plusmn;15m pad &rarr; each seam rebuilt in both neighbours (lossless)</text>
+        <line x1="60" y1="146" x2="780" y2="146" class="axis" stroke-width="1.5"/>
+        <g font-size="11.5" class="mut" text-anchor="middle">
+          <line x1="60" y1="142" x2="60" y2="150" class="axis"/><text x="60" y="164">00:00</text>
+          <line x1="240" y1="142" x2="240" y2="150" class="axis"/><text x="240" y="164">06:00</text>
+          <line x1="420" y1="142" x2="420" y2="150" class="axis"/><text x="420" y="164">12:00</text>
+          <line x1="600" y1="142" x2="600" y2="150" class="axis"/><text x="600" y="164">18:00</text>
+          <line x1="780" y1="142" x2="780" y2="150" class="axis"/><text x="780" y="164">24:00</text>
+        </g>
+        <text x="420" y="184" text-anchor="middle" font-size="12.5" font-weight="700">ceil(24h &divide; 6h) = 4 windows = 4 commits</text>
+      </svg>
+      <figcaption>Total commits for a stitch = &Sigma; over clusters of <code>ceil(cluster_span &divide; 6h)</code>. Clustering
+        happens first, so 24&nbsp;h of <em>sparse</em> data becomes several clusters, each sliced separately.</figcaption>
+    </figure>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--accent-soft);border-color:var(--accent)"></span> entries that piled up (the run)</span>
+      <span><span class="sw" style="background:var(--pad-soft)"></span> &plusmn;15-min pad (safety overlap)</span>
+      <span><span class="sw" style="background:transparent;border:1.5px dashed var(--danger)"></span> deleted &amp; rebuilt</span>
+    </div>
+  </div>
+</section>
+
+<!-- 3. BACKFILL -->
+<section id="backfill">
+  <div class="wrap">
+    <div class="sec-head prose">
+      <span class="eyebrow">3 &middot; Backfill &amp; catch-up</span>
+      <h2>A late/old file lands correctly in the past</h2>
+    </div>
+    <figure class="diagram reveal">
+      <svg viewBox="0 0 820 188" role="img" aria-label="An old file ingested late marks an old time-range dirty, which re-stitches that old window independently of arrival order.">
+        <defs><marker id="a" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker>
+          <pattern id="hatch2" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+            <rect width="7" height="7" fill="var(--pad-soft)"/><line x1="0" y1="0" x2="0" y2="7" stroke="var(--pad)" stroke-width="1.4" opacity=".55"/></pattern></defs>
+        <rect x="560" y="44" width="200" height="30" rx="4" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.3"/>
+        <text x="660" y="64" text-anchor="middle" font-size="11.5">today (fetched first)</text>
+        <rect x="90" y="96" width="170" height="30" rx="4" fill="var(--danger-soft)" stroke="var(--danger)" stroke-width="1.4"/>
+        <text x="175" y="116" text-anchor="middle" font-size="11.5" fill="var(--danger)">old file (fetched LAST)</text>
+        <path d="M175 92 L175 82" stroke="var(--muted)" stroke-width="1.3" marker-end="url(#a)"/>
+        <text x="175" y="42" text-anchor="middle" font-size="11.5" class="mut">&rarr; marks 07:00 range dirty</text>
+        <rect x="75" y="70" width="200" height="14" rx="3" fill="url(#hatch2)"/>
+        <text x="175" y="152" text-anchor="middle" font-size="11.5">re-stitched at 07:00 (delete + rebuild)</text>
+        <line x1="60" y1="168" x2="780" y2="168" class="axis" stroke-width="1.5"/>
+        <g font-size="12" class="mut" text-anchor="middle"><text x="175" y="184">07:00 (past)</text><text x="660" y="184">now</text></g>
+      </svg>
+      <figcaption>Ingesting the old file inserts its entries with their <em>old</em> timestamps and marks a <strong>07:00</strong>
+        pending range. The next stitch rebuilds exactly that old window &mdash; deleting &amp; rebuilding any transactions
+        there (sealed included), with the same deterministic ids. Arrival order is irrelevant.</figcaption>
+    </figure>
+
+    <div class="panel reveal" style="margin-top:20px;">
+      <ul class="g">
+        <li><span class="b">&#9702;</span><span><strong>Fetch &ne; stitch.</strong> Files only drop timestamped entries and flag a dirty range.</span></li>
+        <li><span class="b">&#9702;</span><span><strong>Stitch by time, not by file.</strong> A window reads every <em>unassigned</em> entry in a time range, ordered by timestamp &mdash; blind to which file delivered it.</span></li>
+        <li><span class="b">&#9702;</span><span><strong>Clusters, not one giant window.</strong> The 30-min-gap rule splits dirty ranges into N clusters, each padded / &le;6h-split / committed on its own &mdash; a poison cluster fails alone, dead-lettered after 3 attempts.</span></li>
+        <li><span class="b">&#9702;</span><span><strong>Order-independent &amp; idempotent.</strong> Deterministic uuid5 ids mean re-running a window rebuilds identical transactions.</span></li>
+        <li><span class="b">&#9702;</span><span><strong>Backfill is lossless.</strong> A late/old file marks its own old window dirty, forcing a delete-and-rebuild of exactly that slice.</span></li>
+      </ul>
+    </div>
+    <div class="note plain">
+      <span class="tag">Resume after downtime</span>
+      <p style="margin-bottom:0;">The SSH poller re-reads with a bounded, forward-only resume and a circuit breaker
+        (auto-disable after ~10&nbsp;min of failure) so a return-from-outage can't flood the pipeline; <code>entry_hash</code>
+        dedup makes every re-read correct. The backlog then drains cluster-by-cluster, each isolated and dead-lettered.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 4. PROBLEM -->
+<section id="problem">
+  <div class="wrap">
+    <div class="sec-head prose">
+      <span class="eyebrow">4 &middot; Why it must change for scale</span>
+      <h2>One row-store, one disk, three jobs pulling against each other</h2>
+    </div>
+    <div class="panel reveal">
+      <div class="collide">
+        <div class="chips3">
+          <div class="chip" style="border-color:var(--ingest);color:var(--ingest)">INGEST<br><span class="muted" style="font-weight:400">writes, constantly</span></div>
+          <div class="chip" style="border-color:var(--serve);color:var(--serve)">SERVE FEED<br><span class="muted" style="font-weight:400">fast reads</span></div>
+          <div class="chip" style="border-color:var(--ml);color:var(--ml)">ML (wanted)<br><span class="muted" style="font-weight:400">full scans</span></div>
+        </div>
+        <div class="fan"><span>&darr;</span><span>&darr;</span><span>&darr;</span></div>
+        <div class="bigtable"><div class="t">log_entries + log_transactions</div>
+          <div class="muted" style="font-size:.88rem;margin-top:4px;">one 40&nbsp;GB row-store, every workload on the same rows &amp; indexes</div></div>
+        <div class="arrow" aria-hidden="true"></div>
+        <div class="disk">&#9888; single rotational HDD &mdash; ~55&thinsp;ms writes &middot; already failing (bad sectors)</div>
+      </div>
+    </div>
+    <div class="note warn">
+      <span class="tag">The self-inflicted wound</span>
+      <p style="margin-bottom:0;">Stitch <strong>updates</strong> <code>log_entries</code> to stamp <code>transaction_id</code>/<code>seq</code>
+        &mdash; and re-stamps the unsealed tail every poll. Indexed columns &rArr; ~10 updates per insert, <strong>0% HOT</strong>,
+        <strong>~91% dead rows</strong>, a 40&nbsp;GB heap, and a <code>VACUUM</code>/<code>DELETE</code> that can't run on a
+        disk with bad sectors. The window model above is sound; the place it <em>writes</em> is the problem.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 5. TARGET DESIGN -->
+<section id="design">
+  <div class="wrap">
+    <div class="sec-head prose">
+      <span class="eyebrow">5 &middot; The target design</span>
+      <h2>Four layers, each on storage that fits its job</h2>
+    </div>
+    <div class="prose"><p>
+      The <strong>medallion pattern</strong>: raw &rarr; refined-and-served &rarr; archived &rarr; ML-ready, so heavy readers
+      never touch the busy writer. Crucially, <strong>the whole stitch/window model above is unchanged</strong> &mdash; only
+      where it writes moves (Section&nbsp;6).
+    </p></div>
+    <div class="legend-layers">
+      <span><i style="background:var(--ingest)"></i>Ingest / raw</span>
+      <span><i style="background:var(--serve)"></i>Serve / hot</span>
+      <span><i style="background:var(--archive)"></i>Archive / cold</span>
+      <span><i style="background:var(--ml)"></i>ML / predictions</span>
+    </div>
+    <div class="layers reveal">
+      <div class="layer band-ingest">
+        <div class="top"><span class="sq" style="background:var(--ingest)"></span><h3>Layer&nbsp;1 &mdash; Ingest</h3><span class="kind">Bronze &middot; append-only</span></div>
+        <div class="body">
+          <ul>
+            <li><code>log_entries</code> becomes <strong>INSERT-only</strong> &mdash; never updated.</li>
+            <li>The grouping result moves to a tiny side table <code>log_entry_assignment</code>.</li>
+            <li>Partitioned <strong>by month</strong>; retention = <code>DROP PARTITION</code>.</li>
+          </ul>
+          <div class="why"><div class="h">In plain terms</div>Stop rewriting the giant table. Write once, never edit &mdash;
+            almost no bloat, far fewer disk writes, trivial cleanup. The outage's root cause goes away.</div>
+        </div>
+      </div>
+      <div class="layer band-serve">
+        <div class="top"><span class="sq" style="background:var(--serve)"></span><h3>Layer&nbsp;2 &mdash; Serve the feed</h3><span class="kind">Silver &middot; ~90 days hot</span></div>
+        <div class="body">
+          <ul>
+            <li><code>log_transactions</code> partitioned by month, indexed for the feed.</li>
+            <li>Only ~90 days stay <strong>hot</strong>; older months detach to the archive.</li>
+            <li>Feed &amp; alerts read only the small recent partitions.</li>
+          </ul>
+          <div class="why"><div class="h">In plain terms</div>Queries look at just the months they need, so the feed stays fast as data grows 100&times;.</div>
+        </div>
+      </div>
+      <div class="layer band-archive">
+        <div class="top"><span class="sq" style="background:var(--archive)"></span><h3>Layer&nbsp;3 &mdash; Archive &amp; analytics</h3><span class="kind">Cold &middot; Parquet + DuckDB</span></div>
+        <div class="body">
+          <ul>
+            <li>Aged-out months export to compressed <strong>Parquet</strong> (~5&ndash;10&times; smaller), then the PG partition is dropped.</li>
+            <li><strong>DuckDB</strong> (embedded) runs full-scan queries over Parquet.</li>
+          </ul>
+          <div class="why"><div class="h">In plain terms</div>History lives in cheap columnar files that ML can scan hard &mdash; never touching the live DB.</div>
+        </div>
+      </div>
+      <div class="layer band-ml">
+        <div class="top"><span class="sq" style="background:var(--ml)"></span><h3>Layer&nbsp;4 &mdash; Machine learning</h3><span class="kind">Gold &middot; features &rarr; predictions</span></div>
+        <div class="body">
+          <ul>
+            <li>Batch jobs build <strong>features</strong>; models train <strong>offline</strong>.</li>
+            <li>Results land in a small <code>transaction_predictions</code> table the feed joins cheaply.</li>
+            <li>Anomaly &middot; forecast &middot; tagging (tagging reuses the pgvector/Qdrant embeddings).</li>
+          </ul>
+          <div class="why"><div class="h">In plain terms</div>The slow ML math happens off to the side; the app only reads a tidy table of precomputed predictions.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 6. SCHEMA & DATA FLOW -->
+<section id="schema">
+  <div class="wrap">
+    <div class="sec-head prose">
+      <span class="eyebrow">6 &middot; Schema &amp; data flow</span>
+      <h2>The proposal, as tables and as a flow</h2>
+    </div>
+    <div class="prose"><p>
+      The entities below, colour-coded by layer. Two tables are <strong>new</strong>
+      (<code>log_entry_assignment</code>, and the ML pair); <code>log_entries</code> loses its
+      <code>transaction_id</code>/<code>seq</code> columns to become append-only.
+    </p></div>
+
+    <div class="er-legend" aria-hidden="true">
+      <span><span class="badge pk">PK</span> primary key</span>
+      <span><span class="badge fk">FK</span> foreign key</span>
+      <span><span class="badge uq">UQ</span> unique (partition-local)</span>
+      <span><span class="badge part">PART</span> partition key</span>
+      <span><span class="badge new">NEW</span> added by this design</span>
+    </div>
+
+    <div class="er reveal">
+      <div class="ent e-parent">
+        <div class="eh">jobs</div>
+        <div class="er-rows">
+          <div class="r pkey"><span class="c">id</span><span class="bd"><span class="badge pk">PK</span></span></div>
+          <div class="r"><span class="c">customer_code</span><span class="bd"></span></div>
+          <div class="r"><span class="c">document_type</span><span class="bd"></span></div>
+        </div>
+      </div>
+
+      <div class="ent e-ingest">
+        <div class="eh">log_entries <span class="newtag">append-only</span></div>
+        <div class="er-rows">
+          <div class="r pkey"><span class="c">id</span><span class="bd"><span class="badge pk">PK</span></span></div>
+          <div class="r"><span class="c">job_id</span><span class="bd"><span class="badge fk">FK</span></span></div>
+          <div class="r"><span class="c">customer_code</span><span class="bd"></span></div>
+          <div class="r"><span class="c">entry_hash</span><span class="bd"><span class="badge uq">UQ</span></span></div>
+          <div class="r"><span class="c">timestamp</span><span class="bd"><span class="badge part">PART</span></span></div>
+          <div class="r"><span class="c">thread · user_ctx · entry_type</span><span class="bd"></span></div>
+          <div class="r"><span class="c">raw_body · fields (jsonb)</span><span class="bd"></span></div>
+        </div>
+      </div>
+
+      <div class="ent e-ingest">
+        <div class="eh">log_entry_assignment <span class="newtag">NEW</span></div>
+        <div class="er-rows">
+          <div class="r pkey"><span class="c">entry_id</span><span class="bd"><span class="badge pk">PK</span><span class="badge fk">FK</span></span></div>
+          <div class="r"><span class="c">transaction_id</span><span class="bd"><span class="badge fk">FK</span></span></div>
+          <div class="r"><span class="c">seq</span><span class="bd"></span></div>
+        </div>
+      </div>
+
+      <div class="ent e-serve">
+        <div class="eh">log_transactions</div>
+        <div class="er-rows">
+          <div class="r pkey"><span class="c">id  (uuid5, deterministic)</span><span class="bd"><span class="badge pk">PK</span></span></div>
+          <div class="r"><span class="c">customer_code</span><span class="bd"></span></div>
+          <div class="r"><span class="c">started_at</span><span class="bd"><span class="badge part">PART</span></span></div>
+          <div class="r"><span class="c">date · status · sealed</span><span class="bd"></span></div>
+          <div class="r"><span class="c">user_name · warehouse · method</span><span class="bd"></span></div>
+          <div class="r"><span class="c">order_number · item_number …</span><span class="bd"></span></div>
+          <div class="r"><span class="c">attributes (jsonb)</span><span class="bd"></span></div>
+        </div>
+      </div>
+
+      <div class="ent e-ctl">
+        <div class="eh">log_regroup_pending</div>
+        <div class="er-rows">
+          <div class="r pkey"><span class="c">id</span><span class="bd"><span class="badge pk">PK</span></span></div>
+          <div class="r"><span class="c">customer_code · job_id</span><span class="bd"></span></div>
+          <div class="r"><span class="c">range_start · range_end</span><span class="bd"></span></div>
+          <div class="r"><span class="c">consumed_at · attempts · abandoned_at</span><span class="bd"></span></div>
+        </div>
+      </div>
+
+      <div class="ent e-ml">
+        <div class="eh">transaction_features <span class="newtag">NEW</span></div>
+        <div class="er-rows">
+          <div class="r pkey"><span class="c">transaction_id</span><span class="bd"><span class="badge pk">PK</span><span class="badge fk">FK</span></span></div>
+          <div class="r"><span class="c">duration_ms · hour_of_day</span><span class="bd"></span></div>
+          <div class="r"><span class="c">rolling_error_rate …</span><span class="bd"></span></div>
+          <div class="r"><span class="c">computed_at</span><span class="bd"></span></div>
+        </div>
+      </div>
+
+      <div class="ent e-ml">
+        <div class="eh">transaction_predictions <span class="newtag">NEW</span></div>
+        <div class="er-rows">
+          <div class="r pkey"><span class="c">transaction_id</span><span class="bd"><span class="badge pk">PK</span><span class="badge fk">FK</span></span></div>
+          <div class="r"><span class="c">anomaly_score · predicted_status</span><span class="bd"></span></div>
+          <div class="r"><span class="c">model_version · scored_at</span><span class="bd"></span></div>
+        </div>
+      </div>
+
+      <div class="ent e-archive">
+        <div class="eh">Parquet archive <span class="newtag">external</span></div>
+        <div class="er-rows">
+          <div class="r"><span class="c">months &gt; 90 days old</span><span class="bd"></span></div>
+          <div class="r"><span class="c">columnar · compressed</span><span class="bd"></span></div>
+          <div class="r"><span class="c">queried by DuckDB</span><span class="bd"></span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="rels reveal">
+      <div class="rel"><span class="card">jobs 1 &mdash;&lt; N log_entries</span><span>FK <b>job_id</b> &middot; ON DELETE CASCADE (customer purge)</span></div>
+      <div class="rel"><span class="card">log_entries 1 &mdash;o 0..1 log_entry_assignment</span><span>FK <b>entry_id</b> &middot; ON DELETE CASCADE &middot; no assignment = &ldquo;needs grouping&rdquo;</span></div>
+      <div class="rel"><span class="card">log_transactions 1 &mdash;&lt; N log_entry_assignment</span><span>FK <b>transaction_id</b> &middot; deleted + reinserted per rebuilt window</span></div>
+      <div class="rel"><span class="card">log_transactions 1 &mdash;o 0..1 transaction_features / _predictions</span><span>FK <b>transaction_id</b> &middot; annotations, joined into the feed</span></div>
+      <div class="rel"><span class="card">log_regroup_pending &middot;&middot;&gt; stitch</span><span>soft ref (no FK) &middot; drives which time windows regroup</span></div>
+      <div class="rel"><span class="card">log_* &mdash;(age-out &gt;90d)&rarr; Parquet</span><span>verified export, then <b>DROP PARTITION</b> (entries lag transactions by 15 min)</span></div>
+    </div>
+
+    <h3 style="margin-top:38px;">Data flow across the new tables</h3>
+    <figure class="diagram reveal">
+      <svg viewBox="0 0 960 430" role="img" aria-label="Data flow: SFTP files are fetched into append-only log_entries; a windowed stitch writes log_transactions and log_entry_assignment; the feed joins all three; aged months export to Parquet, which DuckDB scans to build features and predictions that annotate the feed.">
+        <defs>
+          <marker id="ah" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--muted)"/></marker>
+          <marker id="ahp" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--pad)"/></marker>
+        </defs>
+
+        <!-- top lane: ingest -> serve -->
+        <rect x="16" y="60" width="104" height="52" rx="7" fill="var(--surface-2)" stroke="var(--line)"/>
+        <text x="68" y="82" text-anchor="middle" font-size="12" font-weight="700">SFTP files</text>
+        <text x="68" y="98" text-anchor="middle" font-size="9.5" class="mut">*.txt .1 .2</text>
+
+        <line x1="120" y1="86" x2="196" y2="86" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ah)"/>
+        <text x="158" y="78" text-anchor="middle" font-size="9.5" class="mut">fetch</text>
+        <text x="158" y="102" text-anchor="middle" font-size="9" class="mut">dedup+append</text>
+
+        <rect x="200" y="46" width="168" height="60" rx="7" fill="none" stroke="var(--ingest)" stroke-width="1.6"/>
+        <text x="284" y="70" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--ingest)">log_entries</text>
+        <text x="284" y="88" text-anchor="middle" font-size="9.5" class="mut">append-only · month-partitioned</text>
+        <rect x="200" y="116" width="168" height="30" rx="6" fill="none" stroke="var(--line)"/>
+        <text x="284" y="135" text-anchor="middle" font-size="10.5" class="mut">+ log_regroup_pending (dirty range)</text>
+
+        <line x1="368" y1="80" x2="452" y2="80" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ah)"/>
+        <text x="410" y="66" text-anchor="middle" font-size="9.5" class="mut">stitch</text>
+        <text x="410" y="96" text-anchor="middle" font-size="8.8" class="mut">finalize→regroup_window</text>
+
+        <rect x="456" y="40" width="176" height="46" rx="7" fill="none" stroke="var(--serve)" stroke-width="1.6"/>
+        <text x="544" y="60" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--serve)">log_transactions</text>
+        <text x="544" y="76" text-anchor="middle" font-size="9.5" class="mut">uuid5 · month-partitioned</text>
+        <rect x="456" y="96" width="176" height="46" rx="7" fill="none" stroke="var(--ingest)" stroke-width="1.6" stroke-dasharray="0"/>
+        <text x="544" y="116" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ingest)">log_entry_assignment</text>
+        <text x="544" y="132" text-anchor="middle" font-size="9.5" class="mut">entry→txn · seq  (NEW)</text>
+
+        <line x1="632" y1="66" x2="716" y2="80" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ah)"/>
+        <line x1="632" y1="118" x2="716" y2="92" stroke="var(--muted)" stroke-width="1.4"/>
+        <text x="678" y="66" text-anchor="middle" font-size="9.5" class="mut">join</text>
+
+        <rect x="720" y="58" width="130" height="52" rx="7" fill="var(--surface-2)" stroke="var(--serve)" stroke-width="1.6"/>
+        <text x="785" y="80" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--serve)">Feed</text>
+        <text x="785" y="96" text-anchor="middle" font-size="9.5" class="mut">soft-gated · fast</text>
+
+        <!-- age-out down to archive -->
+        <line x1="544" y1="142" x2="544" y2="250" stroke="var(--pad)" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#ahp)"/>
+        <text x="560" y="200" text-anchor="start" font-size="9.5" fill="var(--pad)">age-out &gt;90d</text>
+        <text x="560" y="214" text-anchor="start" font-size="8.8" fill="var(--pad)">verify → DROP</text>
+
+        <!-- ML lane -->
+        <rect x="456" y="252" width="176" height="48" rx="7" fill="none" stroke="var(--archive)" stroke-width="1.6" stroke-dasharray="5 4"/>
+        <text x="544" y="272" text-anchor="middle" font-size="12" font-weight="700" fill="var(--archive)">Parquet archive</text>
+        <text x="544" y="288" text-anchor="middle" font-size="9.5" class="mut">columnar · compressed</text>
+
+        <line x1="632" y1="276" x2="708" y2="276" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ah)"/>
+        <text x="670" y="268" text-anchor="middle" font-size="9" class="mut">DuckDB</text>
+
+        <rect x="712" y="238" width="150" height="42" rx="7" fill="none" stroke="var(--ml)" stroke-width="1.6"/>
+        <text x="787" y="256" text-anchor="middle" font-size="11.5" font-weight="700" fill="var(--ml)">transaction_features</text>
+        <text x="787" y="271" text-anchor="middle" font-size="9" class="mut">batch (NEW)</text>
+
+        <line x1="787" y1="280" x2="787" y2="316" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#ah)"/>
+        <text x="803" y="302" text-anchor="start" font-size="9" class="mut">train / infer</text>
+
+        <rect x="712" y="318" width="150" height="44" rx="7" fill="none" stroke="var(--ml)" stroke-width="1.6"/>
+        <text x="787" y="337" text-anchor="middle" font-size="11.5" font-weight="700" fill="var(--ml)">transaction_predictions</text>
+        <text x="787" y="352" text-anchor="middle" font-size="9" class="mut">small · joined into feed (NEW)</text>
+
+        <!-- predictions annotate feed -->
+        <path d="M712 340 C 660 340, 785 130, 830 110" fill="none" stroke="var(--pad)" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#ahp)"/>
+        <text x="656" y="360" text-anchor="middle" font-size="9" fill="var(--pad)">annotate</text>
+
+        <!-- lane labels -->
+        <text x="16" y="30" font-size="10.5" font-weight="700" class="mut">INGEST → SERVE (hot, OLTP)</text>
+        <text x="456" y="232" font-size="10.5" font-weight="700" class="mut">ARCHIVE → ML (cold, offline)</text>
+      </svg>
+      <figcaption>The write path (top lane) never rewrites <code>log_entries</code>: the windowed stitch writes
+        <code>log_transactions</code> + <code>log_entry_assignment</code>, and the feed joins all three. Aged months
+        export to Parquet (bottom lane); DuckDB builds features and predictions offline, which annotate the feed
+        without touching the live database.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- 7. OLD -> NEW BRIDGE -->
+<section id="bridge">
+  <div class="wrap">
+    <div class="sec-head prose">
+      <span class="eyebrow">7 &middot; How the window model maps onto the new design</span>
+      <h2>Everything in Sections 1&ndash;3 is preserved &mdash; only the write target moves</h2>
+    </div>
+    <div class="compare reveal">
+      <div class="mini bad">
+        <h4>Today &middot; stitch writes the raw table</h4>
+        <p class="muted" style="margin:.3em 0 .8em;">A window's &ldquo;delete + rebuild&rdquo; <strong>UPDATEs</strong>
+          <code>transaction_id</code>/<code>seq</code> on <code>log_entries</code>, and freeing the tail cascades
+          <code>&rarr; NULL</code> on those rows.</p>
+        <div class="stat">tail re-stamped ~180&times; before sealing</div>
+        <div class="stat">every write hits the 40 GB table</div>
+      </div>
+      <div class="mini good">
+        <h4>New &middot; stitch writes the assignment table</h4>
+        <p class="muted" style="margin:.3em 0 .8em;">A window's rebuild deletes + inserts rows in the small
+          <code>log_entry_assignment</code>; <code>log_entries</code> is never touched.</p>
+        <div class="stat">churn moves to a tiny, partitioned table</div>
+        <div class="stat">raw table stays append-only</div>
+      </div>
+    </div>
+    <div class="edges reveal" style="margin-top:18px;">
+      <div class="edge"><div class="e-t">Clustering &middot; 30-min gap &middot; 6h split</div><div class="e-d">Unchanged &mdash; operates on timestamps in <code>finalize_pending</code>, untouched by the change.</div></div>
+      <div class="edge"><div class="e-t">&plusmn;15-min pad = retention lag</div><div class="e-d">The seal window bounds transaction span, so drop the entries partition <strong>15&nbsp;min after</strong> the transactions partition &mdash; no live txn can reference dropped data.</div></div>
+      <div class="edge"><div class="e-t">Deterministic ids</div><div class="e-d">Unchanged (anchored on <code>entry_hash</code>) &mdash; a rebuild reproduces identical transactions <em>and</em> identical assignment rows.</div></div>
+      <div class="edge"><div class="e-t">Backfill / catch-up</div><div class="e-d">Same lossless behaviour &mdash; and now the full-rebuild path reads the immutable raw table instead of rewriting it twice.</div></div>
+      <div class="edge"><div class="e-t">Dead-letter &middot; advisory lock</div><div class="e-d">Unchanged &mdash; per-window commit + failure isolation + 3-attempt dead-letter is exactly preserved.</div></div>
+      <div class="edge"><div class="e-t">&ldquo;Needs grouping&rdquo; signal</div><div class="e-d">Was <code>transaction_id IS NULL</code>; becomes a window-scoped <code>NOT EXISTS (assignment)</code> anti-join &mdash; the one detail that must be reworked, not renamed.</div></div>
+    </div>
+    <div class="note plain">
+      <span class="tag">The linchpin to test</span>
+      <p style="margin-bottom:0;">Partitioning requires the <code>UNIQUE(customer_code, entry_hash)</code> dedup constraint to
+        include the partition key. It survives as a <strong>partition-local</strong> unique because <code>entry_hash</code>
+        includes the ms timestamp, so a duplicate always routes to the same monthly partition. This must be verified explicitly
+        &mdash; it is the guarantee behind every resume/rotation/backfill scenario above.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 7. EDGE CASES -->
+<section id="edges">
+  <div class="wrap">
+    <div class="sec-head prose">
+      <span class="eyebrow">8 &middot; Edge cases &amp; scale</span>
+      <h2>What the code review forced into the design</h2>
+    </div>
+    <div class="edges reveal">
+      <div class="edge"><div class="e-t">Timestamp-less entries</div><div class="e-d">Can't be range-partitioned &rarr; a monitored <code>DEFAULT</code> partition; only a full regroup places them.</div></div>
+      <div class="edge"><div class="e-t">Month-boundary transactions</div><div class="e-d">Span &le; the 15-min seal window &rarr; retention lag of 15&nbsp;min is provably sufficient.</div></div>
+      <div class="edge"><div class="e-t">Late data past retention</div><div class="e-d">Its hot partition may be dropped &rarr; route to an archive-append path; only drop a month after retention + a back-fill grace.</div></div>
+      <div class="edge"><div class="e-t">Archive/drop atomicity</div><div class="e-d">Export &rarr; verify count+checksum &rarr; only then <code>DROP PARTITION</code>. Never drop before verified.</div></div>
+      <div class="edge"><div class="e-t">Per-customer id scan in _persist</div><div class="e-d">Loads all txn ids for the customer &mdash; O(all) at 100&times;; scope it to the window/partition.</div></div>
+      <div class="edge"><div class="e-t">regroup_all memory</div><div class="e-d">Loads all entries per customer; backfill must run per-month, resumable.</div></div>
+      <div class="edge"><div class="e-t">Bounded partition count</div><div class="e-d">Partition by month only; don't sub-partition by tenant by default (avoids months&times;tenants explosion).</div></div>
+      <div class="edge"><div class="e-t">Deletion contracts</div><div class="e-d">Server-delete keeps entries (no FK to source); customer purge removes assignment via the Job cascade, atomically.</div></div>
+      <div class="edge"><div class="e-t">Feed 2-query consistency</div><div class="e-d">Deterministic ids keep the transaction&rarr;assignment&rarr;entry join stable across a mid-read rebuild.</div></div>
+      <div class="edge"><div class="e-t">Orphan guard</div><div class="e-d">Explicit same-txn assignment delete + a periodic check for assignment rows with no transaction.</div></div>
+    </div>
+    <p class="muted prose" style="margin-top:16px;font-size:.9rem;">Full detail, with code references, in <code>docs/data-architecture-scale-ml.md</code> &sect;7.</p>
+  </div>
+</section>
+
+<!-- 8. ROADMAP -->
+<section id="road">
+  <div class="wrap">
+    <div class="sec-head prose">
+      <span class="eyebrow">9 &middot; Rollout</span>
+      <h2>Phased &mdash; each step ships on its own</h2>
+    </div>
+    <div class="prose" style="max-width:var(--maxwide);">
+      <ol class="road reveal">
+        <li><div><div class="t">Append-only entries</div><div class="d">Add <code>log_entry_assignment</code>; stitch writes it instead of updating <code>log_entries</code>; rework detection to the window-scoped anti-join. Removes the outage's root cause.</div></div></li>
+        <li><div><div class="t">Partition both tables by month</div><div class="d">Resolve the partition-local unique; add partition pre-creation + a monitored DEFAULT partition.</div></div></li>
+        <li><div><div class="t">90-day retention + Parquet archive</div><div class="d">Verified export &rarr; <code>DROP PARTITION</code> with the 15-min lag; late-data policy.</div></div></li>
+        <li><div><div class="t">ML layer</div><div class="d">Feature build + <code>transaction_predictions</code> + a first model (anomaly/error), then forecasting and tagging.</div></div></li>
+        <li><div><div class="t">Hardware</div><div class="d">SSD/NVMe (the prerequisite for real 100&times;); an optional second node becomes the archive/ML host.</div></div></li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- APPROACH 2 (recorded for review) -->
+<section id="approach2">
+  <div class="wrap">
+    <div class="sec-head prose">
+      <span class="eyebrow">Approach 2 &middot; recorded for review</span>
+      <h2>One flat read model &mdash; serve the feed from <code>transaction_view</code>, not a join</h2>
+    </div>
+    <div class="prose"><p>
+      Everything above (call it <strong>Approach&nbsp;1</strong>) serves the feed by joining
+      <code>log_transactions</code> &#8904; <code>log_entry_assignment</code> &#8904; <code>log_entries</code>,
+      so the click-through detail depends on <code>log_entries</code>. <strong>Approach&nbsp;2</strong> adds a single
+      denormalized <strong>read model</strong> that pre-resolves the whole transaction &mdash; header filters
+      <em>and</em> the full request/response detail &mdash; so the feed and detail are served from one flat table with
+      no join, and <code>log_entries</code> can be deleted independently. Validated as a CQRS materialized read model
+      (best practice). Recorded here for later review; no code changed.
+    </p></div>
+
+    <div class="compare reveal">
+      <div class="mini">
+        <h4>Approach 1 &middot; join-served</h4>
+        <p class="muted" style="margin:.3em 0 .8em;">Feed + detail render by joining the three tables and fetching
+          each transaction's entries. The detail <strong>depends on <code>log_entries</code></strong> being present.</p>
+        <div class="stat">read: join + per-txn fetch + sort</div>
+        <div class="stat">log_entries: required by the read path</div>
+        <div class="stat">storage: one copy (raw)</div>
+      </div>
+      <div class="mini">
+        <h4>Approach 2 &middot; flat read model</h4>
+        <p class="muted" style="margin:.3em 0 .8em;">Feed + detail served from <code>transaction_view</code> (one row
+          per txn, full resolved detail in JSONB). <strong>No join; <code>log_entries</code> never read by the feed.</strong></p>
+        <div class="stat">read: single-row scan, no join</div>
+        <div class="stat">log_entries: prunable independently</div>
+        <div class="stat">storage: + resolved copy (until entries pruned)</div>
+      </div>
+    </div>
+
+    <h3 style="margin-top:34px;">The new table</h3>
+    <div class="er reveal">
+      <div class="ent e-serve">
+        <div class="eh">transaction_view <span class="newtag">Approach 2</span></div>
+        <div class="er-rows">
+          <div class="r pkey"><span class="c">transaction_id</span><span class="bd"><span class="badge pk">PK</span></span></div>
+          <div class="r"><span class="c">customer_code &middot; started_at</span><span class="bd"><span class="badge part">PART</span></span></div>
+          <div class="r"><span class="c">date &middot; status &middot; user_name &middot; warehouse &middot; method</span><span class="bd"></span></div>
+          <div class="r"><span class="c">order_number &middot; item_number &middot; reqid &hellip; (filters)</span><span class="bd"></span></div>
+          <div class="r"><span class="c">steps (jsonb) &mdash; FULL resolved detail</span><span class="bd"><span class="badge new">BODY</span></span></div>
+        </div>
+      </div>
+    </div>
+    <div class="prose"><p class="muted" style="font-size:.9rem;">
+      <code>steps</code> holds the complete §6 detail as structured JSON &mdash; request line + dims, every MI call's
+      inputs/outcome, SQL, errors, <em>and the verbose-only INFO steps</em>, plus the request/response body &mdash; so the
+      click-through detail renders byte-identically even after <code>log_entries</code> is pruned.
+    </p></div>
+
+    <div class="edges reveal" style="margin-top:8px;">
+      <div class="edge"><div class="e-t">Primary serving path</div><div class="e-d">Feed list + single-transaction detail both read <code>transaction_view</code> directly &mdash; no join, no per-txn entry fetch, no Python sort.</div></div>
+      <div class="edge"><div class="e-t">Maintained by the stitch, not a crawler</div><div class="e-d"><code>regroup_window</code> re-projects only the window it rebuilt, atomically with the txn write; no periodic full scan.</div></div>
+      <div class="edge"><div class="e-t">Augments, not replaces</div><div class="e-d">The three write/derive tables stay (source of truth, debug agent, stitch). <code>transaction_view</code> is the read side only.</div></div>
+      <div class="edge"><div class="e-t">Independent <code>log_entries</code> pruning</div><div class="e-d">Because the feed never reads <code>log_entries</code>, raw entries can be dropped on their own short horizon with zero feed impact.</div></div>
+      <div class="edge"><div class="e-t">Durable system-of-record</div><div class="e-d">Once entries are pruned, <code>transaction_view</code> is the only record of those periods &rarr; back it up / replicate; sealed = final.</div></div>
+      <div class="edge"><div class="e-t">Feeds ML, doesn't serve it</div><div class="e-d">Its resolved fields source the offline feature build; ML full-scans stay on the columnar archive.</div></div>
+    </div>
+
+    <div class="callout pad-c reveal">
+      <p class="clead">Safe-to-prune interlock (the &ldquo;done&rdquo; marker)</p>
+      <p class="muted" style="margin:0;font-size:.9rem;">Because the projection is written atomically with the
+        transaction, a <code>sealed</code> transaction is already materialized &mdash; so <strong>sealed &rArr; done</strong>.
+        For defense-in-depth keep a per-month <code>materialized_through</code> watermark and a <code>pruned_through</code>
+        marker; the prune job enforces <strong>pruned_through &le; materialized_through</strong>, so it can never delete
+        entries for a window the read model hasn't captured.</p>
+    </div>
+
+    <div class="note warn">
+      <span class="tag">Trade-offs to weigh at review</span>
+      <p style="margin-bottom:0;">Extra storage (resolved detail duplicated until entries are pruned) + a re-project
+        write per window rebuild; the projection can lag/desync (mitigated by atomic per-window writes + deterministic
+        ids); and once entries are pruned, a period can no longer be re-stitched or repaired. Endorsed for a read-heavy
+        feed + independent entry pruning; skippable if Approach 1's join is already fast enough.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>Central reference. Written design: <code>docs/data-architecture-scale-ml.md</code>. Absorbs the pipeline mechanics from the former
+      <code>docs/log-pipeline.html</code>. Builds on <code>docs/transactions-view-load-spike-and-db-concepts-primer.md</code> and
+      <code>docs/logs-view-transactions-query-flow-and-sort-fix.md</code>.
+      Config: <code>log_regroup_max_window_seconds</code> (6h) &middot; <code>log_regroup_pad_seconds</code>/<code>log_seal_window_seconds</code> (15m).
+      Code: <code>app/services/mnp_log_ingestion/pipeline/</code>. Design proposal &mdash; no code changed.</p>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var btn = document.getElementById('themeToggle');
+    function current() {
+      var set = document.documentElement.getAttribute('data-theme');
+      if (set) return set;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    btn.addEventListener('click', function () {
+      document.documentElement.setAttribute('data-theme', current() === 'dark' ? 'light' : 'dark');
+    });
+  })();
+</script>
+</body>
+</html>
