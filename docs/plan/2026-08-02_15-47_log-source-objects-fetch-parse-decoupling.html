@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fetch and Parse, Decoupled &middot; MNP log ingestion</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body, h1, h2, h3, h4, p, ol, ul, figure, pre { margin: 0; padding: 0; }
+  ol, ul { list-style: none; }
+  img { max-width: 100%; display: block; }
+
+  :root {
+    --ground:      #F4F6F6;
+    --panel:       #FFFFFF;
+    --panel-2:     #EDF1F1;
+    --ink:         #161E21;
+    --ink-2:       #3D4C50;
+    --muted:       #6E8085;
+    --rule:        #D3DCDC;
+    --rule-strong: #B4C2C2;
+
+    --accent:      #1F5C63;
+    --accent-soft: #DCEAEA;
+
+    --ok:          #2F7D5A;
+    --ok-soft:     #DDEDE4;
+    --warn:        #A87318;
+    --warn-soft:   #F2E9D4;
+    --bad:         #A8442F;
+    --bad-soft:    #F2DFDA;
+
+    --stream-done:   #1F5C63;
+    --stream-flight: #A87318;
+    --stream-todo:   #C9D5D5;
+
+    --shadow: 0 1px 2px rgba(22,30,33,.06), 0 8px 24px -16px rgba(22,30,33,.28);
+
+    --font-head: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-body: Georgia, "Iowan Old Style", "Times New Roman", serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #101618; --panel: #171F22; --panel-2: #1D272A;
+      --ink: #E3EAEA; --ink-2: #B4C3C4; --muted: #7C8F93;
+      --rule: #263235; --rule-strong: #35474B;
+      --accent: #6FB6BC; --accent-soft: #172E31;
+      --ok: #6BBF95; --ok-soft: #162C23;
+      --warn: #D8AC55; --warn-soft: #2B2416;
+      --bad: #DE8570; --bad-soft: #2E1A16;
+      --stream-done: #4E9AA1; --stream-flight: #C09441; --stream-todo: #2C3A3D;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+    }
+  }
+
+  :root[data-theme="light"] {
+    --ground: #F4F6F6; --panel: #FFFFFF; --panel-2: #EDF1F1;
+    --ink: #161E21; --ink-2: #3D4C50; --muted: #6E8085;
+    --rule: #D3DCDC; --rule-strong: #B4C2C2;
+    --accent: #1F5C63; --accent-soft: #DCEAEA;
+    --ok: #2F7D5A; --ok-soft: #DDEDE4;
+    --warn: #A87318; --warn-soft: #F2E9D4;
+    --bad: #A8442F; --bad-soft: #F2DFDA;
+    --stream-done: #1F5C63; --stream-flight: #A87318; --stream-todo: #C9D5D5;
+    --shadow: 0 1px 2px rgba(22,30,33,.06), 0 8px 24px -16px rgba(22,30,33,.28);
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #101618; --panel: #171F22; --panel-2: #1D272A;
+    --ink: #E3EAEA; --ink-2: #B4C3C4; --muted: #7C8F93;
+    --rule: #263235; --rule-strong: #35474B;
+    --accent: #6FB6BC; --accent-soft: #172E31;
+    --ok: #6BBF95; --ok-soft: #162C23;
+    --warn: #D8AC55; --warn-soft: #2B2416;
+    --bad: #DE8570; --bad-soft: #2E1A16;
+    --stream-done: #4E9AA1; --stream-flight: #C09441; --stream-todo: #2C3A3D;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 940px;
+    margin: 0 auto;
+    padding: 4rem 1.5rem 6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3.5rem;
+  }
+
+  .prose { max-width: 68ch; }
+
+  h1, h2, h3, h4 { font-family: var(--font-head); text-wrap: balance; }
+  h1 { font-size: clamp(2rem, 5vw, 2.9rem); font-weight: 700; letter-spacing: -.028em; line-height: 1.08; }
+  h2 { font-size: 1.5rem; font-weight: 660; letter-spacing: -.018em; }
+  h3 { font-size: 1.08rem; font-weight: 640; letter-spacing: -.008em; }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: .7rem;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .lede { font-size: 1.16rem; color: var(--ink-2); line-height: 1.55; }
+
+  header.masthead {
+    display: flex; flex-direction: column; gap: 1rem;
+    padding-bottom: 2.25rem;
+    border-bottom: 2px solid var(--rule-strong);
+  }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: .5rem 1.4rem;
+    font-family: var(--font-mono); font-size: .74rem; color: var(--muted);
+  }
+
+  section { display: flex; flex-direction: column; gap: 1.5rem; }
+  .sec-head { display: flex; flex-direction: column; gap: .5rem; }
+
+  code { font-family: var(--font-mono); font-size: .87em; }
+  .prose code, td code, .steps code, .outcome code, footer code, p code {
+    background: var(--panel-2);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: .08em .34em;
+  }
+  .step-box code, .group code { background: none; border: none; padding: 0; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    box-shadow: var(--shadow);
+    padding: 1.5rem;
+    display: flex; flex-direction: column; gap: 1rem;
+  }
+
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.25rem; }
+  .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 1rem; }
+
+  /* ---- responsibility group cards ---- */
+  .group {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-top: 3px solid var(--gc, var(--accent));
+    border-radius: 5px;
+    padding: 1.1rem 1.15rem 1.25rem;
+    display: flex; flex-direction: column; gap: .7rem;
+  }
+  .group .num {
+    font-family: var(--font-mono); font-size: .68rem; letter-spacing: .14em;
+    color: var(--gc, var(--accent)); text-transform: uppercase;
+  }
+  .group h3 { font-size: 1rem; }
+  .group .q { font-size: .88rem; color: var(--muted); font-style: italic; line-height: 1.45; }
+  .group ul { display: flex; flex-direction: column; gap: .34rem; }
+  .group li { font-family: var(--font-mono); font-size: .78rem; color: var(--ink-2); line-height: 1.4; }
+  .group li.new { color: var(--gc); font-weight: 600; }
+  .tag-new {
+    font-family: var(--font-head); font-size: .58rem; font-weight: 700;
+    letter-spacing: .1em; text-transform: uppercase;
+    background: var(--gc); color: var(--panel);
+    border-radius: 2px; padding: .1em .38em; margin-left: .4em;
+    vertical-align: .12em;
+  }
+
+  /* ---- scenarios + byte stream ruler ---- */
+  .scenario {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-left: 4px solid var(--sc, var(--accent));
+    border-radius: 5px;
+    padding: 1.25rem 1.35rem 1.4rem;
+    display: flex; flex-direction: column; gap: 1rem;
+  }
+  .scenario-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .6rem 1rem; }
+  .scenario-head h3 { flex: 1 1 auto; min-width: 12rem; }
+  .verdict {
+    font-family: var(--font-head); font-size: .68rem; font-weight: 700;
+    letter-spacing: .09em; text-transform: uppercase;
+    padding: .28em .6em; border-radius: 3px;
+    background: var(--sc-soft, var(--accent-soft)); color: var(--sc, var(--accent));
+    border: 1px solid currentColor;
+  }
+
+  .stream { display: flex; flex-direction: column; padding-top: .3rem; }
+  .track { display: flex; height: 26px; border-radius: 3px; overflow: hidden; border: 1px solid var(--rule-strong); }
+  .seg { display: flex; align-items: center; justify-content: center;
+         font-family: var(--font-mono); font-size: .62rem; letter-spacing: .04em;
+         color: #fff; white-space: nowrap; overflow: hidden; }
+  .seg-done   { background: var(--stream-done); }
+  .seg-flight { background: var(--stream-flight); }
+  .seg-todo   { background: var(--stream-todo); color: var(--muted); }
+
+  .caret-row { position: relative; height: 34px; }
+  .caret { position: absolute; top: 0; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 1px; }
+  .caret .tri { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 7px solid var(--ck, var(--accent)); }
+  .caret .lbl { font-family: var(--font-mono); font-size: .66rem; color: var(--ck, var(--accent)); white-space: nowrap; font-weight: 600; }
+
+  .legend { font-family: var(--font-mono); font-size: .78rem; color: var(--muted); }
+
+  .steps { display: flex; flex-direction: column; gap: .45rem; counter-reset: s; }
+  .steps li {
+    display: grid; grid-template-columns: 1.5rem 1fr; gap: .6rem;
+    font-size: .93rem; color: var(--ink-2); line-height: 1.5;
+  }
+  .steps li::before {
+    counter-increment: s; content: counter(s);
+    font-family: var(--font-mono); font-size: .7rem; color: var(--muted);
+    padding-top: .28em;
+  }
+  .steps li.tx { color: var(--ink); font-weight: 600; }
+
+  .outcome {
+    font-size: .93rem; line-height: 1.5;
+    background: var(--sc-soft, var(--accent-soft));
+    border-radius: 4px; padding: .7rem .9rem;
+    color: var(--ink);
+  }
+  .outcome strong { color: var(--sc, var(--accent)); }
+
+  /* ---- flow columns ---- */
+  .flow-col { display: flex; flex-direction: column; gap: .55rem; }
+  .flow-col > .cap { font-family: var(--font-mono); font-size: .7rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .step-box {
+    background: var(--panel-2); border: 1px solid var(--rule);
+    border-radius: 4px; padding: .6rem .75rem;
+    font-family: var(--font-mono); font-size: .78rem; color: var(--ink-2); line-height: 1.4;
+  }
+  .step-box.hot { background: var(--bad-soft); border-color: var(--bad); color: var(--ink); }
+  .step-box.tx  { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); font-weight: 600; }
+  .step-box .ref { display: block; margin-top: .25rem; font-size: .68rem; color: var(--muted); }
+  .arrow { text-align: center; color: var(--rule-strong); font-size: .85rem; line-height: 1; }
+
+  /* ---- inline horizontal chain ----
+     Grid, not flex-wrap: three equal node columns with two auto-width caption
+     columns between them. A flex basis wide enough to read (180px x 3 + captions)
+     overflowed the panel and wrapped the third node onto its own row. */
+  .chain { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: .5rem; align-items: stretch; }
+  .chain .node {
+    border-radius: 4px; padding: .7rem .8rem; min-width: 0;
+    font-family: var(--font-mono); font-size: .76rem; line-height: 1.4;
+    border: 1px solid var(--rule); background: var(--panel-2); color: var(--ink-2);
+  }
+  .chain .node b { display: block; font-family: var(--font-head); font-size: .82rem; color: var(--ink); margin-bottom: .18rem; }
+  .chain .node.miss { background: var(--bad-soft); border-color: var(--bad); }
+  .chain .node.have { background: var(--ok-soft); border-color: var(--ok); }
+  .chain .link { display: flex; align-items: center; color: var(--muted); font-family: var(--font-mono); font-size: .64rem; line-height: 1.35; text-align: center; }
+  @media (max-width: 780px) {
+    .chain { grid-template-columns: 1fr; }
+    .chain .link { justify-content: center; padding: .1rem 0; }
+  }
+
+  /* ---- table ---- */
+  .tbl-scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 5px; background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+  th, td { text-align: left; padding: .7rem .9rem; border-bottom: 1px solid var(--rule); vertical-align: top; line-height: 1.45; }
+  th { font-family: var(--font-head); font-size: .72rem; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); background: var(--panel-2); white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  td.mono { font-family: var(--font-mono); font-size: .78rem; white-space: nowrap; }
+
+  .pill { display: inline-block; font-family: var(--font-mono); font-size: .68rem; padding: .16em .45em; border-radius: 3px; white-space: nowrap; }
+  .pill-ok   { background: var(--ok-soft);   color: var(--ok);   }
+  .pill-warn { background: var(--warn-soft); color: var(--warn); }
+  .pill-bad  { background: var(--bad-soft);  color: var(--bad);  }
+  .pill-acc  { background: var(--accent-soft); color: var(--accent); }
+
+  /* ---- state machine block ---- */
+  .states {
+    font-family: var(--font-mono); font-size: .74rem; line-height: 1.75;
+    background: var(--panel-2); border: 1px solid var(--rule);
+    border-radius: 4px; padding: 1rem 1.15rem; overflow-x: auto;
+    color: var(--ink-2); white-space: pre;
+  }
+  .states b { color: var(--ink); font-weight: 600; }
+  .states .s-ok  { color: var(--ok);   font-weight: 600; }
+  .states .s-bad { color: var(--bad);  font-weight: 600; }
+  .states .s-wrn { color: var(--warn); font-weight: 600; }
+
+  /* ---- two failure modes ---- */
+  .modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 1rem; }
+  .mode {
+    border: 1px solid var(--bad); background: var(--panel);
+    border-left: 4px solid var(--bad); border-radius: 5px;
+    padding: 1rem 1.1rem 1.15rem; display: flex; flex-direction: column; gap: .5rem;
+  }
+  .mode .num { font-family: var(--font-mono); font-size: .66rem; letter-spacing: .13em; text-transform: uppercase; color: var(--bad); }
+  .mode h4 { font-family: var(--font-head); font-size: .95rem; font-weight: 640; }
+  .mode p { font-size: .88rem; color: var(--ink-2); line-height: 1.5; }
+  .mode .diag { font-family: var(--font-mono); font-size: .72rem; color: var(--bad); background: var(--bad-soft); border-radius: 3px; padding: .45rem .6rem; }
+
+  .callout {
+    border: 1px solid var(--bad); background: var(--bad-soft);
+    border-radius: 5px; padding: 1.15rem 1.3rem;
+    display: flex; flex-direction: column; gap: .8rem;
+  }
+  .callout .eyebrow { color: var(--bad); }
+  .callout h2 { font-size: 1.25rem; }
+  .callout p { font-size: .96rem; }
+
+  .keep { display: flex; flex-wrap: wrap; gap: .5rem; }
+  .keep span {
+    font-family: var(--font-mono); font-size: .76rem;
+    background: var(--ok-soft); color: var(--ok);
+    border: 1px solid currentColor; border-radius: 3px;
+    padding: .28em .55em;
+  }
+
+  footer { border-top: 1px solid var(--rule); padding-top: 1.5rem; font-size: .84rem; color: var(--muted); }
+  a { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  @media (max-width: 620px) {
+    body { font-size: 16px; }
+    .wrap { padding: 2.5rem 1.1rem 4rem; gap: 2.75rem; }
+  }
+  @media print {
+    body { background: #fff; }
+    .panel, .scenario, .group, .tbl-scroll { box-shadow: none; break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">MNP log ingestion &middot; design note</p>
+    <h1>Fetch and parse, decoupled</h1>
+    <p class="lede">Today one poll tick downloads bytes, parses them, and inserts rows in a single unbroken sequence. This splits that in two, using one new table as the durable handoff &mdash; without touching <code>log_entries</code>, <code>jobs</code>, or Stage&nbsp;2.</p>
+    <div class="meta">
+      <span>2026-08-02</span>
+      <span>Status: proposed</span>
+      <span>New tables: 1</span>
+      <span>Table rewrites: 0</span>
+    </div>
+  </header>
+
+  <!-- 1. SHAPE OF THE CHANGE -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The shape of the change</p>
+      <h2>One <code>await</code> is the whole problem</h2>
+    </div>
+    <p class="prose">Inside the byte-read loop, <code>_pull_range</code> awaits parse-and-insert before reading the next window. Everything downstream of that <code>await</code> happens while the SSH connection and the per-host lock are still held.</p>
+
+    <div class="grid-2">
+      <div class="flow-col">
+        <p class="cap">Today &mdash; one sequence</p>
+        <div class="step-box">download bytes over SFTP<span class="ref">remote_fetcher.py:149</span></div>
+        <p class="arrow">&darr;</p>
+        <div class="step-box">save file to ./uploads<span class="ref">LogIngestion.py:31</span></div>
+        <p class="arrow">&darr;</p>
+        <div class="step-box">create jobs row<span class="ref">LogIngestion.py:34</span></div>
+        <p class="arrow">&darr;</p>
+        <div class="step-box hot">parse + insert log_entries<span class="ref">parse_insert.py:64 &mdash; host lock still held</span></div>
+        <p class="arrow">&darr;</p>
+        <div class="step-box">advance checkpoint<span class="ref">remote_fetcher.py:386 &mdash; only on full success</span></div>
+      </div>
+
+      <div class="flow-col">
+        <p class="cap">Proposed &mdash; two processes</p>
+        <div class="step-box">download bytes over SFTP</div>
+        <p class="arrow">&darr;</p>
+        <div class="step-box">save file to ./uploads</div>
+        <p class="arrow">&darr;</p>
+        <div class="step-box tx">ONE TRANSACTION<br>insert log_source_objects<br>advance checkpoint<span class="ref">both commit, or neither does</span></div>
+        <p class="arrow">&darr;</p>
+        <div class="step-box">release lock &rarr; fetch next file<span class="ref">the fetcher is done here</span></div>
+        <p class="arrow">&#8615;</p>
+        <div class="step-box">parse worker leases the row, parses,<br>marks it ingested<span class="ref">separate process, own retry policy</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. RESPONSIBILITIES -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Table responsibilities</p>
+      <h2>Four groups, one new member</h2>
+      <p class="prose">Grouping by the question each set of tables answers makes the gap obvious: there was nothing sitting between <em>transport</em> and <em>evidence</em>.</p>
+    </div>
+
+    <div class="grid-4">
+      <div class="group" style="--gc: var(--muted)">
+        <p class="num">Transport</p>
+        <h3>Where to read from</h3>
+        <p class="q">Which servers, which files, how far did we get?</p>
+        <ul>
+          <li>log_ssh_sources</li>
+          <li>log_ssh_file_checkpoints</li>
+          <li>log_ssh_fetch_runs</li>
+        </ul>
+      </div>
+
+      <div class="group" style="--gc: var(--accent)">
+        <p class="num">Handoff</p>
+        <h3>Bytes awaiting parse<span class="tag-new">new</span></h3>
+        <p class="q">Which downloaded bytes still need parsing, and exactly where did they come from?</p>
+        <ul>
+          <li class="new">log_source_objects</li>
+        </ul>
+      </div>
+
+      <div class="group" style="--gc: var(--ok)">
+        <p class="num">Evidence</p>
+        <h3>What the server wrote</h3>
+        <p class="q">The lossless source of truth.</p>
+        <ul>
+          <li>log_entries</li>
+          <li>jobs <span style="color:var(--muted)">(transitional)</span></li>
+        </ul>
+      </div>
+
+      <div class="group" style="--gc: var(--warn)">
+        <p class="num">Derived</p>
+        <h3>Current interpretation</h3>
+        <p class="q">Which business transactions exist, and what still needs stitching?</p>
+        <ul>
+          <li>log_transactions</li>
+          <li>log_regroup_pending</li>
+          <li>log_regroup_runs</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>The pattern already exists one stage later</h3>
+      <p style="font-size:.94rem; color:var(--ink-2)">Stage&nbsp;1 already writes a durable work ticket for Stage&nbsp;2 &mdash; a <code>log_regroup_pending</code> row committed in the same transaction as the entries themselves (<code>parse_insert.py:177-179</code>). That is why Stage&nbsp;2 can fail completely and still be retried. The fetch&nbsp;&rarr;&nbsp;Stage&nbsp;1 hop is the only one missing it.</p>
+      <div class="chain">
+        <div class="node"><b>SSH fetch</b>downloads bytes</div>
+        <div class="link">&mdash;&nbsp;in-flight await,<br>nothing written down&nbsp;&rarr;</div>
+        <div class="node miss"><b>Stage 1</b>parse + insert entries</div>
+        <div class="link">&mdash;&nbsp;log_regroup_pending row,<br>durable and retried&nbsp;&rarr;</div>
+        <div class="node have"><b>Stage 2</b>stitch transactions</div>
+      </div>
+      <p style="font-size:.94rem; color:var(--ink-2)">Adding <code>log_source_objects</code> makes the first hop look like the second.</p>
+    </div>
+  </section>
+
+  <!-- 3. POINTER MOVEMENT -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Pointer movement</p>
+      <h2>Where the bookmark ends up</h2>
+      <p class="prose">The bookmark is <code>log_ssh_file_checkpoints.last_offset</code> &mdash; how many bytes of a remote file have been consumed. Every scenario below is the same remote file, read left to right.</p>
+    </div>
+
+    <p class="legend">
+      <span style="color:var(--stream-done)">&#9632;</span> ingested &nbsp;&nbsp;
+      <span style="color:var(--stream-flight)">&#9632;</span> downloaded, not yet parsed &nbsp;&nbsp;
+      <span style="color:var(--stream-todo)">&#9632;</span> not yet read
+    </p>
+
+    <div class="scenario" style="--sc: var(--ok); --sc-soft: var(--ok-soft)">
+      <div class="scenario-head">
+        <h3>Happy path</h3>
+        <span class="verdict">Bookmark advances</span>
+      </div>
+      <ol class="steps">
+        <li>Fetcher downloads bytes <code>5000&ndash;9000</code> and writes them to <code>./uploads</code>.</li>
+        <li class="tx">One transaction: insert the row as <code>pending</code>, and move the bookmark 5000&nbsp;&rarr;&nbsp;9000.</li>
+        <li>Host lock released. The fetcher moves to the next file immediately.</li>
+        <li>Parse worker leases the row, reads the local file, inserts <code>log_entries</code>, writes <code>log_regroup_pending</code>.</li>
+        <li>Row marked <code>ingested</code>. The file is now provably redundant and can be deleted.</li>
+      </ol>
+      <div class="stream">
+        <div class="track">
+          <span class="seg seg-done" style="flex:9">ingested &middot; 0&ndash;9000</span>
+          <span class="seg seg-todo" style="flex:5">not yet written by the server</span>
+        </div>
+        <div class="caret-row"><span class="caret" style="left:64.3%; --ck: var(--ok)"><span class="tri"></span><span class="lbl">last_offset = 9000</span></span></div>
+      </div>
+      <p class="outcome"><strong>Net effect:</strong> the bookmark moved once, atomically, and everything it skipped past is permanently in the database. The next poll reads only what the server has written since.</p>
+    </div>
+
+    <div class="scenario" style="--sc: var(--accent); --sc-soft: var(--accent-soft)">
+      <div class="scenario-head">
+        <h3>Crash after download, before the commit</h3>
+        <span class="verdict">Bookmark stays put</span>
+      </div>
+      <ol class="steps">
+        <li>Fetcher downloads <code>5000&ndash;9000</code> and writes the file.</li>
+        <li class="tx">Process is killed before the transaction commits.</li>
+        <li>No row exists. The bookmark was never moved.</li>
+        <li>An orphan file is left in <code>./uploads</code> &mdash; the only cost.</li>
+      </ol>
+      <div class="stream">
+        <div class="track">
+          <span class="seg seg-done" style="flex:5">ingested &middot; 0&ndash;5000</span>
+          <span class="seg seg-todo" style="flex:9">re-read on the next poll</span>
+        </div>
+        <div class="caret-row"><span class="caret" style="left:35.7%; --ck: var(--accent)"><span class="tri"></span><span class="lbl">last_offset = 5000 (unchanged)</span></span></div>
+      </div>
+      <p class="outcome"><strong>Net effect:</strong> the next poll re-downloads <code>5000&ndash;9000</code> and starts over. Identical to today's behaviour. Nothing is lost.</p>
+    </div>
+
+    <div class="scenario" style="--sc: var(--warn); --sc-soft: var(--warn-soft)">
+      <div class="scenario-head">
+        <h3>Parse worker dies mid-parse</h3>
+        <span class="verdict">Bookmark already moved &mdash; safely</span>
+      </div>
+      <ol class="steps">
+        <li>The transaction committed, so the bookmark is at <code>9000</code> and the row exists.</li>
+        <li>The worker leases the row and crashes partway through inserting.</li>
+        <li>The insert transaction rolls back &mdash; no half-ingested entries (<code>parse_insert.py:195</code>).</li>
+        <li>The lease expires. Another worker picks the same row up.</li>
+        <li>It re-reads the <em>local</em> file. No network transfer.</li>
+      </ol>
+      <div class="stream">
+        <div class="track">
+          <span class="seg seg-done" style="flex:5">ingested &middot; 0&ndash;5000</span>
+          <span class="seg seg-flight" style="flex:4">queued &middot; 5000&ndash;9000</span>
+          <span class="seg seg-todo" style="flex:5">not yet read</span>
+        </div>
+        <div class="caret-row"><span class="caret" style="left:64.3%; --ck: var(--warn)"><span class="tri"></span><span class="lbl">last_offset = 9000</span></span></div>
+      </div>
+      <p class="outcome"><strong>Why moving the bookmark early is safe here:</strong> the bookmark is no longer the only record of what needs doing. The row is, and it survives the crash. That is the entire point of committing both together.</p>
+    </div>
+
+    <div class="scenario" style="--sc: var(--bad); --sc-soft: var(--bad-soft)">
+      <div class="scenario-head">
+        <h3>Parsing fails repeatedly &mdash; bad sector, corrupt bytes</h3>
+        <span class="verdict">Dead-lettered, nothing lost</span>
+      </div>
+      <ol class="steps">
+        <li>Each attempt increments <code>attempts</code> and records <code>last_error</code>.</li>
+        <li><code>available_at</code> backs the retry off rather than hammering the disk.</li>
+        <li>At <code>max_attempts</code> the row becomes <code>abandoned</code> with a CRITICAL log.</li>
+        <li>The downloaded bytes stay on disk. The row records exactly which file, offsets, and fingerprint.</li>
+        <li>Fixing the cause and re-arming the row replays it &mdash; no re-fetch needed.</li>
+      </ol>
+      <div class="stream">
+        <div class="track">
+          <span class="seg seg-done" style="flex:5">ingested &middot; 0&ndash;5000</span>
+          <span class="seg seg-flight" style="flex:4">abandoned &middot; 5000&ndash;9000</span>
+          <span class="seg seg-todo" style="flex:5">still fetched normally</span>
+        </div>
+        <div class="caret-row"><span class="caret" style="left:64.3%; --ck: var(--bad)"><span class="tri"></span><span class="lbl">last_offset = 9000</span></span></div>
+      </div>
+      <p class="outcome"><strong>Compare with today:</strong> a poisoned range currently blocks the bookmark forever, so every poll re-downloads the same failing bytes indefinitely, leaving another dead <code>jobs</code> row and another file copy each time. Here it is isolated, and everything after it keeps flowing.</p>
+    </div>
+  </section>
+
+  <!-- 4. THE TRAP -->
+  <section>
+    <div class="callout">
+      <p class="eyebrow">The design this avoids</p>
+      <h2>Why it has to be one transaction</h2>
+      <p>The obvious version &mdash; move the bookmark once the download succeeds, then hand off &mdash; loses data. If the handoff row is never written, or is written in a separate transaction that fails, the bookmark has already skipped past those bytes. No future poll will ever read them again.</p>
+      <div class="tbl-scroll" style="border-color: var(--bad)">
+        <table>
+          <thead><tr><th>Design</th><th>Bookmark moves when&hellip;</th><th>Crash between the two steps</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">Today</td><td>parse + insert succeeded</td><td><span class="pill pill-ok">safe</span> re-download, retry</td></tr>
+            <tr><td class="mono">Naive split</td><td>download succeeded</td><td><span class="pill pill-bad">data lost</span> silently, forever</td></tr>
+            <tr><td class="mono">Proposed</td><td>download succeeded <em>and</em> row committed</td><td><span class="pill pill-ok">safe</span> atomic, both or neither</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>There is a second consequence worth planning for. Today the <code>await</code> gives free backpressure: the fetcher physically cannot outrun the database. Remove it and it will happily download faster than the parser drains, filling <code>./uploads</code>. The fetcher needs a queue-depth guard.</p>
+    </div>
+  </section>
+
+  <!-- 5. NO REGRESSION -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Blast radius</p>
+      <h2>What stays exactly as it is</h2>
+    </div>
+    <div class="keep">
+      <span>log_entries schema</span>
+      <span>jobs table</span>
+      <span>job_id ON DELETE CASCADE</span>
+      <span>entry_hash dedup</span>
+      <span>Stage 2 / derive_transactions</span>
+      <span>upload path</span>
+      <span>watcher path</span>
+      <span>no 40 GB table rewrite</span>
+    </div>
+
+    <div class="sec-head" style="margin-top:1rem">
+      <h3>The sites that must change, and why</h3>
+    </div>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Site</th><th>Risk if missed</th><th>Step</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">logspace_cleanup.py:71</td><td>Tenant purge leaves orphan rows <em>and</em> orphan files</td><td><span class="pill pill-acc">5</span></td></tr>
+          <tr><td class="mono">logs.py:466</td><td>Same, on the full-wipe path</td><td><span class="pill pill-acc">5</span></td></tr>
+          <tr><td class="mono">remote_fetcher.py:371-386</td><td>Advancing the bookmark alone would lose data</td><td><span class="pill pill-acc">3</span></td></tr>
+          <tr><td class="mono">remote_fetcher.py:625</td><td>Stage 2 runs before entries exist, so the feed lags a cycle</td><td><span class="pill pill-acc">2</span></td></tr>
+          <tr><td class="mono">remote_fetcher.py:135</td><td>Entry counts cannot exist at fetch time &mdash; <strong>frontend-visible</strong></td><td><span class="pill pill-warn">4</span></td></tr>
+          <tr><td class="mono">background.py:81-106</td><td>Parse worker never starts</td><td><span class="pill pill-acc">2</span></td></tr>
+          <tr><td class="mono">docs/database-er-diagram.md</td><td>Breaks the repo's own diagram-sync rule</td><td><span class="pill pill-acc">1</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 6. ROLLOUT -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Rollout</p>
+      <h2>Six steps, reversible by config</h2>
+      <p class="prose">Steps 2 and 3 sit behind one settings flag. With the flag off, the current inline path runs completely unchanged &mdash; so rolling back is flipping a boolean, not reverting a migration.</p>
+    </div>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th style="width:3rem">#</th><th>Step</th><th>Behaviour change</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">1</td><td>Migration adds the table and its three indexes</td><td><span class="pill pill-ok">none</span> nothing reads it</td></tr>
+          <tr><td class="mono">2</td><td>Parse worker, flag-gated, default off</td><td><span class="pill pill-ok">none</span> queue is empty</td></tr>
+          <tr><td class="mono">3</td><td>Fetcher writes to the queue, same flag</td><td><span class="pill pill-warn">gated</span> flag off = today exactly</td></tr>
+          <tr><td class="mono">4</td><td>Fix the reporting that can no longer be accurate</td><td><span class="pill pill-warn">visible</span> API + frontend</td></tr>
+          <tr><td class="mono">5</td><td>Purge and full-wipe paths clear rows and files</td><td><span class="pill pill-ok">closes orphan risk</span></td></tr>
+          <tr><td class="mono">6</td><td>Delete files once their row is ingested</td><td><span class="pill pill-ok">reclaims disk</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <h3>Step 6 is worth more than it looks</h3>
+      <p style="font-size:.94rem; color:var(--ink-2)"><code>LocalStorage.delete</code> exists but has no caller anywhere in the log path. Every byte ever fetched over SSH is still sitting in <code>./uploads</code>, duplicating what is already in Postgres, because nothing has ever tracked whether a file was successfully ingested. The <code>ingested</code> status makes that provable for the first time &mdash; and this is a disk that is already failing.</p>
+    </div>
+  </section>
+
+  <footer>
+    <p>Companion to <code>docs/plan/2026-08-02_15-47_log-source-objects-fetch-parse-decoupling.md</code>. Scope is the fetch path only. Partitioning, retention, the Stage&nbsp;2 assignment split, and replacing <code>jobs</code> with <code>log_ingestion_batches</code> are deliberately out of scope and belong with the partitioning pass, which rewrites <code>log_entries</code> anyway.</p>
+  </footer>
+
+</div>
+</body>
+</html>
