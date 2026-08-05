@@ -39,7 +39,7 @@ The schema is built around two "spines" that hold everything together.
    Nearly every table carries a `customer_code` string so data is partitioned per customer.
    It is enforced as a foreign key only from `customer_display_names` and `logspace_presence` into `customers`; everywhere else it is a soft convention.
 
-The tables fall into six subsystems: RAG documents/embeddings, WMS log ingestion, remote SSH log fetching, the customer registry, saved views, and notifications.
+The tables fall into seven subsystems: RAG documents/embeddings, WMS log ingestion, remote SSH log fetching, the customer registry, saved views, notifications, and idempotency keys.
 
 ### Master overview (enforced foreign keys only)
 
@@ -87,6 +87,7 @@ erDiagram
     customers ||..o{ log_ssh_sources : "tenant key (soft)"
     customers ||..o{ log_ssh_file_checkpoints : "tenant key (soft)"
     customers ||..o{ log_ssh_fetch_runs : "tenant key (soft)"
+    customers ||..o{ log_source_objects : "tenant key (soft)"
     customers ||..o{ saved_views : "tenant key (soft)"
     customers ||..o{ customer_notification_channels : "tenant key (soft)"
     customers ||..o{ notification_rules : "tenant key (soft)"
@@ -236,6 +237,11 @@ erDiagram
         datetime range_start
         datetime range_end
         datetime consumed_at
+        int attempts "retry budget"
+        text last_error
+        datetime last_attempt_at
+        datetime abandoned_at "dead-lettered at max attempts"
+        datetime available_at "backoff gate; DB clock"
         datetime created_at
     }
 
@@ -319,10 +325,60 @@ erDiagram
 
     log_ssh_sources ||--o{ log_ssh_file_checkpoints : "tracks per file"
     log_ssh_sources ||..o{ log_ssh_fetch_runs : "fetched by (soft)"
+    log_ssh_sources ||..o{ log_source_objects : "downloaded from (soft)"
 ```
 
 Note: `log_ssh_fetch_runs.source_id` is nullable and has no foreign key.
 A null value means the run covered all enabled sources; otherwise it points at one source.
+
+### `log_source_objects` — the fetch/parse handoff
+
+One row is one contiguous byte range downloaded from a remote log file and saved to object storage, plus whether it has been parsed yet.
+It exists so the SSH fetcher can stop parsing inline: the fetcher inserts this row and advances `log_ssh_file_checkpoints.last_offset` in **one transaction**, then releases the SSH connection and the per-host lock, and a separate worker (`app/services/workers/log_parse_worker.py`) leases the row and runs Stage 1.
+
+The single transaction is load-bearing.
+The checkpoint is a promise that everything behind it is handled; advancing it without this row would skip those bytes forever, and writing this row without advancing it would re-download them.
+
+It also carries the retry budget that the fetch path previously lacked (`attempts` / `max_attempts` / `available_at` / `last_error`), giving it the same dead-letter semantics `log_regroup_pending` already has for Stage 2.
+
+`source_id` deliberately has **no** foreign key: deleting an SSH source must never delete ingestion evidence, the same rule `log_ssh_fetch_runs.source_id` follows.
+`job_id` is likewise a soft reference and is transitional — it disappears when `jobs` is retired from the log path.
+
+```mermaid
+erDiagram
+    log_source_objects {
+        uuid id PK
+        string customer_code "soft tenant key"
+        uuid source_id "soft -> log_ssh_sources.id (no FK)"
+        string source_name "denormalized; survives a source rename/delete"
+        string remote_path
+        bigint start_offset
+        bigint end_offset
+        bigint observed_size
+        float observed_mtime
+        string head_fingerprint
+        string content_sha256
+        string storage_key "where the downloaded bytes live"
+        string status "pending/leased/ingested/abandoned"
+        int attempts
+        int max_attempts
+        datetime available_at "retry backoff gate"
+        string lease_owner
+        datetime lease_expires_at "crashed-worker recovery"
+        text last_error
+        uuid job_id "soft -> jobs.id (no FK), transitional"
+        int entries_inserted
+        datetime created_at
+        datetime ingested_at
+        datetime file_deleted_at
+    }
+
+    log_ssh_sources ||..o{ log_source_objects : "downloaded from (soft)"
+    log_source_objects ||..o| jobs : "parsed into (soft, transitional)"
+```
+
+Deletion: `log_source_objects` has no job or tenant foreign key, so a tenant purge deletes it explicitly and unlinks the referenced files first (`app/services/logspace_cleanup.py`).
+A **date-range** log delete deliberately leaves it alone — these rows describe byte ranges, not log dates.
 
 ## Subsystem 4: Customer registry
 
@@ -511,9 +567,11 @@ erDiagram
 
 | Logical parent | Referencing column | Meaning |
 | --- | --- | --- |
-| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, saved_views, idempotency_keys, and the notification tables | tenant partition key |
+| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, and the notification tables | tenant partition key |
 | `jobs.id` | `log_regroup_pending.job_id` | nullable, no FK |
 | `log_ssh_sources.id` | `log_ssh_fetch_runs.source_id` | nullable, no FK (null = all sources) |
+| `log_ssh_sources.id` | `log_source_objects.source_id` | nullable, no FK — deleting a source must not delete ingestion evidence |
+| `jobs.id` | `log_source_objects.job_id` | nullable, no FK; transitional, set by the parse worker |
 | `notification_rules.id` | `notification_events.rule_id` | provenance, no FK |
 | future `log_flow` | `log_transactions.flow_id` | Phase-3 hook, no FK |
 | `chunks.id` / `chunks_entity.id` | `embeddings.id` (string) | app-level key into the pgvector table |

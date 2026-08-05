@@ -552,6 +552,105 @@
     </div>
   </section>
 
+  <!-- 3b. RETRY + DEAD LETTER -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Retry budget</p>
+      <h2>Stage&nbsp;2 dead-letters. Stage&nbsp;1 has nothing.</h2>
+      <p class="prose">A poison window in Stage&nbsp;2 is retried three times, then abandoned with an alert and an endpoint to re-arm it. The fetch path has no equivalent &mdash; and its two failure modes are wrong in opposite directions.</p>
+    </div>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Stage 2 already has</th><th>Location</th></tr></thead>
+        <tbody>
+          <tr><td>attempts, last_error, last_attempt_at, abandoned_at</td><td class="mono">log_regroup_pending.py</td></tr>
+          <tr><td>Attempt cap of 3</td><td class="mono">settings.py:110</td></tr>
+          <tr><td>Abandoned rows excluded from the open query</td><td class="mono">derive_transactions.py:775</td></tr>
+          <tr><td>CRITICAL alert on abandonment</td><td class="mono">derive_transactions.py:844</td></tr>
+          <tr><td>Re-arm endpoint</td><td class="mono">logs.py:422</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="modes">
+      <div class="mode">
+        <p class="num">Fetch path &middot; mode A</p>
+        <h4>Disk I/O error &mdash; retries forever</h4>
+        <p>The error is swallowed, the checkpoint is left alone, and there is no persistent counter anywhere. The same bytes are re-downloaded and re-attempted every poll tick, indefinitely.</p>
+        <p class="diag">Each retry writes another full copy of the bytes to ./uploads and creates another jobs row <em>before</em> it can fail. One poison file leaks disk on a schedule.</p>
+        <p style="font-size:.8rem; color:var(--muted); font-family:var(--font-mono)">remote_fetcher.py:376-384</p>
+      </div>
+      <div class="mode">
+        <p class="num">Fetch path &middot; mode B</p>
+        <h4>Any other error &mdash; nukes the whole source</h4>
+        <p>The error is re-raised, which increments <code>consecutive_failures</code> on the <em>source</em> and auto-disables the entire server at 10.</p>
+        <p class="diag">Wrong granularity. One unparseable file blocks every other file on that server. That counter was built for connection failures, not parse failures.</p>
+        <p style="font-size:.8rem; color:var(--muted); font-family:var(--font-mono)">remote_fetcher.py:377 &rarr; fetch_now:618</p>
+      </div>
+    </div>
+
+    <p class="prose" style="font-weight:600">Too permissive in A, too coarse in B. Neither is a per-unit-of-work retry budget.</p>
+
+    <div class="panel">
+      <h3>The fix: the budget belongs on the queue row</h3>
+      <p style="font-size:.94rem; color:var(--ink-2)">Match Stage&nbsp;2 where it is already right, and add the three things it lacks. The unit of work is one row, so the counter lives on that row.</p>
+
+      <div class="tbl-scroll">
+        <table>
+          <thead><tr><th>Failure class</th><th>Examples</th><th>Policy</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="pill pill-warn">transient</span></td>
+              <td>disk I/O error, statement timeout, lock contention, connection drop</td>
+              <td>back off and retry until the budget is spent &mdash; 30s / 2m / 8m, with jitter</td>
+            </tr>
+            <tr>
+              <td><span class="pill pill-bad">permanent</span></td>
+              <td>decode error, parser failure, missing storage key</td>
+              <td>abandon on the <strong>first</strong> failure &mdash; retrying cannot help, and three tries just triple the log noise</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p style="font-size:.94rem; color:var(--ink-2)">This transient-versus-permanent distinction exists in <em>neither</em> stage today, and neither does backoff &mdash; Stage&nbsp;2 retries a failing window on every finalize tick, hammering a failing disk. Both are worth backporting.</p>
+
+      <div class="states"><b>pending</b> ──claim──▸ <b>leased</b> ──success──▸ <span class="s-ok">ingested</span> ──sweep──▸ (file deleted)
+   ▲             │
+   │             ├─ transient failure ─▸ <span class="s-wrn">pending</span>, attempts+1, available_at = now + backoff
+   │             ├─ permanent failure ─▸ <span class="s-bad">abandoned</span>   (CRITICAL alert, budget untouched)
+   │             ├─ budget exhausted ──▸ <span class="s-bad">abandoned</span>   (CRITICAL alert)
+   │             └─ lease expired ─────▸ <span class="s-wrn">pending</span>, attempts+1  (worker crashed)
+   │
+   └───────── POST /logs/ingest-queue/reset-abandoned ─────────┘</div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <h3>Same operator surface as Stage&nbsp;2</h3>
+        <p style="font-size:.92rem; color:var(--ink-2)">Deliberately the same shape, so there is one pattern to learn rather than two.</p>
+        <div class="tbl-scroll">
+          <table>
+            <thead><tr><th>Concern</th><th>Stage 2</th><th>Ingest queue</th></tr></thead>
+            <tbody>
+              <tr><td>Alert</td><td class="mono">CRITICAL log</td><td class="mono">CRITICAL log</td></tr>
+              <tr><td>Inspect</td><td class="mono">regroup status</td><td class="mono">GET /logs/ingest-queue</td></tr>
+              <tr><td>Re-arm</td><td class="mono">reset-abandoned</td><td class="mono">reset-abandoned</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel" style="border-color: var(--ok)">
+        <h3>A correctness win that falls out free</h3>
+        <p style="font-size:.92rem; color:var(--ink-2)">Once parsing is decoupled, a parse failure <strong>physically cannot reach</strong> <code>fetch_now</code>.</p>
+        <p style="font-size:.92rem; color:var(--ink-2)">So <code>consecutive_failures</code> becomes purely about transport &mdash; exactly what it was designed for &mdash; and mode&nbsp;B's granularity bug disappears without touching that code.</p>
+        <p style="font-size:.92rem; color:var(--ink-2)">Per-file failures get their own budget on the row. Per-server connectivity keeps the existing breaker. The two concerns stop being conflated.</p>
+      </div>
+    </div>
+  </section>
+
   <!-- 4. THE TRAP -->
   <section>
     <div class="callout">
@@ -620,7 +719,7 @@
         <thead><tr><th style="width:3rem">#</th><th>Step</th><th>Behaviour change</th></tr></thead>
         <tbody>
           <tr><td class="mono">1</td><td>Migration adds the table and its three indexes</td><td><span class="pill pill-ok">none</span> nothing reads it</td></tr>
-          <tr><td class="mono">2</td><td>Parse worker, flag-gated, default off</td><td><span class="pill pill-ok">none</span> queue is empty</td></tr>
+          <tr><td class="mono">2</td><td>Parse worker, flag-gated, default off &mdash; carries the retry budget, backoff, dead letter, and the two queue endpoints</td><td><span class="pill pill-ok">none</span> queue is empty</td></tr>
           <tr><td class="mono">3</td><td>Fetcher writes to the queue, same flag</td><td><span class="pill pill-warn">gated</span> flag off = today exactly</td></tr>
           <tr><td class="mono">4</td><td>Fix the reporting that can no longer be accurate</td><td><span class="pill pill-warn">visible</span> API + frontend</td></tr>
           <tr><td class="mono">5</td><td>Purge and full-wipe paths clear rows and files</td><td><span class="pill pill-ok">closes orphan risk</span></td></tr>
@@ -628,6 +727,12 @@
         </tbody>
       </table>
     </div>
+    <div class="panel" style="border-color: var(--warn)">
+      <h3>Rollback safety</h3>
+      <p style="font-size:.94rem; color:var(--ink-2)">Once a row is queued, the checkpoint has <strong>already</strong> advanced past those bytes. So switching the flag back off while rows are still unparsed would strand them: nothing drains the queue, and the fetcher never re-downloads them. That is silent data loss caused purely by a rollback.</p>
+      <p style="font-size:.94rem; color:var(--ink-2)">The parse worker therefore also starts when unfinished rows exist, regardless of the flag, logging a warning that says why. With the flag off and an empty queue &mdash; the normal untouched deployment &mdash; no loop starts at all.</p>
+    </div>
+
     <div class="panel">
       <h3>Step 6 is worth more than it looks</h3>
       <p style="font-size:.94rem; color:var(--ink-2)"><code>LocalStorage.delete</code> exists but has no caller anywhere in the log path. Every byte ever fetched over SSH is still sitting in <code>./uploads</code>, duplicating what is already in Postgres, because nothing has ever tracked whether a file was successfully ingested. The <code>ingested</code> status makes that provable for the first time &mdash; and this is a disk that is already failing.</p>

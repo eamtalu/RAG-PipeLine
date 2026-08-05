@@ -92,7 +92,7 @@ CREATE TABLE log_source_objects (
 
     -- queue state, mirroring the proven log_regroup_pending dead-letter pattern
     status varchar(24) NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending','leased','ingested','failed','abandoned')),
+        CHECK (status IN ('pending','leased','ingested','abandoned')),
     attempts int NOT NULL DEFAULT 0,
     max_attempts int NOT NULL DEFAULT 3,
     available_at timestamptz NOT NULL DEFAULT now(),
@@ -140,6 +140,10 @@ This column disappears when `jobs` is retired from the log path during the later
 A legitimate rotation re-read pulls `[0, size)` again, and a unique constraint would reject it.
 Idempotency comes from the single fetch transaction; retries reuse the same row via `attempts` rather than inserting new ones.
 `entry_hash` remains the correctness backstop, exactly as today.
+
+**Four statuses, not five.**
+There is deliberately no separate `failed` state.
+A retryable failure *is* `pending` with `available_at` pushed into the future, which keeps the claim query a single predicate and leaves no state a row can get stuck in.
 
 ---
 
@@ -239,7 +243,8 @@ Match Stage 2 where it is already right, and add the three things it lacks.
 **2. Exponential backoff with jitter, via `available_at`.**
 Stage 2 has no backoff at all: it retries a failing window on every finalize tick, which hammers a failing disk.
 The claim query here already filters `available_at <= now()`, so backoff costs nothing.
-Suggested schedule: 30 s, 2 min, 8 min, each with jitter of up to 25 percent to avoid synchronised retries across rows.
+Implemented as `base * 2^(attempts-1)` plus up to 25 percent jitter, capped by `log_parse_backoff_max_seconds`, giving 30 s / 60 s / 120 s at the default base.
+The jitter matters because rows typically fail together (one bad disk, one dead source); without it they would all retry on the same tick forever.
 Worth backporting to Stage 2 as a separate change.
 
 **3. Classify permanent versus transient failures.**
@@ -253,6 +258,9 @@ Reuse the existing `is_disk_io_error` helper in `app/services/mnp_log_ingestion/
 Retrying a permanent failure cannot help, and three attempts simply triple the log noise.
 This distinction exists in neither stage today.
 
+An **unrecognised** error defaults to transient.
+The attempt budget bounds it either way, so giving an unknown failure a couple of retries is safer than discarding work that might have succeeded.
+
 **4. Poison isolation.**
 Claiming with `FOR UPDATE SKIP LOCKED` means one stuck row never blocks the rest of the queue.
 That is precisely the failure Mode B currently causes at source level.
@@ -260,6 +268,7 @@ That is precisely the failure Mode B currently causes at source level.
 **5. Lease expiry.**
 `lease_expires_at` recovers rows from a crashed worker.
 Neither stage has this today; Stage 2 relies on the whole finalize run failing.
+An expiry counts as a consumed attempt, so a worker that reliably crashes on one row walks that row down to `abandoned` instead of spinning on it forever.
 
 **6. Observable dead letter, mirroring Stage 2's operator surface.**
 
@@ -285,10 +294,18 @@ pending ──claim──► leased ──success──► ingested ──sweep�
    │                  ├─ transient failure ─► pending, attempts+1, available_at = now + backoff
    │                  ├─ permanent failure ─► abandoned  (CRITICAL alert)
    │                  ├─ budget exhausted ──► abandoned  (CRITICAL alert)
-   │                  └─ lease expired ─────► pending    (worker crashed)
+   │                  └─ lease expired ─────► pending, attempts+1  (worker crashed)
    │
    └──────────── POST /logs/ingest-queue/reset-abandoned ────────────┘
 ```
+
+### Rollback safety
+
+Once a row is queued the checkpoint has already advanced past those bytes.
+So if the flag were switched back off with rows still unparsed, nothing would drain them and the fetcher would never re-download them - silent data loss caused purely by a rollback.
+
+The parse worker therefore also starts when unfinished rows exist, regardless of the flag, and logs a warning saying why.
+With the flag off and an empty queue - the normal untouched deployment - no loop starts at all.
 
 ---
 
@@ -316,7 +333,7 @@ This is the safest possible first commit.
   - **Permanent** (decode error, parser failure, missing storage key): mark `abandoned` immediately, without consuming the retry budget.
 - Every abandonment logs CRITICAL, mirroring `derive_transactions.py:844`.
 - Lease expiry returns a row to `pending`, recovering it from a crashed worker.
-- After draining, call `finalize_pending` per customer touched, mirroring `log_watcher._finalize_customers`.
+- The worker does NOT stitch. Stage 1 already writes a `log_regroup_pending` ticket in the same transaction as its entries, and a dedicated stitch worker owns draining that queue (see the superseding note below).
 - Register in `app/background.py` behind `log_parse_worker_enabled`, default `False`.
 - New settings, defaulting to match Stage 2: `log_parse_max_attempts = 3` (mirrors `log_regroup_max_attempts`), `log_parse_backoff_seconds`, `log_parse_lease_seconds`, `log_parse_queue_max_pending`.
 
@@ -371,7 +388,7 @@ Measure the directory size before and after.
 | --- | --- | --- | --- |
 | 1 | `app/services/logspace_cleanup.py:71` | Purge leaves orphan rows and orphan files | Step 5 |
 | 2 | `app/api/v1/logs.py:466` | Same, tenant-scoped | Step 5 |
-| 3 | `remote_fetcher.py:625` `_do_finalize` | Stage 2 runs before entries exist, so the feed lags a cycle | Step 2, worker triggers finalize |
+| 3 | `remote_fetcher.py` `_do_finalize` | Stage 2 runs before entries exist, so the feed lags a cycle | Superseded: `_do_finalize` was deleted entirely and the stitch worker owns Stage 2 |
 | 4 | `remote_fetcher.py:135` | Entry counts unknown at fetch time | Step 4 |
 | 5 | `remote_fetcher.py:586-595` | Progress reports zero entries mid-fetch | Step 4 |
 | 6 | `remote_fetcher.py:371-386` | Advancing the checkpoint alone loses data on a later parse failure | Step 3, single transaction |
@@ -399,6 +416,11 @@ Measure the directory size before and after.
 - Kill the parse worker mid-row: the lease expires, the row is retried, and entries land exactly once.
 - Kill the fetcher between saving the file and committing: no queue row, no checkpoint advance, and the next poll re-fetches cleanly.
 - Compare `log_transactions` before and after enabling the flag on one customer: identical, because deterministic `uuid5` IDs mean the stitch output should not move.
+
+> **Superseded in part (2026-08-05).** This plan originally had the parse worker call `finalize_pending`
+> after each drain. That was replaced: every producer calling Stage 2 was the underlying design
+> problem, so Stage 2 now has its own consumer (`app/services/workers/log_stitch_worker.py`) and the
+> fetcher, the watcher and this parse worker all stopped calling it. The rest of this document stands.
 
 **Retry and dead-lettering**
 

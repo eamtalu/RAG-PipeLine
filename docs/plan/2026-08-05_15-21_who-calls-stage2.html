@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Who calls Stage 2?</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body, h1, h2, h3, p, ol, ul, figure { margin: 0; padding: 0; }
+  ul, ol { list-style: none; }
+
+  :root {
+    --ground: #F4F6F6; --panel: #FFFFFF; --panel-2: #EDF1F1;
+    --ink: #161E21; --ink-2: #45565A; --muted: #74868B;
+    --rule: #D3DCDC; --rule-2: #B4C2C2;
+    --teal: #1F5C63; --teal-soft: #DCEAEA;
+    --green: #2F7D5A; --green-soft: #DDEDE4;
+    --amber: #A87318; --amber-soft: #F5EBD6;
+    --red: #A8442F; --red-soft: #F4E1DC;
+    --f-head: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --f-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #101618; --panel: #171F22; --panel-2: #1E282B;
+      --ink: #E3EAEA; --ink-2: #B7C5C7; --muted: #7F9296;
+      --rule: #263235; --rule-2: #37494D;
+      --teal: #6FB6BC; --teal-soft: #17302F;
+      --green: #6BBF95; --green-soft: #152C22;
+      --amber: #D8AC55; --amber-soft: #2B2415;
+      --red: #DE8570; --red-soft: #2E1A16;
+    }
+  }
+  :root[data-theme="light"] {
+    --ground: #F4F6F6; --panel: #FFFFFF; --panel-2: #EDF1F1;
+    --ink: #161E21; --ink-2: #45565A; --muted: #74868B;
+    --rule: #D3DCDC; --rule-2: #B4C2C2;
+    --teal: #1F5C63; --teal-soft: #DCEAEA; --green: #2F7D5A; --green-soft: #DDEDE4;
+    --amber: #A87318; --amber-soft: #F5EBD6; --red: #A8442F; --red-soft: #F4E1DC;
+  }
+  :root[data-theme="dark"] {
+    --ground: #101618; --panel: #171F22; --panel-2: #1E282B;
+    --ink: #E3EAEA; --ink-2: #B7C5C7; --muted: #7F9296;
+    --rule: #263235; --rule-2: #37494D;
+    --teal: #6FB6BC; --teal-soft: #17302F; --green: #6BBF95; --green-soft: #152C22;
+    --amber: #D8AC55; --amber-soft: #2B2415; --red: #DE8570; --red-soft: #2E1A16;
+  }
+
+  body {
+    background: var(--ground); color: var(--ink);
+    font-family: var(--f-head); font-size: 16px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 3rem 1.25rem 5rem;
+          display: flex; flex-direction: column; gap: 3rem; }
+
+  h1 { font-size: clamp(1.9rem, 5vw, 2.6rem); font-weight: 700; letter-spacing: -.03em; line-height: 1.1; }
+  h2 { font-size: 1.35rem; font-weight: 660; letter-spacing: -.015em; }
+  .sub { color: var(--ink-2); font-size: 1.05rem; max-width: 62ch; }
+  .tag { font-family: var(--f-mono); font-size: .7rem; letter-spacing: .15em;
+         text-transform: uppercase; color: var(--muted); }
+
+  section { display: flex; flex-direction: column; gap: 1.1rem; }
+
+  /* ---------- lanes ---------- */
+  .lanes { display: grid; gap: 1rem; }
+  .lanes.two { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 720px) { .lanes.two { grid-template-columns: 1fr; } }
+
+  .lane { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px;
+          padding: 1rem; display: flex; flex-direction: column; gap: .5rem; }
+  .lane > .cap { font-family: var(--f-mono); font-size: .72rem; letter-spacing: .1em;
+                 text-transform: uppercase; color: var(--muted); padding-bottom: .3rem;
+                 border-bottom: 1px dashed var(--rule-2); margin-bottom: .3rem; }
+
+  .step { background: var(--panel-2); border: 1px solid var(--rule);
+          border-radius: 6px; padding: .65rem .8rem; font-size: .92rem; color: var(--ink-2); }
+  .step b { color: var(--ink); font-weight: 600; }
+  .step.slow { background: var(--red-soft); border-color: var(--red); color: var(--ink); }
+  .step.save { background: var(--teal-soft); border-color: var(--teal); color: var(--ink); }
+  .step.stage2 { background: var(--green-soft); border-color: var(--green); color: var(--ink);
+                 font-weight: 640; }
+  .step .note { display: block; margin-top: .2rem; font-size: .76rem; color: var(--muted); }
+  .step .ref { display: block; margin-top: .25rem; font-family: var(--f-mono);
+               font-size: .7rem; color: var(--muted); }
+
+  .down { text-align: center; color: var(--rule-2); font-size: 1rem; line-height: .8; }
+  .loop { text-align: center; font-family: var(--f-mono); font-size: .72rem; color: var(--muted); }
+
+  .handoff { display: flex; align-items: center; justify-content: center; gap: .6rem;
+             font-family: var(--f-mono); font-size: .76rem; color: var(--teal);
+             background: var(--teal-soft); border: 1px dashed var(--teal);
+             border-radius: 6px; padding: .5rem .7rem; }
+
+  .answer { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap;
+            background: var(--green-soft); border: 2px solid var(--green);
+            border-radius: 8px; padding: .9rem 1.1rem; }
+  .answer .k { font-family: var(--f-mono); font-size: .7rem; letter-spacing: .12em;
+               text-transform: uppercase; color: var(--green); }
+  .answer .v { font-size: 1.02rem; font-weight: 600; }
+  .answer code { font-family: var(--f-mono); font-size: .86em; }
+
+  /* ---------- retry timeline ---------- */
+  .tl { display: flex; flex-direction: column; gap: .45rem; }
+  .tl-row { display: grid; grid-template-columns: 8.5rem 1fr; gap: .7rem; align-items: center; }
+  .tl-row .lbl { font-family: var(--f-mono); font-size: .74rem; color: var(--muted); text-align: right; }
+  .bar { position: relative; height: 30px; background: var(--panel-2);
+         border: 1px solid var(--rule); border-radius: 5px; }
+  .hit { position: absolute; top: 4px; width: 16px; height: 20px; border-radius: 3px;
+         transform: translateX(-50%); }
+  .hit.t { background: var(--amber); }
+  .hit.x { background: var(--red); }
+  .hit span { position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+              font-family: var(--f-mono); font-size: .6rem; color: var(--muted); white-space: nowrap; }
+  .scale { display: flex; justify-content: space-between; font-family: var(--f-mono);
+           font-size: .66rem; color: var(--muted); padding-left: 9.2rem; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; }
+  .card { background: var(--panel); border: 1px solid var(--rule);
+          border-left: 4px solid var(--c, var(--teal)); border-radius: 6px;
+          padding: .9rem 1rem; display: flex; flex-direction: column; gap: .4rem; }
+  .card h3 { font-size: .98rem; font-weight: 640; }
+  .card p { font-size: .89rem; color: var(--ink-2); }
+
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; background: var(--panel); }
+  .tw { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; }
+  th, td { text-align: left; padding: .6rem .8rem; border-bottom: 1px solid var(--rule); }
+  th { font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
+       color: var(--muted); background: var(--panel-2); }
+  tr:last-child td { border-bottom: none; }
+  td.m { font-family: var(--f-mono); font-size: .8rem; }
+
+  footer { border-top: 1px solid var(--rule); padding-top: 1.2rem;
+           font-size: .84rem; color: var(--muted); }
+  footer code { font-family: var(--f-mono); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header style="display:flex; flex-direction:column; gap:.7rem">
+    <p class="tag">MNP log ingestion</p>
+    <h1>Who calls Stage&nbsp;2?</h1>
+    <p class="sub">Stage&nbsp;1 never calls Stage&nbsp;2. It only leaves a note saying "this time range needs stitching". Something else has to come along and act on that note. This is about <em>who</em>, and <em>when</em>.</p>
+    <p class="sub" style="font-size:.92rem; color:var(--muted)">Read top to bottom: how the code is reached at all &rarr; how it worked before &rarr; how it works now &rarr; what is proposed next.</p>
+  </header>
+
+  <!-- ============ BOOT CHAIN ============ -->
+  <section>
+    <p class="tag">Start here &mdash; how the code is even reached</p>
+    <h2>From switching the machine on, to the fetcher</h2>
+    <p class="sub">Two completely separate processes, started by systemd. Both eventually call the same function, <code>fetch_now</code>, but they get there very differently.</p>
+
+    <div class="lanes two">
+      <div class="lane">
+        <p class="cap">Process A &middot; the web tier</p>
+        <div class="step"><b>systemd</b> starts <code>fastapirag.service</code>
+          <span class="note">not in the repo &mdash; lives on the server</span></div>
+        <p class="down">&darr;</p>
+        <div class="step">gunicorn <b>imports</b> <code>app.main:app</code>
+          <span class="note">4 worker processes, each serving HTTP</span></div>
+        <p class="down">&darr;</p>
+        <div class="step"><code>RUN_BACKGROUND_WORKERS=false</code>
+          <span class="note">so this process starts NO background loops</span>
+          <span class="ref">app/main.py:30</span></div>
+        <p class="down">&darr;</p>
+        <div class="step">A human clicks <b>"Fetch now"</b>
+          <span class="ref">POST /api/v1/logs/fetch-remote</span></div>
+        <p class="down">&darr;</p>
+        <div class="step"><code>run_ssh_fetch_tracked</code>
+          <span class="note">fire-and-forget task, records progress on a run row</span>
+          <span class="ref">log_sources.py:292</span></div>
+      </div>
+
+      <div class="lane">
+        <p class="cap">Process B &middot; the background worker</p>
+        <div class="step"><b>systemd</b> starts <code>fastapirag-worker.service</code>
+          <span class="ref">deploy/fastapirag-worker.service:20</span></div>
+        <p class="down">&darr;</p>
+        <div class="step"><code>python -m app.worker</code> &mdash; <b>runs</b> the module
+          <span class="note">not imported; executed as a script</span>
+          <span class="ref">app/worker.py:77</span></div>
+        <p class="down">&darr;</p>
+        <div class="step">Takes a <b>singleton lock</b> in Postgres
+          <span class="note">a second worker would exit here instead of double-running</span>
+          <span class="ref">app/worker.py:39</span></div>
+        <p class="down">&darr;</p>
+        <div class="step"><code>start_background_tasks()</code> &mdash; launches the loops
+          <span class="ref">app/background.py:70</span></div>
+        <p class="down">&darr;</p>
+        <div class="step">One of them: <code>run_ssh_log_fetcher()</code> &mdash; a <b>supervisor</b>
+          <span class="ref">ssh_log_fetcher.py:116</span></div>
+        <p class="down">&darr;</p>
+        <div class="step">Spawns <b>one loop per customer</b>
+          <span class="note">so a slow server for one tenant never blocks another</span>
+          <span class="ref">ssh_log_fetcher.py:125</span></div>
+        <p class="down">&darr;</p>
+        <div class="step">Each loop: fetch, sleep its interval, repeat
+          <span class="ref">ssh_log_fetcher.py:66</span></div>
+        <p class="down">&darr;</p>
+        <div class="step">Waits for a slot &mdash; <b>max 8 fetches at once</b>
+          <span class="note">stops N tenants exhausting the database pool</span>
+          <span class="ref">ssh_log_fetcher.py:60</span></div>
+      </div>
+    </div>
+
+    <div class="handoff" style="font-size:.85rem">&darr;&nbsp;&nbsp; both arrive at the same place &nbsp;&nbsp;&darr;</div>
+
+    <div class="step save" style="text-align:center; font-size:1rem">
+      <b>fetch_now()</b> &mdash; the one entry point into the remote fetcher
+      <span class="ref" style="text-align:center">remote_fetcher.py &middot; called from ssh_log_fetcher.py:62 and log_sources.py:292</span>
+    </div>
+    <p class="down">&darr;</p>
+    <div class="step" style="text-align:center">
+      <b>_host_lock</b> &mdash; only one SSH connection per server, ever
+      <span class="note">across both processes and all tenants sharing that host</span>
+      <span class="ref" style="text-align:center">remote_fetcher.py:84</span></div>
+    <p class="down">&darr;</p>
+    <div class="step" style="text-align:center">
+      <b>_fetch_source</b> &mdash; list files, decide, download
+      <span class="note">everything in the panels below happens inside here</span></div>
+
+    <div class="cards">
+      <div class="card" style="--c: var(--teal)">
+        <h3>Why two processes</h3>
+        <p>Under <code>gunicorn -w 4</code> the startup hook runs in <em>every</em> worker. Left alone that would start 4 pollers, 4 of everything, all fighting over the same rows. One environment variable decides which process owns the loops.</p>
+      </div>
+      <div class="card" style="--c: var(--green)">
+        <h3>Where the parse worker fits</h3>
+        <p>It starts from the <em>same</em> place &mdash; <code>start_background_tasks()</code> &mdash; as a sibling of the poller, not underneath it. That is why it keeps running after a poll ends.</p>
+      </div>
+      <div class="card" style="--c: var(--amber)">
+        <h3>Four independent safety limits</h3>
+        <p>Singleton lock (one process) &rarr; one task per customer &rarr; semaphore of 8 &rarr; one lock per server. Each solves a different problem, and they stack.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ BEFORE ============ -->
+  <section>
+    <p class="tag">Before &mdash; one loop does everything</p>
+    <h2>The poller did it at the end of the poll</h2>
+
+    <div class="lanes">
+      <div class="lane">
+        <p class="cap">Poller &middot; one tick</p>
+        <div class="step"><b>Poll starts</b><span class="ref">ssh_log_fetcher.py:62</span></div>
+        <p class="down">&darr;</p>
+        <div class="step">Download bytes over SSH</div>
+        <p class="down">&darr;</p>
+        <div class="step slow"><b>Parse + insert</b> &mdash; Stage 1
+          <span class="note">SSH connection and server lock held the whole time</span>
+          <span class="ref">remote_fetcher.py:255</span></div>
+        <p class="down">&darr;</p>
+        <div class="step">Leaves a note: <b>"10:00&ndash;10:05 needs stitching"</b>
+          <span class="ref">parse_insert.py:178</span></div>
+        <p class="loop">&#8635; repeat for each file</p>
+        <p class="down">&darr;</p>
+        <div class="step stage2">&#9654; <b>CALLS STAGE 2</b>
+          <span class="note">once per poll, after every file is done</span>
+          <span class="ref">remote_fetcher.py:650</span></div>
+      </div>
+    </div>
+
+    <div class="answer">
+      <span class="k">Answer</span>
+      <span class="v">The poller itself &mdash; <code>_do_finalize</code> at the end of <code>fetch_now</code></span>
+    </div>
+  </section>
+
+  <!-- ============ NOW ============ -->
+  <section>
+    <p class="tag">Now, with the flag on &mdash; two loops</p>
+    <h2>A dedicated stitch worker does it instead</h2>
+    <p class="sub">The poller stops before parsing, so when its tick ends the new entries <em>do not exist yet</em>. It cannot be the one to stitch them.</p>
+
+    <div class="lanes two">
+      <div class="lane">
+        <p class="cap">Loop 1 &middot; Poller</p>
+        <div class="step"><b>Poll starts</b></div>
+        <p class="down">&darr;</p>
+        <div class="step">Download bytes over SSH</div>
+        <p class="down">&darr;</p>
+        <div class="step save"><b>Save file + write a to-do row</b>
+          <span class="note">bookmark moves in the same instant</span></div>
+        <p class="down">&darr;</p>
+        <div class="step"><b>Poll ends.</b> Lock released
+          <span class="note">nothing parsed, so nothing to stitch</span></div>
+      </div>
+
+      <div class="lane">
+        <p class="cap">Loop 2 &middot; Parse worker &middot; every 2s</p>
+        <div class="step">Pick up a to-do row</div>
+        <p class="down">&darr;</p>
+        <div class="step slow"><b>Parse + insert</b> &mdash; Stage 1
+          <span class="note">no SSH connection, no server lock</span></div>
+        <p class="down">&darr;</p>
+        <div class="step">Leaves the same note as before</div>
+        <p class="down">&darr;</p>
+        <div class="step">Leaves the same note as before
+          <span class="note">and stops there</span></div>
+      </div>
+    </div>
+
+    <div class="handoff">to-do row &nbsp;&rarr;&nbsp; the only thing connecting the two loops</div>
+
+    <div class="answer">
+      <span class="k">Answer</span>
+      <span class="v">A dedicated stitch worker &mdash; <code>log_stitch_worker.py</code> &mdash; draining the queue on its own ~1s loop</span>
+    </div>
+    <p class="sub" style="font-size:.95rem">This panel originally said "the parse worker". That was the
+    same mistake one step along: every producer having to remember to trigger Stage&nbsp;2. Producers
+    now only write tickets, and one consumer drains them.</p>
+
+    <div class="tw">
+      <table>
+        <thead><tr><th>&nbsp;</th><th>Who calls Stage 2</th><th>When</th></tr></thead>
+        <tbody>
+          <tr><td class="m">Flag off</td><td class="m">remote_fetcher.py:650</td><td>end of each poll</td></tr>
+          <tr><td class="m">Flag on</td><td class="m">log_stitch_worker.py:92</td><td>every ~1s, independent of both</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="cards">
+      <div class="card" style="--c: var(--muted)">
+        <h3>Stage 2 itself did not change</h3>
+        <p>Same code, same windows, same transaction IDs. <code>derive_transactions.py</code> has no diff at all. Only the <em>caller</em> moved.</p>
+      </div>
+      <div class="card" style="--c: var(--amber)">
+        <h3>One thing you'd notice</h3>
+        <p>Transactions show up a few seconds later &mdash; after the parse worker picks the row up, rather than when the poll ends.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PROPOSED ============ -->
+  <section>
+    <p class="tag">Proposed next &mdash; not built</p>
+    <h2>Give Stage 2 the same two improvements</h2>
+    <p class="sub">Stage&nbsp;2 keeps working exactly as it always has. These are its two pre-existing rough edges, which the new queue already solves.</p>
+
+    <h3 style="font-size:1rem; font-weight:640; margin-top:.4rem">1. Wait between retries</h3>
+    <p class="sub" style="font-size:.95rem">Stage&nbsp;2 retries a failing window on the very next poll, with no pause. All three attempts are gone within seconds &mdash; before a temporary problem has any chance to clear.</p>
+
+    <div class="tl">
+      <div class="tl-row">
+        <span class="lbl">Stage 2 today</span>
+        <div class="bar">
+          <span class="hit t" style="left:2%"><span>try 1</span></span>
+          <span class="hit t" style="left:13%"><span>try 2</span></span>
+          <span class="hit x" style="left:24%"><span>gave up</span></span>
+        </div>
+      </div>
+      <div class="tl-row">
+        <span class="lbl">New queue</span>
+        <div class="bar">
+          <span class="hit t" style="left:2%"><span>try 1</span></span>
+          <span class="hit t" style="left:35%"><span>try 2</span></span>
+          <span class="hit x" style="left:96%"><span>gave up</span></span>
+        </div>
+      </div>
+      <div class="scale"><span>0s</span><span>30s</span><span>60s</span><span>90s</span></div>
+    </div>
+
+    <p class="sub" style="font-size:.95rem; margin-top:.7rem">Spreading them out is not politeness to the disk. It is what makes the retries actually <em>useful</em> &mdash; a busy disk or a held lock usually clears in that time.</p>
+
+    <h3 style="font-size:1rem; font-weight:640; margin-top:1.2rem">2. Stop wasting tries on hopeless failures</h3>
+
+    <div class="cards">
+      <div class="card" style="--c: var(--red)">
+        <h3>Stage 2 today</h3>
+        <p>Every failure looks the same to it. A window with corrupt bytes is read, fails, read again, fails, read a third time, fails.</p>
+        <p><b>Two of those three reads were guaranteed to fail before it started</b> &mdash; on a disk that is already struggling.</p>
+      </div>
+      <div class="card" style="--c: var(--green)">
+        <h3>New queue</h3>
+        <p>Checks <em>why</em> it failed. Disk hiccup or timeout &rarr; might work later, so use the retries. Corrupt bytes or missing file &rarr; can never work, so stop now and flag it.</p>
+      </div>
+    </div>
+
+    <div class="tw" style="margin-top:.8rem">
+      <table>
+        <thead><tr><th>What it would take</th><th>Size</th></tr></thead>
+        <tbody>
+          <tr><td>Add one column to <code>log_regroup_pending</code> for "don't retry before"</td><td class="m">1 migration</td></tr>
+          <tr><td>Set it on failure, reusing the backoff function that already exists</td><td class="m">~3 lines</td></tr>
+          <tr><td>Add <code>available_at &lt;= now()</code> to the open-window query</td><td class="m">1 line</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="--c: var(--teal); margin-top:.9rem">
+      <h3>Why it is not in this change</h3>
+      <p>You asked for proof of no regression. That is provable right now because <code>derive_transactions.py</code> is byte-for-byte untouched. Tangling a Stage&nbsp;2 edit into the same change would make any future problem much harder to attribute.</p>
+    </div>
+  </section>
+
+  <footer>
+    <p>Companion to <code>2026-08-02_15-47_log-source-objects-fetch-parse-decoupling.md</code>. The "Now" panel describes behaviour with <code>log_parse_worker_enabled=true</code>; the default is <code>false</code>, which keeps the "Before" panel exactly as it is.</p>
+  </footer>
+
+</div>
+</body>
+</html>

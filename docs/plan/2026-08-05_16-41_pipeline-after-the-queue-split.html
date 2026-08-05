@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The pipeline, after the queue split</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body, h1, h2, h3, h4, p, ol, ul, figure, pre { margin: 0; padding: 0; }
+  ul, ol { list-style: none; }
+
+  :root {
+    --ground:#F5F6F5; --panel:#FFF; --panel2:#EAEEEC; --ink:#151C1A; --ink2:#43524E;
+    --muted:#74847F; --rule:#D4DBD8; --rule2:#B3BEB9;
+    --q1:#1F5C63; --q1s:#DCEAEA;            /* stage 1 / ingest queue */
+    --q2:#7A5B12; --q2s:#F4EBD5;            /* stage 2 / stitch queue */
+    --ok:#2C7A57; --oks:#DCEDE3;
+    --bad:#A64430; --bads:#F3E0DB;
+    --fh:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --fm:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:#0F1514; --panel:#161E1C; --panel2:#1D2725; --ink:#E4EAE7; --ink2:#B5C3BE;
+      --muted:#7F918B; --rule:#26312E; --rule2:#374744;
+      --q1:#6FB6BC; --q1s:#152F30; --q2:#D2A94E; --q2s:#2A2415;
+      --ok:#68BE92; --oks:#152B21; --bad:#DD8570; --bads:#2D1A16;
+    }
+  }
+  :root[data-theme="light"] {
+    --ground:#F5F6F5; --panel:#FFF; --panel2:#EAEEEC; --ink:#151C1A; --ink2:#43524E;
+    --muted:#74847F; --rule:#D4DBD8; --rule2:#B3BEB9;
+    --q1:#1F5C63; --q1s:#DCEAEA; --q2:#7A5B12; --q2s:#F4EBD5;
+    --ok:#2C7A57; --oks:#DCEDE3; --bad:#A64430; --bads:#F3E0DB;
+  }
+  :root[data-theme="dark"] {
+    --ground:#0F1514; --panel:#161E1C; --panel2:#1D2725; --ink:#E4EAE7; --ink2:#B5C3BE;
+    --muted:#7F918B; --rule:#26312E; --rule2:#374744;
+    --q1:#6FB6BC; --q1s:#152F30; --q2:#D2A94E; --q2s:#2A2415;
+    --ok:#68BE92; --oks:#152B21; --bad:#DD8570; --bads:#2D1A16;
+  }
+
+  body { background:var(--ground); color:var(--ink); font-family:var(--fh);
+         font-size:16px; line-height:1.55; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1020px; margin:0 auto; padding:3rem 1.25rem 5rem;
+          display:flex; flex-direction:column; gap:3rem; }
+
+  h1 { font-size:clamp(1.9rem,5vw,2.6rem); font-weight:700; letter-spacing:-.03em; line-height:1.1; }
+  h2 { font-size:1.35rem; font-weight:660; letter-spacing:-.015em; }
+  h3 { font-size:1rem; font-weight:640; }
+  .sub { color:var(--ink2); font-size:1.04rem; max-width:64ch; }
+  .tag { font-family:var(--fm); font-size:.7rem; letter-spacing:.15em;
+         text-transform:uppercase; color:var(--muted); }
+  section { display:flex; flex-direction:column; gap:1.1rem; }
+
+  /* ---------- pipeline rail ---------- */
+  .rail { display:flex; flex-direction:column; gap:.4rem; }
+  .node { background:var(--panel); border:1px solid var(--rule); border-radius:7px;
+          padding:.75rem .9rem; display:flex; flex-wrap:wrap; align-items:baseline;
+          gap:.15rem .7rem; }
+  .node .who { font-weight:640; font-size:.95rem; }
+  .node .what { color:var(--ink2); font-size:.9rem; flex:1 1 14rem; }
+  .node .ref { font-family:var(--fm); font-size:.68rem; color:var(--muted); white-space:nowrap; }
+  .node.q1 { border-left:4px solid var(--q1); }
+  .node.q2 { border-left:4px solid var(--q2); }
+  .node.entry { border-left:4px solid var(--muted); }
+
+  .queue { border-radius:7px; padding:.75rem .9rem; display:flex; flex-wrap:wrap;
+           align-items:baseline; gap:.15rem .7rem; border:1px dashed; }
+  .queue.q1 { background:var(--q1s); border-color:var(--q1); }
+  .queue.q2 { background:var(--q2s); border-color:var(--q2); }
+  .queue .who { font-family:var(--fm); font-weight:640; font-size:.88rem; }
+  .queue.q1 .who { color:var(--q1); }
+  .queue.q2 .who { color:var(--q2); }
+  .queue .what { color:var(--ink2); font-size:.88rem; flex:1 1 14rem; }
+
+  .arr { text-align:center; color:var(--rule2); font-size:.9rem; line-height:.7; }
+  .gap { text-align:center; font-family:var(--fm); font-size:.7rem; color:var(--muted);
+         padding:.15rem 0; }
+
+  /* ---------- side by side ---------- */
+  .two { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
+  @media (max-width:760px){ .two { grid-template-columns:1fr; } }
+  .col { background:var(--panel); border:1px solid var(--rule); border-radius:8px;
+         padding:1rem; display:flex; flex-direction:column; gap:.45rem; }
+  .col > .cap { font-family:var(--fm); font-size:.72rem; letter-spacing:.1em;
+                text-transform:uppercase; color:var(--muted);
+                border-bottom:1px dashed var(--rule2); padding-bottom:.35rem; margin-bottom:.25rem; }
+  .li { font-size:.9rem; color:var(--ink2); padding:.5rem .65rem; border-radius:5px;
+        background:var(--panel2); border:1px solid var(--rule); }
+  .li b { color:var(--ink); }
+  .li.bad { background:var(--bads); border-color:var(--bad); color:var(--ink); }
+  .li.ok  { background:var(--oks);  border-color:var(--ok);  color:var(--ink); }
+
+  /* ---------- tables ---------- */
+  .tw { overflow-x:auto; border:1px solid var(--rule); border-radius:7px; background:var(--panel); }
+  table { border-collapse:collapse; width:100%; font-size:.89rem; }
+  th,td { text-align:left; padding:.6rem .8rem; border-bottom:1px solid var(--rule);
+          vertical-align:top; }
+  th { font-size:.71rem; letter-spacing:.08em; text-transform:uppercase; color:var(--muted);
+       background:var(--panel2); white-space:nowrap; }
+  tr:last-child td { border-bottom:none; }
+  td.m { font-family:var(--fm); font-size:.79rem; white-space:nowrap; }
+  code { font-family:var(--fm); font-size:.87em; }
+  td code, .li code, p code { background:var(--panel2); border:1px solid var(--rule);
+                              border-radius:3px; padding:.04em .3em; }
+
+  .pill { display:inline-block; font-family:var(--fm); font-size:.68rem;
+          padding:.14em .45em; border-radius:3px; white-space:nowrap; }
+  .p-new { background:var(--oks); color:var(--ok); }
+  .p-del { background:var(--bads); color:var(--bad); }
+  .p-mod { background:var(--q2s); color:var(--q2); }
+
+  .note { border:1px solid var(--rule); border-left:4px solid var(--c,var(--q1));
+          background:var(--panel); border-radius:7px; padding:.9rem 1.05rem;
+          display:flex; flex-direction:column; gap:.4rem; }
+  .note h3 { font-size:.97rem; }
+  .note p { font-size:.9rem; color:var(--ink2); }
+
+  .states { font-family:var(--fm); font-size:.75rem; line-height:1.7; white-space:pre;
+            background:var(--panel2); border:1px solid var(--rule); border-radius:6px;
+            padding:.9rem 1.05rem; overflow-x:auto; color:var(--ink2); }
+  .states b { color:var(--ink); }
+  .s-ok{color:var(--ok);font-weight:600} .s-bad{color:var(--bad);font-weight:600}
+  .s-w{color:var(--q2);font-weight:600}
+
+  footer { border-top:1px solid var(--rule); padding-top:1.2rem; font-size:.84rem; color:var(--muted); }
+  @media print { .col,.note,.tw{break-inside:avoid} body{background:#fff} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header style="display:flex;flex-direction:column;gap:.7rem">
+    <p class="tag">MNP log ingestion &middot; 2026-08-05</p>
+    <h1>The pipeline, after the queue split</h1>
+    <p class="sub">Two changes, one idea: <b>a producer writes a ticket and stops; one consumer drains that queue.</b> Applied twice &mdash; between fetching and parsing, and between parsing and stitching.</p>
+    <p class="sub" style="font-size:.92rem;color:var(--muted)">160 tests passing. Nothing committed.</p>
+  </header>
+
+  <!-- ============================ THE IDEA ============================ -->
+  <section>
+    <p class="tag">The shape</p>
+    <h2>The same pattern, twice</h2>
+    <p class="sub">The second queue already existed &mdash; Stage&nbsp;1 has always written a ticket for Stage&nbsp;2. It just had no consumer, so every producer had to remember to drain it. Now both queues look identical.</p>
+    <div class="tw">
+      <table>
+        <thead><tr><th>&nbsp;</th><th>Producer writes</th><th>Queue table</th><th>Consumer drains</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="m" style="color:var(--q1)"><b>Stage 1</b></td>
+            <td>SSH fetcher, after saving bytes</td>
+            <td class="m">log_source_objects <span class="pill p-new">new</span></td>
+            <td class="m">log_parse_worker <span class="pill p-new">new</span></td>
+          </tr>
+          <tr>
+            <td class="m" style="color:var(--q2)"><b>Stage 2</b></td>
+            <td>Stage 1, with the entries</td>
+            <td class="m">log_regroup_pending <span style="color:var(--muted)">existed</span></td>
+            <td class="m">log_stitch_worker <span class="pill p-new">new</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================ ENTRY POINTS ============================ -->
+  <section>
+    <p class="tag">Entry points</p>
+    <h2>How anything starts at all</h2>
+    <p class="sub">Two operating-system processes, started by systemd. The web tier serves HTTP and runs no loops; the worker process runs every loop.</p>
+
+    <div class="two">
+      <div class="col">
+        <p class="cap">Process A &middot; web tier</p>
+        <div class="li"><b>systemd</b> &rarr; <code>fastapirag.service</code></div>
+        <div class="li">gunicorn <b>imports</b> <code>app.main:app</code> &mdash; 4 processes</div>
+        <div class="li ok"><code>RUN_BACKGROUND_WORKERS=false</code><br>&rarr; starts <b>no</b> loops</div>
+        <div class="li">Serves the API. A human clicking "Fetch now" enters here.</div>
+      </div>
+      <div class="col">
+        <p class="cap">Process B &middot; background worker</p>
+        <div class="li"><b>systemd</b> &rarr; <code>fastapirag-worker.service</code></div>
+        <div class="li"><code>python -m app.worker</code> &mdash; <b>runs</b> the module
+          <span class="ref" style="display:block;font-family:var(--fm);font-size:.68rem;color:var(--muted)">app/worker.py:77</span></div>
+        <div class="li">Takes a <b>singleton lock</b> in Postgres &mdash; a second worker exits instead of double-running</div>
+        <div class="li ok"><code>start_background_tasks()</code> &rarr; starts <b>all</b> loops
+          <span class="ref" style="display:block;font-family:var(--fm);font-size:.68rem;color:var(--muted)">app/background.py:70</span></div>
+      </div>
+    </div>
+
+    <div class="note" style="--c:var(--muted)">
+      <h3>Which loops, and who owns what</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Loop</th><th>Cadence</th><th>Job</th><th>Default</th></tr></thead>
+          <tbody>
+            <tr><td class="m">ssh_log_fetcher</td><td class="m">per source</td><td>Downloads bytes. One task per customer, max 8 at once</td><td class="m">on</td></tr>
+            <tr><td class="m">log_parse_worker <span class="pill p-new">new</span></td><td class="m">2s</td><td>Drains the ingest queue &rarr; Stage 1</td><td class="m">off</td></tr>
+            <tr><td class="m">log_stitch_worker <span class="pill p-new">new</span></td><td class="m">1s</td><td>Drains the stitch queue &rarr; Stage 2</td><td class="m"><b>on</b></td></tr>
+            <tr><td class="m">log_grouping_worker</td><td class="m">&mdash;</td><td><b>Deleted.</b> Polled <code>count(*)</code> on the 40&nbsp;GB heap every 5s, which is why it shipped disabled</td><td class="m"><span class="pill p-del">gone</span></td></tr>
+            <tr><td class="m">embedding, watcher, notifications, cleanup</td><td class="m">various</td><td>Unchanged</td><td class="m">&mdash;</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ THE PIPELINE ============================ -->
+  <section>
+    <p class="tag">End to end</p>
+    <h2>One log line, from remote disk to the feed</h2>
+    <p class="sub">Each dashed block is a durable queue. Everything above it can crash without losing work; everything below it runs on its own clock.</p>
+
+    <div class="rail">
+      <div class="node entry"><span class="who">Poller tick</span>
+        <span class="what">one task per customer, waits for one of 8 slots</span>
+        <span class="ref">ssh_log_fetcher.py:63</span></div>
+      <p class="arr">&darr;</p>
+      <div class="node entry"><span class="who">Per-host lock</span>
+        <span class="what">only one SSH connection per server, ever &mdash; across both processes</span>
+        <span class="ref">remote_fetcher.py:84</span></div>
+      <p class="arr">&darr;</p>
+      <div class="node q1"><span class="who">Download + save</span>
+        <span class="what">newline-aligned windows written to ./uploads</span>
+        <span class="ref">_stage_range :199</span></div>
+      <p class="arr">&darr;</p>
+
+      <div class="queue q1"><span class="who">log_source_objects</span>
+        <span class="what">"bytes 5000&ndash;9000 of this file still need parsing" &mdash; written in the SAME transaction that advances the file bookmark</span></div>
+
+      <p class="gap">&#8615;&nbsp; fetcher releases the lock and moves on &nbsp;&#8615;</p>
+
+      <div class="node q1"><span class="who">Parse worker</span>
+        <span class="what">claims a row with FOR UPDATE SKIP LOCKED, leases it</span>
+        <span class="ref">log_parse_worker.py:68</span></div>
+      <p class="arr">&darr;</p>
+      <div class="node q1"><span class="who">Stage 1</span>
+        <span class="what">parse &rarr; INSERT log_entries ON CONFLICT DO NOTHING</span>
+        <span class="ref">parse_insert.py</span></div>
+      <p class="arr">&darr;</p>
+
+      <div class="queue q2"><span class="who">log_regroup_pending</span>
+        <span class="what">"10:00&ndash;10:05 needs stitching" &mdash; written in the SAME transaction as the entries</span></div>
+
+      <p class="gap">&#8615;&nbsp; parse worker stops here &nbsp;&#8615;</p>
+
+      <div class="node q2"><span class="who">Stitch worker</span>
+        <span class="what">every 1s: which tenants have due work?</span>
+        <span class="ref">log_stitch_worker.py</span></div>
+      <p class="arr">&darr;</p>
+      <div class="node q2"><span class="who">Stage 2</span>
+        <span class="what">coalesce a tenant's windows, rebuild transactions</span>
+        <span class="ref">log_stitch_worker.py:92</span></div>
+      <p class="arr">&darr;</p>
+      <div class="node"><span class="who">Feed</span>
+        <span class="what">the analyst sees the transaction</span></div>
+    </div>
+
+    <div class="note" style="--c:var(--q1)">
+      <h3>Why the bookmark and the ticket must commit together</h3>
+      <p>The file bookmark (<code>log_ssh_file_checkpoints.last_offset</code>) is a promise that everything behind it is handled. Move it <b>without</b> the ticket and those bytes are skipped forever, with nothing reporting it. Write the ticket <b>without</b> moving it and the next poll re-downloads them.</p>
+      <p>Committing both in one transaction removes the window entirely: a crash before COMMIT simply leaves the previous state, and the next poll re-fetches &mdash; which is exactly what happens today.</p>
+    </div>
+  </section>
+
+  <!-- ============================ BEFORE / AFTER ============================ -->
+  <section>
+    <p class="tag">What actually changed</p>
+    <h2>Before and after</h2>
+    <div class="two">
+      <div class="col">
+        <p class="cap">Before</p>
+        <div class="li bad">One poll tick did <b>everything</b>: download &rarr; parse &rarr; insert &rarr; stitch, holding the SSH connection and server lock throughout.</div>
+        <div class="li bad">A slow database <b>blocked network fetches</b> for that whole server, for every tenant.</div>
+        <div class="li bad">Crash mid-parse &rarr; file orphaned, nothing recorded it needed work. Recovery was accidental.</div>
+        <div class="li bad">A bad file retried <b>every poll forever</b>, writing another ./uploads copy and another jobs row each time.</div>
+        <div class="li bad">A non-disk error instead <b>disabled the whole server</b> after 10 tries.</div>
+        <div class="li bad"><b>Five modules</b> had to remember to call Stage 2 &mdash; including the SFTP transport and a directory watcher.</div>
+        <div class="li bad">Stage 2 retried on <b>every tick with no delay</b>: all 3 attempts gone in seconds, before a transient fault could clear.</div>
+        <div class="li bad">Nothing ever deleted files from ./uploads.</div>
+      </div>
+      <div class="col">
+        <p class="cap">After</p>
+        <div class="li ok">Three independent loops, each on its own clock, joined by two durable queues.</div>
+        <div class="li ok">The lock is released as soon as the bytes are down.</div>
+        <div class="li ok">The ticket survives any crash; the work is picked up again, reading the <b>local</b> file.</div>
+        <div class="li ok">3 attempts with growing delays, then dead-lettered and flagged &mdash; and hopeless failures give up on the <b>first</b> try.</div>
+        <div class="li ok">A bad file no longer touches the source breaker; per-file and per-server failures are separate concerns.</div>
+        <div class="li ok"><b>One</b> consumer drains each queue. Producers only write tickets.</div>
+        <div class="li ok">30s / 60s / 120s with jitter, so the retries can actually succeed.</div>
+        <div class="li ok">An <code>ingested</code> row proves the file is redundant, so it can finally be deleted.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ FAILURE ============================ -->
+  <section>
+    <p class="tag">Failure handling</p>
+    <h2>One retry policy, both queues</h2>
+    <p class="sub">Backoff and failure classification live in one module (<code>app/services/queueing/retry_policy.py</code>) so the same failure behaves the same way whichever queue it lands in. A test asserts neither worker reimplements it.</p>
+
+    <div class="tw">
+      <table>
+        <thead><tr><th>Failure</th><th>Examples</th><th>What happens</th></tr></thead>
+        <tbody>
+          <tr><td><b>Transient</b></td><td>bad sector, statement timeout, dropped connection</td><td>Back off (30s / 60s / 120s + jitter) and retry until the budget is spent</td></tr>
+          <tr><td><b>Permanent</b></td><td>corrupt bytes, missing file, unparseable content</td><td><b>Abandon on the first attempt</b> &mdash; retrying cannot help, and 3 tries just triple the log noise and re-read a bad disk area</td></tr>
+          <tr><td><b>Unknown</b></td><td>anything unrecognised</td><td>Treated as transient. The budget bounds it either way, so a couple of retries beats discarding work that might have succeeded</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="states"><b>pending</b> ──claim──▸ <b>leased</b> ──success──▸ <span class="s-ok">ingested</span> ──sweep──▸ (file deleted)
+   ▲             │
+   │             ├─ transient ──────▸ <span class="s-w">pending</span>, attempts+1, available_at = now + backoff
+   │             ├─ permanent ──────▸ <span class="s-bad">abandoned</span>   (CRITICAL alert, budget untouched)
+   │             ├─ budget spent ───▸ <span class="s-bad">abandoned</span>   (CRITICAL alert)
+   │             └─ lease expired ──▸ <span class="s-w">pending</span>, attempts+1  (worker crashed)
+   │
+   └────────── POST /logs/ingest-queue/reset-abandoned ──────────┘</div>
+
+    <div class="note" style="--c:var(--bad)">
+      <h3>Poison isolation</h3>
+      <p><code>FOR UPDATE SKIP LOCKED</code> means one stuck row never blocks the queue behind it. That is precisely the failure the old design had at <em>source</em> level, where one unparseable file could eventually disable an entire server.</p>
+    </div>
+  </section>
+
+  <!-- ============================ TIMING ============================ -->
+  <section>
+    <p class="tag">Visible change</p>
+    <h2>What behaves differently</h2>
+    <div class="tw">
+      <table>
+        <thead><tr><th>&nbsp;</th><th>Before</th><th>After</th></tr></thead>
+        <tbody>
+          <tr><td>Transactions appear</td><td>when the poll ends</td><td>~1s later, on the stitch worker's next tick</td></tr>
+          <tr><td>A fetch run reports</td><td>pull <b>and</b> stitch outcome</td><td>the <b>pull only</b>; stitch problems show on <code>/logs/regroup/status</code></td></tr>
+          <tr><td>Stitch failure</td><td>marked the fetch run <code>failed</code></td><td>recorded on the queue row, visible via the status endpoint</td></tr>
+          <tr><td><code>/logs/regroup/status</code></td><td>pending / abandoned counts</td><td>plus <code>backing_off_windows</code> and <code>next_retry_at</code> <span class="pill p-new">new</span></td></tr>
+          <tr><td><code>?finalize=true</code></td><td>always claimed "all clear"</td><td>re-counts and <b>tells the truth</b> <span class="pill p-mod">fixed</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note" style="--c:var(--q2)">
+      <h3>One frontend change is required</h3>
+      <p><code>useRemoteFetch.ts</code> documents the old guarantee in a comment: <em>"the run FINALIZES INTERNALLY &hellip; never call finalize after a fetch."</em> That is now false, so reloading the feed the instant a run completes shows data that has not been stitched yet.</p>
+      <p>The fix is ~10 lines: poll <code>getRegroupStatus()</code> until <code>up_to_date</code>, then reload. Full brief in <code>docs/plan/2026-08-05_frontend-stitch-timing-change.md</code>.</p>
+    </div>
+  </section>
+
+  <!-- ============================ BUGS ============================ -->
+  <section>
+    <p class="tag">Found while building</p>
+    <h2>Five bugs in my own work</h2>
+    <div class="tw">
+      <table>
+        <thead><tr><th>Bug</th><th>Would have caused</th></tr></thead>
+        <tbody>
+          <tr><td><b>Queue mode clobbered the checkpoint's mtime and fingerprint</b></td><td>Every next poll reads every file as "rotated" and re-downloads the whole directory &mdash; the ~500&nbsp;MB-per-rotation stall that chunk 12 had already fixed</td></tr>
+          <tr><td><b><code>available_at</code> written with the app clock, compared with the DB clock</b></td><td>Your host runs 44ms ahead of the container. Fresh rows intermittently look "not yet due", so work is silently skipped &mdash; at random. Both sides now use the database clock</td></tr>
+          <tr><td><b><code>now()</code> instead of <code>clock_timestamp()</code></b></td><td><code>now()</code> is <em>transaction</em> start time, so a row written after a transaction began looks permanently not-due inside it</td></tr>
+          <tr><td><b>The queue-depth guard was never called</b></td><td>Implemented and unit-tested, but not wired in &mdash; so the backpressure protecting a failing disk did nothing</td></tr>
+          <tr><td><b>Rolling a flag back would strand work</b></td><td>Once a ticket exists the bookmark has moved past those bytes. Both workers now also start when leftover work exists, regardless of the flag</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================ FILES ============================ -->
+  <section>
+    <p class="tag">Inventory</p>
+    <h2>What was written</h2>
+    <div class="tw">
+      <table>
+        <thead><tr><th>File</th><th>&nbsp;</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td class="m">log_source_object.py</td><td><span class="pill p-new">new</span></td><td>The ingest queue: work ticket + exact provenance + retry budget</td></tr>
+          <tr><td class="m">log_parse_worker.py</td><td><span class="pill p-new">new</span></td><td>Claims, leases, parses, dead-letters</td></tr>
+          <tr><td class="m">log_stitch_worker.py</td><td><span class="pill p-new">new</span></td><td>Drains the stitch queue &mdash; the consumer that never existed</td></tr>
+          <tr><td class="m">queueing/retry_policy.py</td><td><span class="pill p-new">new</span></td><td>One backoff + classification, shared by both queues</td></tr>
+          <tr><td class="m">2 alembic migrations</td><td><span class="pill p-new">new</span></td><td>The queue table; the <code>available_at</code> gate. Both round-trip cleanly</td></tr>
+          <tr><td class="m">log_grouping_worker.py</td><td><span class="pill p-del">deleted</span></td><td>Replaced. Polled <code>count(*)</code> on the 40&nbsp;GB heap</td></tr>
+          <tr><td class="m">remote_fetcher.py</td><td><span class="pill p-mod">mod</span></td><td>Queue mode behind a flag; all Stage 2 knowledge removed</td></tr>
+          <tr><td class="m">log_watcher.py</td><td><span class="pill p-mod">mod</span></td><td>Stage 2 call removed</td></tr>
+          <tr><td class="m">derive_transactions.py</td><td><span class="pill p-mod">mod</span></td><td>Backoff + permanent-failure handling. Stitching logic untouched</td></tr>
+          <tr><td class="m">logs.py</td><td><span class="pill p-mod">mod</span></td><td>2 queue endpoints; truthful <code>?finalize=true</code>; backoff visibility</td></tr>
+          <tr><td class="m">3 test files</td><td><span class="pill p-new">new</span></td><td>62 tests, all written failing-first</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================ STATUS ============================ -->
+  <section>
+    <p class="tag">Where it stands</p>
+    <h2>Live now, and gated</h2>
+    <div class="two">
+      <div class="col">
+        <p class="cap">Active by default</p>
+        <div class="li ok"><b>Stage 2 queue split.</b> The stitch worker owns Stage 2; producers only write tickets.</div>
+        <div class="li ok"><b>Stage 2 backoff + permanent-failure handling.</b></div>
+        <div class="li ok"><b>Truthful pending signals</b> and the new backoff visibility fields.</div>
+      </div>
+      <div class="col">
+        <p class="cap">Built, switched off</p>
+        <div class="li"><b>Stage 1 queue split.</b> <code>log_parse_worker_enabled = false</code>.</div>
+        <div class="li">With the flag off, the fetcher parses inline <b>exactly as before</b> &mdash; there is an explicit regression test asserting that.</div>
+        <div class="li">Rollback is flipping a boolean, not reverting a migration.</div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>Detail: <code>docs/plan/2026-08-02_15-47_log-source-objects-fetch-parse-decoupling.md</code> (Stage&nbsp;1) &middot; <code>docs/plan/2026-08-05_15-21_who-calls-stage2.html</code> (Stage&nbsp;2 trigger) &middot; <code>docs/plan/2026-08-05_frontend-stitch-timing-change.md</code> (frontend brief). Nothing is committed.</p>
+  </footer>
+
+</div>
+</body>
+</html>
