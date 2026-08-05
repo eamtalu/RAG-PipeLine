@@ -271,9 +271,9 @@ async def test_deleting_an_entry_removes_its_assignment(clean):
 
 
 # =============================================================== dual-write parity
-async def test_stage2_writes_assignments_that_match_the_legacy_columns(clean):
-    """The safety net for the whole change: while both are populated they must agree exactly, so the
-    switch-over can be proven on real data before anything depends on the new table."""
+async def test_stage2_writes_an_assignment_for_every_grouped_entry(clean):
+    """Stage 2's only record of the grouping is now the assignment table, so every entry it groups
+    must have exactly one row - no silent drops."""
     job = await _mk_job()
     await _mk_entries(job, 6)
 
@@ -281,19 +281,12 @@ async def test_stage2_writes_assignments_that_match_the_legacy_columns(clean):
         await d.regroup_window(s, CC, T0, T0 + timedelta(seconds=6), commit=True)
 
     async with async_session() as s:
-        mismatches = await s.scalar(select(func.count()).select_from(LogEntry).outerjoin(
-            LogEntryAssignment, LogEntryAssignment.entry_id == LogEntry.id
-        ).where(
-            LogEntry.customer_code == CC,
-            (LogEntry.transaction_id.is_distinct_from(LogEntryAssignment.transaction_id))
-            | (LogEntry.seq.is_distinct_from(LogEntryAssignment.seq)),
-        ))
-    assert mismatches == 0, "the assignment table disagrees with the legacy columns"
-
-    async with async_session() as s:
-        n = await s.scalar(select(func.count()).select_from(LogEntryAssignment)
-                           .where(LogEntryAssignment.customer_code == CC))
-    assert n and n > 0, "Stage 2 wrote no assignments at all"
+        assigned = await s.scalar(select(func.count()).select_from(LogEntryAssignment)
+                                  .where(LogEntryAssignment.customer_code == CC))
+        claimed = await s.scalar(select(func.sum(LogTransaction.entry_count))
+                                 .where(LogTransaction.customer_code == CC))
+    assert assigned and assigned > 0, "Stage 2 wrote no assignments at all"
+    assert assigned == claimed, "entry_count disagrees with the assignments actually written"
 
 
 async def test_regroup_is_idempotent_and_transactions_are_identical(clean):
@@ -353,7 +346,7 @@ async def _log_entries_updates() -> int:
             "SELECT n_tup_upd FROM pg_stat_user_tables WHERE relname = 'log_entries'")) or 0
 
 
-async def test_a_second_regroup_performs_no_update_on_log_entries(clean, monkeypatch):
+async def test_a_second_regroup_performs_no_update_on_log_entries(clean):
     """THE test for this whole change.
 
     Stage 2 used to rewrite the raw table on every regroup — 105,838,123 updates at 0.0% HOT in
@@ -362,10 +355,9 @@ async def test_a_second_regroup_performs_no_update_on_log_entries(clean, monkeyp
       2. implicitly, via the ON DELETE SET NULL cascade firing when the window's transactions were
          deleted.
 
-    Both must be gone. This runs with dual-write OFF, which is the end state; with it on, (1) is
-    still expected and is covered by the parity test above.
+    Both are now gone - the columns themselves were dropped in e93c47a15b08, so neither source can
+    reappear without a migration.
     """
-    monkeypatch.setattr(settings, "log_entry_assignment_dual_write", False)
     job = await _mk_job()
     await _mk_entries(job, 6)
 
@@ -413,15 +405,14 @@ def test_window_regroup_uses_a_bounded_anti_join():
         "the anti-join must remain bounded by the window"
 
 
-def test_no_module_still_writes_the_legacy_columns_in_the_grouping_loop():
-    """Guard for step 4: once dual-write is retired, _persist must not assign to entry.transaction_id
-    or entry.seq at all."""
+def test_persist_does_not_write_any_column_on_log_entries():
+    """_persist must record the grouping ONLY in the assignment table. Assigning to an entry
+    attribute here is what made the raw table mutable in the first place."""
     import inspect
     src = inspect.getsource(d._persist)
-    if settings.log_entry_assignment_dual_write:
-        return                                  # dual-write phase: legacy writes are expected
     assert "e.transaction_id =" not in src
     assert "e.seq =" not in src
+    assert "assignments.write" in src
 
 
 # =============================================================== repository edge coverage
@@ -498,13 +489,15 @@ async def test_transaction_detail_reads_through_the_assignment(clean):
     assert txn is not None
 
     async with async_session() as s:
-        t, entries, truncated = await _load_transaction_entries(txn.id, CC, s)
+        # returns (entry, seq) pairs — the position travels with the row now
+        t, pairs, truncated = await _load_transaction_entries(txn.id, CC, s)
     assert t.id == txn.id
     assert truncated is False
-    assert len(entries) == txn.entry_count
+    assert len(pairs) == txn.entry_count
+    assert [q for _e, q in pairs] == list(range(len(pairs))), "seq must be 0..n-1 in order"
     async with async_session() as s:
         expected = await A.entry_ids_for_transactions(s, [txn.id])
-    assert [e.id for e in entries] == expected
+    assert [e.id for e, _q in pairs] == expected
 
 
 async def test_agent_tool_reads_through_the_assignment(clean):
@@ -524,3 +517,92 @@ async def test_agent_tool_reads_through_the_assignment(clean):
     seqs = [step["seq"] for step in got["timeline"]]
     assert seqs == sorted(seqs), "agent output must be in seq order"
     assert all(q is not None for q in seqs), "seq must come from the assignment, not a NULL column"
+
+
+# =============================================================== final state: the columns are gone
+async def test_legacy_assignment_columns_no_longer_exist():
+    """The end state. While `transaction_id` / `seq` remain on log_entries, something can still write
+    them and quietly reintroduce the churn; and their index is dead weight on every insert.
+
+    Dropping them is metadata-only in PostgreSQL — measured at ~0.1s on a 48 MB table, with the
+    relfilenode unchanged — so there is no rewrite and no reason to keep them.
+    """
+    from sqlalchemy import text as sa_text
+    async with async_session() as s:
+        cols = (await s.execute(sa_text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'log_entries' AND column_name IN ('transaction_id', 'seq')"
+        ))).scalars().all()
+    assert cols == [], f"legacy assignment columns still on log_entries: {cols}"
+
+
+async def test_the_transaction_id_index_is_gone():
+    """That index was maintained on every one of the 105.8M updates. With the column gone it cannot
+    exist, but assert it explicitly so a re-add is caught."""
+    from sqlalchemy import text as sa_text
+    async with async_session() as s:
+        idx = (await s.execute(sa_text(
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'log_entries' "
+            "AND indexdef LIKE '%transaction_id%'"
+        ))).scalars().all()
+    assert idx == [], f"an index on the dropped column still exists: {idx}"
+
+
+def test_no_dual_write_setting_remains():
+    """Dual-write was scaffolding for a staged switch-over. Keeping a dead flag invites someone to
+    turn it back on and start writing a column that no longer exists."""
+    assert not hasattr(settings, "log_entry_assignment_dual_write")
+
+
+def test_no_module_reads_or_writes_the_legacy_columns():
+    """Static guard across every module that touched them, so a reintroduction fails loudly here
+    rather than silently at runtime."""
+    import inspect
+    from app.api.v1 import logs as logs_api
+    from app.services.log_agent import tools
+    from app.services.mnp_log_ingestion.pipeline import derive_transactions as dt
+
+    for mod in (logs_api, tools, dt):
+        src = inspect.getsource(mod)
+        for banned in ("LogEntry.transaction_id", "LogEntry.seq", "e.transaction_id", "e.seq"):
+            assert banned not in src, f"{mod.__name__} still references {banned}"
+
+
+async def test_incremental_regroup_uses_the_anti_join(clean):
+    """regroup_incremental had TWO `transaction_id IS NULL` sites of its own — separate from
+    regroup_window. They must use the assignment anti-join, or the live path silently regroups
+    nothing once the column is gone."""
+    job = await _mk_job()
+    await _mk_entries(job, 6)
+
+    async with async_session() as s:
+        stats = await d.regroup_incremental(s, CC)
+    assert stats.get("transactions_created", 0) > 0, \
+        "regroup_incremental found no unassigned entries — its detection is still column-based"
+
+    async with async_session() as s:
+        n = await s.scalar(select(func.count()).select_from(LogEntryAssignment)
+                           .where(LogEntryAssignment.customer_code == CC))
+    assert n == 6
+
+
+async def test_load_transaction_by_entry_maps_entries_to_their_owner(clean):
+    """The inverse lookup, for list endpoints that show which transaction each entry belongs to.
+    Entries with no assignment are absent from the map — the caller reports those as unassigned
+    rather than guessing."""
+    job = await _mk_job()
+    entries = await _mk_entries(job, 4)
+    txn = await _mk_txn(job)
+    async with async_session() as s:
+        await A.write(s, transaction_id=txn, entry_ids=entries[:3], customer_code=CC)
+        await s.commit()
+
+    async with async_session() as s:
+        got = await A.load_transaction_by_entry(s, entries)
+    assert got == {entries[0]: txn, entries[1]: txn, entries[2]: txn}
+    assert entries[3] not in got, "an unassigned entry must simply be absent"
+
+
+async def test_load_transaction_by_entry_accepts_an_empty_list(clean):
+    async with async_session() as s:
+        assert await A.load_transaction_by_entry(s, []) == {}

@@ -97,32 +97,34 @@ async def _seed_txn_with_scrambled_entries(db, cc: str) -> LogTransaction:
     await db.flush()
 
     def entry(seq, line, etype, msg):
+        """`seq` is carried alongside for the assignment rows below — log_entries no longer has a
+        seq or transaction_id column; the assignment table owns both."""
         raw = f"{cc}-{msg}-{line}"
-        return LogEntry(
+        e = LogEntry(
             id=uuid.uuid4(),
-            customer_code=cc, job_id=job.id, transaction_id=tx.id,
+            customer_code=cc, job_id=job.id,
             source_file="src.txt", line_number=line, entry_type=etype,
-            entry_hash=hashlib.sha256(raw.encode()).hexdigest(), seq=seq, message=msg,
+            entry_hash=hashlib.sha256(raw.encode()).hexdigest(), message=msg,
         )
+        return e, seq
 
     # insertion order is intentionally NOT the render order:
-    rows = [
+    pairs = [
         entry(3, 40, LogEntryType.response, "RESPONSE: done"),
         entry(2, 30, LogEntryType.info, "STEP_SECOND"),
-        entry(None, 99, LogEntryType.info, "STEP_NULLSEQ"),   # NULL seq -> must render last
+        entry(None, 99, LogEntryType.info, "STEP_UNASSIGNED"),  # no assignment -> not in this txn
         entry(0, 10, LogEntryType.request, "REQUEST: start"),
         entry(1, 20, LogEntryType.info, "STEP_FIRST"),
     ]
-    db.add_all(rows)
+    db.add_all([e for e, _q in pairs])
     await db.flush()
 
     # Since chunk 20 the render reads the position from log_entry_assignment, not LogEntry.seq, so a
     # seeded transaction must carry assignment rows exactly as a real Stage 2 run would. The NULL-seq
-    # entry is deliberately given NO assignment row - that is what "unstitched" now looks like, and
-    # the render must still place it last rather than dropping it.
+    # entry is deliberately given NO assignment row - that is what "unstitched" now looks like.
     db.add_all([
-        LogEntryAssignment(entry_id=e.id, transaction_id=tx.id, seq=e.seq, customer_code=cc)
-        for e in rows if e.seq is not None
+        LogEntryAssignment(entry_id=e.id, transaction_id=tx.id, seq=q, customer_code=cc)
+        for e, q in pairs if q is not None
     ])
     await db.flush()
     return tx
@@ -154,4 +156,4 @@ async def test_rendered_entries_are_in_seq_order_despite_scrambled_insert(db):
     # An unassigned entry is still visible - it is simply awaiting stitching, and shows through the
     # entry-level endpoints and the pending_regroup flag rather than inside a transaction it does not
     # belong to.
-    assert "STEP_NULLSEQ" not in body
+    assert "STEP_UNASSIGNED" not in body

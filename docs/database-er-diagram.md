@@ -219,7 +219,7 @@ erDiagram
 
     log_entries {
         uuid id PK
-        uuid transaction_id "LEGACY, no FK; superseded by log_entry_assignment"
+
         uuid job_id FK "-> jobs.id (CASCADE)"
         string customer_code "soft tenant key"
         string entry_hash "dedup, unique w/ customer_code"
@@ -280,8 +280,9 @@ Separating the current interpretation from the raw evidence fixes it.
 `entry_id` is the primary key, so "at most one current assignment per entry" is a database guarantee.
 Both foreign keys `CASCADE`: deleting a transaction drops its assignments (what `SET NULL` used to do, without touching raw rows), and deleting an entry drops its assignment, which keeps the purge chain `jobs -> entries -> assignments` intact.
 
-The `log_entries.transaction_id` / `seq` columns still exist but are **legacy**: the FK was dropped in migration `d5b830e14f72` so no cascade can rewrite the table, and nothing reads them.
-Dropping the columns is the only step that rewrites the raw table, so it rides with the partitioning pass.
+The `log_entries.transaction_id` / `seq` columns and their index are **gone** (migrations `d5b830e14f72`, `e93c47a15b08`).
+`DROP COLUMN` is a catalog operation in PostgreSQL, not a rewrite - measured at 0.1s on a 48 MB table with the relfilenode unchanged - so there was no reason to defer it.
+`log_entries` is now strictly insert-only: five consecutive regroups of the same window perform **0** row updates, against ~55 rewrites per row before.
 
 Note: `log_transactions.flow_id` is a nullable hook for a future `log_flow` table and has no foreign key today.
 
@@ -598,5 +599,5 @@ erDiagram
 | `jobs.id` | `log_source_objects.job_id` | nullable, no FK; transitional, set by the parse worker |
 | `notification_rules.id` | `notification_events.rule_id` | provenance, no FK |
 | future `log_flow` | `log_transactions.flow_id` | Phase-3 hook, no FK |
-| `log_transactions.id` | `log_entries.transaction_id` | LEGACY column; FK dropped in `d5b830e14f72`, superseded by `log_entry_assignment` |
+
 | `chunks.id` / `chunks_entity.id` | `embeddings.id` (string) | app-level key into the pgvector table |

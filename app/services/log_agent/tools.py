@@ -285,7 +285,7 @@ async def _get_transaction(db: AsyncSession, args: dict, customer_code: str) -> 
     if not t or t.customer_code != customer_code:  # another tenant's id reads as not-found
         return {"error": f"No transaction found with id {raw}"}
     max_entries = _clamp(args.get("max_entries"), 80, 200)
-    # Ordered by the assignment's seq — LogEntry.seq is no longer the source of truth. Each pair is
+    # Ordered by the assignment's seq, which is where the position lives now. Each pair is
     # (entry, seq) so the timeline below can report the position without reading it off the row.
     entries = [(e, seq) for e, _txn, seq in
                await assignments.load_entries(db, [tid], limit=max_entries)]
@@ -353,10 +353,13 @@ async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> d
         .limit(limit)
     )).scalars().all()
 
+    # one bulk lookup for the page rather than one per row; an entry missing from the map is not
+    # stitched yet.
+    owner = await assignments.load_transaction_by_entry(db, [e.id for e in rows])
     entries = []
     for e in rows:
         row = {
-            "transaction_id": str(e.transaction_id) if e.transaction_id else None,
+            "transaction_id": str(owner[e.id]) if e.id in owner else None,
             "type": e.entry_type.value,
             "level": e.level,
             "timestamp": iso_display(e.timestamp),

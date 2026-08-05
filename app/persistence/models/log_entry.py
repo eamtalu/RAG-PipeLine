@@ -8,9 +8,11 @@
 #   - Written in Stage 1 (parse → insert), per file, idempotently. This table is the source of
 #     truth; everything else (log_transactions) is derived from it and can be re-computed anytime.
 #   - timestamp is the stream-ordering key Stage 2 uses to merge files and stitch transactions.
-#   - transaction_id is set later by Stage 2 (NULL until grouping runs, or for orphan entries
-#     before the first REQUEST). SUPERSEDED: the current assignment now lives in
-#     log_entry_assignment, which is what makes this table insert-only.
+#   - APPEND-ONLY. Stage 1 inserts; nothing ever updates a row again. Which transaction currently
+#     owns an entry lives in log_entry_assignment, not here. It used to be two columns on this table
+#     (transaction_id / seq) rewritten on every regroup, with an ON DELETE SET NULL cascade blanking
+#     them on every window delete — 105.8M updates at 0.0% HOT in production, which is what took the
+#     database down. Both columns and the cascade are gone (migrations d5b830e14f72, e93c47a15b08).
 #   - Promoted columns (entry_type, mi_program, mi_transaction, result_status, record_count) make
 #     the line-level questions cheap; fields (JSONB) holds parsed Inputs/Outputs/Records and
 #     raw_body keeps the literal text.
@@ -49,14 +51,6 @@ class LogEntry(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    # LEGACY, superseded by log_entry_assignment. The FK was ON DELETE SET NULL, which meant every
-    # Stage 2 window delete UPDATED every entry that pointed at those transactions — the implicit half
-    # of the write amplification (105.8M updates, 0.0% HOT in production). The constraint is dropped
-    # in migration d5b830e14f72 so the raw table can be insert-only; the column stays only until the
-    # partitioning pass, which rewrites the table anyway. Nothing reads it.
-    transaction_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True, index=True
-    )
     # FK kept (ON DELETE CASCADE); its index was dropped as unused/damaged — see migration
     # e2a9c7b41d68. Cascade-deletes of a job now seq-scan (rare/admin-only).
     job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"))
@@ -73,7 +67,6 @@ class LogEntry(Base):
     # --- provenance / ordering ---
     source_file: Mapped[str] = mapped_column(String(512))
     line_number: Mapped[int | None] = mapped_column(Integer, nullable=True)  # physical line where the entry starts
-    seq: Mapped[int | None] = mapped_column(Integer, nullable=True)          # order within the transaction (set by Stage 2)
     timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     # --- log line fields ---

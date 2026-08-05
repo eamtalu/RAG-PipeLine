@@ -256,6 +256,9 @@ async def list_entries(
 
     stmt = stmt.order_by(LogEntry.timestamp, LogEntry.line_number).limit(limit).offset(offset)
     rows = (await db.execute(stmt)).scalars().all()
+    # which transaction owns each entry on THIS page — one bulk lookup, not one per row. An entry
+    # missing from the map is simply not stitched yet.
+    owner = await assignments.load_transaction_by_entry(db, [e.id for e in rows])
 
     return {
         "count": len(rows),
@@ -265,7 +268,7 @@ async def list_entries(
             {
                 "id": str(e.id),
                 "job_id": str(e.job_id),
-                "transaction_id": str(e.transaction_id) if e.transaction_id else None,
+                "transaction_id": str(owner[e.id]) if e.id in owner else None,
                 "source_file": e.source_file,
                 "line_number": e.line_number,
                 "timestamp": iso_display(e.timestamp),
@@ -761,7 +764,7 @@ async def view_transactions(
         # the only ordering that matters — WITHIN each transaction — in Python via _entry_sort_key.
         # See docs/transactions-view-load-spike-and-db-concepts-primer.md.
         # (entry, owning transaction, seq) — the assignment table owns the grouping now, so the
-        # renderer below no longer reads LogEntry.transaction_id / .seq.
+        # renderer below groups and orders from the assignment, not from columns on the entry.
         entry_rows = await assignments.load_entries(db, list(ids), limit=MAX_RENDER_ENTRIES + 1)
     except Exception as exc:
         # A dead disk sector under log_entries for this page must not 500 the whole feed: the
@@ -810,8 +813,9 @@ async def _load_transaction_entries(transaction_id: uuid.UUID, customer: str, db
     t = await db.get(LogTransaction, transaction_id)
     if not t or t.customer_code != customer:
         raise HTTPException(404, detail="Transaction not found")
-    # ordered by the assignment's seq — LogEntry.seq is no longer the source of truth.
-    rows = [e for e, _txn, _seq in
+    # ordered by the assignment's seq, and carrying it: the timeline payload reports the position,
+    # which is no longer a column on the entry.
+    rows = [(e, seq) for e, _txn, seq in
             await assignments.load_entries(db, [transaction_id], limit=MAX_RENDER_ENTRIES + 1)]
     truncated = len(rows) > MAX_RENDER_ENTRIES
     return t, list(rows[:MAX_RENDER_ENTRIES]), truncated
@@ -827,7 +831,8 @@ async def get_transaction_view(
 ):
     """Canonical §6 Transaction Detail View as human-readable text (request → steps → response)."""
     t, entries, truncated = await _load_transaction_entries(transaction_id, customer, db)
-    text = await asyncio.to_thread(render_transaction, t, entries, verbose=verbose)
+    text = await asyncio.to_thread(render_transaction, t, [e for e, _q in entries],
+                                   verbose=verbose)
     notice = _pending_notice(pending)
     if truncated:
         notice += f"(showing the first {MAX_RENDER_ENTRIES:,} steps — transaction truncated)\n\n"
@@ -846,7 +851,7 @@ async def get_transaction(transaction_id: uuid.UUID,
     t, entries, truncated = await _load_transaction_entries(transaction_id, customer, db)
 
     return {
-        "rendered": await asyncio.to_thread(render_transaction, t, entries),
+        "rendered": await asyncio.to_thread(render_transaction, t, [e for e, _q in entries]),
         "entries_truncated": truncated,
         "transaction": {
             **_txn_summary(t),
@@ -866,7 +871,7 @@ async def get_transaction(transaction_id: uuid.UUID,
         },
         "timeline": [
             {
-                "seq": e.seq,
+                "seq": seq,
                 "entry_type": e.entry_type.value,
                 "timestamp": iso_display(e.timestamp),
                 "level": e.level,
@@ -877,7 +882,7 @@ async def get_transaction(transaction_id: uuid.UUID,
                 "message": e.message,
                 "fields": e.fields,
             }
-            for e in entries
+            for e, seq in entries
         ],
         "pending_regroup": pending,
     }

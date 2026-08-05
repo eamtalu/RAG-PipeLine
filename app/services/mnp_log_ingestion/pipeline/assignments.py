@@ -106,6 +106,23 @@ async def load_seq_by_entry(db: AsyncSession,
     return {entry_id: seq for entry_id, seq in rows}
 
 
+async def load_transaction_by_entry(db: AsyncSession,
+                                    entry_ids: list[uuid.UUID]) -> dict[uuid.UUID, uuid.UUID]:
+    """`{entry_id: transaction_id}` for entries that have one.
+
+    The inverse of `load_seq_by_entry`, for list endpoints that show which transaction each entry
+    belongs to. One bulk query for a page of entries rather than one per row. Entries with no
+    assignment are simply absent from the result — the caller reports them as unassigned.
+    """
+    if not entry_ids:
+        return {}
+    rows = (await db.execute(
+        select(LogEntryAssignment.entry_id, LogEntryAssignment.transaction_id).where(
+            LogEntryAssignment.entry_id.in_(entry_ids))
+    )).all()
+    return {entry_id: txn_id for entry_id, txn_id in rows}
+
+
 async def load_entries(db: AsyncSession, transaction_ids: list[uuid.UUID], *,
                        limit: int) -> list[tuple[LogEntry, uuid.UUID, int]]:
     """`(entry, owning transaction_id, seq)` for the given transactions, in (transaction, seq) order.

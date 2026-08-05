@@ -1,5 +1,19 @@
 # Make `log_entries` append-only: move the assignment into its own table
 
+> **Delivered 2026-08-05, without the staged rollout.** Dual-write was dropped as unnecessary and the
+> legacy columns went in the same change. Two corrections to what is written below:
+>
+> - **`DROP COLUMN` does NOT rewrite the table.** It is a catalog operation - measured at 0.1s on a
+>   48 MB table with the relfilenode unchanged. Step 5 below defers it on the strength of a claim that
+>   measurement disproved.
+> - **There was a second write-amplification source**, not identified below: the
+>   `ON DELETE SET NULL` cascade on `log_entries_transaction_id_fkey`. Every window delete UPDATEd
+>   each entry pointing at the deleted transactions. With the new code in place and that cascade still
+>   present, a regroup of 6 entries still performed 6 row updates.
+>
+> Verified end state: 20 entries, five consecutive regroups of the same window, **0** updates on
+> `log_entries`.
+
 **Scope:** Stage 2's write path only.
 Nothing about partitioning, retention, `jobs`, or ML - though this is the prerequisite for all of them.
 
