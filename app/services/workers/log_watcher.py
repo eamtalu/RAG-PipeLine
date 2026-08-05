@@ -20,7 +20,6 @@ from app.persistence.repositories.job_repository import JobRepository
 from app.persistence.repositories.customer_repository import CustomerRepository
 from app.persistence.storage.local import LocalStorage
 from app.services.mnp_log_ingestion.LogIngestion import LogIngestion
-from app.services.mnp_log_ingestion.pipeline.derive_transactions import finalize_pending
 
 logger = logging.getLogger(__name__)
 
@@ -112,34 +111,18 @@ def _safe(name: str) -> bool:
     return name not in ("", ".", "..") and "/" not in name and "\\" not in name
 
 
-async def _finalize_customers(customer_codes: set[str]) -> None:
-    """Run a scoped Stage 2 regroup for each tenant the watcher just fed, stitching exactly the time
-    windows those files touched. One regroup per drained batch, per customer."""
-    for code in sorted(customer_codes):
-        try:
-            async with async_session() as db:
-                stats = await finalize_pending(db, code)
-            if stats.get("windows"):
-                logger.info("Post-drain regroup for %s: %s", code, stats)
-        except Exception:
-            logger.exception("Post-drain regroup failed for %s — pending rows stay open for retry", code)
-
-
 async def run_log_watcher() -> None:
-    """Main watcher loop — polls the staging dir for dropped log files, and once the queue drains runs
-    a scoped regroup for the tenants it ingested (so a multi-file drop is stitched once, at the end)."""
+    """Main watcher loop — polls the staging dir for dropped log files and ingests them.
+
+    It does NOT stitch. Stage 1 writes a log_regroup_pending ticket in the same transaction as its
+    entries, and the stitch worker (app/services/workers/log_stitch_worker.py) owns draining that
+    queue. A watcher has no business knowing Stage 2 exists."""
     logger.info("Log watcher started (dir=%s, poll=%.1fs)",
                 settings.log_incoming_dir, settings.log_watcher_poll_seconds)
-    dirty: set[str] = set()  # tenants ingested but not yet regrouped (queue still draining)
     while True:
         try:
-            processed, ingested = await _drain_once()
-            dirty |= ingested
+            processed, _ingested = await _drain_once()
             if processed == 0:
-                # queue is empty — the batch is in; stitch the windows it touched, then idle.
-                if dirty:
-                    await _finalize_customers(dirty)
-                    dirty.clear()
                 await asyncio.sleep(settings.log_watcher_poll_seconds)
         except Exception:
             logger.exception("Log watcher error — retrying after sleep")

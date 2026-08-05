@@ -17,7 +17,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, DateTime, Index, Integer, Text
+from sqlalchemy import String, DateTime, Index, Integer, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -55,3 +55,14 @@ class LogRegroupPending(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     abandoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Backoff gate. A failed window is pushed into the future by the SHARED retry policy
+    # (app/services/queueing/retry_policy.py), and the open-window query filters `available_at <=
+    # now()`. Without this the window was retried on the very next tick, so all three attempts were
+    # spent within seconds — before a transient condition (busy disk, held lock) could clear, which
+    # made the retries useless. Defaults to now() so existing rows are immediately eligible.
+    # NO Python-side default: available_at is written and compared by the DATABASE clock only.
+    # Setting it from the app host would mean writing with one clock and reading with another, and
+    # any skew (an app host a few ms ahead of the DB is routine, and containers drift more) makes a
+    # freshly-written row look "not yet due" — intermittently, which is the worst kind of bug.
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False)

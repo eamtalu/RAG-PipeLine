@@ -22,7 +22,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
-from sqlalchemy import String, Enum as SAEnum, delete, func, inspect as sa_inspect, select, text as sa_text, update
+from sqlalchemy import (String, Enum as SAEnum, delete, func, inspect as sa_inspect, select,
+                        text as sa_text, true as sa_true, update)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
@@ -34,6 +35,7 @@ from app.services.mnp_log_ingestion.timefmt import to_display, set_display_timez
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun, LogRegroupRunStatus
 from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
+from app.services.queueing import retry_policy
 
 logger = logging.getLogger(__name__)
 
@@ -773,6 +775,11 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
             LogRegroupPending.customer_code == customer_code,
             LogRegroupPending.consumed_at.is_(None),
             LogRegroupPending.abandoned_at.is_(None),  # dead-lettered windows are not retried
+            # Backoff gate: a window that just failed is held back until its delay elapses, so the
+            # attempts are genuinely spread out instead of all being spent on consecutive ticks.
+            # clock_timestamp(), NOT now(): now() is transaction_timestamp(), so in a session whose
+            # transaction began before the row was written the row would look permanently not-yet-due.
+            LogRegroupPending.available_at <= func.clock_timestamp(),
         ).order_by(LogRegroupPending.range_start.asc())
     )).scalars().all())
     if not pend:
@@ -822,6 +829,11 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
             ids = [p.id for p in rows]
             now = datetime.now(timezone.utc)
             max_attempts = settings.log_regroup_max_attempts
+            # Classify with the SAME policy the ingest queue uses (retry_policy). A PERMANENT failure
+            # — a builder that can never be persisted, corrupt content — will fail identically on
+            # every attempt, so spending the remaining budget on it just triples the log noise and
+            # re-reads a bad disk area for nothing.
+            transient = retry_policy.is_transient(exc)
             newly_abandoned = 0
             async with async_session() as edb:
                 await edb.execute(
@@ -830,9 +842,25 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
                         last_error=err_text, last_attempt_at=now,
                     )
                 )
+                if transient:
+                    # Push the retry into the future so the attempts are actually spread out; a
+                    # transient condition then has time to clear between them.
+                    delay = retry_policy.backoff_seconds(
+                        (rows[0].attempts or 0) + 1,
+                        base=settings.log_regroup_backoff_base_seconds,
+                        cap=settings.log_regroup_backoff_max_seconds)
+                    # clock_timestamp() + interval, evaluated by the DATABASE — the same clock the
+                    # open-window query compares against.
+                    await edb.execute(
+                        update(LogRegroupPending).where(LogRegroupPending.id.in_(ids)).values(
+                            available_at=func.clock_timestamp()
+                            + func.make_interval(0, 0, 0, 0, 0, 0, delay)))
+                    cond = LogRegroupPending.attempts >= max_attempts
+                else:
+                    cond = sa_true()          # permanent: dead-letter on the first failure
                 newly_abandoned = len((await edb.execute(
                     update(LogRegroupPending)
-                    .where(LogRegroupPending.id.in_(ids), LogRegroupPending.attempts >= max_attempts)
+                    .where(LogRegroupPending.id.in_(ids), cond)
                     .values(abandoned_at=now)
                     .returning(LogRegroupPending.id)
                 )).scalars().all())
