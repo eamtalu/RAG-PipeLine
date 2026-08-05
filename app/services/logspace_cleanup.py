@@ -9,6 +9,8 @@ Cascade map (so this stays correct as the schema grows):
     log_transactions (all FK job_id ON DELETE CASCADE).
   - `log_source_objects` has NO job/tenant FK, so it is deleted explicitly — and its downloaded
     bytes are unlinked from object storage first, or they outlive the purge as orphan files.
+  - `log_entry_assignment` likewise has no FK (they were removed so daily partitions can be
+    dropped), so it too is deleted explicitly.
   - The raw pgvector `embeddings` table is keyed by chunk/entity id with NO foreign key, so it is
     purged explicitly here (by the ids of the tenant's chunks/entities) before the jobs go.
   - Deleting `notification_events` CASCADEs its deliveries; deleting `log_ssh_sources` CASCADEs its
@@ -32,6 +34,7 @@ from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_ssh_source import LogSshSource
 from app.persistence.models.log_ssh_file_checkpoint import LogSshFileCheckpoint
 from app.persistence.models.log_ssh_fetch_run import LogSshFetchRun
+from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_source_object import LogSourceObject
 from app.persistence.storage.local import LocalStorage
 from app.settings import settings
@@ -102,10 +105,15 @@ async def purge_logspace(db: AsyncSession, customer_code: str) -> bool:
             )
             await db.execute(stmt, {"ids": emb_ids})
 
-    # 2) Jobs → cascades chunks, chunks_entity, embedding_queue, log_entries, log_transactions.
+    # 2a) Assignments have NO foreign key to cascade from — the FKs were removed so that daily
+    #     partitions can be dropped — so the jobs cascade below never reaches them.
+    await db.execute(delete(LogEntryAssignment).where(
+        LogEntryAssignment.customer_code == customer_code))
+
+    # 2b) Jobs → cascades chunks, chunks_entity, embedding_queue, log_entries, log_transactions.
     await db.execute(delete(Job).where(Job.customer_code == customer_code))
 
-    # 2b) Ingest-queue rows have NO job/tenant FK cascade, so they must be deleted explicitly — and
+    # 2c) Ingest-queue rows have NO job/tenant FK cascade, so they must be deleted explicitly — and
     #     their downloaded bytes unlinked first, or the files sit in ./uploads forever with nothing
     #     left referencing them. Best-effort per file: a missing/unreadable file must not abort a
     #     purge that the operator explicitly asked for.

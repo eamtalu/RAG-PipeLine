@@ -572,6 +572,9 @@ async def delete_log_data(
                                 .where(LogEntry.customer_code == customer))
         n_txn = await db.scalar(select(func.count()).select_from(LogTransaction)
                                 .where(LogTransaction.customer_code == customer))
+        # Assignments first — they have no FK to cascade from (see the model docstring), so the
+        # jobs cascade below reaches entries and transactions but never them.
+        await assignments.delete_for_customer(db, customer)
         # delete only this customer's LOG jobs; entries + transactions cascade via job_id FK.
         res = await db.execute(delete(Job).where(
             Job.customer_code == customer, Job.document_type == DOCUMENT_TYPE))
@@ -597,6 +600,15 @@ async def delete_log_data(
     if date_to is not None:
         ent_conds.append(LogEntry.timestamp <= datetime.combine(date_to, datetime.max.time()))
         txn_conds.append(LogTransaction.date <= date_to)
+
+    # The FK cascade is gone (it made partitions undroppable), so assignments are cleared explicitly.
+    # BOTH sides are needed: a transaction may be deleted while its entries survive (and vice versa,
+    # since transactions filter on the customer-LOCAL `date` and entries on the UTC `timestamp`), so
+    # clearing only one side leaves rows pointing at something that no longer exists.
+    await assignments.delete_for_transactions(db, list((await db.execute(
+        select(LogTransaction.id).where(*txn_conds))).scalars().all()))
+    await assignments.delete_for_entries(db, list((await db.execute(
+        select(LogEntry.id).where(*ent_conds))).scalars().all()))
 
     txn_res = await db.execute(delete(LogTransaction).where(*txn_conds))
     ent_res = await db.execute(delete(LogEntry).where(*ent_conds))

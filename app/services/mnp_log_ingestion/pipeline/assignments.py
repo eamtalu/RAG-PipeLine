@@ -15,6 +15,7 @@ HOT in production. Moving the assignment here makes the raw table insert-only.
 """
 
 import uuid
+from typing import Sequence
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -49,23 +50,28 @@ def belongs_to_transaction(transaction_id: uuid.UUID):
 
 
 async def write(db: AsyncSession, *, transaction_id: uuid.UUID,
-                entry_ids: list[uuid.UUID], customer_code: str) -> int:
-    """Record `entry_ids` as belonging to `transaction_id`, in the order given (seq = index).
+                entries: Sequence[LogEntry], customer_code: str) -> int:
+    """Record `entries` as belonging to `transaction_id`, in the order given (seq = index).
 
-    Upserts on the entry_id primary key: a regroup rebuilds the same window with the same
-    deterministic transaction id, so re-writing an existing assignment must REPLACE it rather than
-    raise. The newest grouping wins.
+    Takes the ENTRIES rather than their ids because each row also stores `entry_ts`, copied from the
+    entry's own timestamp. Passing the entry guarantees the two agree by construction; passing ids
+    plus a parallel list of timestamps would let them drift, and re-reading the timestamps here would
+    be a database round-trip for something the caller already holds.
+
+    Upserts on (entry_id, entry_ts): a regroup rebuilds the same window with the same deterministic
+    transaction id, so re-writing an existing assignment must REPLACE it rather than raise. The
+    newest grouping wins.
 
     Does not commit — the caller owns the transaction boundary.
     """
-    if not entry_ids:
+    if not entries:
         return 0
-    rows = [{"entry_id": eid, "transaction_id": transaction_id, "seq": i,
-             "customer_code": customer_code}
-            for i, eid in enumerate(entry_ids)]
+    rows = [{"entry_id": e.id, "entry_ts": e.timestamp, "transaction_id": transaction_id,
+             "seq": i, "customer_code": customer_code}
+            for i, e in enumerate(entries)]
     stmt = pg_insert(LogEntryAssignment).values(rows)
     await db.execute(stmt.on_conflict_do_update(
-        index_elements=["entry_id"],
+        constraint="uq_log_entry_assignment_entry",
         set_={"transaction_id": stmt.excluded.transaction_id,
               "seq": stmt.excluded.seq,
               "customer_code": stmt.excluded.customer_code},
@@ -87,6 +93,36 @@ async def delete_for_transactions(db: AsyncSession,
         return 0
     res = await db.execute(delete(LogEntryAssignment).where(
         LogEntryAssignment.transaction_id.in_(transaction_ids)))
+    return res.rowcount or 0
+
+
+async def delete_for_customer(db: AsyncSession, customer_code: str | None) -> int:
+    """Drop every assignment for one tenant, or for ALL tenants when `customer_code` is None.
+
+    The None case mirrors `regroup_all`, which rebuilds every transaction from scratch and so must
+    clear every assignment. Kept explicit rather than defaulted, because "delete everything" should
+    never be something a caller reaches by omission.
+
+    Does not commit — the caller owns the transaction boundary.
+    """
+    stmt = delete(LogEntryAssignment)
+    if customer_code is not None:
+        stmt = stmt.where(LogEntryAssignment.customer_code == customer_code)
+    res = await db.execute(stmt)
+    return res.rowcount or 0
+
+
+async def delete_for_entries(db: AsyncSession, entry_ids: list[uuid.UUID]) -> int:
+    """Drop the assignments of the given entries.
+
+    Used where ENTRIES are deleted directly (the date-range delete), which the transaction-side
+    cleanup would miss: the transaction survives, but its entries are gone, leaving assignments that
+    reference rows which no longer exist.
+    """
+    if not entry_ids:
+        return 0
+    res = await db.execute(delete(LogEntryAssignment).where(
+        LogEntryAssignment.entry_id.in_(entry_ids)))
     return res.rowcount or 0
 
 

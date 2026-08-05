@@ -210,8 +210,9 @@ erDiagram
     }
 
     log_entry_assignment {
-        uuid entry_id PK "-> log_entries.id (CASCADE)"
-        uuid transaction_id FK "-> log_transactions.id (CASCADE)"
+        uuid entry_id "soft -> log_entries.id (NO FK)"
+        datetime entry_ts "copied from the entry; future partition key"
+        uuid transaction_id "soft -> log_transactions.id (NO FK)"
         int seq "position within the transaction"
         string customer_code "soft tenant key"
         datetime assigned_at
@@ -265,8 +266,8 @@ erDiagram
         datetime finished_at
     }
 
-    log_transactions ||--o{ log_entry_assignment : "groups"
-    log_entries ||--o| log_entry_assignment : "currently assigned"
+    log_transactions ||..o{ log_entry_assignment : "groups (soft, no FK)"
+    log_entries ||..o| log_entry_assignment : "currently assigned (soft, no FK)"
 ```
 
 ### `log_entry_assignment` — why `log_entries` is now append-only
@@ -277,8 +278,18 @@ Measured on production 2026-08-05: **105,838,123 updates at 0.0% HOT** on 1.9M r
 That was the write amplification, dead-tuple churn and vacuum pressure behind the outage.
 
 Separating the current interpretation from the raw evidence fixes it.
-`entry_id` is the primary key, so "at most one current assignment per entry" is a database guarantee.
-Both foreign keys `CASCADE`: deleting a transaction drops its assignments (what `SET NULL` used to do, without touching raw rows), and deleting an entry drops its assignment, which keeps the purge chain `jobs -> entries -> assignments` intact.
+**Both foreign keys were removed** (migration `f04b7c29ae13`) so the table can be partitioned by day.
+A foreign key makes the referenced table's partitions impossible to remove - `DETACH PARTITION` and `DROP TABLE` both refuse while one exists - and retention *is* dropping partitions.
+Removing them also made the hottest write path ~4x faster: 200k assignment inserts went from 1,060 ms (two FK triggers, 200,000 calls each) to 249 ms.
+
+The cost is that deletes no longer cascade, so every path that removes entries or transactions clears the assignments explicitly: `logspace_cleanup.purge_logspace`, the full wipe and date-range delete in `logs.py`, and `regroup_all` / `regroup_incremental` / `regroup_window` in `derive_transactions.py`.
+
+"At most one current assignment per entry" is now a `UNIQUE NULLS NOT DISTINCT (entry_id, entry_ts)` rather than a primary key.
+Not a primary key, because PostgreSQL forces PK columns to `NOT NULL` and `entry_ts` must stay nullable (`log_entries.timestamp` is).
+`NULLS NOT DISTINCT` is what preserves the guarantee for timestamp-less entries - a plain `UNIQUE` treats two NULLs as different.
+
+The column order is load-bearing: `entry_id` FIRST. Measured on 300k rows, looking up by `entry_id` alone takes 0.046 ms with `(entry_id, entry_ts)` and **10.8 ms** with `(entry_ts, entry_id)` - a sequential scan, because `entry_id` is no longer seekable.
+Three hot paths filter on `entry_id` with no time bound.
 
 The `log_entries.transaction_id` / `seq` columns and their index are **gone** (migrations `d5b830e14f72`, `e93c47a15b08`).
 `DROP COLUMN` is a catalog operation in PostgreSQL, not a rewrite - measured at 0.1s on a 48 MB table with the relfilenode unchanged - so there was no reason to defer it.
@@ -580,8 +591,7 @@ erDiagram
 | `chunks.id` | `chunks.parent_id` (self) | CASCADE |
 | `chunks.id` | `embedding_queue.chunk_id` | CASCADE |
 | `chunks_entity.id` | `embedding_queue.chunk_entity_id` | CASCADE |
-| `log_entries.id` | `log_entry_assignment.entry_id` | CASCADE |
-| `log_transactions.id` | `log_entry_assignment.transaction_id` | CASCADE |
+
 | `log_ssh_sources.id` | `log_ssh_file_checkpoints.source_id` | CASCADE |
 | `customers.customer_code` | `customer_display_names.customer_code` | CASCADE |
 | `customers.customer_code` | `logspace_presence.customer_code` | CASCADE |
@@ -599,5 +609,7 @@ erDiagram
 | `jobs.id` | `log_source_objects.job_id` | nullable, no FK; transitional, set by the parse worker |
 | `notification_rules.id` | `notification_events.rule_id` | provenance, no FK |
 | future `log_flow` | `log_transactions.flow_id` | Phase-3 hook, no FK |
+| `log_entries.id` | `log_entry_assignment.entry_id` | FK removed in `f04b7c29ae13` so daily partitions can be dropped; cleared explicitly by every delete path |
+| `log_transactions.id` | `log_entry_assignment.transaction_id` | same |
 
 | `chunks.id` / `chunks_entity.id` | `embeddings.id` (string) | app-level key into the pgvector table |

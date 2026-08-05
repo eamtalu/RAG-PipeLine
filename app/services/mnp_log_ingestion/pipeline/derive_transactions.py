@@ -520,8 +520,7 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
         txn = LogTransaction(id=tid, sealed=is_sealed, **values)
         db.add(txn)
         await db.flush()  # get txn.id
-        await assignments.write(db, transaction_id=txn.id,
-                                entry_ids=[e.id for e in b.entries],
+        await assignments.write(db, transaction_id=txn.id, entries=b.entries,
                                 customer_code=customer_code)
         assigned += len(b.entries)
         created += 1
@@ -550,7 +549,10 @@ async def regroup_all(db: AsyncSession, customer_code: str | None = None) -> dic
 
     Pass `customer_code` to rebuild only one tenant (the manual API path); None rebuilds every
     customer (used for a full repair)."""
-    del_stmt = delete(LogTransaction)  # entries.transaction_id -> NULL via ON DELETE SET NULL
+    # Assignments first: the FK cascade is gone (it made partitions undroppable), so they must be
+    # removed explicitly or every full regroup leaves orphans pointing at deleted transactions.
+    await assignments.delete_for_customer(db, customer_code)
+    del_stmt = delete(LogTransaction)
     if customer_code is not None:
         del_stmt = del_stmt.where(LogTransaction.customer_code == customer_code)
     await db.execute(del_stmt)
@@ -586,10 +588,15 @@ async def regroup_incremental(db: AsyncSession, customer_code: str | None = None
 
     Pass `customer_code` to touch only one tenant (manual API path); None processes every customer
     with unassigned entries (what the background worker runs)."""
-    # 1. free unsealed transactions only (their entries.transaction_id -> NULL); sealed rows stay
+    # 1. free unsealed transactions only; sealed rows stay. Their assignments go first — no cascade
+    #    does it for us, and this runs on the live path every cycle, so an orphan here compounds.
+    unsealed_stmt = select(LogTransaction.id).where(LogTransaction.sealed.is_(False))
     free_stmt = delete(LogTransaction).where(LogTransaction.sealed.is_(False))
     if customer_code is not None:
+        unsealed_stmt = unsealed_stmt.where(LogTransaction.customer_code == customer_code)
         free_stmt = free_stmt.where(LogTransaction.customer_code == customer_code)
+    await assignments.delete_for_transactions(
+        db, list((await db.execute(unsealed_stmt)).scalars().all()))
     await db.execute(free_stmt)
     await db.commit()
 

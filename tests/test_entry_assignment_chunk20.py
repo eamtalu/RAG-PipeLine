@@ -74,21 +74,20 @@ async def _mk_job(cc: str = CC) -> uuid.UUID:
 
 
 async def _mk_entries(job_id: uuid.UUID, n: int, *, cc: str = CC,
-                      start: datetime = T0) -> list[uuid.UUID]:
+                      start: datetime = T0) -> list[LogEntry]:
     """n timestamped entries, one second apart, committed."""
-    ids = []
+    rows = []
     async with async_session() as s:
         for i in range(n):
             # Set the id EXPLICITLY: LogEntry.id has a Python-side default that only runs at flush,
             # so reading e.id before then yields None.
-            eid = uuid.uuid4()
-            s.add(LogEntry(id=eid, customer_code=cc, job_id=job_id, entry_hash=uuid.uuid4().hex,
-                           source_file="t.log", line_number=i + 1,
-                           timestamp=start + timedelta(seconds=i),
-                           entry_type=LogEntryType.info, raw_body=f"line {i}"))
-            ids.append(eid)
+            rows.append(LogEntry(id=uuid.uuid4(), customer_code=cc, job_id=job_id,
+                                 entry_hash=uuid.uuid4().hex, source_file="t.log",
+                                 line_number=i + 1, timestamp=start + timedelta(seconds=i),
+                                 entry_type=LogEntryType.info, raw_body=f"line {i}"))
+        s.add_all(rows)
         await s.commit()
-    return ids
+    return rows
 
 
 async def _mk_txn(job_id: uuid.UUID, cc: str = CC, *, started: datetime = T0) -> uuid.UUID:
@@ -108,7 +107,7 @@ async def test_write_creates_one_row_per_entry_in_order(clean):
     txn = await _mk_txn(job)
 
     async with async_session() as s:
-        n = await A.write(s, transaction_id=txn, entry_ids=entries, customer_code=CC)
+        n = await A.write(s, transaction_id=txn, entries=entries, customer_code=CC)
         await s.commit()
     assert n == 3
 
@@ -116,7 +115,7 @@ async def test_write_creates_one_row_per_entry_in_order(clean):
         rows = (await s.execute(
             select(LogEntryAssignment).where(LogEntryAssignment.transaction_id == txn)
             .order_by(LogEntryAssignment.seq))).scalars().all()
-    assert [r.entry_id for r in rows] == entries
+    assert [r.entry_id for r in rows] == [e.id for e in entries]
     assert [r.seq for r in rows] == [0, 1, 2]
     assert all(r.customer_code == CC for r in rows)
 
@@ -129,10 +128,10 @@ async def test_write_is_idempotent_for_the_same_transaction(clean):
     txn = await _mk_txn(job)
 
     async with async_session() as s:
-        await A.write(s, transaction_id=txn, entry_ids=entries, customer_code=CC)
+        await A.write(s, transaction_id=txn, entries=entries, customer_code=CC)
         await s.commit()
     async with async_session() as s:
-        await A.write(s, transaction_id=txn, entry_ids=list(reversed(entries)), customer_code=CC)
+        await A.write(s, transaction_id=txn, entries=list(reversed(entries)), customer_code=CC)
         await s.commit()
 
     async with async_session() as s:
@@ -140,7 +139,7 @@ async def test_write_is_idempotent_for_the_same_transaction(clean):
             select(LogEntryAssignment).where(LogEntryAssignment.transaction_id == txn)
             .order_by(LogEntryAssignment.seq))).scalars().all()
     assert len(rows) == 3, "must not duplicate on re-write"
-    assert [r.entry_id for r in rows] == list(reversed(entries)), "the newest grouping wins"
+    assert [r.entry_id for r in rows] == [e.id for e in reversed(entries)], "the newest grouping wins"
 
 
 async def test_write_accepts_an_empty_list(clean):
@@ -148,7 +147,7 @@ async def test_write_accepts_an_empty_list(clean):
     job = await _mk_job()
     txn = await _mk_txn(job)
     async with async_session() as s:
-        assert await A.write(s, transaction_id=txn, entry_ids=[], customer_code=CC) == 0
+        assert await A.write(s, transaction_id=txn, entries=[], customer_code=CC) == 0
         await s.commit()
 
 
@@ -162,8 +161,8 @@ async def test_delete_for_transactions_removes_exactly_those(clean):
     t2 = await _mk_txn(job, started=T0 + timedelta(minutes=10))
 
     async with async_session() as s:
-        await A.write(s, transaction_id=t1, entry_ids=e1, customer_code=CC)
-        await A.write(s, transaction_id=t2, entry_ids=e2, customer_code=CC)
+        await A.write(s, transaction_id=t1, entries=e1, customer_code=CC)
+        await A.write(s, transaction_id=t2, entries=e2, customer_code=CC)
         await s.commit()
 
     async with async_session() as s:
@@ -190,14 +189,14 @@ async def test_unassigned_predicate_selects_only_entries_without_an_assignment(c
     entries = await _mk_entries(job, 4)
     txn = await _mk_txn(job)
     async with async_session() as s:
-        await A.write(s, transaction_id=txn, entry_ids=entries[:2], customer_code=CC)
+        await A.write(s, transaction_id=txn, entries=entries[:2], customer_code=CC)
         await s.commit()
 
     async with async_session() as s:
         rows = (await s.execute(
             select(LogEntry.id).where(LogEntry.customer_code == CC, A.is_unassigned())
         )).scalars().all()
-    assert set(rows) == set(entries[2:])
+    assert set(rows) == {e.id for e in entries[2:]}
 
 
 async def test_load_seq_by_entry_returns_a_lookup_for_readers(clean):
@@ -206,12 +205,12 @@ async def test_load_seq_by_entry_returns_a_lookup_for_readers(clean):
     entries = await _mk_entries(job, 3)
     txn = await _mk_txn(job)
     async with async_session() as s:
-        await A.write(s, transaction_id=txn, entry_ids=entries, customer_code=CC)
+        await A.write(s, transaction_id=txn, entries=entries, customer_code=CC)
         await s.commit()
 
     async with async_session() as s:
         got = await A.load_seq_by_entry(s, [txn])
-    assert got == {entries[0]: 0, entries[1]: 1, entries[2]: 2}
+    assert got == {entries[0].id: 0, entries[1].id: 1, entries[2].id: 2}
 
 
 async def test_load_seq_by_entry_accepts_an_empty_list(clean):
@@ -224,21 +223,24 @@ async def test_entry_ids_for_transactions_returns_them_in_seq_order(clean):
     entries = await _mk_entries(job, 3)
     txn = await _mk_txn(job)
     async with async_session() as s:
-        await A.write(s, transaction_id=txn, entry_ids=entries, customer_code=CC)
+        await A.write(s, transaction_id=txn, entries=entries, customer_code=CC)
         await s.commit()
     async with async_session() as s:
-        assert await A.entry_ids_for_transactions(s, [txn]) == entries
+        assert await A.entry_ids_for_transactions(s, [txn]) == [e.id for e in entries]
 
 
 # =============================================================== cascades
-async def test_deleting_a_transaction_removes_its_assignments(clean):
-    """Replaces today's ON DELETE SET NULL. The entries themselves must survive - that is the whole
-    point: raw evidence is never destroyed by regrouping."""
+async def test_deleting_a_transaction_no_longer_cascades(clean):
+    """The cascade was REMOVED in chunk 21 - an FK makes a partition impossible to drop, and
+    retention is exactly that. Callers now delete assignments explicitly.
+
+    Asserted so the change is visible rather than silent: if someone re-adds the FK, this fails and
+    points at the reason. Raw entries survive either way, which was always the point."""
     job = await _mk_job()
     entries = await _mk_entries(job, 3)
     txn = await _mk_txn(job)
     async with async_session() as s:
-        await A.write(s, transaction_id=txn, entry_ids=entries, customer_code=CC)
+        await A.write(s, transaction_id=txn, entries=entries, customer_code=CC)
         await s.commit()
 
     async with async_session() as s:
@@ -246,28 +248,41 @@ async def test_deleting_a_transaction_removes_its_assignments(clean):
         await s.commit()
 
     async with async_session() as s:
+        # no cascade: the rows remain until a caller clears them
         assert await s.scalar(select(func.count()).select_from(LogEntryAssignment)
-                              .where(LogEntryAssignment.customer_code == CC)) == 0
+                              .where(LogEntryAssignment.customer_code == CC)) == 3
         assert await s.scalar(select(func.count()).select_from(LogEntry)
                               .where(LogEntry.customer_code == CC)) == 3
 
+    # ...which is what delete_for_transactions is for.
+    async with async_session() as s:
+        await A.delete_for_transactions(s, [txn])
+        await s.commit()
+    async with async_session() as s:
+        assert await s.scalar(select(func.count()).select_from(LogEntryAssignment)
+                              .where(LogEntryAssignment.customer_code == CC)) == 0
 
-async def test_deleting_an_entry_removes_its_assignment(clean):
-    """Keeps the existing purge path working: jobs -> entries -> assignments, all by cascade."""
+
+async def test_deleting_an_entry_no_longer_cascades(clean):
+    """Same removal, from the entry side. The tenant purge and the date-range delete now clear
+    assignments explicitly - covered end-to-end in tests/test_assignment_soft_refs_chunk21.py."""
     job = await _mk_job()
     entries = await _mk_entries(job, 2)
     txn = await _mk_txn(job)
     async with async_session() as s:
-        await A.write(s, transaction_id=txn, entry_ids=entries, customer_code=CC)
+        await A.write(s, transaction_id=txn, entries=entries, customer_code=CC)
         await s.commit()
 
     async with async_session() as s:
-        await s.execute(delete(Job).where(Job.id == job))   # cascades to entries
+        await s.execute(delete(Job).where(Job.id == job))   # still cascades to ENTRIES
         await s.commit()
 
     async with async_session() as s:
+        assert await s.scalar(select(func.count()).select_from(LogEntry)
+                              .where(LogEntry.customer_code == CC)) == 0, "entries still cascade"
+        # assignments do NOT - hence the explicit delete in logspace_cleanup / the wipe endpoints
         assert await s.scalar(select(func.count()).select_from(LogEntryAssignment)
-                              .where(LogEntryAssignment.customer_code == CC)) == 0
+                              .where(LogEntryAssignment.customer_code == CC)) == 2
 
 
 # =============================================================== dual-write parity
@@ -428,14 +443,14 @@ async def test_belongs_to_transaction_filters_entries(clean):
     t1 = await _mk_txn(job)
     t2 = await _mk_txn(job, started=T0 + timedelta(minutes=5))
     async with async_session() as s:
-        await A.write(s, transaction_id=t1, entry_ids=entries[:2], customer_code=CC)
-        await A.write(s, transaction_id=t2, entry_ids=entries[2:], customer_code=CC)
+        await A.write(s, transaction_id=t1, entries=entries[:2], customer_code=CC)
+        await A.write(s, transaction_id=t2, entries=entries[2:], customer_code=CC)
         await s.commit()
 
     async with async_session() as s:
         got = (await s.execute(select(LogEntry.id).where(
             LogEntry.customer_code == CC, A.belongs_to_transaction(t1)))).scalars().all()
-    assert set(got) == set(entries[:2])
+    assert set(got) == {e.id for e in entries[:2]}
 
 
 # =============================================================== read paths
@@ -446,14 +461,14 @@ async def test_load_entries_returns_entry_with_its_transaction_and_seq(clean):
     entries = await _mk_entries(job, 3)
     txn = await _mk_txn(job)
     async with async_session() as s:
-        await A.write(s, transaction_id=txn, entry_ids=entries, customer_code=CC)
+        await A.write(s, transaction_id=txn, entries=entries, customer_code=CC)
         await s.commit()
 
     async with async_session() as s:
         rows = await A.load_entries(s, [txn], limit=100)
-    assert [(e.id, t, q) for e, t, q in rows] == [(entries[0], txn, 0),
-                                                  (entries[1], txn, 1),
-                                                  (entries[2], txn, 2)]
+    assert [(e.id, t, q) for e, t, q in rows] == [(entries[0].id, txn, 0),
+                                                  (entries[1].id, txn, 1),
+                                                  (entries[2].id, txn, 2)]
 
 
 async def test_load_entries_respects_the_limit(clean):
@@ -463,7 +478,7 @@ async def test_load_entries_respects_the_limit(clean):
     entries = await _mk_entries(job, 5)
     txn = await _mk_txn(job)
     async with async_session() as s:
-        await A.write(s, transaction_id=txn, entry_ids=entries, customer_code=CC)
+        await A.write(s, transaction_id=txn, entries=entries, customer_code=CC)
         await s.commit()
     async with async_session() as s:
         assert len(await A.load_entries(s, [txn], limit=2)) == 2
@@ -594,13 +609,13 @@ async def test_load_transaction_by_entry_maps_entries_to_their_owner(clean):
     entries = await _mk_entries(job, 4)
     txn = await _mk_txn(job)
     async with async_session() as s:
-        await A.write(s, transaction_id=txn, entry_ids=entries[:3], customer_code=CC)
+        await A.write(s, transaction_id=txn, entries=entries[:3], customer_code=CC)
         await s.commit()
 
     async with async_session() as s:
-        got = await A.load_transaction_by_entry(s, entries)
-    assert got == {entries[0]: txn, entries[1]: txn, entries[2]: txn}
-    assert entries[3] not in got, "an unassigned entry must simply be absent"
+        got = await A.load_transaction_by_entry(s, [e.id for e in entries])
+    assert got == {entries[0].id: txn, entries[1].id: txn, entries[2].id: txn}
+    assert entries[3].id not in got, "an unassigned entry must simply be absent"
 
 
 async def test_load_transaction_by_entry_accepts_an_empty_list(clean):
