@@ -56,6 +56,7 @@ async def _customer_interval(customer_code: str) -> float:
     return float(v) if v else settings.ssh_log_fetcher_poll_seconds
 
 
+# This will call remote_fetcher.py fetch_now
 async def _poll_customer_once(customer_code: str) -> dict:
     async with _sem():  # global cap on concurrent per-customer fetches
         async with async_session() as db:
@@ -101,6 +102,18 @@ def _reconcile(loops: dict[str, asyncio.Task], desired: set[str], make_task) -> 
             del loops[cc]
 
 
+# run_ssh_log_fetcher()          <- the "supervisor" / manager. ONE of these.
+#       |
+#       |-- every 30s: who are my customers?  -> _customers_with_enabled_sources()
+#       |-- _reconcile(): hire/fire workers to match that list
+#       |
+#       +-- _customer_loop("ACME")   <- one forever-worker per customer
+#       +-- _customer_loop("BECSI")
+#       +-- _customer_loop("FOO")
+#               |
+#               +-- _poll_customer_once()  -> takes a wristband from _sem()
+#                       |
+#                       +-- _customer_interval()  -> how long to sleep
 async def run_ssh_log_fetcher() -> None:
     logger.info("SSH log fetcher supervisor started (reconcile=%.1fs, max_concurrent=%d)",
                 settings.ssh_poll_reconcile_seconds, settings.ssh_poll_max_concurrent)

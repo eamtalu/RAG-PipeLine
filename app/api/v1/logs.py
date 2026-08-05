@@ -23,6 +23,9 @@ from app.persistence.models.log_entry import LogEntry, LogEntryType
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun
+from app.persistence.models.log_source_object import LogSourceObject, SourceObjectStatus
+from app.services.logspace_cleanup import purge_source_objects_files
+from app.services.workers.log_parse_worker import reset_abandoned_objects
 from app.services.mnp_log_ingestion.LogIngestion import LogIngestion, get_log_ingestion, DOCUMENT_TYPE
 from app.services.mnp_log_ingestion.pipeline.derive_transactions import (
     regroup_all, regroup_incremental, finalize_pending, run_finalize_tracked, reset_abandoned_windows,
@@ -85,15 +88,30 @@ async def read_pending_state(
     not-yet-grouped tail is missing, and the flag says so. Passing finalize=true stitches first
     (same session, committed) so the read is fully current. This never raises: a burst of new data
     can't interrupt an analyst mid-session."""
-    count, oldest = (await db.execute(
-        select(func.count(), func.min(LogRegroupPending.created_at)).where(
-            LogRegroupPending.customer_code == customer,
-            LogRegroupPending.consumed_at.is_(None),
-        )
-    )).one()
+    async def _open_backlog() -> tuple[int, datetime | None]:
+        """Outstanding, still-retryable windows. Abandoned ones are excluded: they are parked
+        awaiting a human, not queued work, and counting them would pin `pending` true forever.
+        Matches what GET /regroup/status reports as its backlog."""
+        return (await db.execute(
+            select(func.count(), func.min(LogRegroupPending.created_at)).where(
+                LogRegroupPending.customer_code == customer,
+                LogRegroupPending.consumed_at.is_(None),
+                LogRegroupPending.abandoned_at.is_(None),
+            )
+        )).one()
+
+    count, oldest = await _open_backlog()
     if count and finalize:
         await finalize_pending(db, customer)
-        return {"pending": False, "pending_windows": 0, "oldest_pending_at": None, "finalized": True}
+        # RE-COUNT rather than assume it is now clear. finalize_pending deliberately skips a window
+        # that is inside its retry backoff (chunk 18), so it can legitimately leave work behind.
+        # Asserting "pending: False" here would report a false all-clear — and the frontend now
+        # polls this signal to decide when a fetched batch is visible, so a false clear makes it
+        # reload a stale feed instead of waiting.
+        count, oldest = await _open_backlog()
+        return {"pending": bool(count), "pending_windows": count or 0,
+                "oldest_pending_at": oldest.isoformat() if oldest else None,
+                "finalized": True}
     return {"pending": bool(count), "pending_windows": count or 0,
             "oldest_pending_at": oldest.isoformat() if oldest else None}
 
@@ -393,19 +411,29 @@ async def regroup_status(
     # ONE query over this customer's pending rows: open-only aggregates via FILTER, plus the overall
     # max(consumed_at) as the "last stitched" timestamp. No writes — safe to poll frequently.
     _open = LogRegroupPending.consumed_at.is_(None)
+    _retryable = (_open, LogRegroupPending.abandoned_at.is_(None))
+    # A window that FAILED is held back by available_at until its backoff elapses. It is still part
+    # of the backlog, but it is failing rather than merely queued — and `pending_windows` alone
+    # cannot tell those apart, which is exactly the distinction that matters when a disk starts
+    # going bad at 2am.
+    _waiting = (*_retryable, LogRegroupPending.available_at > func.clock_timestamp())
     row = (await db.execute(
         select(
             # open backlog that will still be retried (excludes dead-lettered windows)
-            func.count().filter(_open, LogRegroupPending.abandoned_at.is_(None)),
-            func.min(LogRegroupPending.created_at).filter(_open, LogRegroupPending.abandoned_at.is_(None)),
+            func.count().filter(*_retryable),
+            func.min(LogRegroupPending.created_at).filter(*_retryable),
             func.max(LogRegroupPending.consumed_at),
             # dead-lettered: open but abandoned after repeated failures — parked, NOT retried
             func.count().filter(_open, LogRegroupPending.abandoned_at.isnot(None)),
+            # subset of the backlog currently serving a retry delay
+            func.count().filter(*_waiting),
+            func.min(LogRegroupPending.available_at).filter(*_waiting),
         ).where(LogRegroupPending.customer_code == customer)
     )).one()
-    count, oldest, last_regroup, abandoned = row
+    count, oldest, last_regroup, abandoned, backing_off, next_retry = row
     count = count or 0
     abandoned = abandoned or 0
+    backing_off = backing_off or 0
     return {
         "customer_code": customer,
         "pending": bool(count),
@@ -415,6 +443,12 @@ async def regroup_status(
         # windows given up on after log_regroup_max_attempts failures; >0 means investigate (likely a
         # disk fault). They do NOT count as backlog and can be re-armed via POST /regroup/reset-abandoned.
         "abandoned_windows": abandoned,
+        # SUBSET of pending_windows that has already failed and is serving a retry delay. Distinguishes
+        # "about to be stitched" from "failing repeatedly" — the same number otherwise. A rising value
+        # is the early warning that precedes abandoned_windows.
+        "backing_off_windows": backing_off,
+        # when the earliest of those becomes eligible again (null if none are waiting)
+        "next_retry_at": next_retry.isoformat() if next_retry else None,
         "up_to_date": count == 0,
     }
 
@@ -428,6 +462,75 @@ async def reset_abandoned(
     abandoned marker + attempt counter). Use after the cause of the failures is addressed. Returns the
     number re-armed; call POST /regroup/finalize afterwards to stitch them."""
     n = await reset_abandoned_windows(db, customer)
+    return {"customer_code": customer, "reset": n}
+
+
+@router.get("/ingest-queue")
+async def ingest_queue_status(
+    customer: str = Depends(get_current_customer),
+    status: str | None = Query(default=None,
+                               description="filter by queue status: pending / leased / ingested / abandoned"),
+    limit: int = Query(default=50, ge=1, le=500),
+    db: AsyncSession = Depends(get_session),
+):
+    """Inspect this tenant's ingest queue — byte ranges the fetcher downloaded and the parse worker
+    has yet to (or failed to) process.
+
+    Deliberately shaped like the Stage 2 pair above so operators learn one pattern. The common use
+    is `?status=abandoned` to see dead-lettered ranges with the error that stopped them; the bytes
+    are still on disk, so re-arming replays them with no network re-fetch.
+
+    Read-only and bounded, so it is safe to poll.
+    """
+    conds = [LogSourceObject.customer_code == customer]
+    if status:
+        if status not in SourceObjectStatus.ALL:
+            raise HTTPException(400, detail=f"unknown status {status!r}; "
+                                            f"expected one of {', '.join(SourceObjectStatus.ALL)}")
+        conds.append(LogSourceObject.status == status)
+
+    rows = (await db.execute(
+        select(LogSourceObject).where(*conds)
+        .order_by(LogSourceObject.created_at.desc()).limit(limit)
+    )).scalars().all()
+
+    counts = dict((await db.execute(
+        select(LogSourceObject.status, func.count())
+        .where(LogSourceObject.customer_code == customer)
+        .group_by(LogSourceObject.status)
+    )).all())
+
+    return {
+        "customer_code": customer,
+        "counts": counts,
+        "count": len(rows),
+        "objects": [{
+            "id": str(o.id),
+            "status": o.status,
+            "source_name": o.source_name,
+            "remote_path": o.remote_path,
+            "start_offset": o.start_offset,
+            "end_offset": o.end_offset,
+            "attempts": o.attempts,
+            "max_attempts": o.max_attempts,
+            "available_at": o.available_at,
+            "last_error": o.last_error,
+            "entries_inserted": o.entries_inserted,
+            "created_at": o.created_at,
+            "ingested_at": o.ingested_at,
+        } for o in rows],
+    }
+
+
+@router.post("/ingest-queue/reset-abandoned")
+async def reset_abandoned_ingest_objects(
+    customer: str = Depends(get_active_customer),
+    db: AsyncSession = Depends(get_session),
+):
+    """Re-arm this tenant's dead-lettered ingest ranges so the parse worker retries them (clears the
+    abandoned marker + attempt counter). The downloaded bytes are still in object storage, so the
+    retry reads the local file — no re-fetch over SSH. Mirrors POST /regroup/reset-abandoned."""
+    n = await reset_abandoned_objects(db, customer)
     return {"customer_code": customer, "reset": n}
 
 
@@ -465,9 +568,17 @@ async def delete_log_data(
         # delete only this customer's LOG jobs; entries + transactions cascade via job_id FK.
         res = await db.execute(delete(Job).where(
             Job.customer_code == customer, Job.document_type == DOCUMENT_TYPE))
+        # The ingest queue has no job FK, so a wipe must clear it explicitly — and unlink the
+        # downloaded bytes, or they stay in ./uploads with nothing referencing them. A DATE-RANGE
+        # delete deliberately does NOT do this: queue rows describe byte ranges, not log dates, and
+        # dropping them would strand work that was never parsed.
+        await purge_source_objects_files(db, customer)
+        q_res = await db.execute(delete(LogSourceObject).where(
+            LogSourceObject.customer_code == customer))
         await db.commit()
         return {"customer_code": customer, "scope": "all",
                 "jobs_deleted": res.rowcount or 0,
+                "queued_objects_deleted": q_res.rowcount or 0,
                 "entries_deleted": n_ent or 0, "transactions_deleted": n_txn or 0}
 
     # ---- date-range delete ----

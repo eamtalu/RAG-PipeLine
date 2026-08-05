@@ -24,8 +24,9 @@ from logging.handlers import RotatingFileHandler
 from app.settings import settings
 from app.services.workers.embedding_worker import run_worker
 from app.services.workers.log_watcher import run_log_watcher
-from app.services.workers.log_grouping_worker import run_log_grouping_worker
+from app.services.workers.log_stitch_worker import run_log_stitch_worker, pending_backlog
 from app.services.workers.ssh_log_fetcher import run_ssh_log_fetcher
+from app.services.workers.log_parse_worker import run_log_parse_worker, unfinished_ingest_objects
 from app.services.mnp_log_ingestion.remote.remote_fetcher import sweep_stale_runs
 from app.services.workers.notification_worker import run_notification_worker
 from app.services.workers.logspace_cleanup_worker import run_logspace_cleanup_worker
@@ -82,17 +83,56 @@ async def start_background_tasks() -> list[asyncio.Task]:
         asyncio.create_task(run_worker()),
         asyncio.create_task(run_log_watcher()),
     ]
-    # Stage 2 automatic incremental regroup — togglable so it can be run manually via the API instead.
-    if settings.log_grouping_worker_enabled:
-        tasks.append(asyncio.create_task(run_log_grouping_worker()))
+    # Stage 2 stitch worker — the CONSUMER of the log_regroup_pending queue. Producers (the SFTP
+    # transport, the watcher, the parse worker) now only write tickets; this is what drains them.
+    # ON by default, because nothing else calls Stage 2 any more: turning it off would leave ingested
+    # entries unstitched. It also starts when open windows exist, so a rollback cannot strand them.
+    stitch_backlog = 0
+    if not settings.log_stitch_worker_enabled:
+        try:
+            stitch_backlog = await pending_backlog()
+        except Exception:
+            logger.warning("could not check the stitch backlog at startup", exc_info=True)
+    if settings.log_stitch_worker_enabled or stitch_backlog:
+        if stitch_backlog:
+            logger.warning(
+                "Stitch worker starting despite log_stitch_worker_enabled=False: %d open window(s) "
+                "remain and nothing else drains them.", stitch_backlog)
+        tasks.append(asyncio.create_task(run_log_stitch_worker()))
     else:
-        logger.info("Log grouping worker disabled (log_grouping_worker_enabled=False)")
+        logger.info("Log stitch worker disabled (log_stitch_worker_enabled=False, queue empty)")
     # Remote SSH log fetcher: the per-customer poll supervisor. ON by default and idle until a source
     # is enabled from the frontend (ssh_log_fetcher_enabled is only a global kill-switch).
     if settings.ssh_log_fetcher_enabled:
         tasks.append(asyncio.create_task(run_ssh_log_fetcher()))
     else:
         logger.info("SSH log fetcher globally disabled (kill-switch)")
+    # Ingest-queue parse worker: drains log_source_objects (bytes the fetcher downloaded but did not
+    # parse). Gated by the SAME flag the fetcher checks, so the two halves of the decoupling can
+    # never be half-enabled.
+    #
+    # It ALSO starts when the flag is off but unfinished rows exist. That is rollback safety: once a
+    # row is queued the checkpoint has already advanced past those bytes, so if the flag were turned
+    # back off and nothing drained them, they would never be parsed and never re-downloaded — silent
+    # data loss caused purely by a rollback. With the flag off and an empty queue (the normal
+    # untouched deployment) no loop is started at all.
+    leftover = 0
+    if not settings.log_parse_worker_enabled:
+        try:
+            leftover = await unfinished_ingest_objects()
+        except Exception:
+            logger.warning("could not check the ingest queue backlog at startup", exc_info=True)
+    if settings.log_parse_worker_enabled or leftover:
+        if leftover:
+            logger.warning(
+                "Log parse worker starting despite log_parse_worker_enabled=False: %d unfinished "
+                "ingest object(s) remain. Their checkpoints have already advanced, so they must be "
+                "drained or those bytes are lost. The worker exits this role once the queue empties.",
+                leftover)
+        tasks.append(asyncio.create_task(run_log_parse_worker()))
+    else:
+        logger.info("Log parse worker disabled (log_parse_worker_enabled=False, queue empty) — the "
+                    "SSH fetcher parses inline, as before")
     # Notifications (rules → bus → channels). Subscribe the dispatcher to the bus once, then run the
     # worker that drives rule evaluation + store-and-forward redelivery. Off unless enabled.
     if settings.notifications_enabled:

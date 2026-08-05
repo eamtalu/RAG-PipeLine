@@ -73,8 +73,6 @@ class Settings(BaseSettings):
     # Background incremental-regroup worker: polls log_entries and regroups the live tail after each
     # new file. Set False to stop AUTOMATIC regrouping only — manual POST /logs/regroup (full or
     # incremental) and the range-reingest endpoint still work.
-    log_grouping_worker_enabled: bool = False
-    log_grouping_poll_seconds: float = 5.0
     # Stage 2 incremental grouping: a TERMINAL transaction (has a RESPONSE / hard error) whose end is
     # older than this (relative to the newest log timestamp) is SEALED — never recomputed, so its id
     # is permanent and each cycle only reprocesses the recent "live tail". Must be >> the longest real
@@ -108,6 +106,53 @@ class Settings(BaseSettings):
     # forever. Prevents a poison window (e.g. one on a permanently-dead disk block) from burning the
     # statement_timeout every cycle. Its failure is recorded (attempts / last_error) and alerted loudly.
     log_regroup_max_attempts: int = 3
+    # Backoff between Stage 2 retries, using the shared policy in app/services/queueing/retry_policy.
+    # Previously a failing window was retried on the very next tick, so all three attempts were spent
+    # within seconds — before a transient condition could clear, which made the retries useless.
+    log_regroup_backoff_base_seconds: float = 30.0
+    log_regroup_backoff_max_seconds: float = 1800.0
+
+    # --- Stage 2 stitch worker: the consumer that owns draining log_regroup_pending ---
+    # log_regroup_pending has always been a durable work queue (Stage 1 writes a ticket in the same
+    # transaction as the entries), but it had no consumer — so every producer had to remember to call
+    # finalize_pending itself: the SFTP transport, the directory watcher, the parse worker. This
+    # worker owns it, and the producers now only write tickets.
+    # ON by default: unlike the old count(*)-polling grouping worker this replaces, nothing else
+    # drains the queue any more, so disabling it would leave data unstitched.
+    log_stitch_worker_enabled: bool = True
+    log_stitch_poll_seconds: float = 1.0
+    # Cap on tenants stitched per drain, so one very busy tenant set cannot monopolise a tick.
+    log_stitch_max_customers_per_tick: int = 25
+
+    # --- Ingest queue: decoupling SSH fetching from Stage 1 parsing (log_source_objects) ---
+    # Master switch. OFF means the fetcher keeps parsing inline exactly as before, so enabling and
+    # rolling back this whole feature is a config flip rather than a code revert. See
+    # docs/plan/2026-08-02_15-47_log-source-objects-fetch-parse-decoupling.md.
+    log_parse_worker_enabled: bool = False
+    # Dead-letter cap for ONE downloaded byte-range. Deliberately the same number as
+    # log_regroup_max_attempts so an operator has a single retry budget to reason about across both
+    # stages. Only TRANSIENT failures (bad sector, statement timeout, dropped connection) consume it;
+    # a permanent failure (corrupt bytes, missing storage key) abandons on the first attempt because
+    # retrying cannot help.
+    log_parse_max_attempts: int = 3
+    # Backoff base. Attempt N waits base * 2^(N-1) plus up to 25% jitter, so 30s / 60s / 120s by
+    # default. Stage 2 has no backoff at all and retries a failing window on every finalize tick,
+    # which hammers a degraded disk; this avoids repeating that.
+    log_parse_backoff_base_seconds: float = 30.0
+    log_parse_backoff_max_seconds: float = 1800.0
+    # How long a claimed row stays leased before another worker may reclaim it. Bounds how long a
+    # crashed worker can strand its row.
+    log_parse_lease_seconds: float = 120.0
+    # Backpressure. Today the inline `await` makes it impossible for the fetcher to outrun the
+    # database; once decoupled it can, filling ./uploads. A tenant with more than this many rows
+    # awaiting parse is skipped for the tick.
+    log_parse_queue_max_pending: int = 500
+    # Parse-worker loop cadence and per-drain claim cap.
+    log_parse_poll_seconds: float = 2.0
+    log_parse_batch_size: int = 20
+    # Delete the stored file once its row is `ingested` — the first time anything has been able to
+    # clean ./uploads, because nothing previously tracked whether a file was successfully ingested.
+    log_parse_delete_ingested_files: bool = True
 
     # Background loops (embedding, watcher, Stage 2 grouping, SSH poll supervisor, notifications,
     # log-space cleanup) must run in EXACTLY ONE process. Under gunicorn -w N the FastAPI lifespan runs

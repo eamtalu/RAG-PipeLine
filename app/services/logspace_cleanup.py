@@ -7,6 +7,8 @@ deactivate. Permanent spaces are purged the same way on admin delete.
 Cascade map (so this stays correct as the schema grows):
   - Deleting `jobs` for the tenant CASCADEs to chunks, chunks_entity, embedding_queue, log_entries,
     log_transactions (all FK job_id ON DELETE CASCADE).
+  - `log_source_objects` has NO job/tenant FK, so it is deleted explicitly — and its downloaded
+    bytes are unlinked from object storage first, or they outlive the purge as orphan files.
   - The raw pgvector `embeddings` table is keyed by chunk/entity id with NO foreign key, so it is
     purged explicitly here (by the ids of the tenant's chunks/entities) before the jobs go.
   - Deleting `notification_events` CASCADEs its deliveries; deleting `log_ssh_sources` CASCADEs its
@@ -30,6 +32,9 @@ from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_ssh_source import LogSshSource
 from app.persistence.models.log_ssh_file_checkpoint import LogSshFileCheckpoint
 from app.persistence.models.log_ssh_fetch_run import LogSshFetchRun
+from app.persistence.models.log_source_object import LogSourceObject
+from app.persistence.storage.local import LocalStorage
+from app.settings import settings
 from app.persistence.models.notification import (
     CustomerNotificationChannel,
     NotificationRule,
@@ -37,6 +42,36 @@ from app.persistence.models.notification import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def purge_source_objects_files(db: AsyncSession, customer_code: str) -> int:
+    """Unlink the stored bytes for a tenant's ingest-queue rows. Returns how many files were removed.
+
+    Shared by the tenant purge and the full-wipe API so both close the same orphan-file hole.
+    """
+    keys = list((await db.execute(
+        select(LogSourceObject.storage_key).where(LogSourceObject.customer_code == customer_code)
+    )).scalars().all())
+    if not keys:
+        return 0
+    storage = LocalStorage(settings.upload_dir)
+    removed = 0
+    for key in keys:
+        try:
+            if await storage.exists(key):
+                await storage.delete(key)
+                removed += 1
+        except Exception:  # a missing/locked file must never abort an explicit purge
+            logger.warning("could not delete stored log bytes %r during purge of %r",
+                           key, customer_code, exc_info=True)
+    return removed
+
+
+async def _purge_source_objects(db: AsyncSession, customer_code: str) -> None:
+    removed = await purge_source_objects_files(db, customer_code)
+    await db.execute(delete(LogSourceObject).where(LogSourceObject.customer_code == customer_code))
+    if removed:
+        logger.info("Purge %r: removed %d stored ingest file(s)", customer_code, removed)
 
 
 async def purge_logspace(db: AsyncSession, customer_code: str) -> bool:
@@ -69,6 +104,12 @@ async def purge_logspace(db: AsyncSession, customer_code: str) -> bool:
 
     # 2) Jobs → cascades chunks, chunks_entity, embedding_queue, log_entries, log_transactions.
     await db.execute(delete(Job).where(Job.customer_code == customer_code))
+
+    # 2b) Ingest-queue rows have NO job/tenant FK cascade, so they must be deleted explicitly — and
+    #     their downloaded bytes unlinked first, or the files sit in ./uploads forever with nothing
+    #     left referencing them. Best-effort per file: a missing/unreadable file must not abort a
+    #     purge that the operator explicitly asked for.
+    await _purge_source_objects(db, customer_code)
 
     # 3) Remaining customer_code-keyed tables that have no job/tenant FK cascade.
     await db.execute(delete(LogRegroupRun).where(LogRegroupRun.customer_code == customer_code))
