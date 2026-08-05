@@ -10,6 +10,7 @@ from app.persistence.models.log_regroup_run import LogRegroupRun
 from app.persistence.models.log_ssh_source import LogSshSource
 from app.persistence.models.log_ssh_file_checkpoint import LogSshFileCheckpoint
 from app.persistence.models.log_ssh_fetch_run import LogSshFetchRun
+from app.persistence.models.log_source_object import LogSourceObject, SourceObjectStatus
 from app.persistence.models.customer import Customer
 from app.persistence.models.customer_display_name import CustomerDisplayName
 from app.persistence.models.logspace_presence import LogspacePresence
@@ -35,6 +36,8 @@ __all__ = [
     "LogSshSource",
     "LogSshFileCheckpoint",
     "LogSshFetchRun",
+    "LogSourceObject",
+    "SourceObjectStatus",
     "Customer",
     "CustomerDisplayName",
     "LogspacePresence",
