@@ -30,13 +30,21 @@ async def _noop_loop():
 
 def _stub_loops(monkeypatch):
     """Replace every real loop + the startup sweep with harmless stubs, and count register() calls."""
-    for name in ("run_worker", "run_log_watcher", "run_log_grouping_worker",
+    for name in ("run_worker", "run_log_watcher", "run_log_stitch_worker", "run_log_parse_worker",
                  "run_ssh_log_fetcher", "run_notification_worker", "run_logspace_cleanup_worker"):
         monkeypatch.setattr(bg, name, _noop_loop)
 
     async def _sweep0():
         return 0
     monkeypatch.setattr(bg, "sweep_stale_runs", _sweep0)
+
+    # Both queue workers also start when leftover work exists (rollback safety), which would make
+    # these counts depend on whatever rows happen to be in the shared test DB. Pin them to empty so
+    # the tests measure the FLAGS only; the leftover-work behaviour has its own tests.
+    async def _zero():
+        return 0
+    monkeypatch.setattr(bg, "pending_backlog", _zero)
+    monkeypatch.setattr(bg, "unfinished_ingest_objects", _zero)
 
     reg = {"n": 0}
     monkeypatch.setattr(bg.notification_dispatcher, "register", lambda: reg.__setitem__("n", reg["n"] + 1))
@@ -70,8 +78,8 @@ async def test_lifespan_starts_loops_only_when_enabled(monkeypatch):
 async def test_start_background_tasks_assembles_enabled_loops(monkeypatch):
     reg = _stub_loops(monkeypatch)
 
-    # defaults-ish: grouping off, ssh on, notifications off, cleanup off -> embedding + watcher + ssh
-    monkeypatch.setattr(settings, "log_grouping_worker_enabled", False)
+    # defaults-ish: stitch off, ssh on, notifications off, cleanup off -> embedding + watcher + ssh
+    monkeypatch.setattr(settings, "log_stitch_worker_enabled", False)
     monkeypatch.setattr(settings, "ssh_log_fetcher_enabled", True)
     monkeypatch.setattr(settings, "notifications_enabled", False)
     monkeypatch.setattr(settings, "logspace_cleanup_worker_enabled", False)
@@ -83,8 +91,8 @@ async def test_start_background_tasks_assembles_enabled_loops(monkeypatch):
         await bg.stop_background_tasks(tasks)
     assert all(t.cancelled() or t.done() for t in tasks)   # stop cancels everything
 
-    # everything on -> embedding + watcher + grouping + ssh + notifications + cleanup = 6
-    monkeypatch.setattr(settings, "log_grouping_worker_enabled", True)
+    # everything on -> embedding + watcher + stitch + ssh + notifications + cleanup = 6
+    monkeypatch.setattr(settings, "log_stitch_worker_enabled", True)
     monkeypatch.setattr(settings, "notifications_enabled", True)
     monkeypatch.setattr(settings, "logspace_cleanup_worker_enabled", True)
     tasks = await bg.start_background_tasks()

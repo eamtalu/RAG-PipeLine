@@ -141,6 +141,22 @@ def test_regroup_max_attempts_setting_is_positive():
     assert settings.log_regroup_max_attempts and settings.log_regroup_max_attempts > 0
 
 
+async def _clear_backoff(cc: str) -> None:
+    """Simulate the retry delay having elapsed.
+
+    Since chunk 18, a failed window sets `available_at = now + backoff` and the open-window query
+    filters on it, so consecutive finalize calls no longer retry it immediately — which is the whole
+    point of the backoff. These tests drive a window to its dead-letter cap deliberately, so they
+    fast-forward the gate rather than sleeping.
+    """
+    from sqlalchemy import update as sa_update
+    async with async_session() as s:
+        await s.execute(sa_update(LogRegroupPending)
+                        .where(LogRegroupPending.customer_code == cc)
+                        .values(available_at=datetime(2000, 1, 1, tzinfo=timezone.utc)))
+        await s.commit()
+
+
 async def test_finalize_dead_letters_a_window_after_max_attempts(monkeypatch):
     """A stitch window that keeps failing is retried at most log_regroup_max_attempts times, then
     ABANDONED (abandoned_at set) and excluded from future finalizes - never retried forever. Uses its
@@ -170,6 +186,7 @@ async def test_finalize_dead_letters_a_window_after_max_attempts(monkeypatch):
         await s.commit()
     try:
         for attempt in range(1, n + 1):
+            await _clear_backoff(cc)
             async with async_session() as s:
                 res = await d.finalize_pending(s, cc)
             row = await _row()
@@ -218,6 +235,7 @@ async def test_reset_abandoned_windows_re_arms_for_retry(monkeypatch):
         await s.commit()
     try:
         for _ in range(n):                      # drive it to abandonment
+            await _clear_backoff(cc)
             async with async_session() as s:
                 await d.finalize_pending(s, cc)
         row = await _row()
@@ -229,6 +247,7 @@ async def test_reset_abandoned_windows_re_arms_for_retry(monkeypatch):
         row = await _row()
         assert row.abandoned_at is None and row.attempts == 0
 
+        await _clear_backoff(cc)
         async with async_session() as s:        # now it's retried again
             await d.finalize_pending(s, cc)
         assert (await _row()).attempts == 1

@@ -49,7 +49,6 @@ async def test_force_remote_bypasses_timestamp_shortcircuit(committed_source, mo
 
     monkeypatch.setattr(r, "_local_min_ts", fake_min)
     monkeypatch.setattr(r, "_fetch_source", fake_fetch_source)
-    monkeypatch.setattr(r, "finalize_pending", noop_finalize)
     from_ts = datetime.now(timezone.utc)
 
     async with async_session() as db:

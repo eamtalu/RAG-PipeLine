@@ -1,20 +1,23 @@
-"""Chunk 8: Stage 2 finalize on the fetch path is robust and observable.
+"""Chunk 8: the fetch path does not stitch — Stage 2 has its own consumer.
 
-Root cause fixed: fetch_now finalized on the caller's `db`, which sits idle across the (possibly
-long) SFTP transfer — a dropped connection then made finalize raise, and on the poller path that
-exception was swallowed, so log_regroup_pending accumulated silently (the "New data available" banner
-stuck / climbing). Now finalize runs on a FRESH session and its failure is surfaced (agg
-["finalize_error"], a failed run row for manual, an error log for the poller) instead of being lost.
+ORIGINAL problem (2026-07): fetch_now finalized on the caller's `db`, which sits idle across the
+(possibly long) SFTP transfer. A dropped connection made finalize raise, and on the poller path that
+exception was swallowed, so log_regroup_pending accumulated silently and the "New data available"
+banner stuck. That was fixed by finalizing on a FRESH session and surfacing the failure.
 
-Covered:
-- fetch_now finalizes on a fresh session, not the caller's db (which is closed by then);
-- a finalize failure does NOT raise out of fetch_now — it lands in agg["finalize_error"];
-- a successful finalize populates agg["finalize"] with no error;
-- run_ssh_fetch_tracked marks the run FAILED (with a clear message) when finalize failed even though
-  the pull succeeded;
-- the empty-sources early-return path also finalizes via the fresh session.
+SUPERSEDED (2026-08, chunk 18): the transport no longer calls Stage 2 at all. Stage 1 writes a
+log_regroup_pending ticket in the same transaction as its entries, and the stitch worker
+(app/services/workers/log_stitch_worker.py) owns draining that queue. The whole class of bug above
+is now structurally impossible on this path, because the path no longer exists.
+
+What is covered here now:
+- the transport imports and calls NOTHING from Stage 2 (the regression guard for that removal);
+- fetch_now returns pull statistics only, and never a stitch result;
+- a tracked run reports the PULL outcome, and is no longer failed by a stitching problem — stitch
+  failures are visible on log_regroup_pending and via GET /logs/regroup/status instead.
 """
 
+import inspect
 import uuid
 
 import pytest
@@ -27,79 +30,30 @@ from app.persistence.models.log_ssh_fetch_run import (
 from app.services.mnp_log_ingestion.remote import remote_fetcher as r
 
 
-async def test_finalize_runs_on_fresh_session_not_caller_db(monkeypatch):
-    """The caller's db is expunged+rolled-back before the network loop; finalize must NOT use it.
-    We assert the session passed to finalize_pending is a *different, open* session."""
-    seen = {}
+def test_transport_does_not_import_or_call_stage2():
+    """The regression guard for chunk 18. If a future ingestion path re-adds a finalize call here,
+    we are back to every producer having to remember it — and to a new path silently forgetting."""
+    src = inspect.getsource(r)
+    assert "finalize_pending" not in src
+    assert "_do_finalize" not in src
+    assert "derive_transactions" not in src
 
-    async def fake_finalize(db, cc):
-        seen["is_active"] = db.is_active           # a fresh session is active/usable
-        seen["cc"] = cc
-        return {"mode": "finalize", "windows": 0}
 
-    # no sources -> the empty-sources branch, which still finalizes
-    async def no_sources(*a, **k):
+async def test_fetch_now_returns_pull_stats_only(monkeypatch):
+    """No 'finalize' key, and no 'finalize_error': stitching is not this function's outcome."""
+    async def _no_sources(db, customer_code, source_id, **kw):
         return []
 
-    monkeypatch.setattr(r, "finalize_pending", fake_finalize)
-    monkeypatch.setattr(r, "_load_sources", no_sources)
-
-    async with async_session() as caller_db:
-        agg = await r.fetch_now(caller_db, "TEST_CHUNK8")
-    assert seen["is_active"] is True               # ran on a live session
-    assert seen["cc"] == "TEST_CHUNK8"
-    assert agg["finalize"] == {"mode": "finalize", "windows": 0}
+    monkeypatch.setattr(r, "_load_sources", _no_sources)
+    async with async_session() as db:
+        agg = await r.fetch_now(db, "TEST_CHUNK8")
+    assert "finalize" not in agg
     assert "finalize_error" not in agg
+    assert agg["customer_code"] == "TEST_CHUNK8"
+    assert agg["files_fetched"] == 0
 
 
-async def test_finalize_failure_is_surfaced_not_swallowed(monkeypatch):
-    async def boom_finalize(db, cc):
-        raise RuntimeError("connection was closed in the middle of operation")
-
-    async def no_sources(*a, **k):
-        return []
-
-    monkeypatch.setattr(r, "finalize_pending", boom_finalize)
-    monkeypatch.setattr(r, "_load_sources", no_sources)
-
-    async with async_session() as caller_db:
-        agg = await r.fetch_now(caller_db, "TEST_CHUNK8")  # must NOT raise
-    assert "finalize_error" in agg
-    assert "connection was closed" in agg["finalize_error"]
-    assert agg["finalize"]["error"] == agg["finalize_error"]
-
-
-async def test_tracked_run_marked_failed_when_finalize_fails(monkeypatch):
-    # a run row to update
-    async with async_session() as s:
-        run = LogSshFetchRun(customer_code="TEST_CHUNK8", mode=LogSshFetchMode.incremental,
-                             status=LogSshFetchRunStatus.running)
-        s.add(run)
-        await s.commit()
-        await s.refresh(run)
-        rid = run.id
-
-    async def fake_fetch_now(db, customer_code, **kw):
-        # pull succeeded (some entries) but stitching failed
-        return {"files_fetched": 2, "entries_ingested": 40, "bytes_fetched": 100,
-                "files_considered": 2, "finalize_error": "connection was closed"}
-
-    monkeypatch.setattr(r, "fetch_now", fake_fetch_now)
-    try:
-        await r.run_ssh_fetch_tracked(rid, "TEST_CHUNK8", None, LogSshFetchMode.incremental, None)
-        async with async_session() as s:
-            row = await s.get(LogSshFetchRun, rid)
-        assert row.status == LogSshFetchRunStatus.failed          # not 'completed'
-        assert "stitching failed" in (row.error or "")
-        assert row.entries_ingested == 40                         # the pull result is still recorded
-    finally:
-        from sqlalchemy import delete
-        async with async_session() as s:
-            await s.execute(delete(LogSshFetchRun).where(LogSshFetchRun.id == rid))
-            await s.commit()
-
-
-async def test_tracked_run_completed_when_finalize_ok(monkeypatch):
+async def test_tracked_run_reports_the_pull_outcome(monkeypatch):
     async with async_session() as s:
         run = LogSshFetchRun(customer_code="TEST_CHUNK8", mode=LogSshFetchMode.incremental,
                              status=LogSshFetchRunStatus.running)
@@ -110,7 +64,7 @@ async def test_tracked_run_completed_when_finalize_ok(monkeypatch):
 
     async def fake_fetch_now(db, customer_code, **kw):
         return {"files_fetched": 1, "entries_ingested": 5, "bytes_fetched": 10,
-                "files_considered": 1, "finalize": {"windows": 1}}  # no finalize_error
+                "files_considered": 1}   # pull stats only — stitching is not reported here
 
     monkeypatch.setattr(r, "fetch_now", fake_fetch_now)
     try:
