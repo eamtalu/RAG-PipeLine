@@ -222,6 +222,9 @@ Backs an audit/history panel.
   "requested_from": null,      // ISO-8601 or null (the from_timestamp)
   "status": "running",         // running | completed | failed | cancelled
   "phase": "fetching",         // listing | fetching | regrouping | done | null
+                               // NOTE (2026-08-05): "regrouping" is retained for wire
+                               // compatibility only. The stitch worker owns Stage 2, so a
+                               // completed run does NOT mean transactions are rebuilt yet.
   "progress": {                // free-form live progress, or null
     "current_source": "prod-wms-1", "source_index": 1, "sources_total": 1,
     "files_total": 4, "files_done": 2, "current_file": "C:/logs/m3/app.log",

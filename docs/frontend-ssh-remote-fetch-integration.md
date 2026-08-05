@@ -35,8 +35,10 @@ top-level field:
 }
 ```
 
-When you call a read with `?finalize=true`, it stitches first and returns
-`{ "pending": false, "pending_windows": 0, "oldest_pending_at": null, "finalized": true }`.
+When you call a read with `?finalize=true`, it stitches first and then RE-COUNTS, returning the real
+remaining backlog plus `"finalized": true`. It used to hardcode `pending: false`; since 2026-08-05 a
+window inside its retry backoff is deliberately skipped by finalize, so the response can legitimately
+come back with `pending: true` and a non-zero `pending_windows`. Handle a truthful non-zero count.
 
 The two `/view` endpoints return `text/plain`; when pending they are PREFIXED with one line:
 `⚠ N newer log window(s) since <ts> are not yet stitched in — re-request with finalize=true ...`
@@ -49,6 +51,11 @@ The two `/view` endpoints return `text/plain`; when pending they are PREFIXED wi
   `GET /logs/regroup/status` poll (unchanged) which returns the same `{pending, pending_windows,
   oldest_pending_at}`. The "Finalize" action stays: either re-issue the read with `?finalize=true`,
   or call the existing `POST /logs/regroup/finalize` (202 + poll) — both work.
+  `GET /logs/regroup/status` additionally returns `abandoned_windows` (dead-lettered, needs a human,
+  re-arm via `POST /logs/regroup/reset-abandoned`), and since 2026-08-05 `backing_off_windows` plus
+  `next_retry_at` — the subset of the backlog that has already FAILED and is serving a retry delay.
+  A non-zero `backing_off_windows` means the backlog will not clear quickly, so a UI waiting on
+  `up_to_date` may prefer to stop waiting and reload rather than burn its whole timeout.
 - The user can keep browsing while `pending` is true; the data is consistent, only missing the newest
   tail. Make the banner informational ("New data available — click to include"), not a modal/gate.
 
@@ -164,7 +171,7 @@ DB session, so each poll reflects real progress instead of a binary running→do
 |---------|------------------|--------------|
 | `listing` | connecting + globbing each server's remote dir | "Connecting & listing files…" (indeterminate) |
 | `fetching` | pulling + ingesting files (per-file loop) | progress bar `files_done/files_total`, "Fetching `current_file` (3/12)", live `bytes_so_far`/`entries_so_far` |
-| `regrouping` | Stage 2 stitching of what was ingested (the internal finalize) | "Rebuilding transactions…" (indeterminate) |
+| `regrouping` | Retained for wire compatibility. The backend sets it just before the run ends; nothing is stitching at that moment (the stitch worker owns Stage 2) | treat as "finishing up" (indeterminate) |
 | `done` | terminal — read `status` for outcome | hide progress; show result/ error |
 
 Notes:
@@ -181,9 +188,14 @@ On click → POST, then poll the run (~1500ms) until `status` is `completed`/`fa
 `useUpload.ts` polls jobs. Drive a banner off `phase` + `progress` (clone `regroup/FinalizeBanner.tsx`)
 in `useRemoteFetch.ts`.
 
-> IMPORTANT: the run **finalizes internally** — the `regrouping` phase IS that finalize, so when it
-> reports `status: completed` transaction reads are already current (pending flag false). Do NOT call
-> finalize separately after a fetch.
+> IMPORTANT (changed 2026-08-05): the run **no longer finalizes internally**. It reports the PULL
+> only. Stage 1 writes a `log_regroup_pending` ticket in the same transaction as its entries, and a
+> dedicated backend worker (`log_stitch_worker`) drains that queue on its own ~1s loop, so a
+> `completed` run means the bytes are ingested — NOT that transactions are rebuilt yet.
+> On `completed`, poll `GET /logs/regroup/status` until `up_to_date` before reloading the feed,
+> otherwise you reload data that has not been stitched. Bound the wait (~15s) and proceed anyway on
+> timeout or error. Full brief: `docs/plan/2026-08-05_frontend-stitch-timing-change.md`.
+> A stitch failure no longer marks the run `failed`; it is visible on `/logs/regroup/status`.
 > A `completed` run can still carry **per-source failures** in `result.errors[]` (one server down while
 > others succeeded) — show a partial-success warning rather than assuming every server was reached.
 > If `result.already_local === true`, the requested timestamp was already covered locally and nothing

@@ -8,7 +8,7 @@ The app runs several background loops: the SSH poll supervisor, Stage 2 stitchin
 These are meant to run in exactly one process.
 
 The web tier runs under `gunicorn -w N -k uvicorn.workers.UvicornWorker`, and gunicorn runs the FastAPI `lifespan` in every worker process.
-So with `-w 4`, four copies of every background loop used to start at once: four poll supervisors, four finalizers, four notification workers, all hitting the same database.
+So with `-w 4`, four copies of every background loop used to start at once: four poll supervisors, four stitch workers, four notification workers, all hitting the same database.
 That multiplied load and retries and risked duplicate side effects (for example duplicate notifications).
 It is not the same thing as the per-customer poller, which is many asyncio tasks inside one process and is correct.
 
@@ -30,7 +30,7 @@ Default `run_background_workers=True` means single-process and dev setups (`uvic
 
 - "Exactly one" is guaranteed by systemd (one worker process, restarted on crash), not by hand-written leader election.
 - The singleton advisory lock in `app/worker.py` (`pg_try_advisory_lock(0x7A9B, 1)` on a dedicated connection held for the process lifetime) is a second line of defense: a second worker fails to acquire it and exits, so the loops can never double-run even by operator error. Closing the connection on exit releases the lock, so the next worker takes over.
-- Web and worker coordinate purely through Postgres advisory locks that already exist: the per-host SSH fetch lock and the per-customer / per-window finalize lock. So an on-demand fetch or regroup triggered in the web tier never collides with the poller in the worker.
+- Web and worker coordinate purely through Postgres advisory locks that already exist: the per-host SSH fetch lock and the per-customer / per-window stitch lock (inside `finalize_pending`). So an on-demand fetch or regroup triggered in the web tier never collides with the worker's loops - including the stitch worker, which since 2026-08-05 is the only background caller of Stage 2.
 - Notifications are self-contained in the worker: the rule engine reads the database each tick, publishes to an in-process bus that the same-process dispatcher persists to the database outbox, and redelivers from that outbox. Nothing depends on the web process, so the split does not break alerting.
 - Resource isolation: heavy Stage 2 stitching runs in the worker and can never slow HTTP request latency, and the web tier scales with `-w N` independently.
 

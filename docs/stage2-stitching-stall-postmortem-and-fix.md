@@ -1,5 +1,15 @@
 # Stage 2 stitching stall - postmortem, investigation runbook, and fix
 
+> **Superseded 2026-08-05.** The fetch path no longer stitches.
+> `_do_finalize` was deleted from `remote_fetcher.py`, which no longer imports Stage 2 at all, and the
+> directory watcher and parse worker likewise stopped calling it.
+> Stage 2 is now owned by a dedicated consumer, `app/services/workers/log_stitch_worker.py`, which
+> drains the `log_regroup_pending` queue on its own ~1s loop.
+> Producers only write tickets.
+> See `docs/plan/2026-08-05_16-41_pipeline-after-the-queue-split.html`.
+
+This document records the incident and the fix AS THEY WERE. The code paths it names below (`_do_finalize`, `agg["finalize_error"]`) no longer exist; the `finalize_pending` coalescing and dead-letter work it describes does, and is unchanged.
+
 Date: 2026-07-08.
 Environment: Ubuntu deployment (`fastapirag.service` on the VM whose Postgres is reachable at `192.168.0.142`, database `rag`).
 Affected tenant: `tmp-live` (live BEC servers). `tmp-test` and `mnp` were unaffected by the stall.

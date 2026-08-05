@@ -1,5 +1,20 @@
 # Transaction Log Ingestion + Agentic Debugging — Design Reference
 
+> **Status note (2026-08-05).** This document is a phased design record, so the dated "DONE" entries
+> below describe the system AS IT WAS AT THAT DATE and are deliberately left intact.
+> Two things they mention have since changed:
+>
+> - **`log_grouping_worker` was deleted.** It polled `SELECT count(*)` on the multi-GB `log_entries`
+>   heap every 5 s to detect change, which is why it shipped disabled. Stage 2 now has a real
+>   consumer, `app/services/workers/log_stitch_worker.py`, which drains `log_regroup_pending` on a
+>   ~1 s loop and is ON by default. Producers only write tickets.
+>   `log_grouping_worker_enabled` / `log_grouping_poll_seconds` no longer exist.
+> - **Transaction reads no longer 409** while a regroup is pending. That became a soft 200 flag
+>   (`pending_regroup`) some time ago; any 409 text below is historical.
+>
+> Current pipeline: `docs/plan/2026-08-05_16-41_pipeline-after-the-queue-split.html`.
+
+
 > Status: **design agreed** · ready for step-by-step implementation
 > Grain = **Option 1 (one transaction = one API call) + nullable `flow_id` hook**
 > Pipeline = **two-stage: parse→insert raw entries, then derive transactions**
@@ -282,7 +297,8 @@ app/services/log_ingestion/
     GrouperFactory.py
 app/services/workers/
   log_watcher.py                  # polls log_incoming_dir → Stage 1; mirrors embedding_worker
-  log_grouping_worker.py          # runs Stage 2 incrementally; lifecycle in main.py
+  log_stitch_worker.py            # drains log_regroup_pending -> Stage 2 (replaced log_grouping_worker)
+  log_parse_worker.py             # drains log_source_objects -> Stage 1 (flag-gated, off by default)
 app/persistence/
   models/log_transaction.py, log_entry.py
   repositories/log_transaction_repository.py, log_entry_repository.py
@@ -303,16 +319,28 @@ app/services/log_agent/           # Phase 2
 - **Event endpoints** — `POST /logs/scan` (ingest current incoming dir), `POST /logs/ingest` (push one
   file), `POST /logs/regroup` (re-run Stage 2).
 
-> **Superseded for normal sessions (2026-06-13)** — Stage 2 is no longer auto-run by a count-change
-> worker (now disabled by default, `log_grouping_worker_enabled=False`). Each ingest marks a dirty time
-> window (`log_regroup_pending`); a **scoped** regroup runs on the explicit console
-> `POST /logs/regroup/finalize` (async — poll `GET /logs/regroup/runs/{id}`) or when the watcher's queue
-> drains. Transaction reads 409 while a regroup is pending. See §10 "Scoped (windowed) regroup" for the
-> full, current model.
+> **Superseded (2026-06-13, revised 2026-08-05)** — Stage 2 is not auto-run by a count-change worker.
+> Each ingest marks a dirty time window (`log_regroup_pending`), and a **scoped** regroup rebuilds it.
+>
+> The count-change worker (`log_grouping_worker`) has since been **deleted**: it polled
+> `SELECT count(*)` on the multi-GB `log_entries` heap every 5 s just to detect "did anything change",
+> which is why it shipped disabled. `log_regroup_pending` answers that question directly and is tiny
+> and indexed.
+>
+> Stage 2 now has a proper consumer, `app/services/workers/log_stitch_worker.py`, which drains that
+> queue on a ~1 s loop and is ON by default. Producers (the SFTP transport, the watcher, the parse
+> worker) only write tickets and no longer call Stage 2 at all. The explicit
+> `POST /logs/regroup/finalize` and the `?finalize=true` read shortcut remain, as user-initiated
+> actions rather than background triggers.
+>
+> Transaction reads no longer 409 while a regroup is pending - that is a soft 200 flag
+> (`pending_regroup`). See §10 "Scoped (windowed) regroup" and
+> `docs/plan/2026-08-05_16-41_pipeline-after-the-queue-split.html`.
 
 ### Settings additions
 `log_incoming_dir`, `log_processed_dir`, `log_failed_dir`, `log_watcher_poll_seconds`,
-`log_grouping_poll_seconds`, `log_format` (default `m3_dotnet`), plus Anthropic config (Phase 2).
+`log_stitch_poll_seconds`, `log_format` (default `m3_dotnet`), plus Anthropic config (Phase 2).
+(`log_grouping_poll_seconds` was removed with the grouping worker.)
 
 ---
 
@@ -536,8 +564,9 @@ upload-session finalize + read guard" in §10): scoped+lossless `regroup_window`
 (`log_regroup_pending`), upload-session `finalize_pending` with two triggers (console `POST
 /logs/regroup/finalize` + watcher drain-flush), **async finalize** (202 + `run_id`, poll `GET
 /logs/regroup/runs/{id}`, tracked in `log_regroup_runs`), and a **read guard** that 409s transaction
-reads while regroup is pending. The old count-change worker is now disabled by default
-(`log_grouping_worker_enabled=False`). See `docs/LOG_ANALYSIS_GUIDE.md` for how to run the app.
+reads while regroup is pending. The old count-change worker was disabled by default and has since
+been DELETED, replaced by `log_stitch_worker` (see the status note at the top).
+See `docs/LOG_ANALYSIS_GUIDE.md` for how to run the app.
 
 **One open to-do (not code — config):**
 - [ ] Add `ANTHROPIC_API_KEY=sk-ant-...` to `.env` to actually use `POST /logs/debug/ask`. Until then the
@@ -565,8 +594,10 @@ Nothing in Phase 3 requires schema churn on existing tables — the hook was des
   `log_regroup_pending.py` (dirty windows), `log_regroup_run.py` (async finalize status).
 - Agent: `app/services/log_agent/tools.py` (5 read-only tools), `agent.py` (`LogDebugAgent`).
 - API: `app/api/v1/logs.py` (`require_regrouped` read guard + `/regroup/finalize` + `/regroup/runs/{id}`).
-  Settings: `app/settings.py` (`log_regroup_pad_seconds`, `log_grouping_worker_enabled`). Workers:
-  `app/main.py` lifespan; `app/services/workers/log_watcher.py` (drain-empty finalize flush).
+  Settings: `app/settings.py` (`log_regroup_pad_seconds`; `log_grouping_worker_enabled` has since
+  been removed with the worker). Workers: `app/background.py`;
+  `app/services/workers/log_stitch_worker.py` owns Stage 2 - the watcher's drain-empty finalize flush
+  was removed with the producer-side Stage 2 calls.
 - Verification: `scripts/verify_windowed_regroup.py` (lossless + scoped proof on real data).
 - Postman: `postman/RAG_FAST_API.postman_collection.json` ("Logs - Transactions (Stage 2)" folder has
   Finalize regroup + Get regroup run status; the 5 reads carry a `finalize` param + 409 note).
