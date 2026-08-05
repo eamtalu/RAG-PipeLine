@@ -179,13 +179,14 @@ Its `id` is a string that the application sets to the chunk or entity id, so the
 
 This is the log-analysis pipeline for the M3 warehouse system.
 Raw log lines are stored losslessly as `log_entries` (Stage 1), then derived into one row per API request/response cycle as `log_transactions` (Stage 2).
+All three tables here are **range-partitioned by UTC day** (migration `a1f6d70b3e92`) - see "Daily partitioning" below.
 One transaction groups many entries.
 `log_regroup_pending` and `log_regroup_runs` coordinate the async re-derivation of "dirty" time windows.
 
 ```mermaid
 erDiagram
     log_transactions {
-        uuid id PK "deterministic uuid5"
+        uuid id "deterministic uuid5; unique w/ started_at, NOT a PK"
         uuid job_id FK "-> jobs.id (CASCADE)"
         string customer_code "soft tenant key"
         bool sealed
@@ -211,7 +212,7 @@ erDiagram
 
     log_entry_assignment {
         uuid entry_id "soft -> log_entries.id (NO FK)"
-        datetime entry_ts "copied from the entry; future partition key"
+        datetime entry_ts "copied from the entry; PARTITION KEY (UTC day)"
         uuid transaction_id "soft -> log_transactions.id (NO FK)"
         int seq "position within the transaction"
         string customer_code "soft tenant key"
@@ -219,11 +220,11 @@ erDiagram
     }
 
     log_entries {
-        uuid id PK
+        uuid id "unique w/ timestamp, NOT a PK"
 
         uuid job_id FK "-> jobs.id (CASCADE)"
         string customer_code "soft tenant key"
-        string entry_hash "dedup, unique w/ customer_code"
+        string entry_hash "dedup, unique w/ customer_code + timestamp"
         string source_file
         int line_number
         datetime timestamp
@@ -296,6 +297,45 @@ The `log_entries.transaction_id` / `seq` columns and their index are **gone** (m
 `log_entries` is now strictly insert-only: five consecutive regroups of the same window perform **0** row updates, against ~55 rewrites per row before.
 
 Note: `log_transactions.flow_id` is a nullable hook for a future `log_flow` table and has no foreign key today.
+
+### Daily partitioning
+
+`log_entries`, `log_transactions` and `log_entry_assignment` are range-partitioned by UTC day (migration `a1f6d70b3e92`).
+The keys are `timestamp`, `started_at` and `entry_ts` respectively; `app/persistence/partitioning.py` is the single source of truth for which table is cut on which column, and what a day's partition is called.
+
+Retention was `DELETE` + `VACUUM`, both of which read the whole table - on a heap that reached 40 GB, on a disk with bad sectors.
+It is now `DROP TABLE <partition>`: a file unlink, no row scan, nothing left to vacuum.
+`log_entry_assignment` is co-partitioned with `log_entries` on the same grain deliberately, so a day's entries and that day's assignments are dropped together and retention can never strand one without the other.
+
+Three consequences show up in the schema above.
+
+**No table has a PRIMARY KEY any more.**
+PostgreSQL requires a unique constraint on a partitioned table to contain every partition-key column, and silently forces PK columns to `NOT NULL`.
+All three partition keys are nullable - the parser genuinely emits entries whose timestamp will not parse - so a PK would make those rows un-insertable.
+Identity is a `UNIQUE NULLS NOT DISTINCT` instead: `(id, timestamp)`, `(id, started_at)`, `(entry_id, entry_ts)`.
+The key is present but never first, for the same measured reason as `log_entry_assignment` above.
+The ORM models still declare `primary_key=True` on the id column, but that is row identity for SQLAlchemy only - the DDL it implies is invalid here and is never used, because Alembic is the sole schema builder.
+
+**`log_entries` dedup grew a column**: `(customer_code, entry_hash)` became `(customer_code, entry_hash, timestamp)`.
+This stays a correct dedup key because `entry_hash` is a sha256 over the raw line *including* its millisecond timestamp text, so an identical replay parses to the same instant and routes to the same partition.
+`parse_insert.py`'s `ON CONFLICT` must name all three columns or the insert fails outright.
+The one way the two can disagree is a customer's display timezone being changed between ingests, which re-parses the same text to a different UTC instant.
+That is now blocked: `PATCH /customers/{code}` refuses a timezone change with **409** once the tenant has entries, unless `allow_mixed_timezones=true` (see `app/services/timezone_change_guard.py`).
+
+**Every table has a `DEFAULT` partition** catching NULL-key rows, which is what makes timestamp-less entries insertable at all.
+
+Partitions are maintained by `app/services/workers/log_partition_worker.py`, hourly.
+It provisions `log_partition_precreate_days` (14) of runway ahead of today and drops days past `log_partition_retention_days` (60).
+Creation is the dangerous half - an insert into a day with no partition fails outright - so a creation failure logs CRITICAL and the remaining runway is reported on every tick.
+
+Partition health is exposed on `GET /api/v1/logs/regroup/status` as an additive `partitions` block (`days_ahead`, `oldest_day`, `newest_day`, `retention_days`, `default_partition_rows`, `healthy`).
+It is global rather than tenant-scoped, and rides on that endpoint only because the AUTO-POLL card already polls it.
+
+Dropping sits behind three gates: the day is past retention, no OPEN `log_regroup_pending` window overlaps it, and **entries lag transactions by one day**.
+That last one is the midnight rule.
+A transaction spans at most the seal window, so one starting at 23:58 owns entries until ~00:13 the next day; dropping day N's entries while a day N-1 transaction still referenced them would leave that transaction rendering half-empty.
+So `log_transactions` is dropped for day D and `log_entries` + `log_entry_assignment` only for day D-1.
+The cost is one extra day of entry storage and the bound is exact, not a safety guess.
 
 ## Subsystem 3: Remote SSH log fetching
 
@@ -586,8 +626,8 @@ erDiagram
 | `jobs.id` | `chunks.job_id` | CASCADE |
 | `jobs.id` | `chunks_entity.job_id` | CASCADE |
 | `jobs.id` | `embedding_queue.job_id` | CASCADE |
-| `jobs.id` | `log_entries.job_id` | CASCADE |
-| `jobs.id` | `log_transactions.job_id` | CASCADE |
+| `jobs.id` | `log_entries.job_id` | CASCADE (re-added by `a1f6d70b3e92`; `LIKE` does not copy foreign keys) |
+| `jobs.id` | `log_transactions.job_id` | CASCADE (re-added by `a1f6d70b3e92`) |
 | `chunks.id` | `chunks.parent_id` (self) | CASCADE |
 | `chunks.id` | `embedding_queue.chunk_id` | CASCADE |
 | `chunks_entity.id` | `embedding_queue.chunk_entity_id` | CASCADE |
