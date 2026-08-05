@@ -402,3 +402,61 @@ async def test_stitch_worker_starts_anyway_when_windows_are_open(monkeypatch):
     with_backlog = len(await bg.start_background_tasks())
 
     assert with_backlog == baseline + 1
+
+
+# =============================================================== worker loop + policy edge cases
+async def test_worker_loop_drains_then_sleeps_and_stops_on_cancel(monkeypatch):
+    """The forever loop itself: it must drain, sleep its cadence, survive an error, and stop ONLY on
+    CancelledError. Driven by making sleep raise after N ticks, since the loop never returns."""
+    ticks = {"drain": 0, "sleep": 0}
+
+    async def _drain():
+        ticks["drain"] += 1
+        if ticks["drain"] == 2:
+            raise RuntimeError("transient blow-up mid-loop")   # must NOT stop the worker
+        return {"customers": 1, "windows": 1, "consumed": 1, "abandoned": 0, "failed": 0}
+
+    async def _sleep(_seconds):
+        ticks["sleep"] += 1
+        if ticks["sleep"] >= 3:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(lsw, "drain_once", _drain)
+    monkeypatch.setattr(lsw.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await lsw.run_log_stitch_worker()
+
+    assert ticks["drain"] == 3, "the loop must keep going after an error"
+    assert ticks["sleep"] == 3
+
+
+async def test_pending_backlog_counts_open_windows_regardless_of_backoff():
+    """Used at startup to decide whether the worker must run even with the flag off, so it counts
+    ALL open windows - a backing-off one is still work that needs draining."""
+    cc = "TEST_CHUNK18_BACKLOG"
+    await _cleanup(cc)
+    await _mk_pending(cc, available_at=datetime.now(timezone.utc) + timedelta(hours=1))
+    try:
+        assert await lsw.pending_backlog() >= 1
+    finally:
+        await _cleanup(cc)
+
+
+def test_policy_follows_the_cause_chain_and_survives_a_self_reference():
+    """A wrapped error must be classified by what actually went wrong. The self-referential guard
+    exists because `raise X from X` is legal and would otherwise loop forever."""
+    inner = ValueError("unparseable")
+    outer = RuntimeError("stage 2 failed")
+    outer.__cause__ = inner
+    assert retry_policy.is_transient(outer) is False, "must see through the wrapper"
+
+    loop = RuntimeError("self-caused")
+    loop.__cause__ = loop
+    assert retry_policy.is_transient(loop) is True, "must terminate, not hang"
+
+
+def test_policy_defaults_an_unrecognised_error_to_transient():
+    class _Odd(Exception):
+        pass
+    assert retry_policy.is_transient(_Odd("who knows")) is True

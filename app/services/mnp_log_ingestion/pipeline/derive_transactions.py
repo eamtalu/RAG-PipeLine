@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
 from sqlalchemy import (String, Enum as SAEnum, delete, func, inspect as sa_inspect, select,
-                        text as sa_text, true as sa_true, update)
+                        false as sa_false, text as sa_text, true as sa_true, update)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
@@ -35,6 +35,7 @@ from app.services.mnp_log_ingestion.timefmt import to_display, set_display_timez
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun, LogRegroupRunStatus
 from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
+from app.services.mnp_log_ingestion.pipeline import assignments
 from app.services.queueing import retry_policy
 
 logger = logging.getLogger(__name__)
@@ -473,6 +474,27 @@ def _is_sealed(values: dict, seal_cutoff: datetime | None, abandon_cutoff: datet
     return ended < seal_cutoff
 
 
+async def _record_assignment(db: AsyncSession, transaction_id: uuid.UUID,
+                             entries: list[LogEntry], customer_code: str) -> None:
+    """Record which entries belong to this transaction, and in what order.
+
+    The assignment table is the source of truth. While settings.log_entry_assignment_dual_write is
+    on, the legacy `log_entries.transaction_id` / `.seq` columns are ALSO written so the two can be
+    compared on real data before anything depends on the new table; that legacy write is exactly the
+    105.8M-update / 0.0%-HOT churn this change exists to remove, so it is temporary.
+
+    Split out of `_persist` so the persistence concern is one named thing rather than four lines
+    buried in the grouping loop.
+    """
+    await assignments.write(db, transaction_id=transaction_id,
+                            entry_ids=[e.id for e in entries], customer_code=customer_code)
+    if not settings.log_entry_assignment_dual_write:
+        return
+    for i, e in enumerate(entries):
+        e.transaction_id = transaction_id
+        e.seq = i
+
+
 async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code: str,
                    seal_cutoff: datetime | None, abandon_cutoff: datetime | None) -> dict:
     """Compute + insert each builder with a deterministic id, assign its entries, and seal those
@@ -519,9 +541,7 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
         txn = LogTransaction(id=tid, sealed=is_sealed, **values)
         db.add(txn)
         await db.flush()  # get txn.id
-        for i, e in enumerate(b.entries):
-            e.transaction_id = txn.id
-            e.seq = i
+        await _record_assignment(db, txn.id, b.entries, customer_code)
         assigned += len(b.entries)
         created += 1
         sealed += int(is_sealed)
@@ -655,20 +675,32 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
     pad = _regroup_pad()
     lo_p, hi_p = lo - pad, hi + pad
 
-    # 1. free every transaction anchored in [lo_p, hi] (sealed included); entries -> NULL via FK.
-    await db.execute(delete(LogTransaction).where(
-        LogTransaction.customer_code == customer_code,
-        LogTransaction.started_at >= lo_p,
-        LogTransaction.started_at <= hi,
-    ))
+    # 1. free every transaction anchored in [lo_p, hi] (sealed included).
+    #    The assignment rows go with them: the FK cascades, but we delete them EXPLICITLY first so
+    #    the intent is stated rather than inferred, and so the freeing is visible to the re-select in
+    #    step 2 — which happens in this same transaction with no intermediate commit. This is what
+    #    replaces relying on `ON DELETE SET NULL` to blank the raw rows.
+    freed = list((await db.execute(
+        select(LogTransaction.id).where(
+            LogTransaction.customer_code == customer_code,
+            LogTransaction.started_at >= lo_p,
+            LogTransaction.started_at <= hi,
+        )
+    )).scalars().all())
+    await assignments.delete_for_transactions(db, freed)
+    await db.execute(delete(LogTransaction).where(LogTransaction.id.in_(freed)) if freed
+                     else delete(LogTransaction).where(sa_false()))
 
     # 2. read the now-unassigned entries across the full padded span, in stream order. The upper read
     #    bound is hi_p (= hi + pad), not hi: a freed transaction anchored at hi can own entries up to
     #    pad later, and we must see all of them to stitch it whole.
+    #    "Unassigned" is now "has no row in log_entry_assignment" rather than transaction_id IS NULL.
+    #    The anti-join stays bounded by the window below — a whole-table anti-join over an
+    #    append-only table would not scale.
     rows = list((await db.execute(
         select(LogEntry).where(
             LogEntry.customer_code == customer_code,
-            LogEntry.transaction_id.is_(None),
+            assignments.is_unassigned(),
             LogEntry.timestamp >= lo_p,
             LogEntry.timestamp <= hi_p,
         ).order_by(

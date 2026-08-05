@@ -24,6 +24,7 @@ from app.persistence.models.log_transaction import LogTransaction, LogTransactio
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun
 from app.persistence.models.log_source_object import LogSourceObject, SourceObjectStatus
+from app.services.mnp_log_ingestion.pipeline import assignments
 from app.services.logspace_cleanup import purge_source_objects_files
 from app.services.workers.log_parse_worker import reset_abandoned_objects
 from app.services.mnp_log_ingestion.LogIngestion import LogIngestion, get_log_ingestion, DOCUMENT_TYPE
@@ -50,18 +51,21 @@ MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB — rotating log files can be large
 MAX_RENDER_ENTRIES = 50_000
 
 
-def _entry_sort_key(e: "LogEntry"):
-    """Sort key reproducing SQL `seq ASC NULLS LAST, line_number ASC NULLS LAST`.
+def _assigned_sort_key(pair: "tuple[int | None, LogEntry]"):
+    """Sort key for ONE transaction's `(seq, entry)` pairs — `seq ASC NULLS LAST, line_number ASC`.
 
-    Used to order ONE transaction's entries in Python (see view_transactions._render), replacing a
-    global cross-transaction SQL ORDER BY that spilled to disk. Both `seq` and `line_number` are
-    nullable (an entry can be unstitched, or seq unset), so the key must be NULL-safe:
+    Orders in Python rather than SQL (see view_transactions._render), replacing a global
+    cross-transaction ORDER BY that spilled to disk. Each bucket is tiny (~17 entries), so the sorts
+    are trivial.
+
+    `seq` now comes from log_entry_assignment rather than a column on LogEntry, but it is still
+    nullable in principle and `line_number` always was, so the key stays NULL-safe:
       - the `x is None` flags sort NULLs LAST (False < True), and
-      - the `x or 0` substitutions guarantee Python never compares None to None — a plain
-        `(e.seq, e.line_number)` key raises TypeError as soon as it meets a NULL, and even
-        `(e.seq is None, e.seq, ...)` raises when two rows both have seq=None.
+      - the `x or 0` substitutions stop Python comparing None to None — a plain `(seq, line_number)`
+        key raises TypeError the moment it meets a NULL.
     """
-    return (e.seq is None, e.seq or 0, e.line_number is None, e.line_number or 0)
+    seq, e = pair
+    return (seq is None, seq or 0, e.line_number is None, e.line_number or 0)
 
 
 # strong refs to in-flight background finalize tasks (asyncio only weak-refs them, so without this
@@ -756,10 +760,9 @@ async def view_transactions(
         # We fetch unordered (no Sort node, no temp-file, and LIMIT can short-circuit) and restore
         # the only ordering that matters — WITHIN each transaction — in Python via _entry_sort_key.
         # See docs/transactions-view-load-spike-and-db-concepts-primer.md.
-        entry_rows = (await db.execute(
-            select(LogEntry).where(LogEntry.transaction_id.in_(ids))
-            .limit(MAX_RENDER_ENTRIES + 1)
-        )).scalars().all()
+        # (entry, owning transaction, seq) — the assignment table owns the grouping now, so the
+        # renderer below no longer reads LogEntry.transaction_id / .seq.
+        entry_rows = await assignments.load_entries(db, list(ids), limit=MAX_RENDER_ENTRIES + 1)
     except Exception as exc:
         # A dead disk sector under log_entries for this page must not 500 the whole feed: the
         # transaction list above is intact, so return it with a clear notice and let the user page on.
@@ -783,16 +786,17 @@ async def view_transactions(
     # block the worker heartbeat. asyncio.to_thread propagates contextvars (incl. the display
     # timezone set in get_current_customer), which a bare run_in_executor would not.
     def _render() -> str:
+        # Group by the OWNING transaction from the assignment row, and order by its seq. Both used to
+        # come from columns on LogEntry; they now come from log_entry_assignment, which is what lets
+        # the raw table be insert-only.
         by_txn: dict = {}
-        for e in entry_rows:
-            by_txn.setdefault(e.transaction_id, []).append(e)
-        # restore per-transaction order in Python (the DB fetch above is now unordered). Each bucket
-        # is tiny (~17 entries), so these sorts are trivial and never touch disk. Matches the old
-        # SQL "seq ASC NULLS LAST, line_number ASC" exactly, per transaction.
-        for entries in by_txn.values():
-            entries.sort(key=_entry_sort_key)
+        for entry, txn_id, seq in entry_rows:
+            by_txn.setdefault(txn_id, []).append((seq, entry))
+        for bucket in by_txn.values():
+            bucket.sort(key=_assigned_sort_key)
         sep = "\n\n" + ("─" * 90) + "\n\n"
-        blocks = [render_transaction(t, by_txn.get(t.id, []), verbose=verbose) for t in txns]
+        blocks = [render_transaction(t, [e for _seq, e in by_txn.get(t.id, [])], verbose=verbose)
+                  for t in txns]
         return header + sep + sep.join(blocks)
 
     text = await asyncio.to_thread(_render)
@@ -806,11 +810,9 @@ async def _load_transaction_entries(transaction_id: uuid.UUID, customer: str, db
     t = await db.get(LogTransaction, transaction_id)
     if not t or t.customer_code != customer:
         raise HTTPException(404, detail="Transaction not found")
-    rows = (await db.execute(
-        select(LogEntry).where(LogEntry.transaction_id == transaction_id)
-        .order_by(LogEntry.seq.asc().nullslast(), LogEntry.line_number.asc())
-        .limit(MAX_RENDER_ENTRIES + 1)
-    )).scalars().all()
+    # ordered by the assignment's seq — LogEntry.seq is no longer the source of truth.
+    rows = [e for e, _txn, _seq in
+            await assignments.load_entries(db, [transaction_id], limit=MAX_RENDER_ENTRIES + 1)]
     truncated = len(rows) > MAX_RENDER_ENTRIES
     return t, list(rows[:MAX_RENDER_ENTRIES]), truncated
 

@@ -5,6 +5,7 @@ from app.persistence.models.ChunkEntity import ChunkEntity
 from app.persistence.models.embedding_queue import EmbeddingQueueItem
 from app.persistence.models.log_transaction import LogTransaction
 from app.persistence.models.log_entry import LogEntry
+from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun
 from app.persistence.models.log_ssh_source import LogSshSource
@@ -31,6 +32,7 @@ __all__ = [
     "EmbeddingQueueItem",
     "LogTransaction",
     "LogEntry",
+    "LogEntryAssignment",
     "LogRegroupPending",
     "LogRegroupRun",
     "LogSshSource",

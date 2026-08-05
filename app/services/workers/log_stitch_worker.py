@@ -77,6 +77,23 @@ async def pending_backlog() -> int:
         ) or 0
 
 
+# {stat key: the field finalize_pending reports it under}
+_STAT_FIELDS = {"windows": "windows", "consumed": "pending_consumed", "abandoned": "abandoned"}
+
+
+def _merge_result(stats: dict, result: dict) -> None:
+    """Fold one tenant's finalize result into the running totals."""
+    for key, field in _STAT_FIELDS.items():
+        stats[key] += result.get(field) or 0
+
+
+async def _stitch_customer(cc: str) -> dict:
+    """Stitch one tenant. Its own short-lived session, so one tenant never holds a connection open
+    across another's work."""
+    async with async_session() as db:
+        return await finalize_pending(db, cc)
+
+
 async def drain_once() -> dict:
     """Stitch every tenant with due work. Per-tenant failures are isolated.
 
@@ -88,11 +105,7 @@ async def drain_once() -> dict:
     for cc in await customers_with_due_work():
         stats["customers"] += 1
         try:
-            async with async_session() as db:
-                res = await finalize_pending(db, cc)
-            stats["windows"] += res.get("windows", 0) or 0
-            stats["consumed"] += res.get("pending_consumed", 0) or 0
-            stats["abandoned"] += res.get("abandoned", 0) or 0
+            _merge_result(stats, await _stitch_customer(cc))
         except Exception:
             stats["failed"] += 1
             logger.exception(
@@ -101,17 +114,30 @@ async def drain_once() -> dict:
     return stats
 
 
+async def _tick() -> None:
+    """One iteration: drain, and report only when there was something to do.
+
+    Swallows errors so a single bad tick never kills the loop — every per-window failure is already
+    recorded durably on log_regroup_pending, so there is nothing to lose by carrying on.
+
+    There is deliberately no `except asyncio.CancelledError: raise` here. Since Python 3.8
+    CancelledError inherits from BaseException rather than Exception, so shutdown propagates through
+    the handler below untouched; adding one would be redundant branching that reads as if it were
+    load-bearing.
+    """
+    try:
+        stats = await drain_once()
+    except Exception:
+        logger.exception("Stitch worker error — retrying next tick")
+        return
+    if stats["customers"]:
+        logger.info("Stitch drain: %s", stats)
+
+
 async def run_log_stitch_worker() -> None:
-    """Forever loop. Survives errors; only CancelledError (shutdown) stops it."""
+    """Forever loop. Survives errors; only cancellation (shutdown) stops it."""
     logger.info("Log stitch worker started (poll=%.1fs, max_customers_per_tick=%d)",
                 settings.log_stitch_poll_seconds, settings.log_stitch_max_customers_per_tick)
     while True:
-        try:
-            stats = await drain_once()
-            if stats["customers"]:
-                logger.info("Stitch drain: %s", stats)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Stitch worker error — retrying next tick")
+        await _tick()
         await asyncio.sleep(settings.log_stitch_poll_seconds)

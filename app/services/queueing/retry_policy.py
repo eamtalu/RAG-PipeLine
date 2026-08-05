@@ -59,23 +59,45 @@ def backoff_seconds(attempts: int, *, base: float, cap: float) -> float:
     return raw + random.random() * raw * 0.25
 
 
+# Ordered rules: the first whose test matches decides. Expressed as data rather than a chain of
+# `if`s so adding a rule is a one-line edit and the function that walks them stays trivial.
+#
+# The disk classifier goes first: it recognises the real Postgres "could not read block" and
+# QueryCanceledError MESSAGES, which no isinstance check would catch.
+_RULES: tuple[tuple[str, object, bool], ...] = (
+    ("disk or timeout", is_disk_io_error, True),
+    ("permanent type", lambda e: isinstance(e, PERMANENT_TYPES), False),
+    ("transient type", lambda e: isinstance(e, TRANSIENT_TYPES), True),
+)
+
+
+def _cause_chain(exc: BaseException):
+    """`exc`, then its __cause__, and so on — so a wrapped error is classified by what actually
+    went wrong rather than by the wrapper. Guards against a self-referential cause."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = getattr(current, "__cause__", None)
+
+
+def _classify(exc: BaseException) -> bool | None:
+    """One pass of the rules. True = transient, False = permanent, None = unrecognised."""
+    for _name, matches, verdict in _RULES:
+        if matches(exc):
+            return verdict
+    return None
+
+
 def is_transient(exc: BaseException) -> bool:
     """True if the failure is worth another attempt.
-
-    Order: the existing disk/timeout classifier first (it recognises the real Postgres
-    "could not read block" and QueryCanceledError messages), then explicit permanent types, then
-    explicit transient types, then follow the cause chain.
 
     An unrecognised error defaults to TRANSIENT. The attempt budget bounds it either way, so giving
     an unknown failure a couple of retries is safer than discarding work that might have succeeded.
     """
-    if is_disk_io_error(exc):
-        return True
-    if isinstance(exc, PERMANENT_TYPES):
-        return False
-    if isinstance(exc, TRANSIENT_TYPES):
-        return True
-    cause = getattr(exc, "__cause__", None)
-    if cause is not None and cause is not exc:
-        return is_transient(cause)
+    for candidate in _cause_chain(exc):
+        verdict = _classify(candidate)
+        if verdict is not None:
+            return verdict
     return True

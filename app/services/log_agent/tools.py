@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.log_entry import LogEntry
+from app.services.mnp_log_ingestion.pipeline import assignments
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc
 
@@ -284,11 +285,10 @@ async def _get_transaction(db: AsyncSession, args: dict, customer_code: str) -> 
     if not t or t.customer_code != customer_code:  # another tenant's id reads as not-found
         return {"error": f"No transaction found with id {raw}"}
     max_entries = _clamp(args.get("max_entries"), 80, 200)
-    entries = (await db.execute(
-        select(LogEntry).where(LogEntry.transaction_id == tid)
-        .order_by(LogEntry.seq.asc().nullslast(), LogEntry.line_number.asc())
-        .limit(max_entries)
-    )).scalars().all()
+    # Ordered by the assignment's seq — LogEntry.seq is no longer the source of truth. Each pair is
+    # (entry, seq) so the timeline below can report the position without reading it off the row.
+    entries = [(e, seq) for e, _txn, seq in
+               await assignments.load_entries(db, [tid], limit=max_entries)]
 
     header = {
         **_txn_summary(t),
@@ -311,9 +311,9 @@ async def _get_transaction(db: AsyncSession, args: dict, customer_code: str) -> 
     header = {k: v for k, v in header.items() if v is not None}
 
     timeline = []
-    for e in entries:
+    for e, seq in entries:
         step = {
-            "seq": e.seq,
+            "seq": seq,
             "type": e.entry_type.value,
             "level": e.level,
             "timestamp": iso_display(e.timestamp),
@@ -338,7 +338,7 @@ async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> d
         conds.append(LogEntry.level == args["level"].upper())
     if args.get("transaction_id"):
         try:
-            conds.append(LogEntry.transaction_id == uuid.UUID(str(args["transaction_id"])))
+            conds.append(assignments.belongs_to_transaction(uuid.UUID(str(args["transaction_id"]))))
         except (ValueError, AttributeError):
             return {"error": f"Not a valid transaction id: {args['transaction_id']!r}"}
     if args.get("time_from") and (dt := _parse_dt(args["time_from"])):

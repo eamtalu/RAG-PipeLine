@@ -112,6 +112,26 @@ class Settings(BaseSettings):
     log_regroup_backoff_base_seconds: float = 30.0
     log_regroup_backoff_max_seconds: float = 1800.0
 
+    # --- Append-only log_entries: the assignment lives in log_entry_assignment ---
+    # Stage 2 used to write the grouping result back onto the raw table (transaction_id / seq) and
+    # clear it again through an ON DELETE SET NULL cascade. transaction_id is indexed, so every
+    # rewrite touched the heap AND the index, and the unsealed tail is regrouped repeatedly before it
+    # seals. Measured on production 2026-08-05: 105,838,123 updates at 0.0% HOT on 1.9M rows.
+    #
+    # While this is TRUE, Stage 2 writes BOTH the new assignment rows and the legacy columns. That is
+    # the safety net for the switch-over: with both populated, a single comparison query proves they
+    # agree on real production data before anything depends on the new table.
+    #
+    #   SELECT count(*) FROM log_entries e
+    #   LEFT JOIN log_entry_assignment a ON a.entry_id = e.id
+    #   WHERE e.transaction_id IS DISTINCT FROM a.transaction_id
+    #      OR e.seq IS DISTINCT FROM a.seq;          -- must be 0
+    #
+    # Set FALSE once that has been verified: log_entries then becomes genuinely insert-only and
+    # n_tup_upd stops climbing. Dropping the columns is a separate, later migration - it is the only
+    # step that rewrites the raw table, so it should ride with the partitioning pass.
+    log_entry_assignment_dual_write: bool = True
+
     # --- Stage 2 stitch worker: the consumer that owns draining log_regroup_pending ---
     # log_regroup_pending has always been a durable work queue (Stage 1 writes a ticket in the same
     # transaction as the entries), but it had no consumer — so every producer had to remember to call

@@ -209,9 +209,17 @@ erDiagram
         datetime created_at
     }
 
+    log_entry_assignment {
+        uuid entry_id PK "-> log_entries.id (CASCADE)"
+        uuid transaction_id FK "-> log_transactions.id (CASCADE)"
+        int seq "position within the transaction"
+        string customer_code "soft tenant key"
+        datetime assigned_at
+    }
+
     log_entries {
         uuid id PK
-        uuid transaction_id FK "-> log_transactions.id (SET NULL)"
+        uuid transaction_id "LEGACY, no FK; superseded by log_entry_assignment"
         uuid job_id FK "-> jobs.id (CASCADE)"
         string customer_code "soft tenant key"
         string entry_hash "dedup, unique w/ customer_code"
@@ -257,8 +265,23 @@ erDiagram
         datetime finished_at
     }
 
-    log_transactions ||--o{ log_entries : "groups"
+    log_transactions ||--o{ log_entry_assignment : "groups"
+    log_entries ||--o| log_entry_assignment : "currently assigned"
 ```
+
+### `log_entry_assignment` — why `log_entries` is now append-only
+
+Stage 2 used to write the grouping result back onto `log_entries` (`transaction_id` / `seq`) and clear it again through an `ON DELETE SET NULL` cascade.
+`transaction_id` is indexed, so every rewrite touched the heap *and* the index, and the unsealed tail is regrouped repeatedly before it seals.
+Measured on production 2026-08-05: **105,838,123 updates at 0.0% HOT** on 1.9M rows — roughly 55 rewrites per row.
+That was the write amplification, dead-tuple churn and vacuum pressure behind the outage.
+
+Separating the current interpretation from the raw evidence fixes it.
+`entry_id` is the primary key, so "at most one current assignment per entry" is a database guarantee.
+Both foreign keys `CASCADE`: deleting a transaction drops its assignments (what `SET NULL` used to do, without touching raw rows), and deleting an entry drops its assignment, which keeps the purge chain `jobs -> entries -> assignments` intact.
+
+The `log_entries.transaction_id` / `seq` columns still exist but are **legacy**: the FK was dropped in migration `d5b830e14f72` so no cascade can rewrite the table, and nothing reads them.
+Dropping the columns is the only step that rewrites the raw table, so it rides with the partitioning pass.
 
 Note: `log_transactions.flow_id` is a nullable hook for a future `log_flow` table and has no foreign key today.
 
@@ -556,7 +579,8 @@ erDiagram
 | `chunks.id` | `chunks.parent_id` (self) | CASCADE |
 | `chunks.id` | `embedding_queue.chunk_id` | CASCADE |
 | `chunks_entity.id` | `embedding_queue.chunk_entity_id` | CASCADE |
-| `log_transactions.id` | `log_entries.transaction_id` | SET NULL |
+| `log_entries.id` | `log_entry_assignment.entry_id` | CASCADE |
+| `log_transactions.id` | `log_entry_assignment.transaction_id` | CASCADE |
 | `log_ssh_sources.id` | `log_ssh_file_checkpoints.source_id` | CASCADE |
 | `customers.customer_code` | `customer_display_names.customer_code` | CASCADE |
 | `customers.customer_code` | `logspace_presence.customer_code` | CASCADE |
@@ -574,4 +598,5 @@ erDiagram
 | `jobs.id` | `log_source_objects.job_id` | nullable, no FK; transitional, set by the parse worker |
 | `notification_rules.id` | `notification_events.rule_id` | provenance, no FK |
 | future `log_flow` | `log_transactions.flow_id` | Phase-3 hook, no FK |
+| `log_transactions.id` | `log_entries.transaction_id` | LEGACY column; FK dropped in `d5b830e14f72`, superseded by `log_entry_assignment` |
 | `chunks.id` / `chunks_entity.id` | `embeddings.id` (string) | app-level key into the pgvector table |
