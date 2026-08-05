@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
-from sqlalchemy import (String, Enum as SAEnum, delete, func, inspect as sa_inspect, select,
+from sqlalchemy import (String, Enum as SAEnum, delete, func, inspect as sa_inspect, or_, select,
                         false as sa_false, text as sa_text, true as sa_true, update)
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,7 +35,7 @@ from app.services.mnp_log_ingestion.timefmt import to_display, set_display_timez
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun, LogRegroupRunStatus
 from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
-from app.services.mnp_log_ingestion.pipeline import assignments
+from app.services.mnp_log_ingestion.pipeline import assignments, time_bounds
 from app.services.queueing import retry_policy
 
 logger = logging.getLogger(__name__)
@@ -446,14 +446,92 @@ def _txn_id(entries: list[LogEntry]) -> uuid.UUID:
     return uuid.uuid5(_TXN_NS, _anchor(entries))
 
 
+def _entry_stream_order(e: LogEntry):
+    """Chronological order within one transaction, NULL timestamps first and stable on line number.
+
+    The `is None` flag rather than the raw value because Python refuses to compare None to a datetime,
+    and a transaction can legitimately contain an entry whose timestamp did not parse.
+    """
+    return (e.timestamp is None, e.timestamp, e.line_number or 0)
+
+
+def _clash_window(timestamps) -> "time_bounds.UtcWindow | None":
+    """The span in which a transaction colliding with these entries could have started.
+
+    A transaction's id is `uuid5` of its anchor entry's hash, so a colliding row was built from the
+    SAME anchor entry and shares its timestamp. Its `started_at` is the minimum over its own entries,
+    which the system guarantees lie within one pad of each other — so it sits in
+    `[anchor_ts - pad, anchor_ts]`. Padding the span of the entries being written therefore cannot
+    miss a real clash; it is exact, not an approximation that happens to work.
+
+    None when no timestamp can be derived at all, which tells the caller to look the ids up without a
+    time bound rather than filter everything out.
+    """
+    return time_bounds.from_instants(timestamps, pad=_regroup_pad())
+
+
+def _existing_ids_stmt(customer_code: str, ids, *, window):
+    """The clash-check SELECT, separated so a test can EXPLAIN it and confirm it prunes."""
+    stmt = select(LogTransaction.id).where(
+        LogTransaction.customer_code == customer_code, LogTransaction.id.in_(list(ids)))
+    if window is not None:
+        # include_null: a transaction whose entries all lack a parsable timestamp has a NULL
+        # started_at and lives in the DEFAULT partition. A range predicate is FALSE for NULL, so
+        # without this branch that clash would go unseen and the rebuild would overwrite the row.
+        stmt = stmt.where(window.covers(LogTransaction.started_at, include_null=True))
+    return stmt
+
+
+async def _existing_transaction_ids(db: AsyncSession, customer_code: str, ids, *,
+                                    window) -> set[uuid.UUID]:
+    """Which of `ids` already exist for this tenant.
+
+    This used to load EVERY transaction id the tenant had ever had into a Python set — 109k rows per
+    call in production, growing forever, and after partitioning an Append across all ~130 partitions.
+    Asking only about the ids actually being written is both exact and bounded by the size of the
+    batch rather than by the tenant's history.
+    """
+    ids = list(ids)
+    if not ids:
+        return set()
+    return set((await db.execute(_existing_ids_stmt(customer_code, ids, window=window)))
+               .scalars().all())
+
+
+def _recent_max_ts_stmt(customer_code: str):
+    """The newest entry timestamp within the recent lookback — the fast path for `_cutoffs`.
+
+    Carries an explicit `timestamp >=` bound so a partitioned `log_entries` prunes to the last few
+    days instead of taking the max of all 60 partitions. Kept as a statement so a test can EXPLAIN it
+    and confirm the partition key is actually in the predicate.
+    """
+    floor = datetime.now(timezone.utc) - timedelta(days=settings.log_cutoff_lookback_days)
+    return select(func.max(LogEntry.timestamp)).where(
+        LogEntry.customer_code == customer_code, LogEntry.timestamp >= floor)
+
+
+async def _max_entry_ts(db: AsyncSession, customer_code: str) -> datetime | None:
+    """Newest entry timestamp for the tenant: bounded probe first, unbounded scan only if it misses.
+
+    The bound alone would be wrong. A tenant whose ingestion has stopped, or one importing back-dated
+    logs, has its newest entry OUTSIDE the lookback — the probe returns NULL, `_cutoffs` reports "no
+    entries", and nothing that tenant owns ever seals. So a miss falls back to the full scan and pays
+    the old cost, which is the rare case; a live tenant always hits the bounded path.
+    """
+    recent = await db.scalar(_recent_max_ts_stmt(customer_code))
+    if recent is not None:
+        return recent
+    return await db.scalar(
+        select(func.max(LogEntry.timestamp)).where(LogEntry.customer_code == customer_code)
+    )
+
+
 async def _cutoffs(db: AsyncSession, customer_code: str) -> tuple[datetime | None, datetime | None]:
     """(seal_cutoff, abandon_cutoff) measured against the NEWEST log timestamp FOR THIS CUSTOMER (the
     log's notion of 'now'), not wall-clock — so batch / back-dated ingestion seals correctly too, and
     one customer's stale logs still seal while another's active stream doesn't drag them. Terminal
     transactions seal at seal_cutoff; incomplete ones only at the much-older abandon_cutoff."""
-    max_ts = await db.scalar(
-        select(func.max(LogEntry.timestamp)).where(LogEntry.customer_code == customer_code)
-    )
+    max_ts = await _max_entry_ts(db, customer_code)
     if max_ts is None:
         return None, None
     return (max_ts - timedelta(seconds=settings.log_seal_window_seconds),
@@ -474,6 +552,59 @@ def _is_sealed(values: dict, seal_cutoff: datetime | None, abandon_cutoff: datet
     return ended < seal_cutoff
 
 
+async def _resolve_ids(db: AsyncSession, builders: list[_TxnBuilder],
+                       customer_code: str) -> tuple[list[uuid.UUID], set[uuid.UUID]]:
+    """Each builder's deterministic id, plus the subset of them that already exist.
+
+    The sort comes first and is not cosmetic: entries are attached out of stream order (a REQUEST is
+    bound after its work appears), and `_txn_id` reads the ANCHOR entry, which is whichever entry the
+    order puts first. Computing ids before sorting would produce a different id for the same
+    transaction and break the idempotency the whole design rests on. Sorting also makes seq,
+    source_file_start/end and the rendered timeline correct.
+    """
+    for b in builders:
+        b.entries.sort(key=_entry_stream_order)
+    ids = [_txn_id(b.entries) for b in builders]
+    existing = await _existing_transaction_ids(
+        db, customer_code, ids,
+        window=_clash_window([e.timestamp for b in builders for e in b.entries]))
+    return ids, existing
+
+
+def _over_length(values: dict, limits: dict[str, int]):
+    """(key, limit, value) for each promoted string longer than the column that has to hold it."""
+    for key, limit in limits.items():
+        value = values.get(key)
+        if isinstance(value, str) and len(value) > limit:
+            yield key, limit, value
+
+
+def _cap_over_length(values: dict, customer_code: str) -> dict:
+    """Trim promoted string dimensions to their column width, in place.
+
+    The full value is preserved on the raw log_entry; only the queryable transaction column is capped.
+    Without this, one over-length value (e.g. a 70-char composite ItemNumber) raises
+    StringDataRightTruncationError, aborting the batch — and since finalize retries oldest-first, that
+    stalls ALL stitching for the tenant. See docs/stage2-stitching-stall-postmortem-and-fix.md.
+    """
+    for key, limit, value in _over_length(values, _txn_str_limits()):
+        logger.warning("Stage 2 [%s]: capped over-length %s (%d > %d) to fit column",
+                       customer_code, key, len(value), limit)
+        values[key] = value[:limit]
+    return values
+
+
+async def _write_transaction(db: AsyncSession, *, tid: uuid.UUID, values: dict, is_sealed: bool,
+                             entries: list[LogEntry], customer_code: str) -> LogTransaction:
+    """Insert one transaction and record which entries belong to it. Caller commits."""
+    txn = LogTransaction(id=tid, sealed=is_sealed, **values)
+    db.add(txn)
+    await db.flush()  # get txn.id
+    await assignments.write(db, transaction_id=txn.id, entries=entries,
+                            customer_code=customer_code)
+    return txn
+
+
 async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code: str,
                    seal_cutoff: datetime | None, abandon_cutoff: datetime | None) -> dict:
     """Compute + insert each builder with a deterministic id, assign its entries, and seal those
@@ -492,36 +623,16 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
     created = sealed = assigned = skipped = 0
     by_status: dict[str, int] = {}
     seen: set[uuid.UUID] = set()
-    existing: set[uuid.UUID] = set((await db.execute(
-        select(LogTransaction.id).where(LogTransaction.customer_code == customer_code)
-    )).scalars().all())
-    for b in builders:
-        # entries were attached out of stream order (a REQUEST is bound after its work appears);
-        # re-sort chronologically so seq + source_file_start/end and the rendered timeline are right.
-        b.entries.sort(key=lambda e: (e.timestamp is None, e.timestamp, e.line_number or 0))
-        tid = _txn_id(b.entries)
+    ids, existing = await _resolve_ids(db, builders, customer_code)
+    for b, tid in zip(builders, ids):
         if tid in seen or tid in existing:
             skipped += 1
             continue
         seen.add(tid)
-        values = b.compute()
-        # Defensive length cap: coerce any promoted string dimension longer than its column to fit.
-        # The full value is preserved on the raw log_entry; only the (queryable) transaction column is
-        # capped. Without this, one over-length value (e.g. a 70-char composite ItemNumber) raises
-        # StringDataRightTruncationError, aborting the batch and — since finalize retries oldest-first —
-        # stalling ALL stitching for the tenant. See docs/stage2-stitching-stall-postmortem-and-fix.md.
-        for _k, _lim in _txn_str_limits().items():
-            _v = values.get(_k)
-            if isinstance(_v, str) and len(_v) > _lim:
-                logger.warning("Stage 2 [%s]: capped over-length %s (%d > %d) to fit column",
-                               customer_code, _k, len(_v), _lim)
-                values[_k] = _v[:_lim]
+        values = _cap_over_length(b.compute(), customer_code)
         is_sealed = _is_sealed(values, seal_cutoff, abandon_cutoff)
-        txn = LogTransaction(id=tid, sealed=is_sealed, **values)
-        db.add(txn)
-        await db.flush()  # get txn.id
-        await assignments.write(db, transaction_id=txn.id, entries=b.entries,
-                                customer_code=customer_code)
+        txn = await _write_transaction(db, tid=tid, values=values, is_sealed=is_sealed,
+                                       entries=b.entries, customer_code=customer_code)
         assigned += len(b.entries)
         created += 1
         sealed += int(is_sealed)
@@ -581,6 +692,70 @@ async def regroup_all(db: AsyncSession, customer_code: str | None = None) -> dic
     return stats
 
 
+async def _codes_needing_regroup(db: AsyncSession, customer_code: str | None) -> list[str]:
+    """Tenants with at least one unassigned entry.
+
+    When the caller already named the tenant — which both real call sites do — this is an EXISTENCE
+    check for that one code, not a `SELECT DISTINCT customer_code` anti-join over every entry in the
+    database. The old query rediscovered a fact the caller had already supplied, at the cost of a
+    whole-table scan; after partitioning, one across ~130 partitions.
+
+    The None path keeps the documented "process every tenant" behaviour, scan and all. It is the
+    manual/administrative path — the live loop goes through `finalize_pending` -> `regroup_window`,
+    which is time-bounded — so the cost lands where someone asked for it.
+    """
+    if customer_code is not None:
+        found = await db.scalar(
+            select(LogEntry.customer_code).where(
+                LogEntry.customer_code == customer_code, assignments.is_unassigned()
+            ).limit(1))
+        return [customer_code] if found else []
+    return list((await db.execute(
+        select(LogEntry.customer_code).where(assignments.is_unassigned()).distinct()
+    )).scalars().all())
+
+
+async def _live_tail(db: AsyncSession, customer_code: str) -> list[LogEntry]:
+    """One tenant's unassigned entries that can still join a live transaction, in stream order.
+
+    Bounded to the abandon window (plus a pad) behind the tenant's newest entry. That is not an
+    arbitrary cap: past the abandon window every transaction is sealed, so an older unassigned entry
+    has nothing left to join and reloading it on every cycle is work that can never produce a result.
+    Unbounded, this pulled every unassigned entry for the tenant into one session with no LIMIT — so a
+    backlog grew the identity map without limit, the same failure `log_regroup_max_window_seconds`
+    was added to prevent in `finalize_pending`.
+
+    Entries with NO timestamp are always included. A range predicate is FALSE for NULL, so bounding
+    without that branch would mean a timestamp-less entry is never grouped and never reported —
+    silent loss, which is the one outcome worse than a slow query.
+
+    The cost of the bound is that a tenant whose entire backlog predates the window looks idle. That
+    is surfaced loudly rather than skipped: the repair is a full regroup, and nothing else would tell
+    an operator it is needed.
+    """
+    floor = None
+    max_ts = await _max_entry_ts(db, customer_code)
+    if max_ts is not None:
+        floor = max_ts - timedelta(seconds=settings.log_abandon_window_seconds) - _regroup_pad()
+
+    stmt = select(LogEntry).where(
+        LogEntry.customer_code == customer_code, assignments.is_unassigned())
+    if floor is not None:
+        stmt = stmt.where(or_(LogEntry.timestamp >= floor, LogEntry.timestamp.is_(None)))
+    rows = list((await db.execute(stmt.order_by(
+        LogEntry.timestamp.asc().nullslast(),
+        LogEntry.source_file.asc(),
+        LogEntry.line_number.asc(),
+    ))).scalars().all())
+
+    if not rows and floor is not None:
+        logger.warning(
+            "Stage 2 [%s]: has unassigned entries but all of them predate the live window (before "
+            "%s), so incremental regrouping cannot reach them. Run a full regroup to repair.",
+            customer_code, floor.isoformat())
+    return rows
+
+
 async def regroup_incremental(db: AsyncSession, customer_code: str | None = None) -> dict:
     """LIVE path: keep SEALED transactions untouched; free only the unsealed tail, regroup it
     together with newly-ingested (unassigned) entries, PER CUSTOMER. Per-cycle work is bounded by the
@@ -601,27 +776,14 @@ async def regroup_incremental(db: AsyncSession, customer_code: str | None = None
     await db.commit()
 
     # 2. customers that have any still-unassigned entry (freed unsealed + brand-new)
-    # "unassigned" is now "has no row in log_entry_assignment" (see assignments.is_unassigned).
-    code_stmt = select(LogEntry.customer_code).where(assignments.is_unassigned()).distinct()
-    if customer_code is not None:
-        code_stmt = code_stmt.where(LogEntry.customer_code == customer_code)
-    codes = (await db.execute(code_stmt)).scalars().all()
+    codes = await _codes_needing_regroup(db, customer_code)
     if not codes:
         return {"mode": "incremental", "customers": 0, "entries_scanned": 0,
                 "transactions_created": 0, "transactions_sealed": 0, "by_status": {}}
 
     stats = {"mode": "incremental", "customers": len(codes), "by_status": {}}
     for code in codes:
-        # the live tail for this customer, in stream order
-        rows = list((await db.execute(
-            select(LogEntry).where(
-                LogEntry.customer_code == code, assignments.is_unassigned()
-            ).order_by(
-                LogEntry.timestamp.asc().nullslast(),
-                LogEntry.source_file.asc(),
-                LogEntry.line_number.asc(),
-            )
-        )).scalars().all())
+        rows = await _live_tail(db, code)
         if not rows:
             continue
         seal_cutoff, abandon_cutoff = await _cutoffs(db, code)

@@ -47,9 +47,37 @@ class LogEntry(Base):
     # (e.g. a health-check at the same millisecond), so the dedup key is (customer_code, entry_hash),
     # not entry_hash alone — otherwise the second customer's line would be silently dropped.
     __table_args__ = (
-        UniqueConstraint("customer_code", "entry_hash", name="uq_log_entries_customer_hash"),
+        # Identity. NOT a PRIMARY KEY: a PK silently forces its columns NOT NULL, and `timestamp` is
+        # the partition key AND nullable (the parser emits entries whose timestamp will not parse).
+        # `id` leads and the key follows — leading with the key measured 240x slower on lookups by id
+        # alone. NULLS NOT DISTINCT so two rows sharing an id with a NULL timestamp still conflict.
+        UniqueConstraint("id", "timestamp", name="uq_log_entries_id",
+                         postgresql_nulls_not_distinct=True),
+        # Content dedup, scoped PER CUSTOMER: two customers can legitimately emit an identical line
+        # (e.g. a health-check at the same millisecond), so dropping customer_code would silently lose
+        # the second customer's line.
+        #
+        # `timestamp` joined this key when the table became partitioned — PostgreSQL requires a unique
+        # on a partitioned table to contain every partition column. It remains a correct dedup key
+        # because entry_hash is a sha256 over the raw line INCLUDING its millisecond timestamp text,
+        # so a replay parses to the same instant and routes to the same partition. parse_insert's
+        # ON CONFLICT must name these three columns exactly or the insert fails outright.
+        UniqueConstraint("customer_code", "entry_hash", "timestamp",
+                         name="uq_log_entries_customer_hash", postgresql_nulls_not_distinct=True),
+        # NOTE: `primary_key=True` on the id column below is the ORM's row identity ONLY. The DDL
+        # SQLAlchemy would emit from it (`PRIMARY KEY (id)`) is invalid on a partitioned table and is
+        # never used — Alembic builds this schema, nothing calls create_all (pinned by a test in
+        # tests/test_partitioning_chunk23.py). Identity is enforced in the database by the UNIQUE
+        # above. Keeping the ORM key as `id` alone is deliberate: making it (id, key) would force
+        # every `db.get(Model, id)` call site to pass a tuple.
+        # Range-partitioned by UTC day (see app/persistence/partitioning.py and migration
+        # a1f6d70b3e92). Retention is a DROP of the day's partition rather than a DELETE + VACUUM that
+        # reads the whole table.
+        {"postgresql_partition_by": "RANGE (timestamp)"},
     )
 
+    # `primary_key=True` here is the ORM's row identity only; the DATABASE enforces it through
+    # uq_log_entries_id above, because a real PK cannot contain the nullable partition key.
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # FK kept (ON DELETE CASCADE); its index was dropped as unused/damaged — see migration
     # e2a9c7b41d68. Cascade-deletes of a job now seq-scan (rare/admin-only).

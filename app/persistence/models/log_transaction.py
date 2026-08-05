@@ -17,7 +17,7 @@ import enum
 import uuid
 from datetime import datetime, date, timezone
 
-from sqlalchemy import String, DateTime, Date, Enum, Integer, Text, Boolean, ForeignKey, Index
+from sqlalchemy import UniqueConstraint, String, DateTime, Date, Enum, Integer, Text, Boolean, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -37,13 +37,29 @@ class LogTransaction(Base):
 
     # composite indexes for the common tenant-scoped filters (every read pins customer_code first).
     __table_args__ = (
+        # Identity. NOT a PRIMARY KEY: `started_at` is the partition key and is nullable (a
+        # transaction all of whose entries lack a parsable timestamp has none), and a PK would force
+        # it NOT NULL. `id` leads so lookups by id alone stay an index scan.
+        UniqueConstraint("id", "started_at", name="uq_log_transactions_id",
+                         postgresql_nulls_not_distinct=True),
         Index("ix_log_transactions_customer_date", "customer_code", "date"),
         Index("ix_log_transactions_customer_user", "customer_code", "user_name"),
+        # NOTE: `primary_key=True` on the id column below is the ORM's row identity ONLY. The DDL
+        # SQLAlchemy would emit from it (`PRIMARY KEY (id)`) is invalid on a partitioned table and is
+        # never used — Alembic builds this schema, nothing calls create_all (pinned by a test in
+        # tests/test_partitioning_chunk23.py). Identity is enforced in the database by the UNIQUE
+        # above. Keeping the ORM key as `id` alone is deliberate: making it (id, key) would force
+        # every `db.get(Model, id)` call site to pass a tuple.
+        # Range-partitioned by UTC day (see app/persistence/partitioning.py and migration
+        # a1f6d70b3e92). Retention is a DROP of the day's partition rather than a DELETE + VACUUM that
+        # reads the whole table.
+        {"postgresql_partition_by": "RANGE (started_at)"},
     )
 
     # --- pk / lineage ---
     # id is DETERMINISTIC: uuid5 of the transaction's anchor entry hash (see derive_transactions).
     # So the same transaction keeps the same id across regroups — references stay valid.
+    # `primary_key=True` is the ORM's row identity; the DATABASE enforces it via uq_log_transactions_id.
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
     # tenant (denormalized from the job/entries) — Stage 2 stamps it; every read & the agent filter by it.

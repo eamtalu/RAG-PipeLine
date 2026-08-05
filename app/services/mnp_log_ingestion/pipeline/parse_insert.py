@@ -54,9 +54,20 @@ async def _insert_dedup(db: AsyncSession, rows: list[dict]) -> list:
     """
     if not rows:
         return []
-    # dedup is per customer: the same line for two customers is two distinct rows.
+    # Dedup is per customer: the same line for two customers is two distinct rows.
+    #
+    # `timestamp` joined this key when log_entries became partitioned by UTC day — PostgreSQL requires
+    # a unique constraint on a partitioned table to contain every partition column, and ON CONFLICT
+    # must name the constraint EXACTLY or it fails outright with "no unique or exclusion constraint
+    # matching the ON CONFLICT specification".
+    #
+    # It stays a correct dedup key because `entry_hash` is a sha256 over the raw line INCLUDING its
+    # millisecond timestamp text, so a replay of the same line parses to the same instant and lands on
+    # the same row. The one way the two can disagree is a customer's display timezone being changed
+    # between ingests, which re-parses the same text to a different UTC instant — a narrow but real
+    # hole tracked as step 5 of the partitioning plan.
     stmt = pg_insert(LogEntry).values(rows).on_conflict_do_nothing(
-        index_elements=["customer_code", "entry_hash"]
+        index_elements=["customer_code", "entry_hash", "timestamp"]
     ).returning(LogEntry.timestamp)
     return list((await db.execute(stmt)).scalars().all())
 

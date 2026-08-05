@@ -27,6 +27,7 @@ from app.services.workers.log_watcher import run_log_watcher
 from app.services.workers.log_stitch_worker import run_log_stitch_worker, pending_backlog
 from app.services.workers.ssh_log_fetcher import run_ssh_log_fetcher
 from app.services.workers.log_parse_worker import run_log_parse_worker, unfinished_ingest_objects
+from app.services.workers.log_partition_worker import run_log_partition_worker
 from app.services.mnp_log_ingestion.remote.remote_fetcher import sweep_stale_runs
 from app.services.workers.notification_worker import run_notification_worker
 from app.services.workers.logspace_cleanup_worker import run_logspace_cleanup_worker
@@ -133,6 +134,17 @@ async def start_background_tasks() -> list[asyncio.Task]:
     else:
         logger.info("Log parse worker disabled (log_parse_worker_enabled=False, queue empty) — the "
                     "SSH fetcher parses inline, as before")
+    # Partition management: keeps daily partitions provisioned ahead of ingestion and drops them past
+    # retention. Deliberately NOT gated on there being work to do — unlike the queue workers, this one
+    # has nothing durable to fall back on. An insert into a day with no partition fails outright, so
+    # if it does not run, ingestion stops the moment the existing runway is exhausted. Turning it off
+    # is therefore a decision to provision partitions by hand, and the log says so.
+    if settings.log_partition_worker_enabled:
+        tasks.append(asyncio.create_task(run_log_partition_worker()))
+    else:
+        logger.warning("Log partition worker disabled (log_partition_worker_enabled=False) — daily "
+                       "partitions must now be created MANUALLY. Ingestion stops when the existing "
+                       "runway runs out.")
     # Notifications (rules → bus → channels). Subscribe the dispatcher to the bus once, then run the
     # worker that drives rule evaluation + store-and-forward redelivery. Off unless enabled.
     if settings.notifications_enabled:

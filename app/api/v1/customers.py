@@ -4,6 +4,7 @@ A customer must be created here before any log can be ingested under its code. T
 these to let a user pick which tenant's log space to view or ingest into.
 """
 
+import logging
 import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
@@ -22,8 +23,11 @@ from app.persistence.repositories.customer_repository import CustomerRepository,
 from app.persistence.repositories.logspace_presence_repository import (
     LogspacePresenceRepository, get_logspace_presence_repository)
 from app.services.logspace_cleanup import purge_logspace
+from app.services import timezone_change_guard
 
 router = APIRouter(prefix="/customers", tags=["customers"])
+
+logger = logging.getLogger(__name__)
 
 _TZ_HELP = ("IANA timezone of this customer's log server, e.g. 'Europe/London' or 'Europe/Berlin'. "
             "Omit to leave it unconfigured (flagged as timezone_set=false until set).")
@@ -367,10 +371,58 @@ async def remove_customer_display_name(
     return None
 
 
+def _permanent_fields(body: UpdateCustomerRequest) -> dict:
+    """The admin-only permanent-space fields actually present on the request."""
+    return {k: v for k in ("name", "description", "environment")
+            if (v := getattr(body, k)) is not None}
+
+
+def _require_something_to_update(body: UpdateCustomerRequest, perm_kwargs: dict) -> None:
+    """Reject an empty PATCH rather than silently returning the unchanged tenant, which reads to the
+    caller exactly like a successful update."""
+    if body.active is None and body.timezone is None and not perm_kwargs:
+        raise HTTPException(400, detail="Provide 'active', 'timezone', and/or a permanent field "
+                                        "('name'/'description'/'environment') to update.")
+
+
+async def _set_timezone_guarded(db: AsyncSession, repo: CustomerRepository, cust: Customer,
+                                requested_tz: str, *, allow_mixed: bool) -> Customer:
+    """Change a tenant's timezone, refusing when doing so would corrupt already-ingested data.
+
+    Judged against the STORED value rather than the serialized effective one: `null` means "the global
+    default", and the guard needs that distinction to tell a real change from an operator merely
+    writing down the default the tenant was already using.
+    """
+    new_tz = _validate_tz(requested_tz)
+    reason = await timezone_change_guard.blocking_reason(
+        db, customer_code=cust.customer_code, stored_tz=cust.timezone, new_tz=new_tz)
+    if reason and not allow_mixed:
+        # 409, not 400: the request is well-formed and would be valid against a tenant with no
+        # entries. It conflicts with the current state of THIS one.
+        raise HTTPException(409, detail=reason)
+    if reason:
+        # CRITICAL because from here on nothing in the DATA marks where the derivation changed —
+        # this log line is the only record that the seam exists.
+        logger.critical(
+            "Timezone of %r changed from %r to %r WITH entries already ingested (%s=true). "
+            "Timestamps stored before now keep the old derivation; re-ingesting an already-loaded "
+            "file can now create duplicate entries.",
+            cust.customer_code, cust.timezone, new_tz, timezone_change_guard.OVERRIDE_PARAM)
+    return await repo.set_timezone(cust.customer_code, new_tz)
+
+
 @router.patch("/{customer_code}")
 async def update_customer(
     customer_code: str,
     body: UpdateCustomerRequest,
+    allow_mixed_timezones: bool = Query(
+        default=False,
+        description="Proceed with a timezone change even though this tenant already has ingested "
+                    "entries. Their stored timestamps keep the OLD derivation while new ones use the "
+                    "new zone, and re-ingesting a file can then insert duplicate rows. Only set this "
+                    "if you accept a split timeline; the safe route is to purge the log data first.",
+    ),
+    db: AsyncSession = Depends(get_session),
     repo: CustomerRepository = Depends(get_customer_repository),
     presence_repo: LogspacePresenceRepository = Depends(get_logspace_presence_repository),
 ):
@@ -379,20 +431,14 @@ async def update_customer(
     without deleting its historical data (use DELETE /customers/{code} to purge the space itself).
 
     Changing `timezone` affects how NEW log lines are converted to UTC at ingestion and how all of this
-    tenant's timestamps are displayed; it does NOT rewrite already-stored instants."""
+    tenant's timestamps are displayed; it does NOT rewrite already-stored instants. Because of that,
+    changing it once entries exist is REFUSED with 409 unless `allow_mixed_timezones=true` — see
+    app/services/timezone_change_guard.py for why."""
     code = normalize_customer_code(customer_code)
     if code is None:
         raise HTTPException(404, detail=f"Unknown customer: {customer_code!r}")
-    perm_kwargs = {}
-    if body.name is not None:
-        perm_kwargs["name"] = body.name
-    if body.description is not None:
-        perm_kwargs["description"] = body.description
-    if body.environment is not None:
-        perm_kwargs["environment"] = body.environment
-    if body.active is None and body.timezone is None and not perm_kwargs:
-        raise HTTPException(400, detail="Provide 'active', 'timezone', and/or a permanent field "
-                                        "('name'/'description'/'environment') to update.")
+    perm_kwargs = _permanent_fields(body)
+    _require_something_to_update(body, perm_kwargs)
 
     cust = await repo.get_by_code(code)
     if cust is None:
@@ -401,7 +447,8 @@ async def update_customer(
         await require_admin()
         cust = await repo.update_fields(code, **perm_kwargs)
     if body.timezone is not None:
-        cust = await repo.set_timezone(code, _validate_tz(body.timezone))
+        cust = await _set_timezone_guarded(db, repo, cust, body.timezone,
+                                           allow_mixed=allow_mixed_timezones)
     if body.active is not None:
         cust = await repo.set_active(code, body.active)
     presence = await presence_repo.list_for_code(code, fresh_after=_presence_fresh_after())

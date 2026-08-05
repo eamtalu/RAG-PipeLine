@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_entry_assignment import LogEntryAssignment
+from app.services.mnp_log_ingestion.pipeline.time_bounds import UtcWindow
 
 
 def is_unassigned():
@@ -159,8 +160,39 @@ async def load_transaction_by_entry(db: AsyncSession,
     return {entry_id: txn_id for entry_id, txn_id in rows}
 
 
+def entries_stmt(transaction_ids: list[uuid.UUID], *, limit: int,
+                 window: UtcWindow | None):
+    """The SELECT behind `load_entries`, as a statement.
+
+    Separated from the execution so the shape of the query — specifically whether the partition-key
+    predicate reached BOTH tables — can be asserted with EXPLAIN in a test rather than inferred.
+    """
+    stmt = (
+        select(LogEntry, LogEntryAssignment.transaction_id, LogEntryAssignment.seq)
+        .join(LogEntryAssignment, LogEntryAssignment.entry_id == LogEntry.id)
+        .where(LogEntryAssignment.transaction_id.in_(transaction_ids))
+    )
+    if window is not None:
+        # Both sides: `log_entry_assignment` is partitioned on `entry_ts` and `log_entries` on
+        # `timestamp`, and the join key is `entry_id`, which PostgreSQL cannot turn into either one.
+        # Bounding only one table still opens all 60 partitions of the other to resolve the join.
+        #
+        # NULLs are included on purpose. `entry_ts` is a copy of the entry's own timestamp, so an
+        # entry that had no parsable timestamp carries NULL on both sides and lands in the DEFAULT
+        # partition; a plain range predicate is FALSE for NULL and would drop it from the rendered
+        # transaction silently. A window derived from `started_at`/`ended_at` cannot tell whether
+        # such an entry exists — those are computed from the timestamps that DO parse — so the
+        # branch is unconditional rather than guessed at.
+        stmt = stmt.where(
+            window.covers(LogEntryAssignment.entry_ts, include_null=True),
+            window.covers(LogEntry.timestamp, include_null=True),
+        )
+    return stmt.order_by(LogEntryAssignment.transaction_id, LogEntryAssignment.seq).limit(limit)
+
+
 async def load_entries(db: AsyncSession, transaction_ids: list[uuid.UUID], *,
-                       limit: int) -> list[tuple[LogEntry, uuid.UUID, int]]:
+                       limit: int, window: UtcWindow | None = None,
+                       ) -> list[tuple[LogEntry, uuid.UUID, int]]:
     """`(entry, owning transaction_id, seq)` for the given transactions, in (transaction, seq) order.
 
     Readers need all three together — the row to render, which transaction to group it under, and
@@ -169,16 +201,16 @@ async def load_entries(db: AsyncSession, transaction_ids: list[uuid.UUID], *,
 
     `limit` is applied in SQL, not after materialising: the feed caps how many entries it will render
     and must not load an unbounded set to find that out.
+
+    `window` is the partition bound, and callers are expected to pass one — it is optional only so a
+    transaction with no timestamps at all (no derivable window) still returns its entries instead of
+    none. Derive it with `time_bounds.from_instants` over the transactions' own `started_at` /
+    `ended_at`: those are the min and max of the entry timestamps, so the window is exact by
+    construction and cannot exclude an entry that belongs to the transaction.
     """
     if not transaction_ids:
         return []
-    rows = (await db.execute(
-        select(LogEntry, LogEntryAssignment.transaction_id, LogEntryAssignment.seq)
-        .join(LogEntryAssignment, LogEntryAssignment.entry_id == LogEntry.id)
-        .where(LogEntryAssignment.transaction_id.in_(transaction_ids))
-        .order_by(LogEntryAssignment.transaction_id, LogEntryAssignment.seq)
-        .limit(limit)
-    )).all()
+    rows = (await db.execute(entries_stmt(transaction_ids, limit=limit, window=window))).all()
     return [(entry, txn_id, seq) for entry, txn_id, seq in rows]
 
 

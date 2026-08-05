@@ -82,6 +82,29 @@ class Settings(BaseSettings):
     # slow/late response can still join it; only after this long "abandon" window is it sealed as
     # permanently incomplete. Keeps the unsealed pool tiny without ever splitting a slow request.
     log_abandon_window_seconds: int = 3600
+    # How far back `_cutoffs` probes for the newest entry before giving up and scanning unbounded.
+    # Once log_entries is partitioned by UTC day, an unbounded max(timestamp) opens all 60 partitions
+    # on every regroup cycle; this bound prunes it to the last few days. It must comfortably exceed
+    # log_abandon_window_seconds, or a merely quiet tenant would take the slow fallback every cycle.
+    # A tenant whose newest log is genuinely older than this still seals correctly — the probe misses
+    # and the full scan runs — so this trades a rare slow path for a fast common one.
+    log_cutoff_lookback_days: int = 7
+    # --- daily partitioning (docs/plan/2026-08-05_20-32_daily-partitioning.md) ---
+    # How many whole days of log data to keep. Retention is a DROP of the day's partition — a file
+    # unlink, no row scan and nothing left to vacuum — so this can be enforced cheaply and often.
+    # Must exceed the abandon window, or a day could be dropped while Stage 2 is still stitching it.
+    log_partition_retention_days: int = 60
+    # How many days AHEAD of today partitions are provisioned. Ingestion into a day with no partition
+    # fails outright ("no partition of relation found for row"), so this is the safety margin against
+    # the management worker being down; it must comfortably exceed the worker's own cadence.
+    log_partition_precreate_days: int = 14
+    # The partition management worker: extends the runway and drops expired days. Both halves are
+    # idempotent, so an hourly cadence and the occasional missed tick are harmless.
+    log_partition_worker_enabled: bool = True
+    log_partition_worker_interval_seconds: int = 3600
+    # Runway below which the worker alarms CRITICAL. Ingestion does not fail until it hits zero, so
+    # this is the margin in which someone can still notice and fix creation before Stage 1 stops.
+    log_partition_min_runway_days: int = 3
     # Stage 2 grouping staleness guard: an open transaction idle longer than this is ABANDONED
     # (flushed as incomplete) so a far-later RESPONSE — especially a user-less one matched by FIFO —
     # can't bind across a huge time gap and create a bloated multi-day transaction. Real

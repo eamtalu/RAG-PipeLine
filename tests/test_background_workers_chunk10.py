@@ -31,7 +31,8 @@ async def _noop_loop():
 def _stub_loops(monkeypatch):
     """Replace every real loop + the startup sweep with harmless stubs, and count register() calls."""
     for name in ("run_worker", "run_log_watcher", "run_log_stitch_worker", "run_log_parse_worker",
-                 "run_ssh_log_fetcher", "run_notification_worker", "run_logspace_cleanup_worker"):
+                 "run_ssh_log_fetcher", "run_notification_worker", "run_logspace_cleanup_worker",
+                 "run_log_partition_worker"):
         monkeypatch.setattr(bg, name, _noop_loop)
 
     async def _sweep0():
@@ -78,7 +79,10 @@ async def test_lifespan_starts_loops_only_when_enabled(monkeypatch):
 async def test_start_background_tasks_assembles_enabled_loops(monkeypatch):
     reg = _stub_loops(monkeypatch)
 
-    # defaults-ish: stitch off, ssh on, notifications off, cleanup off -> embedding + watcher + ssh
+    # defaults-ish: stitch off, ssh on, notifications off, cleanup off
+    # -> embedding + watcher + ssh + partition.
+    # The partition worker is NOT in that off-list on purpose: unlike the queue workers it has no
+    # durable backlog to fall back on, so it runs by default and is only silenced explicitly.
     monkeypatch.setattr(settings, "log_stitch_worker_enabled", False)
     monkeypatch.setattr(settings, "ssh_log_fetcher_enabled", True)
     monkeypatch.setattr(settings, "notifications_enabled", False)
@@ -86,21 +90,44 @@ async def test_start_background_tasks_assembles_enabled_loops(monkeypatch):
     monkeypatch.setattr(settings, "log_parse_worker_enabled", False)
     tasks = await bg.start_background_tasks()
     try:
-        assert len(tasks) == 3
+        assert len(tasks) == 4
         assert reg["n"] == 0                     # dispatcher NOT registered when notifications off
     finally:
         await bg.stop_background_tasks(tasks)
     assert all(t.cancelled() or t.done() for t in tasks)   # stop cancels everything
 
-    # everything on -> embedding + watcher + stitch + ssh + parse + notifications + cleanup = 7
+    # everything on -> embedding + watcher + stitch + ssh + parse + notifications + cleanup
+    #                  + partition = 8
     monkeypatch.setattr(settings, "log_stitch_worker_enabled", True)
     monkeypatch.setattr(settings, "notifications_enabled", True)
     monkeypatch.setattr(settings, "logspace_cleanup_worker_enabled", True)
     monkeypatch.setattr(settings, "log_parse_worker_enabled", True)
     tasks = await bg.start_background_tasks()
     try:
-        assert len(tasks) == 7
+        assert len(tasks) == 8
         assert reg["n"] == 1                     # dispatcher registered exactly once
+    finally:
+        await bg.stop_background_tasks(tasks)
+
+
+async def test_the_partition_worker_can_be_turned_off(monkeypatch):
+    """It defaults ON because nothing else provisions partitions, but an operator managing them by
+    hand must still be able to silence it — and the count must actually drop when they do."""
+    _stub_loops(monkeypatch)
+    for flag in ("log_stitch_worker_enabled", "notifications_enabled",
+                 "logspace_cleanup_worker_enabled", "log_parse_worker_enabled",
+                 "ssh_log_fetcher_enabled"):
+        monkeypatch.setattr(settings, flag, False)
+
+    monkeypatch.setattr(settings, "log_partition_worker_enabled", True)
+    tasks = await bg.start_background_tasks()
+    with_worker = len(tasks)
+    await bg.stop_background_tasks(tasks)
+
+    monkeypatch.setattr(settings, "log_partition_worker_enabled", False)
+    tasks = await bg.start_background_tasks()
+    try:
+        assert len(tasks) == with_worker - 1
     finally:
         await bg.stop_background_tasks(tasks)
 

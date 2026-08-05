@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, delete
+from sqlalchemy import func, select, delete, table as sa_table
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
@@ -24,7 +24,9 @@ from app.persistence.models.log_transaction import LogTransaction, LogTransactio
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun
 from app.persistence.models.log_source_object import LogSourceObject, SourceObjectStatus
-from app.services.mnp_log_ingestion.pipeline import assignments
+from app.persistence import partitioning as pt
+from app.services.workers.log_partition_worker import db_today, days_of_runway
+from app.services.mnp_log_ingestion.pipeline import assignments, time_bounds
 from app.services.logspace_cleanup import purge_source_objects_files
 from app.services.workers.log_parse_worker import reset_abandoned_objects
 from app.services.mnp_log_ingestion.LogIngestion import LogIngestion, get_log_ingestion, DOCUMENT_TYPE
@@ -49,6 +51,29 @@ MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB — rotating log files can be large
 # huge burst, or future data growth) can't balloon memory. The normal max feed (limit=500) is
 # ~14.5k entries, well under this. See docs/debugging-worker-timeout-outage.md.
 MAX_RENDER_ENTRIES = 50_000
+
+
+def _day_conds(customer: str, day: date_type, tz_name: str) -> list:
+    """The WHERE conditions selecting one customer-LOCAL day of transactions.
+
+    `LogTransaction.date` is that local day and is what the feed is specified in terms of, but
+    `log_transactions` is partitioned on `started_at` (a UTC instant), and PostgreSQL cannot derive
+    one from the other — `date` alone prunes nothing and opens all 60 partitions. So the equivalent
+    UTC window goes in beside it.
+
+    The window is padded well beyond any real timezone offset, which makes it a strict SUPERSET of
+    the instants that can carry this local date. That is deliberate: `date` was computed with
+    whatever display zone the customer had when the row was WRITTEN, so a later timezone change would
+    otherwise slide the two apart and blank out the day view. `date` stays the exact filter; the
+    window only prunes.
+    """
+    conds = [LogTransaction.customer_code == customer, LogTransaction.date == day]
+    window = time_bounds.from_local_dates(day, day, tz_name)
+    if window is not None:
+        # include_null=False is safe rather than lossy: `date` is derived FROM `started_at`, so a row
+        # with a NULL `started_at` also has a NULL `date` and never matches the equality above.
+        conds.append(window.covers(LogTransaction.started_at, include_null=False))
+    return conds
 
 
 def _assigned_sort_key(pair: "tuple[int | None, LogEntry]"):
@@ -393,6 +418,79 @@ async def get_regroup_run(
     }
 
 
+def _iso(dt: datetime | None) -> str | None:
+    """`datetime -> ISO-8601` for a JSON payload, passing None through. Raw UTC, NOT display-localised:
+    these are machine-read status fields, unlike the human-facing values that go through iso_display."""
+    return dt.isoformat() if dt else None
+
+
+def _partitions_healthy(*, days_ahead: int, default_rows: int) -> bool:
+    """Whether daily partitioning is in a state that needs no attention.
+
+    Computed here rather than in the frontend so the thresholds live in one place: a threshold baked
+    into a React component cannot be changed without a deploy, and it drifts from the partition
+    worker's own alarm until the card is reporting green while the worker is paging.
+
+    Both conditions are load-bearing and independent. Runway reaching zero STOPS ingestion outright.
+    Rows in the DEFAULT partition mean the parser is emitting entries whose timestamp would not parse
+    — data is still being stored, but its time is unknown, and nothing else in the system reports it.
+    """
+    return days_ahead >= settings.log_partition_min_runway_days and default_rows == 0
+
+
+def _default_partition_count_stmt():
+    """Rows sitting in the DEFAULT entry partition.
+
+    Addressed as the partition DIRECTLY rather than as `log_entries WHERE timestamp IS NULL`. Both
+    are equally cheap in practice — measured, PostgreSQL prunes an `IS NULL` predicate down to the
+    DEFAULT partition on its own — but naming it leaves nothing resting on the planner continuing to
+    do that, and this runs on a polled status card. Exposed as a statement so a test can EXPLAIN it.
+    """
+    return select(func.count()).select_from(
+        sa_table(pt.default_partition_name("log_entries")))
+
+
+async def _partition_status(db: AsyncSession) -> dict:
+    """Daily-partition health, from the catalogue — not a data scan.
+
+    Global rather than tenant-scoped: partitions are cut per DAY, not per customer, so every tenant
+    sees the same block. It is reported on this endpoint anyway because the AUTO-POLL card already
+    polls it, so the frontend needs no second request for what is really infrastructure health.
+    """
+    today = await db_today(db)
+    covered = await pt.covered_days(db, "log_entries")
+    days_ahead = await days_of_runway(db, today)
+    default_rows = int(await db.scalar(_default_partition_count_stmt()) or 0)
+    return {
+        # Hits 0 -> ingestion stops. The number that pages someone.
+        "days_ahead": days_ahead,
+        # Whether retention is actually running, or only the create half of the worker still works.
+        "oldest_day": min(covered).isoformat() if covered else None,
+        "newest_day": max(covered).isoformat() if covered else None,
+        "retention_days": settings.log_partition_retention_days,
+        # Growth here means the parser is silently failing to read timestamps on some log format.
+        "default_partition_rows": default_rows,
+        "healthy": _partitions_healthy(days_ahead=days_ahead, default_rows=default_rows),
+    }
+
+
+async def _partition_status_or_none(db: AsyncSession) -> dict | None:
+    """Partition health, or None if it cannot be read.
+
+    Partition health is a PASSENGER on the stitching-status endpoint, not its purpose. A failing
+    catalogue read must still leave the card rendering the stitching state it primarily exists for,
+    rather than 500ing the whole widget over a secondary block.
+
+    None rather than omitting the key, so the frontend can tell "unavailable right now" from "an older
+    backend that never sent it". Both render nothing; only one is worth investigating.
+    """
+    try:
+        return await _partition_status(db)
+    except Exception:
+        logger.warning("partition status unavailable for /regroup/status", exc_info=True)
+        return None
+
+
 @router.get("/regroup/status")
 async def regroup_status(
     customer: str = Depends(get_current_customer),
@@ -445,8 +543,8 @@ async def regroup_status(
         "customer_code": customer,
         "pending": bool(count),
         "pending_windows": count,
-        "oldest_pending_at": oldest.isoformat() if oldest else None,
-        "last_regroup_at": last_regroup.isoformat() if last_regroup else None,
+        "oldest_pending_at": _iso(oldest),
+        "last_regroup_at": _iso(last_regroup),
         # windows given up on after log_regroup_max_attempts failures; >0 means investigate (likely a
         # disk fault). They do NOT count as backlog and can be re-armed via POST /regroup/reset-abandoned.
         "abandoned_windows": abandoned,
@@ -454,8 +552,12 @@ async def regroup_status(
         # "about to be stitched" from "failing repeatedly" — the same number otherwise. A rising value
         # is the early warning that precedes abandoned_windows.
         "backing_off_windows": backing_off,
+        # Daily-partition health. GLOBAL, not tenant-scoped — partitions are cut per day, not per
+        # customer — so every tenant sees the same block. It rides here because the AUTO-POLL card
+        # already polls this endpoint, so no second request is needed. Null when unavailable.
+        "partitions": await _partition_status_or_none(db),
         # when the earliest of those becomes eligible again (null if none are waiting)
-        "next_retry_at": next_retry.isoformat() if next_retry else None,
+        "next_retry_at": _iso(next_retry),
         "up_to_date": count == 0,
     }
 
@@ -600,6 +702,14 @@ async def delete_log_data(
     if date_to is not None:
         ent_conds.append(LogEntry.timestamp <= datetime.combine(date_to, datetime.max.time()))
         txn_conds.append(LogTransaction.date <= date_to)
+    # The entry side already states the partition key (`timestamp`). The transaction side filters on
+    # `date`, which is the customer-LOCAL day and NOT the column `log_transactions` is partitioned on,
+    # so on its own it prunes nothing. Add the equivalent `started_at` window beside it. The window is
+    # padded, so it is a strict SUPERSET of the instants any matching `date` can hold — ANDing it
+    # cannot change WHICH rows are deleted, only how many partitions are opened to find them.
+    txn_window = time_bounds.from_local_dates(date_from, date_to, active_timezone_name())
+    if txn_window is not None:
+        txn_conds.append(txn_window.covers(LogTransaction.started_at, include_null=False))
 
     # The FK cascade is gone (it made partitions undroppable), so assignments are cleared explicitly.
     # BOTH sides are needed: a transaction may be deleted while its entries survive (and vice versa,
@@ -716,7 +826,7 @@ async def view_transactions(
     stack on top of the date. Pagination metadata is returned in response headers: `X-Total-Count`,
     `X-Offset`, `X-Limit`, `X-Page`, `X-Page-Count`.
     """
-    conds = [LogTransaction.customer_code == customer, LogTransaction.date == date]
+    conds = _day_conds(customer, date, active_timezone_name())
     if user is not None:
         conds.append(LogTransaction.user_name == user)
     if hour is not None:
@@ -777,7 +887,13 @@ async def view_transactions(
         # See docs/transactions-view-load-spike-and-db-concepts-primer.md.
         # (entry, owning transaction, seq) — the assignment table owns the grouping now, so the
         # renderer below groups and orders from the assignment, not from columns on the entry.
-        entry_rows = await assignments.load_entries(db, list(ids), limit=MAX_RENDER_ENTRIES + 1)
+        # started_at/ended_at are the min and max of each transaction's own entry timestamps, so
+        # the window over this page's transactions is exact — it cannot exclude an entry that
+        # belongs to one of them — while cutting the scan from 60 partitions to the page's span.
+        entry_rows = await assignments.load_entries(
+            db, list(ids), limit=MAX_RENDER_ENTRIES + 1,
+            window=time_bounds.from_instants(
+                [t.started_at for t in txns] + [t.ended_at for t in txns]))
     except Exception as exc:
         # A dead disk sector under log_entries for this page must not 500 the whole feed: the
         # transaction list above is intact, so return it with a clear notice and let the user page on.
@@ -828,7 +944,9 @@ async def _load_transaction_entries(transaction_id: uuid.UUID, customer: str, db
     # ordered by the assignment's seq, and carrying it: the timeline payload reports the position,
     # which is no longer a column on the entry.
     rows = [(e, seq) for e, _txn, seq in
-            await assignments.load_entries(db, [transaction_id], limit=MAX_RENDER_ENTRIES + 1)]
+            await assignments.load_entries(
+                db, [transaction_id], limit=MAX_RENDER_ENTRIES + 1,
+                window=time_bounds.from_instants([t.started_at, t.ended_at]))]
     truncated = len(rows) > MAX_RENDER_ENTRIES
     return t, list(rows[:MAX_RENDER_ENTRIES]), truncated
 

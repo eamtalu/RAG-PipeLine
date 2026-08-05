@@ -421,13 +421,18 @@ def test_window_regroup_uses_a_bounded_anti_join():
 
 
 def test_persist_does_not_write_any_column_on_log_entries():
-    """_persist must record the grouping ONLY in the assignment table. Assigning to an entry
-    attribute here is what made the raw table mutable in the first place."""
+    """The persist path must record the grouping ONLY in the assignment table. Assigning to an entry
+    attribute here is what made the raw table mutable in the first place.
+
+    Scoped to the whole persist path rather than to `_persist` alone: the insert now lives in the
+    `_write_transaction` helper, and a guard that only reads one function would silently stop covering
+    the code it exists to protect the moment that code is extracted."""
     import inspect
-    src = inspect.getsource(d._persist)
+    src = "".join(inspect.getsource(f) for f in
+                  (d._persist, d._resolve_ids, d._write_transaction, d._cap_over_length))
     assert "e.transaction_id =" not in src
     assert "e.seq =" not in src
-    assert "assignments.write" in src
+    assert "assignments.write" in src, "the grouping must still be recorded in the assignment table"
 
 
 # =============================================================== repository edge coverage

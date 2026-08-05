@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.log_entry import LogEntry
-from app.services.mnp_log_ingestion.pipeline import assignments
+from app.services.mnp_log_ingestion.pipeline import assignments, time_bounds
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc
 
@@ -288,7 +288,9 @@ async def _get_transaction(db: AsyncSession, args: dict, customer_code: str) -> 
     # Ordered by the assignment's seq, which is where the position lives now. Each pair is
     # (entry, seq) so the timeline below can report the position without reading it off the row.
     entries = [(e, seq) for e, _txn, seq in
-               await assignments.load_entries(db, [tid], limit=max_entries)]
+               await assignments.load_entries(
+                   db, [tid], limit=max_entries,
+                   window=time_bounds.from_instants([t.started_at, t.ended_at]))]
 
     header = {
         **_txn_summary(t),

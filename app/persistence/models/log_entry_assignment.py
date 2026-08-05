@@ -83,6 +83,18 @@ class LogEntryAssignment(Base):
         # supports dropping a day's assignments alongside the matching entry partition, and the
         # tenant+day consistency checks retention runs before a drop.
         Index("ix_log_entry_assignment_entry_ts", "entry_ts"),
+        # NOTE: `primary_key=True` on the id column below is the ORM's row identity ONLY. The DDL
+        # SQLAlchemy would emit from it (`PRIMARY KEY (id)`) is invalid on a partitioned table and is
+        # never used — Alembic builds this schema, nothing calls create_all (pinned by a test in
+        # tests/test_partitioning_chunk23.py). Identity is enforced in the database by the UNIQUE
+        # above. Keeping the ORM key as `id` alone is deliberate: making it (id, key) would force
+        # every `db.get(Model, id)` call site to pass a tuple.
+        # Range-partitioned by UTC day (see app/persistence/partitioning.py and migration
+        # a1f6d70b3e92). Retention is a DROP of the day's partition rather than a DELETE + VACUUM that
+        # reads the whole table.
+        # Co-partitioned with log_entries on the SAME grain, so a day's entries and that day's
+        # assignments are dropped together and retention can never strand one without the other.
+        {"postgresql_partition_by": "RANGE (entry_ts)"},
     )
 
     # entry_id alone identifies a row (entry_ts is functionally dependent on it), so it is the
