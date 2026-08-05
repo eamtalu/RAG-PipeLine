@@ -1,4 +1,70 @@
-# Frontend: partition health on the AUTO-POLL card
+# Frontend: two changes from the daily-partitioning release
+
+1. **The timezone picker can now be refused** - a real behaviour change, needs handling.
+2. **Partition health on the AUTO-POLL card** - additive, one line.
+
+Item 1 first, because it is the one that changes an existing flow.
+
+---
+
+# 1. `CustomerTimezonePanel` can now get a 409
+
+`PATCH /customers/{code}` now REFUSES a timezone change once the tenant has ingested entries.
+
+Why: `log_entries.timestamp` is derived at parse time using the customer's zone and is never
+rewritten. Changing it splits the tenant's timeline - old entries keep the old derivation, new ones
+get the new one - and because the entry-dedup key now includes the timestamp, re-ingesting an
+already-loaded file inserts DUPLICATE rows instead of being skipped.
+
+## What happens today, unchanged
+
+`confirmChange` in `src/components/logspace/CustomerTimezonePanel.tsx` already catches the error and
+toasts `LogsApiError.message`, and `fail()` in `customersApi.ts` already lifts `detail` into that
+message. So **nothing crashes**. But the detail is a five-sentence paragraph, which reads badly in a
+toast, and there is no way to proceed from the UI.
+
+## What to change
+
+**`customersApi.ts`** - let the caller opt in:
+
+```ts
+export async function setCustomerTimezone(
+  code: string,
+  timezone: string,
+  opts?: { allowMixed?: boolean }
+): Promise<Customer> {
+  const qs = opts?.allowMixed ? "?allow_mixed_timezones=true" : "";
+  const res = await resilientFetch(`${PREFIX}/${encodeURIComponent(code)}${qs}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ timezone }),
+  });
+  if (!res.ok) await fail(res);
+  return (await res.json()) as Customer;
+}
+```
+
+**`CustomerTimezonePanel.tsx`** - on a 409, do NOT toast. Keep the confirm modal open and show the
+server's `detail` as the body, with two actions:
+
+- **Purge log data first** (the safe route the message names) - or just close, if there is no purge
+  affordance nearby.
+- **Change anyway** - re-calls `setCustomerTimezone(code, tz, { allowMixed: true })`.
+
+Branch on `err instanceof LogsApiError && err.status === 409`; every other error keeps the existing
+toast path.
+
+Do not paraphrase the reason - render `detail` as given. It names the exact zones, the consequence,
+and the safe remedy, and it is the same text an operator hitting the API directly sees.
+
+## Not affected
+
+Setting a timezone on a tenant with **no entries** is unchanged - the normal post-creation flow never
+sees a 409. Nor does re-selecting the zone the tenant already has.
+
+---
+
+# 2. Partition health on the AUTO-POLL card
 
 One line to add.
 `GET /api/v1/logs/regroup/status` — the endpoint `RegroupContext` already polls — now returns an extra `partitions` block.
