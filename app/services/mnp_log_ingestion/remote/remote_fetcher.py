@@ -1,8 +1,11 @@
-# remote_fetcher.py — pull remote log bytes over SFTP and feed the existing Stage 1 + finalize.
+# remote_fetcher.py — pull remote log bytes over SFTP and hand them to ingestion.
 #
-#   This is the only new ingestion path: it reads bytes from a LogSshSource's Windows Server and
-#   hands each newline-aligned chunk to LogIngestion.ingest(...) exactly like the upload/scan/watcher
-#   paths do, then runs finalize_pending(...) ONCE at the end so transaction reads are current.
+#   It reads bytes from a LogSshSource's Windows Server and hands each newline-aligned chunk to
+#   ingestion, exactly like the upload/scan/watcher paths do.
+#
+#   This module does NOT stitch. Stage 1 writes a log_regroup_pending ticket in the same transaction
+#   as its entries, and the stitch worker (app/services/workers/log_stitch_worker.py) owns draining
+#   that queue. Transport has no business knowing Stage 2 exists.
 #
 #   Modes (see LogSshFetchMode):
 #     - incremental : per-file byte tail (checkpointed) — the poller's mode.
@@ -21,7 +24,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncssh
 from sqlalchemy import delete, func, select, update
@@ -33,11 +36,12 @@ from app.config.database import async_session, engine
 
 # Fixed namespace (classid) for the per-host fetch advisory lock. Uses the TWO-INT advisory-lock
 # keyspace `pg_(try_)advisory_lock(classid, objid)`, which is disjoint from the single-bigint space
-# finalize_pending uses (`pg_advisory_xact_lock(hashtext(customer_code))`) — so the two locks can
+# Stage 2 stitching uses (`pg_advisory_xact_lock(hashtext(customer_code))`) — so the two locks can
 # never collide or deadlock even on a hash tie. objid = hashtext("host:port").
 SSH_FETCH_LOCK_CLASSID = 0x55AA
 from app.persistence.models.job import Job
 from app.persistence.models.log_entry import LogEntry
+from app.persistence.models.log_source_object import LogSourceObject, SourceObjectStatus
 from app.persistence.models.log_ssh_source import LogSshSource
 from app.persistence.models.log_ssh_file_checkpoint import LogSshFileCheckpoint
 from app.persistence.models.log_ssh_fetch_run import (
@@ -46,7 +50,6 @@ from app.persistence.models.log_ssh_fetch_run import (
 from app.persistence.repositories.job_repository import JobRepository
 from app.persistence.storage.local import LocalStorage
 from app.services.mnp_log_ingestion.LogIngestion import LogIngestion
-from app.services.mnp_log_ingestion.pipeline.derive_transactions import finalize_pending
 from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
 from app.services.mnp_log_ingestion.remote import ssh_client
 
@@ -60,7 +63,7 @@ async def _write_progress(run_id: UUID, *, phase: LogSshFetchPhase | None = None
                           files_considered: int | None = None, progress: dict | None = None) -> None:
     """Update the run row mid-flight on its OWN short-lived session so GET /fetch-remote/runs/{id}
     reflects progress DURING the fetch. Runs on its own connection, independent of both the per-host
-    fetch advisory lock (_host_lock) and finalize_pending's per-customer pg_advisory_xact_lock; and
+    fetch advisory lock (_host_lock) and Stage 2's per-customer pg_advisory_xact_lock; and
     best-effort: a progress write must never abort the fetch, so failures are logged and swallowed."""
     values: dict = {}
     if phase is not None:
@@ -133,6 +136,103 @@ async def _ingest_chunk(source: LogSshSource, remote_path: str, data: bytes) -> 
         ingestion = LogIngestion(LocalStorage(settings.upload_dir), JobRepository(db))
         job = await ingestion.ingest(data, filename, source.customer_code, background=False)
         return await db.scalar(select(Job.chunk_count).where(Job.id == job.id)) or 0
+
+
+async def _queue_and_checkpoint(source: LogSshSource, remote_path: str, *, size: int, mtime: float,
+                                offset: int, head_fp: str | None, storage_key: str,
+                                start_offset: int, end_offset: int) -> None:
+    """Record "these bytes still need parsing" AND advance the file checkpoint, atomically.
+
+    This single transaction is the load-bearing guarantee of the whole decoupling. The checkpoint is
+    a promise that everything behind it is handled; the queue row is what makes that promise true
+    once parsing is no longer inline.
+
+    - Checkpoint advanced WITHOUT the row -> those bytes are skipped forever and nothing reports it.
+    - Row written WITHOUT the checkpoint   -> the next poll re-downloads the same bytes.
+
+    Committing both together removes the window entirely, so a crash anywhere before COMMIT simply
+    leaves the previous state and the next poll re-fetches (which is exactly today's behaviour).
+    """
+    now = datetime.now(timezone.utc)
+    async with async_session() as db:
+        db.add(LogSourceObject(
+            customer_code=source.customer_code,
+            source_id=source.id,
+            source_name=source.name,
+            remote_path=remote_path,
+            start_offset=start_offset,
+            end_offset=end_offset,
+            observed_size=size,
+            observed_mtime=mtime,
+            head_fingerprint=head_fp,
+            storage_key=storage_key,
+            status=SourceObjectStatus.pending,
+            max_attempts=settings.log_parse_max_attempts,
+        ))
+        stmt = pg_insert(LogSshFileCheckpoint).values(
+            source_id=source.id, customer_code=source.customer_code, remote_path=remote_path,
+            last_size=size, last_mtime=mtime, last_offset=offset, last_fetched_at=now,
+            head_fingerprint=head_fp,
+        ).on_conflict_do_update(
+            index_elements=["source_id", "remote_path"],
+            set_=dict(last_size=size, last_mtime=mtime, last_offset=offset, last_fetched_at=now,
+                      head_fingerprint=head_fp),
+        )
+        await db.execute(stmt)
+        await db.commit()          # both, or neither
+
+
+async def _queue_backlog_exceeded(customer_code: str) -> bool:
+    """Backpressure. Today the inline await makes it impossible for the fetcher to outrun the
+    database; once decoupled it can, and ./uploads would grow without limit. A tenant already
+    holding more than the cap is skipped for this tick."""
+    from app.services.workers.log_parse_worker import pending_count  # local: avoids an import cycle
+    depth = await pending_count(customer_code)
+    if depth > settings.log_parse_queue_max_pending:
+        logger.warning(
+            "Ingest queue backlog for %s is %d (> %d) — pausing fetch this tick so the parser can "
+            "catch up", customer_code, depth, settings.log_parse_queue_max_pending)
+        return True
+    return False
+
+
+async def _stage_range(client, remote_path: str, start: int, size: int, *,
+                       source: LogSshSource, mtime: float, head_fp: str | None) -> tuple[int, int, int]:
+    """Queue-mode counterpart of _pull_range: download the newline-aligned windows and SAVE them,
+    but do NOT parse. Returns (new_offset, bytes_read, objects_queued).
+
+    `mtime` and `head_fp` are threaded through rather than defaulted, because they are written onto
+    the checkpoint and are what `_plan_incremental` uses to detect rotation. Writing a placeholder
+    here would make every next poll think the file had been replaced and re-read it whole.
+
+    Each window is checkpointed with its own queue row, so a long catch-up becomes several
+    independently retryable units and partial progress survives a crash mid-file.
+    """
+    storage = LocalStorage(settings.upload_dir)
+    offset, bytes_read, queued = start, 0, 0
+    f = await ssh_client.op(client.open(remote_path, "rb"), f"open {remote_path}")
+    try:
+        while offset < size:
+            window = min(settings.ssh_max_file_size, size - offset)
+            data = await ssh_client.op(f.read(size=window, offset=offset), "read")
+            if not data:
+                break
+            at_eof = offset + len(data) >= size
+            if not at_eof:
+                nl = data.rfind(b"\n")
+                data = data[: nl + 1] if nl != -1 else data
+            chunk_start, chunk_end = offset, offset + len(data)
+            key = f"{source.customer_code}/{uuid4().hex}/{source.name}-{_basename(remote_path)}"
+            await storage.save(key, data)
+            await _queue_and_checkpoint(
+                source, remote_path, size=size, mtime=mtime, offset=chunk_end, head_fp=head_fp,
+                storage_key=key, start_offset=chunk_start, end_offset=chunk_end)
+            queued += 1
+            offset = chunk_end
+            bytes_read += len(data)
+    finally:
+        await f.close()
+    return offset, bytes_read, queued
 
 
 async def _pull_range(client, remote_path: str, start: int, size: int, *,
@@ -305,8 +405,11 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
     Progress hooks (no-ops for the poller): `on_listed(considered)` fires once the remote dir is
     globbed; `on_file(files_done, files_total, current_file, bytes_so_far, entries_so_far)` fires
     after EVERY listed file — including unchanged/skipped ones — so a progress bar advances smoothly."""
-    considered = fetched = entries = total_bytes = content_skipped = io_skipped = 0
+    considered = fetched = entries = total_bytes = content_skipped = io_skipped = queued = 0
     per_file: list[dict] = []
+    # Queue mode: download + save + record a work row, and let the parse worker do Stage 1. With the
+    # flag off, every line below behaves exactly as it did before this feature existed.
+    queue_mode = bool(settings.log_parse_worker_enabled)
     ckpts = await _load_ckpts(source)  # {path: (last_size, last_mtime, last_offset, head_fingerprint)}
     # Content-identity index from the SAME pre-poll snapshot: (head_fp, size, mtime) -> max consumed
     # offset. Built once and immutable during the loop, so a file processed later still sees a content
@@ -368,7 +471,13 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
                 if head_fp is None:  # non-incremental path hasn't fingerprinted yet
                     head_fp = await _read_head_fp(client, path)
                 try:
-                    new_off, read, ins = await _pull_range(client, path, start, size, source=source)
+                    if queue_mode:
+                        # Download + save + queue. _stage_range advances the checkpoint itself, in
+                        # the same transaction as each queue row, so no _save_ckpt call follows.
+                        new_off, read, ins = await _stage_range(
+                            client, path, start, size, source=source, mtime=mtime, head_fp=head_fp)
+                    else:
+                        new_off, read, ins = await _pull_range(client, path, start, size, source=source)
                 except Exception as exc:
                     # A dead disk sector hit while ingesting THIS file must not abort the whole source
                     # (nor the poll). Skip this file, record it, and move to the next — the checkpoint
@@ -383,11 +492,17 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
                     )
                     per_file.append({"file": path, "io_error": disk_io_detail(exc)})
                 else:
-                    await _save_ckpt(source, path, size, mtime, new_off, head_fp)
+                    if queue_mode:
+                        # _stage_range already committed the checkpoint with each queue row; calling
+                        # _save_ckpt here would be a second, non-atomic write of the same fact.
+                        queued += ins
+                        per_file.append({"file": path, "bytes": read, "objects_queued": ins})
+                    else:
+                        await _save_ckpt(source, path, size, mtime, new_off, head_fp)
+                        entries += ins
+                        per_file.append({"file": path, "bytes": read, "new_entries": ins})
                     fetched += 1
-                    entries += ins
                     total_bytes += read
-                    per_file.append({"file": path, "bytes": read, "new_entries": ins})
 
             if on_file:
                 await on_file(idx + 1, considered, path, total_bytes, entries)
@@ -395,8 +510,12 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
         # housekeeping: drop checkpoints for paths that vanished long ago (best-effort, non-empty only)
         await _prune_checkpoints(source, {p for p, _, _ in listing})
 
+    # `entries_ingested` stays in the shape for compatibility, but in queue mode it is necessarily 0
+    # at this point: the bytes are recorded, not yet parsed. `objects_queued` is the honest number
+    # for that phase, and the real entry count lands on the log_source_objects row afterwards.
     return {"source": source.name, "files_considered": considered, "files_fetched": fetched,
             "bytes_fetched": total_bytes, "entries_ingested": entries,
+            "objects_queued": queued,
             "content_skipped": content_skipped, "io_skipped": io_skipped, "by_file": per_file}
 
 
@@ -497,15 +616,15 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
                     disabled_only: bool = False, skip_if_busy: bool = False,
                     drive_breaker: bool = False, force_remote: bool = False,
                     on_progress: ProgressCb | None = None) -> dict:
-    """Pull from the targeted source(s), then finalize ONCE so transaction reads are current.
+    """Pull from the targeted source(s). Stitching is NOT triggered here — see the module docstring.
 
     Each source is fetched under a per-host advisory lock (_host_lock): `skip_if_busy=True` (the
     poller) skips a host another fetch already holds and records it under agg["skipped"];
     `skip_if_busy=False` (on-demand) waits up to ssh_fetch_lock_wait_seconds. Per-source failures are
     isolated (one unreachable server doesn't abort the others) and recorded on that source's
     last_error; a reachable source updates last_ok_at. The caller's `db` is used only for loading
-    sources and the final finalize — it is released (rollback) before the network loop so no pooled
-    connection is held across the SFTP transfer. Returns aggregate stats incl. the finalize result.
+    sources — it is released (rollback) before the network loop so no pooled connection is held
+    across the SFTP transfer. Returns aggregate stats for the pull.
 
     `on_progress` (the tracked endpoint passes one; the poller doesn't) is called with keyword fields
     — phase / files_considered / progress — at each stage so the run row reflects live progress."""
@@ -513,39 +632,14 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
                                   enabled_only=enabled_only, disabled_only=disabled_only)
     agg = {"customer_code": customer_code, "mode": mode.value, "sources": len(sources),
            "files_considered": 0, "files_fetched": 0, "bytes_fetched": 0,
-           "entries_ingested": 0, "content_skipped": 0, "io_skipped": 0, "by_source": [], "errors": []}
+           "entries_ingested": 0, "objects_queued": 0,
+           "content_skipped": 0, "io_skipped": 0, "by_source": [], "errors": []}
 
     async def _regrouping() -> None:
         if on_progress is not None:
             await on_progress(phase=LogSshFetchPhase.regrouping)
 
-    async def _do_finalize() -> dict:
-        """Stitch (Stage 2) on a FRESH short-lived session, NOT the caller's `db` — which by the time
-        we finalize has sat idle across the (possibly long) SFTP transfer and whose connection may
-        have been dropped. On failure, record it VISIBLY in agg instead of raising: the ingested rows
-        are already committed, and finalize_pending leaves the pending windows open, so the next fetch
-        retries. Crucially this stops a poll-path finalize failure from being swallowed silently while
-        log_regroup_pending grows unbounded."""
-        await _regrouping()
-        try:
-            async with async_session() as fdb:
-                res = await finalize_pending(fdb, customer_code)
-            # finalize_pending now ISOLATES a failing run (commits the good ones, leaves the bad run's
-            # pending open) instead of raising. Still surface any such failure so it is not swallowed
-            # while log_regroup_pending grows: a persistent per-run failure must show up on the run
-            # row / poller error log exactly as a hard finalize failure did.
-            if res.get("failures"):
-                agg["finalize_error"] = "; ".join(
-                    f"{f.get('window_start')}..{f.get('window_end')}: {f.get('error')}"
-                    for f in res["failures"])[:2000]
-            return res
-        except Exception as exc:
-            logger.exception("Stage 2 finalize failed for %s — pending stays open for retry", customer_code)
-            agg["finalize_error"] = str(exc)[:2000]
-            return {"error": str(exc)[:2000]}
-
     if not sources:
-        agg["finalize"] = await _do_finalize()  # idempotent (windows=0 if none)
         return agg
 
     # timestamp mode: if Postgres already covers from_ts, don't touch the servers at all — UNLESS this
@@ -555,7 +649,6 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
         local_min = await _local_min_ts(db, customer_code)
         if local_min is not None and from_ts >= local_min:
             agg["already_local"] = True
-            agg["finalize"] = await _do_finalize()
             return agg
 
     # Release the caller's pooled connection before the (slow) network loop — _fetch_source and the
@@ -595,6 +688,14 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
                               "entries_so_far": base["entries"] + src_entries})
 
         try:
+            # Backpressure: in queue mode the fetcher no longer waits for the database, so nothing
+            # else stops it downloading faster than the parse worker drains. Skip the source for
+            # this tick rather than piling more bytes onto a disk that is already struggling.
+            if settings.log_parse_worker_enabled and await _queue_backlog_exceeded(customer_code):
+                agg.setdefault("skipped", []).append(
+                    {"source": source.name,
+                     "reason": f"ingest queue backlog exceeds {settings.log_parse_queue_max_pending}"})
+                continue
             async with _host_lock(source, skip_if_busy=skip_if_busy) as got:
                 if not got:  # poller: another fetch holds this host — skip, pick it up next tick
                     agg.setdefault("skipped", []).append(
@@ -608,6 +709,7 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
             agg["files_fetched"] += stats["files_fetched"]
             agg["bytes_fetched"] += stats["bytes_fetched"]
             agg["entries_ingested"] += stats["entries_ingested"]
+            agg["objects_queued"] += stats.get("objects_queued", 0)
             agg["content_skipped"] += stats.get("content_skipped", 0)
             agg["io_skipped"] += stats.get("io_skipped", 0)
             base["considered"] += stats["files_considered"]
@@ -620,9 +722,11 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
             if auto_disabled:
                 agg.setdefault("auto_disabled", []).append(source.name)
 
-    # one finalize for everything the sources just fed (like the watcher's drain-empty flush) — on a
-    # fresh session, with failures surfaced (see _do_finalize).
-    agg["finalize"] = await _do_finalize()
+    # NOTE: no Stage 2 call here. Stage 1 writes a log_regroup_pending ticket in the same transaction
+    # as its entries, and the stitch worker (app/services/workers/log_stitch_worker.py) owns draining
+    # that queue. Transport has no business knowing stitching exists — and when every producer had to
+    # remember this call, any new ingestion path that forgot it silently left data unstitched.
+    await _regrouping()
     return agg
 
 
@@ -641,17 +745,18 @@ async def run_ssh_fetch_tracked(run_id: UUID, customer_code: str, source_id: UUI
             stats = await fetch_now(db, customer_code, source_id=source_id, mode=mode,
                                     from_ts=from_ts, disabled_only=(source_id is None),
                                     force_remote=True, on_progress=_cb)
-            # the pull may succeed while Stage 2 finalize fails — surface that as a failed run so the
-            # operator knows the data isn't stitched yet (pending stays open for the next retry).
-            fin_err = stats.get("finalize_error")
+            # The run reports the PULL only. Stitching is now owned by the stitch worker and happens
+            # after this run completes, so a stitch failure is no longer this run's outcome — it is
+            # visible on log_regroup_pending (attempts / last_error / abandoned_at) and via
+            # GET /logs/regroup/status instead.
             values = dict(
-                status=(LogSshFetchRunStatus.failed if fin_err else LogSshFetchRunStatus.completed),
+                status=LogSshFetchRunStatus.completed,
                 phase=LogSshFetchPhase.done,
                 files_considered=stats.get("files_considered"),
                 files_fetched=stats.get("files_fetched"),
                 bytes_fetched=stats.get("bytes_fetched"),
                 entries_ingested=stats.get("entries_ingested"),
-                error=(f"fetched OK but stitching failed: {fin_err}" if fin_err else None),
+                error=None,
                 result=stats, finished_at=datetime.now(timezone.utc),
             )
         except asyncio.CancelledError:
