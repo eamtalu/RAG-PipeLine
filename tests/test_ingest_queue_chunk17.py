@@ -27,7 +27,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.settings import settings
 from app.config.database import async_session
@@ -259,8 +259,17 @@ async def test_reset_abandoned_re_arms_for_retry(clean):
     row = await _get(rid)
     assert row.status == SourceObjectStatus.pending
     assert row.attempts == 0 and row.last_error is None
-    async with async_session() as s:                 # and it is claimable again
-        assert (await lpw.claim_one(s, "worker-1")).id == rid
+    # ...and it is claimable again. Asserted by re-running claim_one's OWN predicate rather than by
+    # calling it: claim_one is deliberately global and returns the single oldest due row across all
+    # tenants, so any older pending row - from another tenant, or another test - would be returned
+    # instead and this would fail for a reason that has nothing to do with re-arming.
+    async with async_session() as s:
+        claimable = (await s.execute(
+            select(LogSourceObject.id).where(
+                LogSourceObject.status == SourceObjectStatus.pending,
+                LogSourceObject.available_at <= func.clock_timestamp(),
+            ))).scalars().all()
+    assert rid in claimable, "a re-armed row is not visible to the claim query"
 
 
 # =============================================================== the atomic write
