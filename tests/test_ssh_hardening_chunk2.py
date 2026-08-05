@@ -145,7 +145,18 @@ def _patch_sftp(monkeypatch, files):
 
 
 def _patch_ingest_counts_lines(monkeypatch):
-    # Isolate the fetch/checkpoint logic from the Stage-1 parser: count newlines as "entries".
+    """Isolate the fetch/checkpoint logic from the Stage-1 parser: count newlines as "entries".
+
+    This also pins log_parse_worker_enabled OFF. Stubbing `_ingest_chunk` is by definition a
+    statement that the test exercises the INLINE path - in queue mode the fetcher calls
+    `_stage_range` instead and reports `objects_queued`, so `entries_ingested` is legitimately 0
+    and every assertion here would be measuring the wrong number.
+
+    Queue-mode fetch mechanics (including rotation detection, the case most at risk) are covered
+    separately in tests/test_ingest_queue_chunk17.py.
+    """
+    monkeypatch.setattr(settings, "log_parse_worker_enabled", False)
+
     async def fake_ingest(source, remote_path, data):
         return data.count(b"\n")
     monkeypatch.setattr(remote_fetcher, "_ingest_chunk", fake_ingest)

@@ -83,6 +83,7 @@ async def test_start_background_tasks_assembles_enabled_loops(monkeypatch):
     monkeypatch.setattr(settings, "ssh_log_fetcher_enabled", True)
     monkeypatch.setattr(settings, "notifications_enabled", False)
     monkeypatch.setattr(settings, "logspace_cleanup_worker_enabled", False)
+    monkeypatch.setattr(settings, "log_parse_worker_enabled", False)
     tasks = await bg.start_background_tasks()
     try:
         assert len(tasks) == 3
@@ -91,13 +92,14 @@ async def test_start_background_tasks_assembles_enabled_loops(monkeypatch):
         await bg.stop_background_tasks(tasks)
     assert all(t.cancelled() or t.done() for t in tasks)   # stop cancels everything
 
-    # everything on -> embedding + watcher + stitch + ssh + notifications + cleanup = 6
+    # everything on -> embedding + watcher + stitch + ssh + parse + notifications + cleanup = 7
     monkeypatch.setattr(settings, "log_stitch_worker_enabled", True)
     monkeypatch.setattr(settings, "notifications_enabled", True)
     monkeypatch.setattr(settings, "logspace_cleanup_worker_enabled", True)
+    monkeypatch.setattr(settings, "log_parse_worker_enabled", True)
     tasks = await bg.start_background_tasks()
     try:
-        assert len(tasks) == 6
+        assert len(tasks) == 7
         assert reg["n"] == 1                     # dispatcher registered exactly once
     finally:
         await bg.stop_background_tasks(tasks)

@@ -125,10 +125,20 @@ class Settings(BaseSettings):
     log_stitch_max_customers_per_tick: int = 25
 
     # --- Ingest queue: decoupling SSH fetching from Stage 1 parsing (log_source_objects) ---
-    # Master switch. OFF means the fetcher keeps parsing inline exactly as before, so enabling and
-    # rolling back this whole feature is a config flip rather than a code revert. See
-    # docs/plan/2026-08-02_15-47_log-source-objects-fetch-parse-decoupling.md.
-    log_parse_worker_enabled: bool = False
+    # Master switch, ON since 2026-08-05. The fetcher downloads bytes, saves them, and commits a
+    # log_source_objects ticket together with the file checkpoint in ONE transaction; log_parse_worker
+    # then drains that queue and runs Stage 1. The fetcher no longer holds the SSH connection and the
+    # per-host advisory lock across the database work.
+    #
+    # Turning it OFF returns the fetcher to parsing inline, exactly as before. That is safe at any
+    # time: the queue is simply drained to empty and stays empty (both workers also start when
+    # unfinished rows exist, regardless of this flag, so a rollback cannot strand queued work).
+    #
+    # It must be read by BOTH processes - the poller lives in the worker, but the web tier serves
+    # on-demand "fetch now" - so it belongs here rather than in a single systemd unit.
+    #
+    # See docs/plan/2026-08-02_15-47_log-source-objects-fetch-parse-decoupling.md.
+    log_parse_worker_enabled: bool = True
     # Dead-letter cap for ONE downloaded byte-range. Deliberately the same number as
     # log_regroup_max_attempts so an operator has a single retry budget to reason about across both
     # stages. Only TRANSIENT failures (bad sector, statement timeout, dropped connection) consume it;

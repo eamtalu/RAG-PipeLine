@@ -101,8 +101,10 @@ def test_queue_settings_are_sane():
     assert settings.log_parse_max_attempts and settings.log_parse_max_attempts > 0
     assert settings.log_parse_lease_seconds and settings.log_parse_lease_seconds > 0
     assert settings.log_parse_queue_max_pending and settings.log_parse_queue_max_pending > 0
-    # default OFF: enabling the new path must be an explicit decision, so rollback is a flag flip.
-    assert settings.log_parse_worker_enabled is False
+    # ON since 2026-08-05. It shipped OFF so the two halves of the decoupling could deploy
+    # separately; the queue half has been verified in production, so the queue path is now the
+    # default. Rollback is still a flag flip, not a revert - see test_flag_off_keeps_the_inline_path_unchanged.
+    assert settings.log_parse_worker_enabled is True
 
 
 def test_max_attempts_matches_stage2_so_operators_learn_one_number():
