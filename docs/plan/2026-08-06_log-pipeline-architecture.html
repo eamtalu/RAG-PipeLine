@@ -1,0 +1,781 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The log pipeline, end to end</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body, h1, h2, h3, h4, p, ol, ul, figure, pre, table { margin: 0; padding: 0; }
+  ul, ol { list-style: none; }
+
+  :root {
+    --ground:#F5F6F5; --panel:#FFF; --panel2:#EAEEEC; --ink:#151C1A; --ink2:#43524E;
+    --muted:#74847F; --rule:#D4DBD8; --rule2:#B3BEB9;
+    --q1:#1F5C63; --q1s:#DCEAEA;            /* stage 1 / ingest queue */
+    --q2:#7A5B12; --q2s:#F4EBD5;            /* stage 2 / stitch queue */
+    --q3:#4A3E7A; --q3s:#E4E0F0;            /* storage / partitions */
+    --ok:#2C7A57; --oks:#DCEDE3;
+    --bad:#A64430; --bads:#F3E0DB;
+    --fh:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --fm:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:#0F1514; --panel:#161E1C; --panel2:#1D2725; --ink:#E4EAE7; --ink2:#B5C3BE;
+      --muted:#7F918B; --rule:#26312E; --rule2:#374744;
+      --q1:#6FB6BC; --q1s:#152F30; --q2:#D2A94E; --q2s:#2A2415;
+      --q3:#A79BD8; --q3s:#211D33;
+      --ok:#68BE92; --oks:#152B21; --bad:#DD8570; --bads:#2D1A16;
+    }
+  }
+  :root[data-theme="light"] {
+    --ground:#F5F6F5; --panel:#FFF; --panel2:#EAEEEC; --ink:#151C1A; --ink2:#43524E;
+    --muted:#74847F; --rule:#D4DBD8; --rule2:#B3BEB9;
+    --q1:#1F5C63; --q1s:#DCEAEA; --q2:#7A5B12; --q2s:#F4EBD5;
+    --q3:#4A3E7A; --q3s:#E4E0F0;
+    --ok:#2C7A57; --oks:#DCEDE3; --bad:#A64430; --bads:#F3E0DB;
+  }
+  :root[data-theme="dark"] {
+    --ground:#0F1514; --panel:#161E1C; --panel2:#1D2725; --ink:#E4EAE7; --ink2:#B5C3BE;
+    --muted:#7F918B; --rule:#26312E; --rule2:#374744;
+    --q1:#6FB6BC; --q1s:#152F30; --q2:#D2A94E; --q2s:#2A2415;
+    --q3:#A79BD8; --q3s:#211D33;
+    --ok:#68BE92; --oks:#152B21; --bad:#DD8570; --bads:#2D1A16;
+  }
+
+  body { background:var(--ground); color:var(--ink); font-family:var(--fh);
+         font-size:16px; line-height:1.55; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1060px; margin:0 auto; padding:3rem 1.25rem 5rem;
+          display:flex; flex-direction:column; gap:3.2rem; }
+
+  h1 { font-size:clamp(1.9rem,5vw,2.6rem); font-weight:700; letter-spacing:-.03em; line-height:1.1;
+       text-wrap:balance; }
+  h2 { font-size:1.35rem; font-weight:660; letter-spacing:-.015em; text-wrap:balance; }
+  h3 { font-size:1rem; font-weight:640; }
+  h4 { font-size:.9rem; font-weight:640; color:var(--ink2); }
+  p  { max-width:70ch; color:var(--ink2); }
+  p.lead { color:var(--ink); }
+  .sub { color:var(--ink2); font-size:1.04rem; max-width:66ch; }
+  .tag { font-family:var(--fm); font-size:.7rem; letter-spacing:.15em;
+         text-transform:uppercase; color:var(--muted); }
+  section { display:flex; flex-direction:column; gap:1.1rem; }
+  code { font-family:var(--fm); font-size:.86em; background:var(--panel2);
+         padding:.1em .35em; border-radius:4px; }
+  a { color:var(--q1); }
+
+  hr { border:0; border-top:1px solid var(--rule); }
+
+  /* ---------- header ---------- */
+  header { display:flex; flex-direction:column; gap:.9rem;
+           border-bottom:1px solid var(--rule); padding-bottom:2rem; }
+  .meta { display:flex; flex-wrap:wrap; gap:.4rem .9rem; font-family:var(--fm);
+          font-size:.75rem; color:var(--muted); }
+
+  /* ---------- panels ---------- */
+  .panel { background:var(--panel); border:1px solid var(--rule); border-radius:9px;
+           padding:1.1rem 1.2rem; display:flex; flex-direction:column; gap:.7rem; }
+  .panel.s1 { border-left:3px solid var(--q1); }
+  .panel.s2 { border-left:3px solid var(--q2); }
+  .panel.s3 { border-left:3px solid var(--q3); }
+  .panel.warn { border-left:3px solid var(--bad); background:var(--bads); }
+  .panel.good { border-left:3px solid var(--ok); background:var(--oks); }
+  .panel.warn p, .panel.good p { color:var(--ink); }
+
+  /* ---------- pipeline rail ---------- */
+  .rail { display:flex; flex-direction:column; gap:.35rem; }
+  .node { background:var(--panel); border:1px solid var(--rule); border-radius:7px;
+          padding:.7rem .9rem; display:flex; flex-wrap:wrap; align-items:baseline; gap:.15rem .7rem; }
+  .node .who { font-weight:640; }
+  .node .fn  { font-family:var(--fm); font-size:.79rem; color:var(--muted); }
+  .node .what{ flex-basis:100%; color:var(--ink2); font-size:.92rem; }
+  .node.s1 { border-left:3px solid var(--q1); }
+  .node.s2 { border-left:3px solid var(--q2); }
+  .node.s3 { border-left:3px solid var(--q3); }
+  .arrow { color:var(--muted); font-family:var(--fm); font-size:.75rem;
+           padding-left:1rem; display:flex; gap:.5rem; align-items:center; }
+  .arrow::before { content:"↓"; }
+
+  /* ---------- tables ---------- */
+  .tw { overflow-x:auto; border:1px solid var(--rule); border-radius:9px; background:var(--panel); }
+  table { border-collapse:collapse; width:100%; font-size:.9rem; min-width:520px; }
+  th, td { text-align:left; padding:.6rem .8rem; border-bottom:1px solid var(--rule);
+           vertical-align:top; }
+  th { font-size:.72rem; letter-spacing:.09em; text-transform:uppercase; color:var(--muted);
+       font-weight:640; white-space:nowrap; }
+  tr:last-child td { border-bottom:0; }
+  td code { background:transparent; padding:0; }
+  td.num { font-variant-numeric:tabular-nums; white-space:nowrap; }
+
+  /* ---------- diagrams ---------- */
+  figure { background:var(--panel); border:1px solid var(--rule); border-radius:9px;
+           padding:1.1rem; overflow-x:auto; }
+  figure pre { font-family:var(--fm); font-size:.78rem; line-height:1.5; color:var(--ink);
+               white-space:pre; }
+  figcaption { color:var(--muted); font-size:.82rem; margin-top:.7rem; }
+
+  /* ---------- lists ---------- */
+  ul.bul { display:flex; flex-direction:column; gap:.45rem; }
+  ul.bul li { position:relative; padding-left:1.1rem; color:var(--ink2); max-width:70ch; }
+  ul.bul li::before { content:"—"; position:absolute; left:0; color:var(--muted); }
+  ul.bul li strong { color:var(--ink); font-weight:620; }
+
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:.8rem; }
+
+  .pill { display:inline-block; font-family:var(--fm); font-size:.68rem; letter-spacing:.08em;
+          text-transform:uppercase; padding:.15em .5em; border-radius:4px; font-weight:600; }
+  .pill.s1 { background:var(--q1s); color:var(--q1); }
+  .pill.s2 { background:var(--q2s); color:var(--q2); }
+  .pill.s3 { background:var(--q3s); color:var(--q3); }
+  .pill.ok { background:var(--oks); color:var(--ok); }
+  .pill.bad{ background:var(--bads); color:var(--bad); }
+
+  .toc { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:.5rem; }
+  .toc a { display:block; padding:.55rem .75rem; background:var(--panel);
+           border:1px solid var(--rule); border-radius:7px; text-decoration:none;
+           color:var(--ink); font-size:.9rem; }
+  .toc a:hover { border-color:var(--rule2); }
+  .toc a span { display:block; color:var(--muted); font-size:.78rem; }
+  a:focus-visible, .toc a:focus-visible { outline:2px solid var(--q1); outline-offset:2px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="tag">MNP log platform · architecture</div>
+  <h1>The log pipeline, end to end</h1>
+  <p class="sub">How a line of text on a Windows log server becomes a queryable transaction in the
+  feed — the components that move it, the tickets they hand each other, and the tables it lands in.
+  Written after the daily-partitioning release of 6 August 2026.</p>
+  <div class="meta">
+    <span>backend <code>RAG-PipeLine</code></span>
+    <span>·</span>
+    <span>deployed <code>25ec87c</code></span>
+    <span>·</span>
+    <span>schema <code>a1f6d70b3e92</code></span>
+    <span>·</span>
+    <span>349 tests</span>
+  </div>
+</header>
+
+<nav class="toc" aria-label="Contents">
+  <a href="#shape"><strong>1. The shape</strong><span>one picture</span></a>
+  <a href="#stage1"><strong>2. Stage 1</strong><span>producers &amp; the fetch ticket</span></a>
+  <a href="#parse"><strong>3. Parsing</strong><span>ticket → raw entries</span></a>
+  <a href="#stage2"><strong>4. Stage 2</strong><span>stitch ticket → transactions</span></a>
+  <a href="#storage"><strong>5. Storage</strong><span>daily partitions</span></a>
+  <a href="#data"><strong>6. Data model</strong><span>every table</span></a>
+  <a href="#why"><strong>7. Why it looks like this</strong><span>the failures behind it</span></a>
+  <a href="#ops"><strong>8. Operating it</strong><span>knobs &amp; signals</span></a>
+  <a href="#next"><strong>9. Next steps</strong><span>what is not built</span></a>
+</nav>
+
+<!-- ============================================================ 1 -->
+<section id="shape">
+  <div class="tag">01</div>
+  <h2>The shape: three queues, four workers, nothing calls anything directly</h2>
+  <p class="lead">Every stage of this pipeline is separated from the next by a <strong>database
+  table used as a work queue</strong>. No stage calls the next one. A stage writes a row saying
+  "this needs doing" and commits; a worker on its own clock picks it up.</p>
+  <p>That single decision is what makes the system survivable. A crash between stages loses nothing,
+  because the ticket is already committed. A slow database cannot block an SSH download. And a new
+  ingestion path cannot forget to trigger the next stage, because it does not trigger anything — it
+  just writes its ticket.</p>
+
+  <figure>
+<pre>
+   PRODUCERS                  QUEUE                 CONSUMER              OUTPUT
+   ─────────                  ─────                 ────────              ──────
+
+   SSH fetcher      ┐
+   directory watcher├──write──▶ <span style="color:var(--q1)">log_source_objects</span> ──▶ log_parse_worker ──▶ log_entries
+   API upload/scan  ┘            "bytes to parse"        (~2s tick)          (raw lines)
+                                                              │
+                                                              │ writes a ticket
+                                                              ▼
+                                              <span style="color:var(--q2)">log_regroup_pending</span> ──▶ log_stitch_worker ──▶ log_transactions
+                                               "window to stitch"    (~1s tick)      + log_entry_assignment
+                                                                                              │
+                                                                                              ▼
+                                                                                         the feed / API
+
+   log_partition_worker (hourly) ──▶ maintains the daily partitions all three tables live in
+</pre>
+    <figcaption>Solid arrows are writes. No arrow is a function call between stages — every one of
+    them is a committed row that something else picks up later.</figcaption>
+  </figure>
+
+  <div class="grid2">
+    <div class="panel s1">
+      <h3><span class="pill s1">Queue 1</span> log_source_objects</h3>
+      <p>“These bytes were downloaded and still need parsing.” Written in the <em>same transaction</em>
+      that advances the SSH read checkpoint.</p>
+    </div>
+    <div class="panel s2">
+      <h3><span class="pill s2">Queue 2</span> log_regroup_pending</h3>
+      <p>“Entries landed in this time window; it needs re-stitching.” Written by the parser as it
+      inserts.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 2 -->
+<section id="stage1">
+  <div class="tag">02</div>
+  <h2>Stage 1, part one: the producers that create fetch tickets</h2>
+  <p class="lead">Three independent paths put log bytes into the system. All three end the same way:
+  bytes saved to object storage, and a ticket row committed.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Producer</th><th>Module</th><th>Trigger</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>SSH fetcher</strong><br><span class="pill s1">primary</span></td>
+        <td><code>remote/remote_fetcher.py</code><br><code>run_ssh_log_fetcher()</code></td>
+        <td>poll loop, per source</td>
+        <td>SFTP-reads new bytes from each configured Windows log server, from the last byte offset
+            forward. Never re-reads what it already has.</td>
+      </tr>
+      <tr>
+        <td><strong>Directory watcher</strong></td>
+        <td><code>workers/log_watcher.py</code><br><code>run_log_watcher()</code></td>
+        <td>filesystem poll</td>
+        <td>Picks up files dropped into the incoming directory on the server itself.</td>
+      </tr>
+      <tr>
+        <td><strong>API upload / scan</strong></td>
+        <td><code>api/v1/logs.py</code><br><code>ingest_log()</code>, <code>scan_logs()</code></td>
+        <td>HTTP request</td>
+        <td>A person uploads a file, or asks the server to read a directory read-only.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>The fetch ticket, and the one thing that makes it safe</h3>
+  <p>The SSH fetcher tracks how far it has read each remote file in
+  <code>log_ssh_file_checkpoints</code>. Writing the ticket and advancing that checkpoint happen in
+  <strong>one transaction</strong>, in <code>_queue_and_checkpoint()</code>.</p>
+
+  <div class="grid2">
+    <div class="panel warn">
+      <h4>If the checkpoint advanced alone</h4>
+      <p>Those bytes are marked "read" but no ticket exists. Nothing ever parses them, and the fetcher
+      will never look at them again. <strong>Silent, permanent data loss.</strong></p>
+    </div>
+    <div class="panel warn">
+      <h4>If the ticket were written alone</h4>
+      <p>The checkpoint has not moved, so the next poll downloads the same bytes again — forever.
+      <strong>An infinite re-download loop.</strong></p>
+    </div>
+  </div>
+  <p>Both are avoided by refusing to do one without the other. This is the transactional outbox
+  pattern: the work item and the state change it depends on are committed together or not at all.</p>
+
+  <div class="rail">
+    <div class="node s1">
+      <span class="who">fetch_now</span>
+      <span class="fn">remote_fetcher.py</span>
+      <span class="what">Takes a per-host advisory lock so two pollers never fight over one server.</span>
+    </div>
+    <div class="arrow">for each rotated / grown file</div>
+    <div class="node s1">
+      <span class="who">_stage_range</span>
+      <span class="fn">remote_fetcher.py</span>
+      <span class="what">SFTP-reads <code>[start_offset, end_offset)</code> and saves the bytes to storage.</span>
+    </div>
+    <div class="arrow">one transaction</div>
+    <div class="node s1">
+      <span class="who">_queue_and_checkpoint</span>
+      <span class="fn">remote_fetcher.py</span>
+      <span class="what">INSERT the <code>log_source_objects</code> ticket <em>and</em> UPDATE the
+      checkpoint, then COMMIT. Either both land or neither does.</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h4>Backpressure</h4>
+    <p><code>_queue_backlog_exceeded()</code> pauses fetching when too many tickets are unparsed.
+    Before the split, the <code>await</code> on parsing provided that throttle for free; once the two
+    were decoupled the fetcher could otherwise outrun the parser and fill the disk with downloaded
+    bytes nobody had processed yet.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 3 -->
+<section id="parse">
+  <div class="tag">03</div>
+  <h2>Stage 1, part two: the parse worker turns tickets into raw entries</h2>
+  <p class="lead"><code>workers/log_parse_worker.py</code> — one loop, roughly every two seconds. It
+  is the <em>only</em> consumer of queue 1, and the only writer of <code>log_entries</code>.</p>
+
+  <div class="rail">
+    <div class="node s1">
+      <span class="who">claim_one</span>
+      <span class="fn">log_parse_worker.py:68</span>
+      <span class="what">Takes the oldest <em>due</em> ticket with
+      <code>FOR UPDATE SKIP LOCKED</code> and marks it <code>leased</code>. SKIP LOCKED means a stuck
+      row never blocks the rest of the queue, and several workers could run safely.</span>
+    </div>
+    <div class="arrow"></div>
+    <div class="node s1">
+      <span class="who">process_claimed</span>
+      <span class="fn">log_parse_worker.py:221</span>
+      <span class="what">Loads the stored bytes, creates a <code>Job</code> row, and runs the parser.</span>
+    </div>
+    <div class="arrow"></div>
+    <div class="node s1">
+      <span class="who">run_log_parse_insert</span>
+      <span class="fn">pipeline/parse_insert.py</span>
+      <span class="what">Parses each line, attaches the customer's timezone to turn local wall-clock
+      into a true UTC instant, then bulk-inserts with
+      <code>ON CONFLICT (customer_code, entry_hash, timestamp) DO NOTHING</code>.</span>
+    </div>
+    <div class="arrow">the same function writes the next ticket</div>
+    <div class="node s2">
+      <span class="who">INSERT log_regroup_pending</span>
+      <span class="fn">parse_insert.py:189</span>
+      <span class="what">“Entries landed between <code>range_start</code> and <code>range_end</code>;
+      that window needs stitching.” The range comes from the <code>RETURNING</code> clause of the
+      insert — only rows actually written, never a scan of old data.</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h4>Deduplication is content-based</h4>
+    <p><code>entry_hash = sha256(raw_body)</code> — the whole raw line, including its millisecond
+    timestamp. Re-ingest the same file and every line collides with the row already stored, so it is
+    skipped. This is what makes the whole pipeline safe to replay.</p>
+  </div>
+
+  <h3>When a ticket fails</h3>
+  <p>Every ticket carries its own retry budget, so one bad file cannot damage anything else:</p>
+  <ul class="bul">
+    <li><strong>Transient</strong> (disk I/O error, timeout, connection reset) → back off with
+        exponential delay + jitter, retry until the budget runs out.</li>
+    <li><strong>Permanent</strong> (undecodable bytes, unparseable content, missing file) →
+        <strong>abandon on the first failure</strong>. Retrying cannot help, and three attempts would
+        just triple the log noise.</li>
+    <li><strong>Budget exhausted</strong> → status <code>abandoned</code>, logged CRITICAL. It stops
+        being retried and waits for a human. <code>POST /logs/ingest-queue/reset-abandoned</code>
+        re-arms it.</li>
+    <li><strong>Worker crashed mid-parse</strong> → the lease expires and
+        <code>reclaim_expired_leases()</code> hands the ticket back to the queue.</li>
+  </ul>
+  <p>Before this existed, a single unreadable file was retried on <em>every</em> poll forever, writing
+  another copy of the bytes and another <code>jobs</code> row each time — on a disk that was already
+  failing.</p>
+</section>
+
+<!-- ============================================================ 4 -->
+<section id="stage2">
+  <div class="tag">04</div>
+  <h2>Stage 2: a separate worker stitches entries into transactions</h2>
+  <p class="lead"><code>workers/log_stitch_worker.py</code> — one loop, roughly every second. It owns
+  queue 2 completely. <strong>Nothing else invokes Stage 2.</strong></p>
+
+  <div class="panel">
+    <h4>This is the part that changed most</h4>
+    <p>Stage 2 used to be called directly by whoever had just ingested something — the SSH fetcher at
+    the end of a poll, the watcher after a file, the upload endpoint. Three call sites, and every new
+    ingestion path had to remember to add a fourth. Forgetting meant data sat unstitched with nothing
+    reporting it.</p>
+    <p>Now there is exactly one consumer, on its own clock, and producers only write tickets.</p>
+  </div>
+
+  <div class="rail">
+    <div class="node s2">
+      <span class="who">customers_with_due_work</span>
+      <span class="fn">log_stitch_worker.py:59</span>
+      <span class="what">Which tenants have an open ticket that is past its retry backoff. An indexed
+      read of the small queue table — never a scan of the 60k-row entry table.</span>
+    </div>
+    <div class="arrow">per tenant</div>
+    <div class="node s2">
+      <span class="who">finalize_pending</span>
+      <span class="fn">pipeline/derive_transactions.py</span>
+      <span class="what">Merges that tenant's open windows into disjoint spans and processes each,
+      splitting anything too large so one huge backfill cannot become a single giant transaction.</span>
+    </div>
+    <div class="arrow"></div>
+    <div class="node s2">
+      <span class="who">regroup_window</span>
+      <span class="fn">derive_transactions.py</span>
+      <span class="what">The actual rebuild for one time range. Deletes the transactions anchored in
+      the window, re-reads the now-unassigned entries, and rebuilds — all in one transaction.</span>
+    </div>
+    <div class="arrow"></div>
+    <div class="node s2">
+      <span class="who">_group → _persist</span>
+      <span class="fn">derive_transactions.py</span>
+      <span class="what">Runs the REQUEST→RESPONSE state machine over the entries in stream order,
+      then writes one <code>log_transactions</code> row per request cycle plus its
+      <code>log_entry_assignment</code> rows.</span>
+    </div>
+  </div>
+
+  <h3>Two ideas that make re-stitching safe</h3>
+  <div class="grid2">
+    <div class="panel">
+      <h4>Deterministic IDs</h4>
+      <p>A transaction's id is <code>uuid5</code> of its anchor entry's content hash. Rebuild the same
+      entries and you get <em>the same id</em>. So a regroup is idempotent, and a transaction id you
+      saved or linked to stays valid forever.</p>
+    </div>
+    <div class="panel">
+      <h4>Sealing</h4>
+      <p>Once a transaction is old enough that nothing can still join it, it is marked
+      <code>sealed</code> and never recomputed. Only the recent unsealed tail is reworked each cycle,
+      so the per-cycle cost stays flat no matter how much history exists.</p>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h4>The padded window</h4>
+    <p>A rebuild of <code>[lo, hi]</code> actually processes <code>[lo − pad, hi + pad]</code>, where
+    the pad is at least the seal window. A transaction can span at most that long, so any transaction
+    a new entry could belong to is guaranteed to be inside the padded range — which is what makes the
+    rebuild lossless at the boundaries instead of splitting a request from its response.</p>
+  </div>
+
+  <h3>Dead-lettering, same pattern as queue 1</h3>
+  <ul class="bul">
+    <li>Each window has <code>attempts</code>, <code>last_error</code>, and an
+        <code>available_at</code> backoff gate.</li>
+    <li>After 3 failures it is marked <code>abandoned</code> and logged CRITICAL — parked, not
+        retried, so one poison window cannot burn the statement timeout every second.</li>
+    <li>Abandoned windows are excluded from the backlog, so they cannot pin the "not up to date"
+        banner on forever.</li>
+    <li><code>POST /logs/regroup/reset-abandoned</code> re-arms them.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ 5 -->
+<section id="storage">
+  <div class="tag">05</div>
+  <h2>Storage: the three hot tables are cut into one file per day</h2>
+  <p class="lead">All three high-volume tables are <strong>range-partitioned by UTC day</strong>.
+  Deleting old data is now <code>DROP TABLE</code> on one day's partition — a file unlink — instead of
+  <code>DELETE</code> + <code>VACUUM</code>, both of which read the entire table.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Table</th><th>Partition key</th><th>Why that column</th></tr></thead>
+    <tbody>
+      <tr><td><code>log_entries</code></td><td><code>timestamp</code></td>
+          <td>when the log line happened</td></tr>
+      <tr><td><code>log_transactions</code></td><td><code>started_at</code></td>
+          <td>its first entry's timestamp</td></tr>
+      <tr><td><code>log_entry_assignment</code></td><td><code>entry_ts</code></td>
+          <td>a copy of its entry's timestamp, so it lands in the <em>same</em> day as the entry it
+              describes</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <figure>
+<pre>
+                    log_entries  (partitioned parent — holds no rows itself)
+                          │
+    ┌─────────────┬───────┴───────┬─────────────┬──────────────────┐
+    ▼             ▼               ▼             ▼                  ▼
+ _2026_08_05  _2026_08_06 ... _2026_08_20   _default          (dropped at 60 days)
+  one UTC day  one UTC day     runway ahead   NULL timestamps    ← DROP TABLE, no scan
+
+ log_entry_assignment is cut on the SAME grain, so day D's entries and day D's
+ assignments are dropped together and neither is ever left pointing at the other.
+</pre>
+    <figcaption>Reads for one day open one partition. Retention drops one file.</figcaption>
+  </figure>
+
+  <h3>The partition worker</h3>
+  <p><code>workers/log_partition_worker.py</code> — hourly, both halves idempotent so a missed tick is
+  harmless.</p>
+  <div class="grid2">
+    <div class="panel s3">
+      <h4>Create — the dangerous half</h4>
+      <p>Keeps 14 days of partitions ahead of today. An insert into a day with no partition
+      <strong>fails outright</strong>, so if creation stops, ingestion stops when the runway runs out.
+      A failure logs CRITICAL and the remaining runway is reported every tick.</p>
+    </div>
+    <div class="panel s3">
+      <h4>Drop — the irreversible half</h4>
+      <p>Removes days past 60, behind three gates. A failure here reclaims no disk and simply retries,
+      so it can never block creation.</p>
+    </div>
+  </div>
+
+  <h4>The three gates before anything is dropped</h4>
+  <ul class="bul">
+    <li><strong>Past retention</strong> — the day is older than 60 days.</li>
+    <li><strong>No open stitch window overlaps it</strong> — dropping data Stage 2 has not finished
+        with would destroy transactions that were about to be built.</li>
+    <li><strong>Entries lag transactions by one day.</strong> A transaction starting at 23:58 owns
+        entries into the next day. Dropping day N's entries while a day N−1 transaction still
+        referenced them would leave it rendering half-empty, with nothing recording that its body
+        used to exist. So transactions drop for day D, entries and assignments only for day D−1. One
+        extra day of storage; the bound is exact, not a guess.</li>
+  </ul>
+
+  <div class="panel good">
+    <h4>Observed in production, first tick</h4>
+    <p><code>created=3 dropped=0, 14 day(s) of runway</code> — and the 3 is the design working. The
+    tick fell at 00:06 UTC, just after the UTC date rolled over, so the far edge of the runway moved
+    by one day across all three tables. The worker reads the date in <strong>UTC</strong>, not the
+    server's local Europe/London — a distinction that is invisible 23 hours out of 24, and that first
+    tick landed inside the one hour where it matters.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 6 -->
+<section id="data">
+  <div class="tag">06</div>
+  <h2>The data model, grouped by what each table is for</h2>
+
+  <h3><span class="pill s1">Group A</span> Transport &amp; provenance — how bytes got here</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Table</th><th>Holds</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>log_ssh_sources</code></td><td>a configured Windows log server</td>
+          <td>host, credentials, remote directory, circuit-breaker state</td></tr>
+      <tr><td><code>log_ssh_file_checkpoints</code></td><td>how far each remote file has been read</td>
+          <td>byte offset + size + mtime + head fingerprint, so rotation is detected</td></tr>
+      <tr><td><code>log_ssh_fetch_runs</code></td><td>history of each poll</td>
+          <td>what it queued, how long it took, why it failed</td></tr>
+      <tr><td><code>log_source_objects</code></td><td><strong>queue 1</strong> — bytes awaiting parse</td>
+          <td>also permanent provenance: which file version and byte range produced which entries</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3><span class="pill s2">Group B</span> The log data itself</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Table</th><th>Holds</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>log_entries</code></td><td>one row per raw log line</td>
+          <td><strong>append-only</strong>. Partitioned by <code>timestamp</code>. Deduped on
+              <code>(customer_code, entry_hash, timestamp)</code>.</td></tr>
+      <tr><td><code>log_transactions</code></td><td>one row per API request/response cycle</td>
+          <td>Partitioned by <code>started_at</code>. Deterministic <code>uuid5</code> id.
+              Promotes the useful WMS dimensions to columns.</td></tr>
+      <tr><td><code>log_entry_assignment</code></td><td>which transaction currently owns which entry</td>
+          <td>Partitioned by <code>entry_ts</code>. Carries <code>seq</code>, the entry's position in
+              the transaction timeline.</td></tr>
+      <tr><td><code>log_regroup_pending</code></td><td><strong>queue 2</strong> — windows to stitch</td>
+          <td>attempts, backoff, dead-letter</td></tr>
+      <tr><td><code>log_regroup_runs</code></td><td>history of each stitch run</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Why the assignment table exists at all</h3>
+  <p>Stage 2 used to write its result back onto <code>log_entries</code> as
+  <code>transaction_id</code> and <code>seq</code> columns. Because those were indexed, every rewrite
+  touched both the heap and the index — and the unsealed tail is regrouped repeatedly before it
+  seals.</p>
+  <div class="panel warn">
+    <p><strong>Measured in production: 105,838,123 row updates at 0.0% HOT on 1.9M rows.</strong>
+    Roughly 55 rewrites per row. That was the write amplification and dead-tuple churn behind the
+    outage, on a disk that could no longer complete a vacuum.</p>
+  </div>
+  <p>Moving the grouping into its own table made <code>log_entries</code> strictly insert-only.
+  Five consecutive regroups of the same window now perform <strong>zero</strong> row updates.</p>
+
+  <div class="panel">
+    <h4>No foreign keys between these three, on purpose</h4>
+    <p>A foreign key makes the referenced table's partitions impossible to detach or drop — and
+    retention <em>is</em> dropping partitions. So the references are soft, and every delete path
+    clears assignments explicitly. Removing them also made the hottest write path about 4× faster
+    (200k assignment inserts: 1,060 ms → 249 ms, two FK triggers × 200,000 calls each).</p>
+  </div>
+
+  <h3>A structural consequence worth knowing</h3>
+  <p><strong>None of the three tables has a PRIMARY KEY any more.</strong> PostgreSQL requires a
+  unique constraint on a partitioned table to contain every partition-key column, and silently forces
+  primary-key columns to <code>NOT NULL</code>. All three partition keys are nullable — the parser
+  genuinely emits entries whose timestamp will not parse — so a primary key would make those rows
+  impossible to insert. Identity is a <code>UNIQUE NULLS NOT DISTINCT</code> instead, with the
+  partition key present but never first.</p>
+  <p>The order is load-bearing and was measured: looking up by id alone takes 0.046 ms with
+  <code>(entry_id, entry_ts)</code> and <strong>10.8 ms</strong> with <code>(entry_ts, entry_id)</code>
+  — a sequential scan, because the id is no longer seekable.</p>
+</section>
+
+<!-- ============================================================ 7 -->
+<section id="why">
+  <div class="tag">07</div>
+  <h2>Why it looks like this: the failures each decision came from</h2>
+  <p class="lead">Almost nothing here is a preference. Each piece exists because something specific
+  broke.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Design</th><th>The failure it came from</th></tr></thead>
+    <tbody>
+      <tr><td>Fetch and parse split by a queue</td>
+          <td>The SSH connection and the per-host lock were held while the database worked. A slow
+              disk blocked network fetches for the whole server.</td></tr>
+      <tr><td>Per-ticket retry budget</td>
+          <td>One unreadable file was retried every poll forever, each attempt writing another copy
+              of the bytes and another <code>jobs</code> row — on a failing disk.</td></tr>
+      <tr><td>Per-file failures separated from per-server ones</td>
+          <td>A single unparseable file used to increment the <em>source's</em> failure counter and
+              would eventually disable the entire server, blocking every other file on it.</td></tr>
+      <tr><td>Stage 2 owned by one worker</td>
+          <td>Three separate call sites had to remember to trigger stitching. Any new ingestion path
+              that forgot left data silently unstitched.</td></tr>
+      <tr><td>Assignment table, entries append-only</td>
+          <td>105.8M updates at 0% HOT. Vacuum could not keep up; the heap reached 40 GB.</td></tr>
+      <tr><td>Daily partitions</td>
+          <td>Retention meant <code>DELETE</code> + <code>VACUUM</code>, both full-table reads on a
+              disk with bad sectors.</td></tr>
+      <tr><td>Every hot query carries a time bound</td>
+              <td>PostgreSQL prunes partitions only from a predicate on the partition-key column. An
+              unbounded query opens all ~130 of them.</td></tr>
+      <tr><td>Timezone changes refused once data exists</td>
+          <td>The dedup key now includes the timestamp, which is derived using the customer's
+              timezone. Change it and re-ingest, and the same line inserts a
+              <strong>duplicate</strong> instead of being skipped.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="panel">
+    <h4>One example of the bounding work, measured</h4>
+    <p><code>_persist</code> used to load <em>every transaction id the tenant had ever had</em> into a
+    Python set — 109k rows per call, growing forever — purely to detect an id collision. It now asks
+    only about the ids being written, inside a padded window. <strong>25 partitions opened → 1</strong>,
+    and memory now scales with the batch rather than with the tenant's history.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 8 -->
+<section id="ops">
+  <div class="tag">08</div>
+  <h2>Operating it</h2>
+
+  <h3>The one endpoint that tells you if things are healthy</h3>
+  <p><code>GET /api/v1/logs/regroup/status</code> — polled by the AUTO-POLL card.</p>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Field</th><th>Means</th><th>Act when</th></tr></thead>
+    <tbody>
+      <tr><td><code>pending_windows</code></td><td>stitch backlog</td><td>rising steadily</td></tr>
+      <tr><td><code>backing_off_windows</code></td><td>windows already failing and retrying</td>
+          <td>above zero — this is the early warning</td></tr>
+      <tr><td><code>abandoned_windows</code></td><td>dead-lettered, waiting for a human</td>
+          <td>above zero — always</td></tr>
+      <tr><td><code>partitions.days_ahead</code></td><td>days of partition runway</td>
+          <td class="num">below 3 — <strong>ingestion stops at 0</strong></td></tr>
+      <tr><td><code>partitions.default_partition_rows</code></td><td>entries with no parsable timestamp</td>
+          <td>growing — the parser is failing on some format</td></tr>
+      <tr><td><code>partitions.oldest_day</code></td><td>oldest day still stored</td>
+          <td>not moving — retention has stopped</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>The <code>partitions</code> block is global, not per tenant.</strong> Partitions are cut
+  by day, not by customer, so every log space shows the same values. It rides on this endpoint only
+  because the card already polls it.</p>
+
+  <h3>The knobs</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Setting</th><th>Default</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td><code>log_partition_retention_days</code></td><td class="num">60</td>
+          <td>how long data is kept. <strong>Dropping is permanent.</strong></td></tr>
+      <tr><td><code>log_partition_precreate_days</code></td><td class="num">14</td>
+          <td>runway ahead — how long the worker can be dead before ingestion stops</td></tr>
+      <tr><td><code>log_partition_min_runway_days</code></td><td class="num">3</td>
+          <td>alarm threshold, shared by the worker and the status card</td></tr>
+      <tr><td><code>log_seal_window_seconds</code></td><td class="num">900</td>
+          <td>how long a transaction stays open to late entries</td></tr>
+      <tr><td><code>log_parse_max_attempts</code></td><td class="num">3</td>
+          <td>retry budget per ticket, both queues</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="panel warn">
+    <h4>Deploying a schema change here is not a rolling deploy</h4>
+    <p>The dedup constraint is part of the code's <code>ON CONFLICT</code> clause. Old code against
+    the new schema fails ingestion outright, and vice versa. The sequence is
+    <strong>stop workers → migrate → deploy → start</strong>, not <code>deploy.sh</code>'s
+    pull-then-migrate order.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 9 -->
+<section id="next">
+  <div class="tag">09</div>
+  <h2>Next steps</h2>
+
+  <div class="panel warn">
+    <h3>1. Archive before drop — the important one</h3>
+    <p><strong>Retention is live and permanently deletes data at 60 days. There is no archive.</strong>
+    Day 61 is simply gone.</p>
+    <p>The original design called for exporting a partition to Parquet, verifying its row count and
+    checksum, writing a manifest, and only then dropping it. That part was never built. Partitioning
+    makes it straightforward — a partition is already a clean, immutable export unit.</p>
+    <p><strong>Deadline:</strong> the oldest data is 2026-08-05, so the first real drop lands around
+    <strong>5 October 2026</strong>. Nothing is at risk before then.</p>
+  </div>
+
+  <div class="panel">
+    <h3>2. Frontend, two small changes</h3>
+    <ul class="bul">
+      <li><strong>Timezone picker can now be refused.</strong> <code>PATCH /customers/{code}</code>
+          returns 409 once a tenant has entries. It currently surfaces as a toast containing a long
+          paragraph; it should open the confirm modal with the reason and a "change anyway" action
+          that resends with <code>allow_mixed_timezones=true</code>.</li>
+      <li><strong>Partition health line</strong> on the AUTO-POLL card — one line, additive.</li>
+    </ul>
+    <p>Briefed in <code>docs/plan/2026-08-06_frontend-partition-status-line.md</code>. Neither blocks
+    anything.</p>
+  </div>
+
+  <div class="panel">
+    <h3>3. Known issue, deliberately left alone</h3>
+    <p><code>log_entries.job_id</code> still cascades from <code>jobs</code>, and its index was
+    dropped long ago as unused. A tenant purge already sequential-scanned; after partitioning that
+    becomes roughly 130 sequential scans. Admin-only path, so it is slow rather than broken — and it
+    was left rather than restructuring deletion semantics again.</p>
+  </div>
+
+  <div class="panel">
+    <h3>4. Pre-existing schema drift</h3>
+    <p><code>alembic check</code> reports the raw pgvector <code>embeddings</code> table, some nullable
+    <code>created_at</code>/<code>updated_at</code> columns, and three <code>log_transactions</code>
+    indexes created by migration <code>b9d4f2a7c318</code> that were never declared on the model. All
+    of it predates this work.</p>
+  </div>
+
+  <div class="panel good">
+    <h3>5. Then the actual goal — machine learning</h3>
+    <p>Transaction failure-risk prediction. <code>log_transactions.status</code> is already a usable
+    label and <code>duration_ms</code> a usable regression target. The data foundation this whole
+    exercise was building is now in place: entries are immutable, transactions are deterministic and
+    idempotent, and history ages out on a predictable schedule.</p>
+    <p>Root-cause classification is <em>not</em> label-ready — <code>error_text</code> is free text,
+    which is evidence rather than a verified cause. It needs a taxonomy and operator-confirmed
+    resolutions first.</p>
+  </div>
+</section>
+
+<hr>
+<p style="font-size:.85rem;color:var(--muted)">
+  Companion documents:
+  <code>docs/database-er-diagram.md</code> (the as-built schema) ·
+  <code>docs/plan/2026-08-05_20-32_daily-partitioning.md</code> (the partitioning design and what
+  measurement changed) ·
+  <code>docs/plan/2026-08-02_15-47_log-source-objects-fetch-parse-decoupling.md</code> (the queue split).
+</p>
+
+</div>
+</body>
+</html>
