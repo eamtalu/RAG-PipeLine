@@ -175,39 +175,41 @@
   .pill.now { background:var(--oks); color:var(--ok); }
   .pill.new { background:var(--diss); color:var(--dis); }
   .pill.bad { background:var(--bads); color:var(--bad); }
-</style>
-</head>
+</style></head>
 <body>
 <div class="wrap">
 
 <header>
-  <div class="tag">MNP log platform · notifications</div>
-  <h1>Notifications: how it works, where it breaks, and what to build</h1>
-  <p class="sub">The current implementation traced end to end, the flaws found in it, and a proposal
-  built on one idea — a cursor — that also gives you the pattern for ML and analytics later.</p>
+  <div class="tag">MNP log platform · notifications · as built</div>
+  <h1>The notification subsystem</h1>
+  <p class="sub">What it does, how it is put together, and why each piece is shaped the way it is.
+  Starts at the shape of the whole thing and works downward to the individual mechanisms.</p>
   <div class="meta">
     <span>8 August 2026</span><span>·</span>
-    <span>code at <code>25ec87c</code></span><span>·</span>
-    <span>production figures measured 7 Aug</span><span>·</span>
-    <span>no code changes — design only</span>
+    <span>steps 1–8 complete</span><span>·</span>
+    <span>137 tests</span><span>·</span>
+    <span>OFF in production (<code>notifications_enabled=False</code>)</span>
   </div>
 </header>
 
 <nav class="toc" aria-label="Contents">
-  <a href="#where"><strong>1. Where it sits</strong><span>vs Stage 1 and Stage 2</span></a>
-  <a href="#entry"><strong>2. Entry points</strong><span>the call chain</span></a>
-  <a href="#today"><strong>3. How it works today</strong><span>tables and tenancy</span></a>
-  <a href="#flaws"><strong>4. The flaws</strong><span>with the code that causes them</span></a>
-  <a href="#proposal"><strong>5. The proposal</strong><span>three layers</span></a>
-  <a href="#cursor"><strong>6. Cursors, plainly</strong><span>the core idea</span></a>
-  <a href="#scale"><strong>7. ML and analytics</strong><span>reusing the pattern</span></a>
-  <a href="#caveats"><strong>8. Caveats</strong><span>what to watch</span></a>
-  <a href="#build"><strong>9. Build order</strong><span>what to do first</span></a>
+  <a href="#what"><strong>1. What it does</strong><span>in one page</span></a>
+  <a href="#shape"><strong>2. The shape</strong><span>four layers</span></a>
+  <a href="#tick"><strong>3. One tick</strong><span>the worker loop</span></a>
+  <a href="#discovery"><strong>4. Discovery</strong><span>finding the work</span></a>
+  <a href="#decision"><strong>5. Decision</strong><span>should this alert?</span></a>
+  <a href="#delivery"><strong>6. Delivery</strong><span>getting it out</span></a>
+  <a href="#data"><strong>7. Data model</strong><span>every table</span></a>
+  <a href="#tenancy"><strong>8. Multi-tenant</strong><span>rules and channels</span></a>
+  <a href="#before"><strong>9. Before &amp; after</strong><span>measured</span></a>
+  <a href="#reuse"><strong>10. Reusing it</strong><span>ML &amp; analytics</span></a>
+  <a href="#config"><strong>11. Configuration</strong><span>every setting</span></a>
+  <a href="#caveats"><strong>12. Caveats</strong><span>what is not done</span></a>
 </nav>
 
 <section>
   <h3>The colour system</h3>
-  <p>Five concerns, one colour each. Used consistently in every diagram below — learn them once.</p>
+  <p>Four concerns, one colour each, used consistently in every diagram below.</p>
   <div class="legend">
     <span class="key"><span class="dot" style="background:var(--src)"></span>source · what is watched</span>
     <span class="key"><span class="dot" style="background:var(--dis)"></span>discovery · finding the work</span>
@@ -218,670 +220,728 @@
 </section>
 
 <!-- ================================================================= 1 -->
-<section id="where">
+<section id="what">
   <div class="tag">01</div>
-  <h2>Where notifications sit: outside the pipeline, not inside it</h2>
-  <p class="lead">Stage 1 and Stage 2 are joined by <strong>queues</strong> — a producer commits a
-  ticket, a consumer claims it. Notifications is the one component that does not work that way. It
-  <strong>polls</strong> Stage 2's output table on its own clock.</p>
+  <h2>What it does, in one page</h2>
+  <p class="lead">A background worker watches the transactions Stage 2 produces, decides which ones a
+  tenant asked to be told about, and sends a card to their Teams channel — durably, paced, and without
+  drowning anyone.</p>
 
   <figure>
-    <svg viewBox="0 0 900 300" role="img" aria-label="Stage 1 and Stage 2 are queue-coupled; notifications polls log_transactions instead">
+    <svg viewBox="0 0 900 250" role="img" aria-label="Transactions flow through discovery, decision and delivery to Teams">
       <defs>
-        <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
           <path d="M0,0 L10,5 L0,10 z" fill="var(--rule2)"/>
         </marker>
-        <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-          <path d="M0,0 L10,5 L0,10 z" fill="var(--dis)"/>
-        </marker>
       </defs>
+      <rect x="10" y="90" width="150" height="58" rx="8" fill="var(--srcs)" stroke="var(--src)" stroke-width="2"/>
+      <text class="lbl" x="85" y="114" text-anchor="middle" style="font-weight:640">log_transactions</text>
+      <text class="sm"  x="85" y="131" text-anchor="middle">Stage 2's output</text>
 
-      <rect class="bx" x="10"  y="30" width="150" height="46" rx="7"/>
-      <text class="lbl" x="85" y="50" text-anchor="middle">SSH fetcher</text>
-      <text class="sm"  x="85" y="66" text-anchor="middle">+ watcher, upload</text>
+      <rect x="200" y="90" width="150" height="58" rx="8" fill="var(--diss)" stroke="var(--dis)" stroke-width="2"/>
+      <text class="lbl" x="275" y="110" text-anchor="middle" style="font-weight:640">discovery</text>
+      <text class="sm"  x="275" y="126" text-anchor="middle">cursor + lag</text>
+      <text class="sm"  x="275" y="139" text-anchor="middle">only what is new</text>
 
-      <rect x="190" y="30" width="160" height="46" rx="7" fill="var(--srcs)" stroke="var(--src)"/>
-      <text class="lbl" x="270" y="50" text-anchor="middle">log_source_objects</text>
-      <text class="sm"  x="270" y="66" text-anchor="middle">queue 1 · a ticket</text>
+      <rect x="390" y="90" width="150" height="58" rx="8" fill="var(--decs)" stroke="var(--dec)" stroke-width="2"/>
+      <text class="lbl" x="465" y="110" text-anchor="middle" style="font-weight:640">decision</text>
+      <text class="sm"  x="465" y="126" text-anchor="middle">rules · seal gate</text>
+      <text class="sm"  x="465" y="139" text-anchor="middle">dedupe · burst cap</text>
 
-      <rect class="bx" x="380" y="30" width="140" height="46" rx="7"/>
-      <text class="lbl" x="450" y="50" text-anchor="middle">parse worker</text>
-      <text class="sm"  x="450" y="66" text-anchor="middle">~2s</text>
+      <rect x="580" y="90" width="150" height="58" rx="8" fill="var(--dels)" stroke="var(--del)" stroke-width="2"/>
+      <text class="lbl" x="655" y="110" text-anchor="middle" style="font-weight:640">delivery</text>
+      <text class="sm"  x="655" y="126" text-anchor="middle">outbox · paced</text>
+      <text class="sm"  x="655" y="139" text-anchor="middle">fair · retried</text>
 
-      <rect x="550" y="30" width="170" height="46" rx="7" fill="var(--srcs)" stroke="var(--src)"/>
-      <text class="lbl" x="635" y="50" text-anchor="middle">log_regroup_pending</text>
-      <text class="sm"  x="635" y="66" text-anchor="middle">queue 2 · a ticket</text>
+      <rect x="770" y="90" width="120" height="58" rx="8" fill="var(--tras)" stroke="var(--tra)" stroke-width="2"/>
+      <text class="lbl" x="830" y="114" text-anchor="middle" style="font-weight:640">Teams</text>
+      <text class="sm"  x="830" y="131" text-anchor="middle">a card</text>
 
-      <rect class="bx" x="750" y="30" width="140" height="46" rx="7"/>
-      <text class="lbl" x="820" y="50" text-anchor="middle">stitch worker</text>
-      <text class="sm"  x="820" y="66" text-anchor="middle">~1s</text>
+      <path class="ln" d="M160,119 H198" marker-end="url(#ar)"/>
+      <path class="ln" d="M350,119 H388" marker-end="url(#ar)"/>
+      <path class="ln" d="M540,119 H578" marker-end="url(#ar)"/>
+      <path class="ln" d="M730,119 H768" marker-end="url(#ar)"/>
 
-      <path class="ln" d="M160,53 H188" marker-end="url(#a1)"/>
-      <path class="ln" d="M350,53 H378" marker-end="url(#a1)"/>
-      <path class="ln" d="M520,53 H548" marker-end="url(#a1)"/>
-      <path class="ln" d="M720,53 H748" marker-end="url(#a1)"/>
-
-      <rect x="620" y="140" width="270" height="52" rx="7" fill="var(--srcs)" stroke="var(--src)" stroke-width="2"/>
-      <text class="lbl" x="755" y="162" text-anchor="middle" style="font-weight:640">log_transactions</text>
-      <text class="sm"  x="755" y="179" text-anchor="middle">Stage 2's output — the shared source</text>
-      <path class="ln" d="M820,76 V138" marker-end="url(#a1)"/>
-
-      <rect x="120" y="230" width="270" height="52" rx="7" fill="var(--diss)" stroke="var(--dis)" stroke-width="2"/>
-      <text class="lbl" x="255" y="252" text-anchor="middle" style="font-weight:640">notification worker</text>
-      <text class="sm"  x="255" y="269" text-anchor="middle">polls every 10s · no ticket, no queue</text>
-
-      <path class="ln" d="M620,172 H400 Q392,172 392,186 V230" stroke="var(--dis)" stroke-dasharray="5 4" marker-end="url(#a2)"/>
-      <text class="sm" x="470" y="205" fill="var(--dis)">polls — the only component that does</text>
+      <text class="sm" x="275" y="180" text-anchor="middle">reads only rows</text>
+      <text class="sm" x="275" y="193" text-anchor="middle">written since last time</text>
+      <text class="sm" x="465" y="180" text-anchor="middle">500 matches →</text>
+      <text class="sm" x="465" y="193" text-anchor="middle">3 cards + 1 summary</text>
+      <text class="sm" x="655" y="180" text-anchor="middle">≤20/min per channel,</text>
+      <text class="sm" x="655" y="193" text-anchor="middle">round-robin across tenants</text>
     </svg>
-    <figcaption>Solid arrows are committed tickets. The dashed arrow is a poll: nothing upstream tells
-    notifications anything, so it re-asks on a timer.</figcaption>
+    <figcaption>Every stage is bounded. Nothing downstream can be overwhelmed by what happens upstream.</figcaption>
   </figure>
 
-  <div class="panel">
-    <h4>Why this matters</h4>
-    <p>Because nothing tells it when there is new work, it has to <em>guess</em> — "look at the last
-    hour, every ten seconds." That guess is the origin of three separate flaws in section 4: wasted
-    scanning, missed backfills, and a hard cap that silently truncates.</p>
+  <div class="grid2">
+    <div class="panel good">
+      <h4>The four guarantees</h4>
+      <ul class="bul">
+        <li><strong>Nothing is lost.</strong> The alert is committed to the outbox before any HTTP, so
+          a Teams outage or a restart cannot drop it.</li>
+        <li><strong>Nothing is sent twice.</strong> Dedupe by <code>dedup_key</code>, even across
+          replays, rule edits and cursor resets.</li>
+        <li><strong>Nothing is wrong.</strong> A transaction that is still changing does not alert,
+          because a false alert here could never be corrected.</li>
+        <li><strong>Nothing floods.</strong> Paced per channel, fair across tenants, and collapsed into
+          a summary past a per-rule cap.</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h4>What it is <em>not</em></h4>
+      <ul class="bul">
+        <li>Not a pipeline stage. Stage 1 and Stage 2 do not know it exists and never call it.</li>
+        <li>Not event-driven. It polls Stage 2's output table on its own clock.</li>
+        <li>Not live yet — <code>notifications_enabled</code> is <code>False</code> in production.</li>
+      </ul>
+    </div>
   </div>
 </section>
 
 <!-- ================================================================= 2 -->
-<section id="entry">
+<section id="shape">
   <div class="tag">02</div>
-  <h2>Entry points and the call chain</h2>
-  <p class="lead">Two lines at startup. The first is easy to overlook and is what makes the whole
-  thing work.</p>
-
-  <pre class="code"><span class="c"># app/background.py</span>
-151    notification_dispatcher.register()                           <span class="c"># wire the subscriber</span>
-152    tasks.append(asyncio.create_task(run_notification_worker())) <span class="c"># start the loop</span></pre>
-
-  <p><code>register()</code> is the only link between rule evaluation and delivery — it calls
-  <code>bus.subscribe(handle)</code>. The engine never imports the dispatcher. Without line 151, rules
-  would evaluate every 10 seconds and nothing would ever be sent.</p>
-
-  <h3>The chain, hop by hop</h3>
-  <div class="chain">
-    <div class="hop"><span class="loc">background.py:152</span>
-      <span class="call">create_task(run_notification_worker())</span></div>
-    <div class="tick">process start</div>
-    <div class="hop"><span class="loc">notification_worker.py:23</span>
-      <span class="call">while True:</span>
-      <span class="note">every <code>notification_poll_seconds</code> (10s), forever.</span></div>
-    <div class="tick">:25 run_rules_once() · :26 retry_pending()</div>
-    <div class="hop loopy"><span class="loc">engine.py:56</span>
-      <span class="call">for customer_code, cust_rules in by_customer.items()</span>
-      <span class="note"><strong>Loop 1 — tenants.</strong> One pass per customer that has an active rule.</span></div>
-    <div class="tick"></div>
-    <div class="hop mark"><span class="loc">engine.py:58-63</span>
-      <span class="call">SELECT log_transactions WHERE started_at &gt;= now() - 1 hour LIMIT 2000</span>
-      <span class="note">The whole last hour, re-read from scratch on every tick. No memory of the
-      previous run. <strong>This one line is the root of flaws 3 and 5.</strong></span></div>
-    <div class="tick"></div>
-    <div class="hop loopy"><span class="loc">engine.py:69-70</span>
-      <span class="call">for txn in txns: &nbsp; for ev in evaluators:</span>
-      <span class="note"><strong>Loops 2 and 3</strong> — every transaction against every rule.</span></div>
-    <div class="tick"></div>
-    <div class="hop"><span class="loc">engine.py:78</span>
-      <span class="call">existing = await repo.existing_dedup_keys(...)</span>
-      <span class="note"><strong>Dedupe.</strong> Note the position: this is the <em>last</em> step.
-      The rows were still loaded and still evaluated — only the send is prevented.</span></div>
-    <div class="tick">:79 for event in candidates — loop 4</div>
-    <div class="hop"><span class="loc">engine.py:82</span>
-      <span class="call">await bus.publish(event)</span></div>
-    <div class="tick">bus.py:35 — loop 5, over subscribers (there is exactly one)</div>
-    <div class="hop"><span class="loc">dispatcher.py:74</span>
-      <span class="call">channels = await _resolve_channels(db, event)</span>
-      <span class="note">Which channels this event goes to — see the tenancy rules in section 3.</span></div>
-    <div class="tick"></div>
-    <div class="hop loopy"><span class="loc">dispatcher.py:93</span>
-      <span class="call">for ch in channels:</span>
-      <span class="note"><strong>Loop 6 — channels.</strong> One <code>notification_deliveries</code>
-      row per channel, each with its own retry state. Teams succeeding while Slack fails means only
-      Slack retries.</span></div>
-    <div class="tick"></div>
-    <div class="hop"><span class="loc">dispatcher.py:101</span>
-      <span class="call">await db.commit()</span>
-      <span class="note">Durable <em>before</em> any HTTP. This ordering is why a Teams outage or a
-      crash mid-send never loses an alert. Keep it.</span></div>
-    <div class="tick"></div>
-    <div class="hop mark"><span class="loc">dispatcher.py:105</span>
-      <span class="call">await asyncio.gather(*(_attempt_delivery(did) for did in delivery_ids))</span>
-      <span class="note">Sends immediately, <strong>inside evaluation</strong>. No pacing point exists
-      because there is nowhere to put one. <strong>Root of flaws 1 and 2.</strong></span></div>
-    <div class="tick">:137 adapter.send()</div>
-    <div class="hop"><span class="loc">teams.py:34</span>
-      <span class="call">await client.post(webhook_url, json=body)</span></div>
-  </div>
-
-  <div class="panel warn">
-    <h4>Six nested loops multiply</h4>
-    <pre class="code" style="background:transparent;border:0;padding:0">tenants × transactions × rules  →  events × channels  =  HTTP calls</pre>
-    <p>At the measured production rate, one broad rule and one channel:
-    <strong>1 tenant × 567 transactions × 1 rule = 567 events × 1 channel = 567 POSTs.</strong>
-    Add a second channel to that tenant and it is 1,134 — from the same 567 matches.</p>
-  </div>
-</section>
-
-<!-- ================================================================= 3 -->
-<section id="today">
-  <div class="tag">03</div>
-  <h2>How it works today</h2>
-
-  <h3>Four tables, two of them per tenant</h3>
-  <figure>
-    <svg viewBox="0 0 880 340" role="img" aria-label="Data model: customers own channels and rules; rules produce events; events fan out to deliveries">
-      <defs>
-        <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-          <path d="M0,0 L10,5 L0,10 z" fill="var(--rule2)"/>
-        </marker>
-      </defs>
-      <rect class="bx" x="330" y="10" width="200" height="44" rx="7"/>
-      <text class="lbl" x="430" y="30" text-anchor="middle" style="font-weight:640">customers</text>
-      <text class="sm"  x="430" y="46" text-anchor="middle">the tenant</text>
-
-      <rect x="30" y="110" width="330" height="60" rx="7" fill="var(--dels)" stroke="var(--del)"/>
-      <text class="lbl" x="195" y="132" text-anchor="middle" style="font-weight:640">customer_notification_channels</text>
-      <text class="sm"  x="195" y="149" text-anchor="middle">WHERE alerts go · N per customer</text>
-      <text class="sm"  x="195" y="163" text-anchor="middle">config JSONB (webhook_url) · enabled</text>
-
-      <rect x="500" y="110" width="330" height="60" rx="7" fill="var(--decs)" stroke="var(--dec)"/>
-      <text class="lbl" x="665" y="132" text-anchor="middle" style="font-weight:640">notification_rules</text>
-      <text class="sm"  x="665" y="149" text-anchor="middle">WHAT to watch · N per customer · the scanners</text>
-      <text class="sm"  x="665" y="163" text-anchor="middle">match JSONB · target_channel_ids · status</text>
-
-      <path class="ln" d="M380,54 Q300,54 250,108" marker-end="url(#a3)"/>
-      <path class="ln" d="M480,54 Q570,54 620,108" marker-end="url(#a3)"/>
-
-      <rect x="500" y="210" width="330" height="52" rx="7" fill="var(--srcs)" stroke="var(--src)"/>
-      <text class="lbl" x="665" y="231" text-anchor="middle" style="font-weight:640">notification_events</text>
-      <text class="sm"  x="665" y="248" text-anchor="middle">the outbox · one per match · unique dedup_key</text>
-      <path class="ln" d="M665,170 V208" marker-end="url(#a3)"/>
-      <text class="sm" x="675" y="194">a match</text>
-
-      <rect x="500" y="290" width="330" height="42" rx="7" fill="var(--srcs)" stroke="var(--src)"/>
-      <text class="lbl" x="665" y="316" text-anchor="middle" style="font-weight:640">notification_deliveries</text>
-      <path class="ln" d="M665,262 V288" marker-end="url(#a3)"/>
-      <text class="sm" x="675" y="280">one per channel</text>
-
-      <path class="ln" d="M360,140 H420 Q470,140 490,290 L498,305" stroke-dasharray="5 4" marker-end="url(#a3)"/>
-      <text class="sm" x="370" y="230">targeting</text>
-    </svg>
-    <figcaption>A rule optionally names which channels it publishes to. Empty means all enabled
-    channels for that tenant.</figcaption>
-  </figure>
-
-  <h3>Tenant isolation is already correct — read the order</h3>
-  <pre class="code"><span class="c"># app/services/notifications/dispatcher.py:110-118</span>
-stmt = select(CustomerNotificationChannel).where(
-    CustomerNotificationChannel.customer_code == event.customer_code,  <span class="c"># 1. tenant FIRST</span>
-    CustomerNotificationChannel.enabled.is_(True),                     <span class="c"># 2. then enabled</span>
-)
-rows = list((await db.execute(stmt)).scalars().all())
-if event.target_channel_ids:                          <span class="c"># 3. only THEN narrow</span>
-    wanted = {str(c) for c in event.target_channel_ids}
-    rows = [r for r in rows if str(r.id) in wanted]
-return rows</pre>
-  <p>Because step 3 filters a list that is <em>already</em> tenant-scoped, a rule naming another
-  tenant's channel id gets nothing. <strong>Targeting can only narrow, never reach across.</strong>
-  This is worth preserving exactly as-is.</p>
-
-  <div class="grid2">
-    <div class="panel good">
-      <h4>What is already right</h4>
-      <ul class="bul">
-        <li>Unlimited rules and channels per tenant</li>
-        <li>Per-rule channel targeting</li>
-        <li>Tenant isolation, as above</li>
-        <li>Durable outbox — committed before any HTTP</li>
-        <li>Dedupe, backoff, dead-letter after 50 attempts</li>
-      </ul>
-    </div>
-    <div class="panel">
-      <h4>Rule types</h4>
-      <ul class="bul">
-        <li><strong>status_match</strong> — streaming; status list, optional method filter</li>
-        <li><strong>text_match</strong> — streaming; substring or regex over chosen fields</li>
-        <li><strong>digest</strong> — window; one summary per interval</li>
-      </ul>
-      <p style="font-size:.87rem">Only rules with <code>status = active</code> are evaluated.</p>
-    </div>
-  </div>
-</section>
-
-<!-- ================================================================= 4 -->
-<section id="flaws">
-  <div class="tag">04</div>
-  <h2>The flaws</h2>
-  <p class="lead">Each paired with the code that causes it. Figures measured on production, 7 August.</p>
-
-  <div class="tw">
-  <table>
-    <thead><tr><th>#</th><th>Flaw</th><th>Cause</th><th>Consequence</th></tr></thead>
-    <tbody>
-      <tr><td class="num">1</td><td><strong>No throttling</strong></td>
-        <td><code>engine.py:79-82</code> bare publish loop; <code>dispatcher.py:105</code> sends at once</td>
-        <td>500 matches = 500 back-to-back POSTs. A 429 is a generic failure; <code>Retry-After</code> never read</td></tr>
-      <tr><td class="num">2</td><td><strong>Send happens inside evaluation</strong></td>
-        <td><code>dispatcher.py:105</code></td>
-        <td>The root cause. No pacing point exists, and one tenant's flood blocks every other tenant</td></tr>
-      <tr><td class="num">3</td><td><strong>Full rescan every tick</strong></td>
-        <td><code>engine.py:61</code> — <code>started_at &gt;= now() - 1 hour</code></td>
-        <td>~567 rows re-read and re-evaluated ~8,600×/day to find a handful that are new</td></tr>
-      <tr><td class="num">4</td><td><strong>Unsealed rows are evaluated</strong></td>
-        <td>no <code>sealed</code> filter anywhere in the engine</td>
-        <td>An <code>incomplete</code> transaction alerts, then becomes <code>success</code> — and the stable dedup key means no correction is ever sent. <strong>81 of 412</strong> currently unsealed</td></tr>
-      <tr><td class="num">5</td><td><strong>Data can be missed</strong></td>
-        <td>the 1 h lookback and <code>_CANDIDATE_LIMIT = 2000</code></td>
-        <td>A backfill of week-old logs is invisible — <code>started_at</code> is old even though the row is new</td></tr>
-      <tr><td class="num">6</td><td><strong>Slack/WhatsApp are stubs</strong></td>
-        <td><code>send()</code> raises <code>NotImplementedError</code></td>
-        <td>Flows into the normal failure path: fails 50 times, then dead-letters</td></tr>
-      <tr><td class="num">7</td><td><strong>One flag-flip from a flood</strong></td>
-        <td>an <em>inactive</em> rule on <code>tmp-live</code> matches <code>error + soft + success</code> — every transaction — pointed at an <em>enabled</em> channel</td>
-        <td>Worker is currently OFF. Turn it on and activate that rule: ~567 messages/hour</td></tr>
-    </tbody>
-  </table>
-  </div>
-
-  <div class="panel warn">
-    <h4>The one to understand: dedupe does not prevent work</h4>
-    <p>It is easy to assume dedupe stops re-processing. It does not — look at where it sits in the
-    chain. <code>engine.py:78</code> runs <em>after</em> the rows were loaded and <em>after</em> every
-    rule was evaluated against them. It only stops the <strong>send</strong>.</p>
-  </div>
-</section>
-
-<!-- ================================================================= 5 -->
-<section id="proposal">
-  <div class="tag">05</div>
-  <h2>The proposal: three layers, each with one job</h2>
-  <p class="lead">The current design has no seams — finding work, deciding to alert, and sending are
-  tangled together in one call path. Separating them is what makes every individual fix possible.</p>
+  <h2>The shape: four layers, each with one job</h2>
+  <p class="lead">The separation is the design. Each layer answers one question, and each mechanism has
+  exactly one home — so a change to pacing cannot affect what alerts, and a change to rules cannot
+  affect how fast anything sends.</p>
 
   <div class="stack">
     <div class="layer l-dis">
-      <div><div class="lname">Discovery</div><div class="lrole">how do I find work?</div></div>
+      <div><div class="lname">Discovery</div><div class="lrole">what is new?</div></div>
       <ul>
-        <li><span class="n">cursor</span> <span class="pill new">new</span> where I stopped reading — replaces the hourly rescan</li>
-        <li><span class="n">lag</span> <span class="pill new">new</span> stay ~60s behind the present, so late commits are not skipped</li>
-        <li><span class="n">seal filter</span> <span class="pill new">new</span> skip rows still being rewritten</li>
+        <li><span class="n">cursor</span> a bookmark per rule — read only what arrived since last time</li>
+        <li><span class="n">lag</span> stay 60 s behind the present, so late commits are not skipped</li>
+        <li><span class="n">seal gate</span> skip rows Stage 2 is still rewriting</li>
       </ul>
     </div>
     <div class="down">↓ candidate transactions</div>
     <div class="layer l-dec">
       <div><div class="lname">Decision</div><div class="lrole">should this alert?</div></div>
       <ul>
-        <li><span class="n">seal-gating</span> <span class="pill new">new</span> hold <code>incomplete</code> until sealed; alert other statuses at once</li>
-        <li><span class="n">dedupe</span> <span class="pill now">exists</span> unchanged — still the safety net</li>
-        <li><span class="n">rollup</span> <span class="pill new">new</span> after N cards from one rule, send one summary instead</li>
+        <li><span class="n">evaluators</span> status match, text match, digest</li>
+        <li><span class="n">dedupe</span> already alerted on this transaction?</li>
+        <li><span class="n">burst cap</span> past N per rule, suppress and summarise instead</li>
       </ul>
     </div>
     <div class="down">↓ rows in the outbox</div>
     <div class="layer l-del">
-      <div><div class="lname">Delivery</div><div class="lrole">how do I get it out?</div></div>
+      <div><div class="lname">Delivery</div><div class="lrole">how does it get out?</div></div>
       <ul>
-        <li><span class="n">pacing</span> <span class="pill new">new</span> token bucket per channel</li>
-        <li><span class="n">fairness</span> <span class="pill new">new</span> round-robin across tenants</li>
-        <li><span class="n">Retry-After</span> <span class="pill new">new</span> obey a 429 instead of guessing</li>
-        <li><span class="n">retry / dead</span> <span class="pill now">exists</span> backoff ladder, give up at 50</li>
+        <li><span class="n">the drain</span> the ONLY place HTTP happens</li>
+        <li><span class="n">pacing</span> per-channel token budget</li>
+        <li><span class="n">fairness</span> round-robin across tenants</li>
+        <li><span class="n">retry</span> backoff, Retry-After, dead-letter</li>
       </ul>
     </div>
     <div class="down">↓</div>
     <div class="layer l-tra">
-      <div><div class="lname">Transport</div><div class="lrole">the actual HTTP</div></div>
-      <ul><li><span class="n">channel adapter</span> Teams today; Slack and WhatsApp are stubs</li></ul>
+      <div><div class="lname">Transport</div><div class="lrole">the wire</div></div>
+      <ul><li><span class="n">channel adapter</span> Teams works; Slack and WhatsApp are refused at config time</li></ul>
     </div>
   </div>
 
-  <h3>Which fix solves which flaw</h3>
+  <div class="panel">
+    <h4>Why the layering is load-bearing, not tidiness</h4>
+    <p>Originally sending happened <em>inside</em> rule evaluation. That single fact made three
+    separate problems unfixable: there was nowhere to put a rate limit, one tenant's flood blocked
+    every other tenant in the evaluation loop, and a 429 was indistinguishable from a broken channel.
+    Splitting delivery out was the change that made the other five possible.</p>
+  </div>
+</section>
+
+<!-- ================================================================= 3 -->
+<section id="tick">
+  <div class="tag">03</div>
+  <h2>One tick of the worker</h2>
+  <p class="lead">Everything runs on one loop, every 10 seconds. The order of the four steps matters
+  and each is commented in the source with why.</p>
+
+  <pre class="code"><span class="c"># app/services/workers/notification_worker.py</span>
+while True:
+    await run_rules_once()      <span class="c"># 1. discover + decide → outbox rows</span>
+    await rollup.run_once()     <span class="c"># 2. summarise what the burst cap suppressed</span>
+    attempted = await deliver_due()   <span class="c"># 3. the ONLY place HTTP happens</span>
+    await _report_position()    <span class="c"># 4. tell retention how far we have consumed</span>
+    await asyncio.sleep(settings.notification_poll_seconds)</pre>
+
+  <ul class="bul">
+    <li><strong>Rollup before the drain</strong>, so a summary published this tick goes out on the
+      same tick rather than waiting for the next one.</li>
+    <li><strong>Publishing and draining in one tick</strong> is why moving the send out of the publish
+      path cost no latency: a fresh delivery has <code>next_attempt_at IS NULL</code>, which the drain
+      already treats as due.</li>
+    <li><strong>Reporting last</strong>, after the work it describes, so the published position can
+      never get ahead of what was actually consumed.</li>
+    <li><strong>Every step is failure-isolated.</strong> The whole body is wrapped so one bad tick logs
+      and retries rather than killing the loop.</li>
+  </ul>
+
+  <div class="panel">
+    <h4>Two lines start all of it</h4>
+    <pre class="code" style="background:transparent;border:0;padding:0"><span class="c"># app/background.py</span>
+151    notification_dispatcher.register()                           <span class="c"># wire the subscriber</span>
+152    tasks.append(asyncio.create_task(run_notification_worker())) <span class="c"># start the loop</span></pre>
+    <p>Line 151 is easy to miss and load-bearing: it is the only link between rule evaluation and
+    delivery. The engine publishes to a bus and never imports the dispatcher. Without it, rules
+    evaluate correctly every ten seconds and nothing is ever sent.</p>
+  </div>
+</section>
+
+<!-- ================================================================= 4 -->
+<section id="discovery">
+  <div class="tag">04</div>
+  <h2>Discovery — finding what is new</h2>
+  <p class="lead"><code>app/services/notifications/cursor.py</code>. A cursor is a bookmark: one
+  timestamp per rule saying “I have read up to here”.</p>
+
+  <figure>
+    <svg viewBox="0 0 860 200" role="img" aria-label="Rows on a timeline with a cursor and a lag zone">
+      <text class="sm" x="10" y="20">log_transactions, ordered by created_at (WRITE time)</text>
+      <line class="ln" x1="20" y1="110" x2="840" y2="110"/>
+      <circle cx="90"  cy="110" r="7" fill="var(--srcs)" stroke="var(--src)"/>
+      <circle cx="230" cy="110" r="7" fill="var(--srcs)" stroke="var(--src)"/>
+      <circle cx="380" cy="110" r="7" fill="var(--decs)" stroke="var(--dec)"/>
+      <circle cx="520" cy="110" r="7" fill="var(--decs)" stroke="var(--dec)"/>
+      <circle cx="760" cy="110" r="7" fill="var(--bads)" stroke="var(--bad)"/>
+      <text class="sm" x="90"  y="134" text-anchor="middle">already read</text>
+      <text class="sm" x="230" y="134" text-anchor="middle">already read</text>
+      <text class="sm" x="380" y="134" text-anchor="middle">NEW</text>
+      <text class="sm" x="520" y="134" text-anchor="middle">NEW</text>
+      <text class="sm" x="760" y="134" text-anchor="middle">too recent</text>
+
+      <path d="M300,86 V104" stroke="var(--dis)" stroke-width="2"/>
+      <rect x="230" y="58" width="140" height="28" rx="6" fill="var(--diss)" stroke="var(--dis)"/>
+      <text class="lbl" x="300" y="77" text-anchor="middle" fill="var(--dis)">cursor</text>
+
+      <rect x="660" y="52" width="180" height="46" rx="6" fill="var(--bads)" stroke="var(--bad)"/>
+      <text class="sm" x="750" y="70" text-anchor="middle" fill="var(--bad)">the lag zone — 60 s</text>
+      <text class="sm" x="750" y="85" text-anchor="middle" fill="var(--bad)">may still be committing</text>
+      <line x1="660" y1="98" x2="660" y2="122" stroke="var(--bad)" stroke-dasharray="4 3"/>
+
+      <rect x="330" y="160" width="300" height="26" rx="6" fill="var(--decs)" stroke="var(--dec)"/>
+      <text class="sm" x="480" y="177" text-anchor="middle" fill="var(--dec)">this tick reads exactly these two</text>
+    </svg>
+    <figcaption>Read forward from the bookmark, stop short of the present, move the bookmark.</figcaption>
+  </figure>
+
+  <h3>Three mechanisms, three different jobs</h3>
   <div class="tw">
   <table>
-    <thead><tr><th>Flaw</th><th>Fixed by</th><th>Layer</th></tr></thead>
+    <thead><tr><th>Mechanism</th><th>Job</th><th>If it were wrong</th></tr></thead>
     <tbody>
-      <tr><td>1 · no throttling</td><td>token bucket per channel</td><td>delivery</td></tr>
-      <tr><td>2 · send inside evaluation</td><td><strong>move the send to the outbox worker</strong></td><td>delivery</td></tr>
-      <tr><td>3 · full rescan</td><td>cursor</td><td>discovery</td></tr>
-      <tr><td>4 · unsealed rows alert</td><td>seal-gating (<code>incomplete</code> only)</td><td>decision</td></tr>
-      <tr><td>5 · data missed</td><td>cursor on <code>created_at</code> + lag</td><td>discovery</td></tr>
-      <tr><td>6 · stub channels dead-letter</td><td>reject unimplemented types at config time</td><td>transport</td></tr>
-      <tr><td>7 · flood from a broad rule</td><td>rollup + pacing</td><td>decision + delivery</td></tr>
-      <tr><td>— · one tenant starves others</td><td>round-robin claim</td><td>delivery</td></tr>
+      <tr><td><strong>Cursor</strong></td><td>do not re-read old rows</td>
+          <td>wasted work — output still correct</td></tr>
+      <tr><td><strong>Lag</strong></td><td>do not read rows still being written</td>
+          <td><strong>a row is missed permanently</strong></td></tr>
+      <tr><td><strong>Seal gate</strong></td><td>do not read rows still changing</td>
+          <td>a false alert that can never be corrected</td></tr>
     </tbody>
   </table>
   </div>
 
   <div class="panel warn">
-    <h4>The load-bearing change is flaw 2</h4>
-    <p>Everything else depends on it. While <code>dispatcher.py:105</code> sends during evaluation
-    there is nowhere to put a rate limit, and no way to be fair across tenants. Move sending into the
-    worker that already drains the outbox, and the outbox becomes the single place where pacing,
-    fairness and back-pressure all naturally live.</p>
-  </div>
-
-  <div class="panel">
-    <h4>Deliberately rejected: having Stage 2 write a notification ticket</h4>
-    <p>It looks tempting — it matches the two existing queues. But it reintroduces exactly the
-    coupling that was removed from Stage 2 when three call sites each had to remember to trigger
-    stitching. Stage 2 would have to know notifications exist; then ML; then analytics. The producer
-    accumulates knowledge of every consumer, and adding a reader means modifying the most
-    correctness-critical writer you have.</p>
-  </div>
-</section>
-
-<!-- ================================================================= 6 -->
-<section id="cursor">
-  <div class="tag">06</div>
-  <h2>Cursors, plainly</h2>
-  <p class="lead">A cursor is a <strong>bookmark</strong>: one value remembering where you stopped
-  reading. That is genuinely all it is. Nothing is copied anywhere — <code>log_transactions</code>
-  itself is the feed.</p>
-
-  <figure>
-    <svg viewBox="0 0 860 210" role="img" aria-label="Rows ordered by write time with a bookmark partway along">
-      <text class="sm" x="10" y="20">log_transactions, ordered by created_at (when the row was WRITTEN)</text>
-      <line class="ln" x1="20" y1="120" x2="840" y2="120"/>
-      <g>
-        <circle cx="90"  cy="120" r="7" fill="var(--srcs)" stroke="var(--src)"/>
-        <circle cx="230" cy="120" r="7" fill="var(--srcs)" stroke="var(--src)"/>
-        <circle cx="370" cy="120" r="7" fill="var(--decs)" stroke="var(--dec)"/>
-        <circle cx="510" cy="120" r="7" fill="var(--decs)" stroke="var(--dec)"/>
-        <circle cx="650" cy="120" r="7" fill="var(--decs)" stroke="var(--dec)"/>
-      </g>
-      <text class="sm" x="90"  y="145" text-anchor="middle">txn-A</text>
-      <text class="sm" x="230" y="145" text-anchor="middle">txn-B</text>
-      <text class="sm" x="370" y="145" text-anchor="middle">txn-C</text>
-      <text class="sm" x="510" y="145" text-anchor="middle">txn-D</text>
-      <text class="sm" x="650" y="145" text-anchor="middle">txn-E</text>
-      <text class="sm" x="90"  y="160" text-anchor="middle">10:00:01</text>
-      <text class="sm" x="230" y="160" text-anchor="middle">10:00:05</text>
-      <text class="sm" x="370" y="160" text-anchor="middle">10:00:09</text>
-      <text class="sm" x="510" y="160" text-anchor="middle">10:00:12</text>
-      <text class="sm" x="650" y="160" text-anchor="middle">10:00:14</text>
-
-      <path d="M230,95 V113" stroke="var(--dis)" stroke-width="2"/>
-      <rect x="150" y="66" width="160" height="30" rx="6" fill="var(--diss)" stroke="var(--dis)"/>
-      <text class="lbl" x="230" y="86" text-anchor="middle" fill="var(--dis)">cursor = 10:00:05</text>
-
-      <rect x="330" y="176" width="360" height="26" rx="6" fill="var(--decs)" stroke="var(--dec)"/>
-      <text class="sm" x="510" y="193" text-anchor="middle" fill="var(--dec)">next read: WHERE created_at &gt; 10:00:05 → C, D, E</text>
-
-      <rect x="700" y="66" width="140" height="46" rx="6" fill="var(--bads)" stroke="var(--bad)"/>
-      <text class="sm" x="770" y="84" text-anchor="middle" fill="var(--bad)">the lag zone</text>
-      <text class="sm" x="770" y="99" text-anchor="middle" fill="var(--bad)">too recent to read</text>
-    </svg>
-    <figcaption>Read forward from the bookmark, stop short of the present, move the bookmark. Already-read
-    rows are never looked at again.</figcaption>
-  </figure>
-
-  <h3>Today versus proposed</h3>
-  <div class="grid2">
-    <div class="panel warn">
-      <h4>Today</h4>
-      <pre class="code" style="background:transparent;border:0;padding:0">WHERE started_at >= now() - 1 hour</pre>
-      <p>Returns A, B, C, D, E <strong>every tick</strong> for as long as they stay inside the hour.
-      Dedupe then discards the ones already sent — after loading and evaluating all of them.</p>
-    </div>
-    <div class="panel dis">
-      <h4>Proposed</h4>
-      <pre class="code" style="background:transparent;border:0;padding:0">WHERE created_at >  :cursor
-  AND created_at <= now() - 60s</pre>
-      <p>Returns only what is new. When nothing has happened it returns zero rows and costs almost
-      nothing.</p>
-    </div>
-  </div>
-
-  <h3>Why <code>created_at</code> and not <code>started_at</code></h3>
-  <p><code>started_at</code> is when the log line <em>happened</em>. <code>created_at</code>
-  (<code>log_transaction.py:132</code>) is when the row was <em>written</em>. Backfill a week-old file
-  and those rows have an old <code>started_at</code> but a <code>created_at</code> of now — a cursor
-  on <code>started_at</code> would silently skip them, which is flaw 5 all over again.</p>
-  <p><code>created_at</code> is currently <strong>unindexed</strong>. That index is the first thing to
-  build.</p>
-
-  <div class="panel warn">
-    <h4>Why the lag is mandatory, not an optimisation</h4>
-    <p><code>created_at</code> is stamped when Python <em>builds</em> the row, not when the database
-    <em>commits</em> it. A long Stage 2 transaction can therefore commit a row whose timestamp is
-    already behind a cursor that has since moved past it:</p>
+    <h4>Why the lag is correctness, not tuning</h4>
+    <p><code>created_at</code> is stamped when Python <em>builds</em> the row, not when Postgres
+    <em>commits</em> it. A long Stage 2 transaction can therefore commit a row whose timestamp already
+    sits behind a cursor that has moved past it:</p>
     <pre class="code" style="background:transparent;border:0;padding:0">10:00:01  Stage 2 builds txn-X, stamps created_at = 10:00:01
 10:00:20  notifications reads to 10:00:15, moves cursor → 10:00:15
 10:00:30  Stage 2 COMMITS txn-X — created_at still says 10:00:01
-
-          txn-X is now behind the cursor. It is never read.</pre>
-    <p><strong>Dedupe cannot save you here</strong> — it prevents duplicates, it cannot recover
-    something never seen. Staying ~60s behind the present guarantees every transaction that could
-    write into a timestamp range has already committed. The lag just has to exceed the longest Stage 2
-    transaction.</p>
+          txn-X is behind the cursor. It is never read.</pre>
+    <p><strong>Dedupe cannot rescue this</strong> — it prevents duplicates, it cannot recover
+    something never seen. Staying 60 s behind guarantees everything that could write into a range has
+    committed.</p>
   </div>
 
   <div class="panel">
-    <h4>Three mechanisms, three different jobs</h4>
-    <div class="tw" style="border:0">
-    <table style="min-width:0">
-      <thead><tr><th>Mechanism</th><th>Job</th><th>If it fails</th></tr></thead>
-      <tbody>
-        <tr><td><strong>Cursor</strong></td><td>do not re-read old rows</td><td>wasted work — output still correct</td></tr>
-        <tr><td><strong>Lag</strong></td><td>do not read rows still being written</td><td><strong>a row is missed permanently</strong></td></tr>
-        <tr><td><strong>Dedupe</strong></td><td>do not send twice</td><td>duplicate alerts</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p>The cursor is a performance mechanism. The lag is a correctness mechanism. Dedupe is the safety
-    net. Keep all three — losing the cursor costs speed, losing dedupe costs spam, losing the lag
-    costs an alert.</p>
+    <h4>Why <code>created_at</code> and not <code>started_at</code></h4>
+    <p><code>started_at</code> is when the log line <em>happened</em>; <code>created_at</code> is when
+    the row was <em>written</em>. Backfill a week-old file and those rows have an old
+    <code>started_at</code> but a new <code>created_at</code>. Cursoring on event time would silently
+    skip every backfilled transaction — which is exactly what the old one-hour lookback did.</p>
+  </div>
+
+  <h3>The seal gate</h3>
+  <p><code>app/services/notifications/rules/stability.py</code>. Stage 2 rewrites its unsealed tail
+  constantly, so a transaction's status is not final the moment it appears.</p>
+  <pre class="code">incomplete + unsealed  →  wait      <span class="c"># in flight; will probably become success</span>
+incomplete + SEALED    →  alert     <span class="c"># past the abandon window — the response is never coming</span>
+error / soft / success →  alert     <span class="c"># already terminal</span></pre>
+  <p>Only <code>incomplete</code> is gated. Requiring a seal for everything would delay a genuine error
+  by up to the 15-minute seal window, which defeats the point of alerting;
+  <code>notification_alert_only_sealed</code> exists for anyone who prefers the accuracy.</p>
+
+  <div class="panel">
+    <h4>The invariant everything rests on</h4>
+    <p>Skipping an unsealed row is only safe because it comes <em>back</em>. Stage 2 does
+    DELETE + INSERT, stamping a fresh <code>created_at</code>, so a gated transaction re-enters the
+    feed the moment it seals. That has its own test — if a rebuild ever preserved
+    <code>created_at</code>, the gate would silently become “never alert” instead of “alert later”.</p>
+  </div>
+</section>
+
+<!-- ================================================================= 5 -->
+<section id="decision">
+  <div class="tag">05</div>
+  <h2>Decision — should this alert?</h2>
+
+  <h3>The three rule types</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Type</th><th>Kind</th><th>Matches on</th><th>Uses the cursor?</th></tr></thead>
+    <tbody>
+      <tr><td><code>status_match</code></td><td>streaming</td><td>status list + optional method filter</td><td>yes</td></tr>
+      <tr><td><code>text_match</code></td><td>streaming</td><td>substring or regex over chosen fields</td><td>yes</td></tr>
+      <tr><td><code>digest</code></td><td>window</td><td>one summary per interval</td><td><strong>no</strong> — its own window arithmetic</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Only rules with <code>status = active</code> are evaluated. Each rule keeps its own cursor, so
+  activating or replaying one never disturbs another — but a customer's rules are read with a
+  <strong>single query</strong> starting from the oldest cursor among them, because planning a query
+  against the partitioned table costs ~50 ms regardless of what it returns.</p>
+
+  <h3>Dedupe, and why it stays</h3>
+  <p>The cursor stops us <em>re-reading</em>; dedupe stops us <em>re-sending</em>. They are not
+  redundant: a rule edited, replayed, or with a reset cursor would re-alert without it. Dedupe is the
+  safety net that makes every other optimisation safe to get wrong.</p>
+
+  <h3>The burst cap and the rollup</h3>
+  <p><code>app/services/notifications/rollup.py</code>. Pacing protects the webhook; this protects the
+  person reading the channel, for whom 500 cards delivered slowly is still 500 cards.</p>
+  <figure>
+    <svg viewBox="0 0 860 170" role="img" aria-label="500 matches become three cards plus one summary">
+      <defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--rule2)"/></marker></defs>
+      <rect x="10" y="60" width="150" height="50" rx="8" fill="var(--decs)" stroke="var(--dec)" stroke-width="2"/>
+      <text class="lbl" x="85" y="82" text-anchor="middle" style="font-weight:640">500 matches</text>
+      <text class="sm"  x="85" y="99" text-anchor="middle">burst_cap = 3</text>
+
+      <rect x="250" y="20" width="230" height="44" rx="7" fill="var(--dels)" stroke="var(--del)"/>
+      <text class="sm" x="365" y="39" text-anchor="middle">first 3 → individual cards</text>
+      <text class="sm" x="365" y="54" text-anchor="middle">status: pending</text>
+
+      <rect x="250" y="90" width="230" height="60" rx="7" fill="var(--panel2)" stroke="var(--rule2)"/>
+      <text class="sm" x="365" y="109" text-anchor="middle">remaining 497 → suppressed</text>
+      <text class="sm" x="365" y="124" text-anchor="middle">recorded, never sent individually,</text>
+      <text class="sm" x="365" y="138" text-anchor="middle">never claimed by the drain</text>
+
+      <path class="ln" d="M160,78 Q205,78 248,45" marker-end="url(#ar3)"/>
+      <path class="ln" d="M160,92 Q205,92 248,112" marker-end="url(#ar3)"/>
+
+      <rect x="560" y="60" width="290" height="50" rx="7" fill="var(--dels)" stroke="var(--del)" stroke-width="2"/>
+      <text class="sm" x="705" y="80" text-anchor="middle">“497 more alerts from WMS errors</text>
+      <text class="sm" x="705" y="95" text-anchor="middle">in the last 5 min” + top offenders</text>
+      <path class="ln" d="M480,118 Q525,118 558,95" marker-end="url(#ar3)"/>
+      <text class="sm" x="519" y="140" text-anchor="middle">one summary per window</text>
+    </svg>
+    <figcaption>Measured: 500 matching transactions produce four cards.</figcaption>
+  </figure>
+
+  <ul class="bul">
+    <li><strong>Suppressed is recorded, not skipped.</strong> Every match keeps its event row and a
+      <code>suppressed</code> delivery row. The cursor has already moved past those transactions, so
+      nothing else would record what the summary covered.</li>
+    <li><strong>Only completed windows are summarised</strong>, and idempotently by dedup key — the
+      same rule the digest evaluators follow, so there is one notion of “window” to learn.</li>
+    <li><strong>Summaries are exempt from the cap.</strong> They carry their rule's id for provenance,
+      so without the exemption the cap would suppress the very card reporting the suppression and the
+      flood would vanish in silence. Found by a test, not in production.</li>
+  </ul>
+</section>
+
+<!-- ================================================================= 6 -->
+<section id="delivery">
+  <div class="tag">06</div>
+  <h2>Delivery — the one place HTTP happens</h2>
+  <p class="lead"><code>dispatcher.enqueue</code> writes rows and never sends.
+  <code>dispatcher.deliver_due</code> — the outbox drain — is the single seam where anything leaves the
+  system, which is what makes pacing, fairness and <code>Retry-After</code> possible at all.</p>
+
+  <div class="chain">
+    <div class="hop"><span class="loc">enqueue</span><span class="call">persist event + one delivery row per channel</span>
+      <span class="note">Commits BEFORE anything is sent. This ordering is why a Teams outage or a
+      crash mid-send never loses an alert.</span></div>
+    <div class="tick">the drain claims what is due</div>
+    <div class="hop"><span class="loc">_claim_due</span><span class="call">FOR UPDATE SKIP LOCKED, joined to the tenant</span>
+      <span class="note">Deliberately unbounded: fairness must be decided across the whole due set, or
+      a LIMIT would cut the batch before round-robin ever saw the quiet tenants.</span></div>
+    <div class="tick">fairness</div>
+    <div class="hop loopy"><span class="loc">pacing.round_robin</span><span class="call">one per tenant in turn</span>
+      <span class="note">A flood delays itself rather than everyone. Order within a tenant is
+      preserved, so fairness across tenants does not become unfairness inside one.</span></div>
+    <div class="tick">budget</div>
+    <div class="hop loopy"><span class="loc">_spend_budgets</span><span class="call">claim what fits; reschedule the rest</span>
+      <span class="note">Over budget → rescheduled inside the rate window, jittered. NOT a failure:
+      no attempt consumed, no error recorded.</span></div>
+    <div class="tick"></div>
+    <div class="hop"><span class="loc">_attempt_delivery</span><span class="call">adapter.send(...)</span>
+      <span class="note">Concurrent across channels — one failing channel never holds up the others.</span></div>
+  </div>
+
+  <h3>Three kinds of “it did not go out”, and why they must not be confused</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Outcome</th><th>Attempts</th><th>Next</th><th>Confusing it with the others would…</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Over budget</strong></td><td class="num">unchanged</td><td>inside the rate window, jittered</td>
+          <td>…dead-letter a good alert after 50 quiet deferrals</td></tr>
+      <tr><td><strong>Throttled (429)</strong></td><td class="num">unchanged</td><td>the server's own <code>Retry-After</code></td>
+          <td>…burn the retry budget for being told “slower”</td></tr>
+      <tr><td><strong>Failed</strong></td><td class="num">+1</td><td>backoff ladder, dead at 50</td>
+          <td>…retry forever, or give up on a network blip</td></tr>
+      <tr><td><strong>Permanently broken</strong></td><td class="num">+1</td><td><strong>dead immediately</strong></td>
+          <td>…spend 50 attempts on code that does not exist</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Only a missing implementation counts as permanent. A <em>disabled</em> channel deliberately does
+  not — someone can re-enable it, and treating that as fatal would discard alerts an operator was about
+  to rescue.</p>
+
+  <div class="panel">
+    <h4>The budget needs no counter table</h4>
+    <p>Remaining allowance is measured by counting deliveries already made inside the window. That
+    stays correct across restarts and across worker processes for free, and there is no counter to
+    drift out of sync with reality.</p>
   </div>
 </section>
 
 <!-- ================================================================= 7 -->
-<section id="scale">
+<section id="data">
   <div class="tag">07</div>
-  <h2>Reusing the pattern: ML and analytics</h2>
-  <p class="lead">Every consumer keeps its own bookmark on the same table. No copies, no channel, and
-  Stage 2 never learns any of them exist.</p>
-
+  <h2>The data model</h2>
   <figure>
-    <svg viewBox="0 0 860 250" role="img" aria-label="Three consumers with independent cursors on one table">
-      <text class="sm" x="10" y="20">log_transactions — one table, rows only ever added</text>
-      <line class="ln" x1="20" y1="80" x2="840" y2="80"/>
-      <g fill="var(--srcs)" stroke="var(--src)">
-        <circle cx="90" cy="80" r="6"/><circle cx="200" cy="80" r="6"/><circle cx="310" cy="80" r="6"/>
-        <circle cx="420" cy="80" r="6"/><circle cx="530" cy="80" r="6"/><circle cx="640" cy="80" r="6"/>
-        <circle cx="750" cy="80" r="6"/>
-      </g>
-      <text class="sm" x="835" y="72" text-anchor="end">newer →</text>
+    <svg viewBox="0 0 880 330" role="img" aria-label="Customers own channels and rules; rules produce events; events fan out to deliveries">
+      <defs><marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--rule2)"/></marker></defs>
+      <rect class="bx" x="340" y="10" width="190" height="42" rx="7"/>
+      <text class="lbl" x="435" y="30" text-anchor="middle" style="font-weight:640">customers</text>
+      <text class="sm"  x="435" y="45" text-anchor="middle">the tenant</text>
 
-      <path d="M200,88 V128" stroke="var(--dis)" stroke-width="2"/>
-      <rect x="120" y="128" width="165" height="42" rx="6" fill="var(--diss)" stroke="var(--dis)"/>
-      <text class="lbl" x="202" y="146" text-anchor="middle" fill="var(--dis)">ml:features-v1</text>
-      <text class="sm"  x="202" y="162" text-anchor="middle">behind — backfilling</text>
+      <rect x="20" y="105" width="320" height="66" rx="7" fill="var(--dels)" stroke="var(--del)"/>
+      <text class="lbl" x="180" y="126" text-anchor="middle" style="font-weight:640">customer_notification_channels</text>
+      <text class="sm"  x="180" y="143" text-anchor="middle">WHERE alerts go · N per customer</text>
+      <text class="sm"  x="180" y="158" text-anchor="middle">config: webhook_url, max_per_minute</text>
 
-      <path d="M530,88 V128" stroke="var(--dec)" stroke-width="2"/>
-      <rect x="450" y="128" width="165" height="42" rx="6" fill="var(--decs)" stroke="var(--dec)"/>
-      <text class="lbl" x="532" y="146" text-anchor="middle" fill="var(--dec)">notifications</text>
-      <text class="sm"  x="532" y="162" text-anchor="middle">near the head</text>
+      <rect x="520" y="105" width="340" height="66" rx="7" fill="var(--decs)" stroke="var(--dec)"/>
+      <text class="lbl" x="690" y="126" text-anchor="middle" style="font-weight:640">notification_rules</text>
+      <text class="sm"  x="690" y="143" text-anchor="middle">WHAT to watch · N per customer</text>
+      <text class="sm"  x="690" y="158" text-anchor="middle">match, target_channel_ids, cursor_at</text>
 
-      <path d="M750,88 V128" stroke="var(--del)" stroke-width="2"/>
-      <rect x="672" y="128" width="165" height="42" rx="6" fill="var(--dels)" stroke="var(--del)"/>
-      <text class="lbl" x="754" y="146" text-anchor="middle" fill="var(--del)">analytics</text>
-      <text class="sm"  x="754" y="162" text-anchor="middle">caught up</text>
+      <path class="ln" d="M390,52 Q290,52 240,103" marker-end="url(#ar4)"/>
+      <path class="ln" d="M480,52 Q590,52 640,103" marker-end="url(#ar4)"/>
 
-      <rect x="120" y="196" width="717" height="40" rx="6" fill="var(--panel2)" stroke="var(--rule2)"/>
-      <text class="sm" x="478" y="213" text-anchor="middle">consumer_cursors — one row each. Adding a consumer changes nothing upstream.</text>
-      <text class="sm" x="478" y="228" text-anchor="middle">A slow consumer never blocks a fast one.</text>
+      <rect x="520" y="205" width="340" height="52" rx="7" fill="var(--srcs)" stroke="var(--src)"/>
+      <text class="lbl" x="690" y="226" text-anchor="middle" style="font-weight:640">notification_events</text>
+      <text class="sm"  x="690" y="243" text-anchor="middle">the outbox · one per match · unique dedup_key</text>
+      <path class="ln" d="M690,171 V203" marker-end="url(#ar4)"/>
+
+      <rect x="520" y="285" width="340" height="42" rx="7" fill="var(--srcs)" stroke="var(--src)"/>
+      <text class="lbl" x="690" y="303" text-anchor="middle" style="font-weight:640">notification_deliveries</text>
+      <text class="sm"  x="690" y="318" text-anchor="middle">pending · suppressed · delivered · failed · dead</text>
+      <path class="ln" d="M690,257 V283" marker-end="url(#ar4)"/>
+      <path class="ln" d="M340,140 Q420,140 500,300" stroke-dasharray="5 4" marker-end="url(#ar4)"/>
+      <text class="sm" x="380" y="230">one per channel</text>
+
+      <rect x="20" y="240" width="320" height="60" rx="7" fill="var(--diss)" stroke="var(--dis)"/>
+      <text class="lbl" x="180" y="261" text-anchor="middle" style="font-weight:640">consumer_cursors</text>
+      <text class="sm"  x="180" y="277" text-anchor="middle">one row per incremental reader</text>
+      <text class="sm"  x="180" y="291" text-anchor="middle">read by retention, not by notifications</text>
     </svg>
-    <figcaption>Independent bookmarks on shared data. This is the same model as Kafka consumer groups
-    or Postgres logical replication.</figcaption>
+    <figcaption>Three new pieces this work added: <code>notification_rules.cursor_at</code>, the
+    <code>suppressed</code> delivery status, and the <code>consumer_cursors</code> table.</figcaption>
   </figure>
-
-  <div class="panel warn">
-    <h4>But not every consumer wants a cursor</h4>
-    <p>This is the part that is easy to get wrong. A cursor suits <em>incremental</em> readers. ML
-    training wants a <strong>frozen, reproducible</strong> dataset — a moving bookmark would shift the
-    data under every training run and destroy reproducibility. Analytics computing "yesterday" wants
-    one complete day, not "what is new".</p>
-  </div>
 
   <div class="tw">
   <table>
-    <thead><tr><th>Consumer</th><th>What it actually wants</th><th>Right mechanism</th></tr></thead>
+    <thead><tr><th>Added</th><th>Where</th><th>Why</th></tr></thead>
     <tbody>
-      <tr><td><strong>Notifications</strong></td><td>what is new, right now</td>
-          <td>cursor + lag</td></tr>
-      <tr><td><strong>ML training</strong></td><td>all of March, frozen, re-runnable</td>
-          <td>date range — <em>no cursor</em></td></tr>
-      <tr><td><strong>ML online features</strong></td><td>what is new, right now</td>
-          <td>cursor + lag</td></tr>
-      <tr><td><strong>Analytics rollup</strong></td><td>yesterday, complete, once</td>
-          <td>read the day's partition directly</td></tr>
+      <tr><td><code>cursor_at</code></td><td><code>notification_rules</code></td>
+          <td>per-rule bookmark. NULL means “never run”, which bootstraps to the lookback window so
+              activating a rule behaves as it always did</td></tr>
+      <tr><td><code>suppressed</code></td><td><code>notification_deliveries.status</code></td>
+          <td>past the burst cap. Recorded, never claimed by the drain, represented by a summary</td></tr>
+      <tr><td><code>consumer_cursors</code></td><td>new table</td>
+          <td>the published contract with retention: “everything before here is consumed”</td></tr>
+      <tr><td><code>ix_log_transactions_created_at</code></td><td>index</td>
+          <td>every incremental reader filters and orders on write time</td></tr>
     </tbody>
   </table>
   </div>
-
-  <p>And this is where daily partitioning pays off a second time. Analytics reads one partition — no
-  scan, no cursor, no coordination:</p>
-  <pre class="code">SELECT status, count(*) FROM log_transactions_2026_08_07 GROUP BY 1;</pre>
-
-  <div class="panel warn">
-    <h4>The cross-consumer concern: retention will delete data out from under a slow reader</h4>
-    <p>The partition worker drops days past 60. It already refuses to drop a day with unstitched
-    windows — <code>days_blocked_by_pending()</code>, gate 2. A slow consumer needs the same
-    protection, or retention silently destroys data it has not read yet.</p>
-    <pre class="code">blocked = await days_blocked_by_pending(db, days) \
-        | await days_blocked_by_consumers(db, days)   <span class="c"># min(cursor) across consumers</span></pre>
-    <p>This is the strongest argument for <strong>one shared cursor registry</strong> rather than each
-    subsystem hiding its bookmark in its own table: you cannot gate retention on something you cannot
-    see, and you cannot answer "is anything behind?" without one place to ask.</p>
-  </div>
+  <p class="sub" style="font-size:.9rem">Migrations <code>b3d914c7ea52</code>,
+  <code>c7a02f68b1d4</code>, <code>d5c81b60a473</code>. The index one is worth reading:
+  PostgreSQL <em>refuses</em> <code>CREATE INDEX CONCURRENTLY</code> on a partitioned parent, so it is
+  built per partition and attached to an <code>ON ONLY</code> parent index.</p>
 </section>
 
 <!-- ================================================================= 8 -->
-<section id="caveats">
+<section id="tenancy">
   <div class="tag">08</div>
-  <h2>Caveats</h2>
-  <ul class="bul">
-    <li><strong>The lag is not optional.</strong> Without it a cursor silently drops rows committed by
-      long transactions. It must exceed the longest Stage 2 transaction; measure it, do not guess.</li>
-    <li><strong><code>created_at</code> resets on every regroup.</strong>
-      <code>derive_transactions.py:600</code> builds a fresh <code>LogTransaction</code> each rebuild,
-      and Stage 2 rewrites the unsealed tail constantly — so the same transaction re-enters the feed
-      repeatedly for ~15 minutes. That is correct (the row genuinely changed) but it means every
-      consumer <em>must</em> be idempotent. Seal-gating removes most of this churn.</li>
-    <li><strong>Seal-gating trades latency for accuracy.</strong> Only <code>incomplete</code> is
-      gated by default. The residual edge: a late error entry can join an already-responded
-      transaction inside the seal window and flip <code>success</code> to <code>error</code> — rare,
-      but real. <code>notification_alert_only_sealed=true</code> closes it by requiring a seal for
-      every status, at the cost of delaying every alert by up to 15 minutes.</li>
-    <li><strong>Moving the send off the publish path turned out NOT to add latency</strong> — the
-      worker publishes and drains in the same tick, and a fresh delivery is immediately due. Two paths
-      still send synchronously on purpose and are exempt from pacing: <code>POST
-      /channels/{id}/test</code> (bypasses the outbox entirely) and <code>POST
-      /{customer}/publish</code> (a human action whose contract is to return the per-channel outcome;
-      one event to a handful of channels cannot flood).</li>
-    <li><strong>Rollup hides detail by design.</strong> The summary card must carry enough — count, top
-      offenders, time range, and a link — that nobody needs the 473 individual cards it replaced.</li>
-    <li><strong>Slack and WhatsApp still do not work</strong>, but they can no longer be configured —
-      the API refuses them, and any that already exist dead-letter on the first attempt instead of
-      burning 50. The <code>/channel-types</code> endpoint still lists them separately from
-      <code>implemented</code>, so a picker can grey them out rather than hide the roadmap.</li>
-    <li><strong>Two pre-existing complexity hotspots remain in this subsystem, both untested</strong>:
-      <code>publish_manual_endpoint</code> (CRAP 16) and <code>_validate_rule</code> (7) in
-      <code>api/v1/notifications.py</code>, plus <code>TeamsChannel._facts</code> (9). They are not
-      touched by this work; refactoring untested code blind would risk changing behaviour with nothing
-      to catch it. Tests first, then decompose.</li>
-    <li><strong>The event bus earns nothing today.</strong> <code>bus.py:35</code> loops over
-      subscribers and there is exactly one. It is indirection with a single implementation — worth
-      keeping only if a second subscriber is genuinely coming.</li>
-    <li><strong>Do not add a storage abstraction yet.</strong> The argument for one is "storage might
-      move." It has not, and an interface with one implementation is a cost with no benefit — the same
-      trap as the bus. Add it the day a second storage shape is real.</li>
-  </ul>
+  <h2>Multi-tenant: rules and channels</h2>
+  <figure>
+    <svg viewBox="0 0 860 240" role="img" aria-label="Two customers with their own rules and channels, and an isolation boundary between them">
+      <defs><marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--rule2)"/></marker></defs>
+      <rect x="20" y="20" width="370" height="200" rx="10" fill="none" stroke="var(--rule2)" stroke-dasharray="6 4"/>
+      <text class="sm" x="35" y="40">customer “mnp”</text>
+      <rect x="40" y="55" width="150" height="34" rx="6" fill="var(--decs)" stroke="var(--dec)"/>
+      <text class="sm" x="115" y="76" text-anchor="middle">rule: printer errors</text>
+      <rect x="40" y="99" width="150" height="34" rx="6" fill="var(--decs)" stroke="var(--dec)"/>
+      <text class="sm" x="115" y="120" text-anchor="middle">rule: decimal mismatch</text>
+      <rect x="40" y="143" width="150" height="34" rx="6" fill="var(--decs)" stroke="var(--dec)"/>
+      <text class="sm" x="115" y="164" text-anchor="middle">rule: hourly digest</text>
+      <rect x="235" y="66" width="140" height="34" rx="6" fill="var(--dels)" stroke="var(--del)"/>
+      <text class="sm" x="305" y="87" text-anchor="middle">#wms-oncall</text>
+      <rect x="235" y="140" width="140" height="34" rx="6" fill="var(--dels)" stroke="var(--del)"/>
+      <text class="sm" x="305" y="161" text-anchor="middle">#wms-daily</text>
+      <path class="ln" d="M190,72 H233" marker-end="url(#ar5)"/>
+      <path class="ln" d="M190,116 Q212,116 233,92" marker-end="url(#ar5)"/>
+      <path class="ln" d="M190,160 H233" marker-end="url(#ar5)"/>
+
+      <line x1="425" y1="15" x2="425" y2="225" stroke="var(--bad)" stroke-width="2"/>
+      <text class="sm" x="432" y="128" fill="var(--bad)">isolation</text>
+
+      <rect x="470" y="20" width="370" height="200" rx="10" fill="none" stroke="var(--rule2)" stroke-dasharray="6 4"/>
+      <text class="sm" x="485" y="40">customer “tmp-live”</text>
+      <rect x="490" y="99" width="150" height="34" rx="6" fill="var(--decs)" stroke="var(--dec)"/>
+      <text class="sm" x="565" y="120" text-anchor="middle">rule: all errors</text>
+      <rect x="685" y="99" width="140" height="34" rx="6" fill="var(--dels)" stroke="var(--del)"/>
+      <text class="sm" x="755" y="120" text-anchor="middle">#support</text>
+      <path class="ln" d="M640,116 H683" marker-end="url(#ar5)"/>
+    </svg>
+    <figcaption>Unlimited rules and channels per tenant; each rule optionally names which channels it
+    publishes to. No targeting line can cross the boundary.</figcaption>
+  </figure>
+
+  <pre class="code"><span class="c"># dispatcher._resolve_channels — read the ORDER</span>
+where(customer_code == event.customer_code,   <span class="c"># 1. tenant FIRST</span>
+      enabled.is_(True))                      <span class="c"># 2. then enabled</span>
+if event.target_channel_ids:                  <span class="c"># 3. only THEN narrow</span>
+    rows = [r for r in rows if str(r.id) in wanted]</pre>
+  <p>Because step 3 filters a list that is <em>already</em> tenant-scoped, a rule naming another
+  tenant's channel id gets nothing. Targeting can only narrow, never reach across. Empty targeting
+  means all of that tenant's enabled channels.</p>
+  <p>Everything that could be a shared resource is per-tenant or per-channel: the rate budget is per
+  channel, the burst cap is per rule, and the drain is fair across tenants. One noisy tenant cannot
+  silence, slow, or starve another.</p>
 </section>
 
 <!-- ================================================================= 9 -->
-<section id="build">
+<section id="before">
   <div class="tag">09</div>
-  <h2>Build order</h2>
-  <p class="lead">Sequenced so each step is independently shippable and testable.</p>
+  <h2>Before &amp; after, measured</h2>
+  <p class="lead">Every figure below was measured against the real database, not estimated.</p>
   <div class="tw">
   <table>
-    <thead><tr><th>#</th><th>Step</th><th>Why here</th></tr></thead>
+    <thead><tr><th>Was</th><th>Now</th><th>Evidence</th></tr></thead>
     <tbody>
-      <tr><td class="num">1</td><td>Index <code>log_transactions.created_at</code>
-          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
-          <td>Migration <code>b3d914c7ea52</code>. PostgreSQL <em>refuses</em>
-          <code>CREATE INDEX CONCURRENTLY</code> on a partitioned parent, so it is built per partition
-          and attached to an <code>ON ONLY</code> parent index. New partitions inherit it automatically</td></tr>
-      <tr><td class="num">2</td><td>Cursor + lag on the engine query
-          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
-          <td>Migrations <code>c7a02f68b1d4</code> + <code>app/services/notifications/cursor.py</code>.
-          Measured: 50 matching rows publish once on tick 1 (131 ms), then ticks 2-3 read
-          <strong>zero rows</strong> in 13 ms. Dedupe kept as the safety net</td></tr>
-      <tr><td class="num">3</td><td>Seal-gate <code>incomplete</code>
-          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
-          <td>Kills flaw 4. <code>rules/stability.py</code> — applied in SQL, so churning in-flight
-          rows are never fetched. Verified end to end: in-flight <code>incomplete</code> held back,
-          sealed <code>incomplete</code> alerts, unsealed <code>error</code>/<code>success</code>
-          alert immediately</td></tr>
-      <tr><td class="num">4</td><td><strong>Move the send out of the publish path</strong>
-          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
-          <td>`handle` now only ENQUEUES; `deliver_due` (renamed from `retry_pending`, which no longer
-          described it) is the single seam where HTTP happens. Measured: publishing 5 events makes
-          <strong>0</strong> HTTP calls, and a batched drain delivers 2 / 2 / 1. No added latency -
-          a new delivery has <code>next_attempt_at IS NULL</code>, which the drain already treats as
-          due, so it still goes out on the tick it was raised</td></tr>
-      <tr><td class="num">5</td><td>Per-channel pacing, fairness, <code>Retry-After</code>
-          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
-          <td>Kills flaws 1 and 2 and the starvation. <code>pacing.py</code> holds the pure decisions
-          (100% covered). Measured: tenant A floods with 30 alerts and tenant B raises 2 — each sends
-          exactly its 3/min budget, B is not starved, and <strong>zero</strong> attempts are burned on
-          the 27 held rows, because a deferral is not a failure</td></tr>
-      <tr><td class="num">6</td><td>Rollup threshold + summary card
-          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
-          <td>Kills flaw 7. Measured: 500 matching transactions with <code>burst_cap=3</code> produce
-          <strong>4 cards</strong> — 3 individual plus one “497 more alerts…”. Every match still keeps
-          its event row and a <code>suppressed</code> delivery row, so what the summary covered stays
-          answerable</td></tr>
-      <tr><td class="num">7</td><td>Reject unimplemented channel types at config time
-          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
-          <td>Kills flaw 6. Creating a Slack channel now 400s with a message distinguishing “known but
-          not built” from “never heard of it”. Anything already configured fails fast:
-          <code>NotImplementedError</code> dead-letters on the FIRST attempt rather than the 50th,
-          reusing the permanent-vs-transient distinction the Stage 1 queue already draws</td></tr>
-      <tr><td class="num">8</td><td><code>consumer_cursors</code> registry + retention gate
-          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
-          <td>Migration <code>d5c81b60a473</code>. Retention now refuses to drop a day a live consumer
-          has not read, alongside the existing unstitched-window gate. A consumer that stops reporting
-          for 24 h stops blocking and is alarmed CRITICAL — blocking forever would fill the disk,
-          which is the worse failure. ML and analytics register the same way</td></tr>
+      <tr><td>Re-read the last hour every 10 s — ~567 rows, ~8,600×/day</td>
+          <td>Reads only what is new</td>
+          <td class="num">tick 1: 50 events, 131 ms · ticks 2–3: <strong>0 rows</strong>, 13 ms</td></tr>
+      <tr><td>Backfilled files invisible (old <code>started_at</code>)</td>
+          <td>Found, because the cursor reads write time</td>
+          <td>test: 7-day-old <code>started_at</code>, new <code>created_at</code> → alerts</td></tr>
+      <tr><td>In-flight <code>incomplete</code> alerts, then becomes <code>success</code>, never corrected</td>
+          <td>Held until sealed</td>
+          <td>81 of 412 unsealed in prod; all four status paths verified</td></tr>
+      <tr><td>500 matches → 500 back-to-back POSTs</td>
+          <td>Paced per channel</td>
+          <td class="num">budget 3/min honoured exactly; 0 attempts burned on 27 held rows</td></tr>
+      <tr><td>One tenant's flood fills every batch</td>
+          <td>Round-robin</td>
+          <td>A floods 30, B raises 2 → A=3, B=2; B not starved</td></tr>
+      <tr><td>500 cards in the channel</td>
+          <td>3 cards + 1 summary</td>
+          <td class="num"><strong>500 → 4</strong></td></tr>
+      <tr><td>A 429 burns an attempt and guesses the delay</td>
+          <td>Honours <code>Retry-After</code>, costs no attempt</td>
+          <td>tests on both the header and its absence</td></tr>
+      <tr><td>A Slack channel fails 50× then dead-letters</td>
+          <td>Refused at config; existing ones die on attempt 1</td>
+          <td class="num">50 → <strong>1</strong></td></tr>
+      <tr><td>Retention could drop data a reader had not read</td>
+          <td>Gated on the slowest live consumer</td>
+          <td>end-to-end: the partition survives a real drop pass</td></tr>
     </tbody>
   </table>
   </div>
 
   <div class="panel good">
-    <h4>Steps 1-2 shipped, 8 August</h4>
-    <p>29 tests in <code>tests/test_notification_cursor_chunk28.py</code> — the first tests this
-    subsystem has ever had. All eight correctness decisions mutation-checked; two initially escaped
-    and needed better tests (an exclusive lower bound, and a rule re-evaluating rows behind its own
-    cursor). Everything A-grade complexity. Full suite 378 green.</p>
-    <p>Two bugs were caught during implementation rather than in production: <code>advance_rule</code>
-    was <code>async</code> but called without <code>await</code>, so no cursor ever moved — it is now
-    synchronous, since it performs no I/O and that shape makes the mistake impossible. And the
-    end-to-end test initially published into a void because <code>bus.publish</code> has no
-    subscribers until <code>dispatcher.register()</code> runs.</p>
-    <p>One design decision changed after measurement: rules were going to get one query each, but
-    planning a query against the partitioned table costs ~50 ms regardless of how little it returns,
-    so a customer's rules now share ONE query starting from the oldest cursor among them and filter
-    in memory. Query count is unchanged from before; every rule still keeps an independent cursor.</p>
+    <h4>On the testing</h4>
+    <p>The subsystem had <strong>no tests at all</strong> before this work. It now has <strong>137</strong>,
+    written failing-first. Every correctness decision was mutation-tested — the fix reverted, the suite
+    re-run, and the failure confirmed. Three of those mutations survived and exposed weak tests rather
+    than weak code; two others turned out to be equivalent mutations, which corrected a comment that
+    had overclaimed.</p>
   </div>
+
+  <div class="panel">
+    <h4>Two bugs caught by tests rather than production</h4>
+    <ul class="bul">
+      <li><strong><code>advance_rule</code> was <code>async</code> but called without <code>await</code></strong>
+        — so no cursor ever moved. It does no I/O, so it is now synchronous; that shape makes the
+        mistake impossible rather than merely fixed.</li>
+      <li><strong>The rollup summary suppressed itself.</strong> It carries its rule's id for
+        provenance, so the burst cap counted it as one more alert from that rule. The entire flood
+        would have vanished in silence — strictly worse than sending all 500 cards.</li>
+    </ul>
+  </div>
+
+  <div class="panel">
+    <h4>And one real bug found via a flaky test</h4>
+    <p>A recurring failure in the Stage 1 queue tests turned out not to be a test problem.
+    <code>reset_abandoned_objects</code> set <code>available_at</code> from the <strong>app host's</strong>
+    clock while <code>claim_one</code> gates on the <strong>database's</strong>
+    (<code>available_at &lt;= clock_timestamp()</code>). Measured drift here swings +3 ms to −55 ms, so a
+    re-armed queue row was silently unclaimable whenever the host ran ahead. Fixed, and guarded by a
+    test that checks 25 times, since it only shows on the positive excursions.</p>
+  </div>
+</section>
+
+<!-- ================================================================= 10 -->
+<section id="reuse">
+  <div class="tag">10</div>
+  <h2>Reusing this for ML and analytics</h2>
+  <p class="lead">Notifications is the first incremental reader of <code>log_transactions</code>. The
+  machinery it uses is deliberately generic, so the next one costs almost nothing — and
+  <strong>Stage 2 never changes</strong>.</p>
+
+  <figure>
+    <svg viewBox="0 0 860 210" role="img" aria-label="Three consumers with independent cursors on one table">
+      <text class="sm" x="10" y="20">log_transactions — one table, rows only ever added</text>
+      <line class="ln" x1="20" y1="75" x2="840" y2="75"/>
+      <g fill="var(--srcs)" stroke="var(--src)">
+        <circle cx="90" cy="75" r="6"/><circle cx="200" cy="75" r="6"/><circle cx="310" cy="75" r="6"/>
+        <circle cx="420" cy="75" r="6"/><circle cx="530" cy="75" r="6"/><circle cx="640" cy="75" r="6"/>
+        <circle cx="750" cy="75" r="6"/>
+      </g>
+      <text class="sm" x="835" y="67" text-anchor="end">newer →</text>
+      <path d="M200,83 V120" stroke="var(--dis)" stroke-width="2"/>
+      <rect x="120" y="120" width="165" height="40" rx="6" fill="var(--diss)" stroke="var(--dis)"/>
+      <text class="sm" x="202" y="137" text-anchor="middle" fill="var(--dis)">ml:features-v1</text>
+      <text class="sm" x="202" y="152" text-anchor="middle">behind — backfilling</text>
+      <path d="M530,83 V120" stroke="var(--dec)" stroke-width="2"/>
+      <rect x="450" y="120" width="165" height="40" rx="6" fill="var(--decs)" stroke="var(--dec)"/>
+      <text class="sm" x="532" y="137" text-anchor="middle" fill="var(--dec)">notifications</text>
+      <text class="sm" x="532" y="152" text-anchor="middle">near the head</text>
+      <path d="M750,83 V120" stroke="var(--del)" stroke-width="2"/>
+      <rect x="672" y="120" width="165" height="40" rx="6" fill="var(--dels)" stroke="var(--del)"/>
+      <text class="sm" x="754" y="137" text-anchor="middle" fill="var(--del)">analytics</text>
+      <text class="sm" x="754" y="152" text-anchor="middle">caught up</text>
+      <rect x="120" y="176" width="717" height="26" rx="6" fill="var(--panel2)" stroke="var(--rule2)"/>
+      <text class="sm" x="478" y="193" text-anchor="middle">consumer_cursors — retention holds every day the SLOWEST live reader still needs</text>
+    </svg>
+    <figcaption>Independent bookmarks on shared data. A slow consumer never blocks a fast one.</figcaption>
+  </figure>
+
+  <div class="panel warn">
+    <h4>But a cursor is not right for every consumer</h4>
+    <p>This is the part that is easy to get wrong. ML <em>training</em> wants a frozen, reproducible
+    range — a moving bookmark would shift the dataset under every run and destroy reproducibility.
+    Analytics computing “yesterday” wants one complete day, not “what is new”.</p>
+  </div>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Consumer</th><th>What it wants</th><th>Mechanism</th></tr></thead>
+    <tbody>
+      <tr><td>Notifications</td><td>what is new, now</td><td>cursor + lag, register in <code>consumer_cursors</code></td></tr>
+      <tr><td>ML online features</td><td>what is new, now</td><td>same — <code>cursor.py</code> is not notification-specific</td></tr>
+      <tr><td>ML training</td><td>all of March, frozen, re-runnable</td><td>date range — <em>no cursor</em></td></tr>
+      <tr><td>Analytics rollup</td><td>yesterday, complete, once</td><td>read the day's partition directly</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Daily partitioning pays off a second time for the batch readers:
+  <code>SELECT … FROM log_transactions_2026_08_07</code> is one partition — no scan, no cursor, no
+  coordination.</p>
+
+  <div class="panel">
+    <h4>Adding an incremental consumer, concretely</h4>
+    <ol class="bul">
+      <li>Read with <code>cursor.window_stmt(...)</code>, passing any extra filters your subsystem
+        needs — it takes them rather than knowing them, which is why the seal gate lives in
+        <code>rules/stability.py</code> and not in <code>cursor.py</code>.</li>
+      <li>Keep your own position however suits you; publish the oldest one you still need via
+        <code>consumer_cursors.report(...)</code>.</li>
+      <li>That is all. Retention picks you up automatically, and Stage 2 is untouched.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ================================================================= 11 -->
+<section id="config">
+  <div class="tag">11</div>
+  <h2>Configuration</h2>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Setting</th><th>Default</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td><code>notifications_enabled</code></td><td class="num">False</td><td>master switch — currently OFF in production</td></tr>
+      <tr><td><code>notification_poll_seconds</code></td><td class="num">10</td><td>the worker tick</td></tr>
+      <tr><td colspan="3" style="background:var(--diss)"><strong>Discovery</strong></td></tr>
+      <tr><td><code>notification_cursor_lag_seconds</code></td><td class="num">60</td>
+          <td>how far behind the present to read. <strong>Correctness, not tuning</strong> — must exceed the longest Stage 2 transaction</td></tr>
+      <tr><td><code>notification_lookback_seconds</code></td><td class="num">3600</td><td>where a brand-new rule starts</td></tr>
+      <tr><td><code>notification_candidate_limit</code></td><td class="num">2000</td><td>rows per customer per tick; a truncated batch drains over several ticks</td></tr>
+      <tr><td><code>notification_alert_only_sealed</code></td><td class="num">False</td><td>require a seal for EVERY status — accuracy over latency</td></tr>
+      <tr><td colspan="3" style="background:var(--decs)"><strong>Decision</strong></td></tr>
+      <tr><td><code>notification_rule_burst_cap</code></td><td class="num">5</td><td>individual cards per rule per window; per rule via <code>{"burst_cap": N}</code></td></tr>
+      <tr><td><code>notification_rollup_window_seconds</code></td><td class="num">300</td><td>summary bucket size</td></tr>
+      <tr><td colspan="3" style="background:var(--dels)"><strong>Delivery</strong></td></tr>
+      <tr><td><code>notification_channel_max_per_minute</code></td><td class="num">20</td><td>per-channel budget; per channel via <code>{"max_per_minute": N}</code></td></tr>
+      <tr><td><code>notification_rate_window_seconds</code></td><td class="num">60</td><td>the budget window</td></tr>
+      <tr><td><code>notification_delivery_batch</code></td><td class="num">100</td><td>deliveries attempted per drain pass</td></tr>
+      <tr><td><code>notification_max_attempts</code></td><td class="num">50</td><td>before dead-lettering a genuinely failing delivery</td></tr>
+      <tr><td><code>notification_retry_backoff_seconds</code></td><td class="num">30…3600</td><td>the ladder, when the server gave no <code>Retry-After</code></td></tr>
+      <tr><td colspan="3" style="background:var(--panel2)"><strong>Retention</strong></td></tr>
+      <tr><td><code>consumer_cursor_stale_after_seconds</code></td><td class="num">86400</td>
+          <td>when a silent consumer stops blocking retention — and is alarmed CRITICAL</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================================================================= 12 -->
+<section id="caveats">
+  <div class="tag">12</div>
+  <h2>Caveats and what is not done</h2>
+  <ul class="bul">
+    <li><strong>It is switched off.</strong> <code>notifications_enabled=False</code> in production.
+      Nothing here is live yet.</li>
+    <li><strong>Deploying needs a stop.</strong> Three migrations
+      (<code>b3d914c7ea52</code>, <code>c7a02f68b1d4</code>, <code>d5c81b60a473</code>) — stop workers,
+      migrate, deploy, start. Not <code>deploy.sh</code>'s pull-then-migrate order.</li>
+    <li><strong>The lag delays every alert by up to 60 s.</strong> That is the price of never missing a
+      row committed late, and it is not negotiable downward without reintroducing that bug.</li>
+    <li><strong>Seal-gating has a residual edge.</strong> A late error entry can still join an
+      already-responded transaction inside the seal window and flip <code>success</code> to
+      <code>error</code>. Rare but real; <code>notification_alert_only_sealed</code> closes it at the
+      cost of delaying every alert.</li>
+    <li><strong>Rollup hides detail by design.</strong> The summary must carry enough — count, top
+      offenders, window — that nobody needs the cards it replaced. Suppressed rows remain queryable.</li>
+    <li><strong>A stale consumer stops protecting itself.</strong> After 24 h retention proceeds
+      without it, logged CRITICAL. Blocking forever would fill the disk, which is the worse failure.</li>
+    <li><strong>Slack and WhatsApp still do not work.</strong> They can no longer be configured, and
+      <code>/channel-types</code> still lists them separately so a picker can grey them out rather than
+      hide the roadmap.</li>
+    <li><strong>The event bus earns nothing today.</strong> It loops over subscribers and there is
+      exactly one. Indirection with a single implementation — worth keeping only if a second subscriber
+      is genuinely coming.</li>
+    <li><strong>Three complexity hotspots remain, all untested</strong>:
+      <code>publish_manual_endpoint</code> (CRAP 16), <code>_validate_rule</code> (7), and
+      <code>TeamsChannel._facts</code> (9). Not touched by this work — refactoring untested code blind
+      would risk changing behaviour with nothing to catch it. Tests first, then decompose.</li>
+  </ul>
 </section>
 
 <hr>
 <p style="font-size:.85rem;color:var(--muted)">
   Companion documents:
   <code>docs/plan/2026-08-06_log-pipeline-architecture.html</code> (Stage 1 and Stage 2 end to end) ·
-  <code>docs/database-er-diagram.md</code> (the as-built schema, including daily partitioning) ·
+  <code>docs/database-er-diagram.md</code> (the as-built schema) ·
   <code>docs/plan/2026-08-05_20-32_daily-partitioning.md</code> (retention and the partition worker).
+  <br>Code: <code>app/services/notifications/</code> —
+  <code>cursor.py</code>, <code>pacing.py</code>, <code>rollup.py</code>, <code>dispatcher.py</code>,
+  <code>rules/stability.py</code>; <code>app/services/consumer_cursors.py</code>.
 </p>
 
 </div>
