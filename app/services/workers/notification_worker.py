@@ -13,7 +13,7 @@ import logging
 
 from app.settings import settings
 from app.services.notifications.rules.engine import run_rules_once
-from app.services.notifications.dispatcher import retry_pending
+from app.services.notifications.dispatcher import deliver_due
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +23,9 @@ async def run_notification_worker() -> None:
     while True:
         try:
             await run_rules_once()
-            attempted = await retry_pending()
+            attempted = await deliver_due()
             if attempted:
-                logger.info("Notification redelivery attempted %d delivery(ies)", attempted)
+                logger.info("Notification drain attempted %d delivery(ies)", attempted)
         except Exception:
             logger.exception("Notification worker error — retrying after sleep")
         await asyncio.sleep(settings.notification_poll_seconds)

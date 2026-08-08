@@ -281,6 +281,10 @@ class Settings(BaseSettings):
     # close the remaining edge - a late error entry flipping an already-responded transaction - at
     # the cost of that delay on every alert.
     notification_alert_only_sealed: bool = False
+    # Deliveries attempted per drain pass. Since enqueuing no longer sends, this bounds how much
+    # actually leaves the system per tick — crude pacing that keeps a burst from becoming one wall of
+    # HTTP. Step 5 replaces it with a real per-channel budget; until then it is the only limiter.
+    notification_delivery_batch: int = 100
     # Optional public base URL of the app/frontend; when set, alert cards include a deep link to the
     # transaction view. Empty ⇒ cards just show the transaction id/fields.
     app_public_base_url: str = ""

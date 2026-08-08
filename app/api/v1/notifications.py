@@ -322,9 +322,12 @@ async def publish_manual_endpoint(
         payload=payload,
         target_channel_ids=targets,
     )
-    # Persist outbox + create per-channel deliveries + attempt immediate send (independent of the
-    # background worker; failures are picked up by the worker's retry loop when it's running).
-    await dispatcher.handle(event)
+    # Enqueue, then deliver EXPLICITLY rather than waiting for the worker's drain. This endpoint's
+    # contract is to return the per-channel outcome, and a person clicking "notify the team" needs the
+    # answer now. Safe to bypass the paced drain here specifically: one human action to a handful of
+    # channels cannot flood a webhook. Anything that fails is still an outbox row, so the worker
+    # retries it as normal.
+    await dispatcher.deliver_now(await dispatcher.enqueue(event))
 
     row = await repo.get_event_by_dedup_key(event.dedup_key)
     deliveries = await repo.get_deliveries_for_event(row.id) if row else []

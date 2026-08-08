@@ -772,9 +772,12 @@ return rows</pre>
       transaction inside the seal window and flip <code>success</code> to <code>error</code> — rare,
       but real. <code>notification_alert_only_sealed=true</code> closes it by requiring a seal for
       every status, at the cost of delaying every alert by up to 15 minutes.</li>
-    <li><strong>Moving the send off the publish path adds latency.</strong> An alert waits for the
-      delivery tick instead of going out during evaluation. Run the delivery loop faster than
-      evaluation (~1–2 s) so worst-case latency stays roughly where it is today.</li>
+    <li><strong>Moving the send off the publish path turned out NOT to add latency</strong> — the
+      worker publishes and drains in the same tick, and a fresh delivery is immediately due. Two paths
+      still send synchronously on purpose and are exempt from pacing: <code>POST
+      /channels/{id}/test</code> (bypasses the outbox entirely) and <code>POST
+      /{customer}/publish</code> (a human action whose contract is to return the per-channel outcome;
+      one event to a handful of channels cannot flood).</li>
     <li><strong>Rollup hides detail by design.</strong> The summary card must carry enough — count, top
       offenders, time range, and a link — that nobody needs the 473 individual cards it replaced.</li>
     <li><strong>Slack and WhatsApp still do not work.</strong> Until implemented, the API should refuse
@@ -813,8 +816,13 @@ return rows</pre>
           rows are never fetched. Verified end to end: in-flight <code>incomplete</code> held back,
           sealed <code>incomplete</code> alerts, unsealed <code>error</code>/<code>success</code>
           alert immediately</td></tr>
-      <tr><td class="num">4</td><td><strong>Move the send out of the publish path</strong></td>
-          <td>The structural change. Nothing in 5 or 6 is possible before it</td></tr>
+      <tr><td class="num">4</td><td><strong>Move the send out of the publish path</strong>
+          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
+          <td>`handle` now only ENQUEUES; `deliver_due` (renamed from `retry_pending`, which no longer
+          described it) is the single seam where HTTP happens. Measured: publishing 5 events makes
+          <strong>0</strong> HTTP calls, and a batched drain delivers 2 / 2 / 1. No added latency -
+          a new delivery has <code>next_attempt_at IS NULL</code>, which the drain already treats as
+          due, so it still goes out on the tick it was raised</td></tr>
       <tr><td class="num">5</td><td>Per-channel pacing, fairness, <code>Retry-After</code></td>
           <td>Kills flaws 1 and 2 and the cross-tenant starvation</td></tr>
       <tr><td class="num">6</td><td>Rollup threshold + summary card</td>
