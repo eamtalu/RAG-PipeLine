@@ -10,7 +10,7 @@ import logging
 
 import httpx
 
-from app.services.notifications.channels.base import Channel
+from app.services.notifications.channels.base import Channel, ChannelRateLimited
 from app.services.notifications.events import NotificationEvent
 from app.settings import settings
 
@@ -32,7 +32,29 @@ class TeamsChannel(Channel):
         body = self.build_card(event)
         async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.post(webhook_url, json=body)
-            resp.raise_for_status()  # non-2xx → delivery failure (retried)
+            if resp.is_success:
+                return
+            raise self._as_error(resp)
+
+    @staticmethod
+    def _as_error(resp: "httpx.Response") -> Exception:
+        """Turn a non-2xx response into the right kind of exception.
+
+        A 429 becomes ChannelRateLimited carrying the server's own Retry-After, so the dispatcher
+        waits exactly as long as Microsoft asked rather than guessing from a ladder. Everything else
+        stays a plain failure and follows the normal retry/dead-letter path.
+
+        Separated from `send` so it can be tested against a synthetic response, without a webhook.
+        """
+        if resp.status_code == 429:
+            raw = resp.headers.get("Retry-After")
+            try:
+                after = float(raw) if raw is not None else None
+            except ValueError:
+                after = None   # the header may be an HTTP-date; fall back to our own backoff
+            return ChannelRateLimited(retry_after=after,
+                                      message=f"rate limited by the channel (retry_after={raw!r})")
+        return RuntimeError(f"channel returned HTTP {resp.status_code}: {resp.text[:200]}")
 
     # ---- card construction (pure; unit-testable without network) -------------------------------
     def build_card(self, event: NotificationEvent) -> dict:

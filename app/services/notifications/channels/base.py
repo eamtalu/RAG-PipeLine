@@ -11,6 +11,22 @@ from abc import ABC, abstractmethod
 from app.services.notifications.events import NotificationEvent
 
 
+class ChannelRateLimited(Exception):
+    """The transport asked us to slow down (HTTP 429), rather than failing to deliver.
+
+    Raised INSTEAD of a generic error so the dispatcher can tell the two apart. Being throttled is not
+    a defect in the delivery: it must not consume the retry budget, must not move the row toward
+    dead-lettering, and must not use the generic backoff ladder when the platform has told us exactly
+    how long to wait.
+
+    `retry_after` is the server's own number in seconds, or None when it did not send one.
+    """
+
+    def __init__(self, retry_after: float | None = None, message: str = "channel rate limited"):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class Channel(ABC):
     # stable transport key, e.g. "teams" — matches CustomerNotificationChannel.channel_type.
     channel_type: str = ""

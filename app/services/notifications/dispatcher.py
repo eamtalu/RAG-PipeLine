@@ -19,7 +19,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
@@ -32,7 +32,9 @@ from app.persistence.models.notification import (
 )
 from app.services.notifications.bus import bus
 from app.services.notifications.events import NotificationEvent
+from app.services.notifications import pacing
 from app.services.notifications.channels import get_channel
+from app.services.notifications.channels.base import ChannelRateLimited
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +212,25 @@ async def _attempt_delivery(delivery_id: uuid.UUID) -> None:
         await db.commit()
 
 
+def _record_throttled(delivery: NotificationDelivery, exc: ChannelRateLimited) -> None:
+    """The channel asked us to slow down. That is not a delivery defect.
+
+    So `attempts` is untouched and the row stays `pending`: counting a 429 toward
+    notification_max_attempts would dead-letter a perfectly good alert after 50 rate-limit responses,
+    which is the opposite of what being throttled means. We wait the server's own Retry-After when it
+    gave one, and fall back to our jittered window when it did not — some throttling responses omit
+    the header, and retrying immediately would only make it worse.
+    """
+    delay = exc.retry_after if exc.retry_after is not None else None
+    delivery.next_attempt_at = (_now() + timedelta(seconds=delay) if delay is not None
+                                else pacing.retry_at(_now()))
+    logger.info("notification delivery %s throttled by the channel; retrying at %s",
+                delivery.id, delivery.next_attempt_at.isoformat())
+
+
 def _record_failure(delivery: NotificationDelivery, exc: Exception) -> None:
+    if isinstance(exc, ChannelRateLimited):
+        return _record_throttled(delivery, exc)
     delivery.attempts += 1
     delivery.last_error = str(exc)[:2000]
     if delivery.attempts >= settings.notification_max_attempts:
@@ -219,6 +239,75 @@ def _record_failure(delivery: NotificationDelivery, exc: Exception) -> None:
     else:
         delivery.status = DeliveryStatus.failed.value
         delivery.next_attempt_at = _now() + timedelta(seconds=_backoff_seconds(delivery.attempts))
+
+
+def _spend_budgets(selected, budgets: dict, *, now: datetime,
+                   lease: timedelta) -> list[uuid.UUID]:
+    """Claim what fits each channel's remaining budget; reschedule the rest. Returns ids to send.
+
+    A row held back is NOT a failure: `attempts` is untouched and no error is recorded, because it was
+    never attempted. It is rescheduled inside the rate window, jittered so a burst deferred together
+    does not come back in lockstep.
+    """
+    claimed: list[uuid.UUID] = []
+    for row, _cc in selected:
+        if budgets.get(row.channel_id, 0) <= 0:
+            row.next_attempt_at = pacing.retry_at(now)
+            continue
+        budgets[row.channel_id] -= 1
+        row.next_attempt_at = now + lease  # lease so a concurrent loop skips it
+        claimed.append(row.id)
+    return claimed
+
+
+async def _claim_due(db, now: datetime) -> list[tuple[NotificationDelivery, str]]:
+    """Every delivery that is due, locked, paired with its owning tenant.
+
+    Deliberately UNBOUNDED: fairness has to be decided across the whole due set, and a `LIMIT` here
+    would cut the batch before round-robin ever saw the quiet tenants. The set is small in practice —
+    it is what is due right now, not the whole outbox — and the row cap still applies afterwards.
+
+    The tenant comes from the event, since a delivery does not carry `customer_code` itself.
+    """
+    rows = (await db.execute(
+        select(NotificationDelivery, NotificationEventRow.customer_code)
+        .join(NotificationEventRow, NotificationEventRow.id == NotificationDelivery.event_id)
+        .where(
+            NotificationDelivery.status.in_(
+                [DeliveryStatus.pending.value, DeliveryStatus.failed.value]),
+            (NotificationDelivery.next_attempt_at.is_(None)) |
+            (NotificationDelivery.next_attempt_at <= now),
+        )
+        .order_by(NotificationDelivery.created_at.asc())
+        .with_for_update(skip_locked=True, of=NotificationDelivery)
+    )).all()
+    return [(r, cc) for r, cc in rows]
+
+
+async def _channel_budgets(db, channel_ids: set, now: datetime) -> dict:
+    """Remaining sends per channel in the current rate window.
+
+    Counted from the deliveries already made rather than from a separate counter table, so it stays
+    correct across restarts and across worker processes for free.
+    """
+    ids = [c for c in channel_ids if c is not None]
+    if not ids:
+        return {}
+    since = now - timedelta(seconds=settings.notification_rate_window_seconds)
+    sent = dict((await db.execute(
+        select(NotificationDelivery.channel_id, func.count())
+        .where(NotificationDelivery.channel_id.in_(ids),
+               NotificationDelivery.delivered_at.isnot(None),
+               NotificationDelivery.delivered_at >= since)
+        .group_by(NotificationDelivery.channel_id)
+    )).all())
+    configs = dict((await db.execute(
+        select(CustomerNotificationChannel.id, CustomerNotificationChannel.config)
+        .where(CustomerNotificationChannel.id.in_(ids))
+    )).all())
+    return {cid: pacing.allowance(sent_in_window=sent.get(cid, 0),
+                                  limit=pacing.channel_limit(configs.get(cid)))
+            for cid in ids}
 
 
 # ---- the outbox drain: the ONE place delivery happens ---------------------------------------------
@@ -241,21 +330,16 @@ async def deliver_due(batch: int | None = None) -> int:
     batch = batch if batch is not None else settings.notification_delivery_batch
     now = _now()
     lease = timedelta(seconds=max(settings.notification_poll_seconds * 3, 60))
-    claimed: list[uuid.UUID] = []
     async with async_session() as db:
         async with db.begin():
-            rows = (await db.execute(
-                select(NotificationDelivery).where(
-                    NotificationDelivery.status.in_(
-                        [DeliveryStatus.pending.value, DeliveryStatus.failed.value]),
-                    (NotificationDelivery.next_attempt_at.is_(None)) |
-                    (NotificationDelivery.next_attempt_at <= now),
-                ).order_by(NotificationDelivery.next_attempt_at.asc().nullsfirst())
-                .limit(batch).with_for_update(skip_locked=True)
-            )).scalars().all()
-            for r in rows:
-                r.next_attempt_at = now + lease  # lease so a concurrent loop skips it
-                claimed.append(r.id)
+            due = await _claim_due(db, now)
+            # Fair across tenants BEFORE the batch is cut. Ordering by next_attempt_at and taking the
+            # first N let one tenant's flood fill every batch, because freshly published deliveries
+            # all have NULL — the quiet tenant's single alert waited however many ticks the flood took.
+            selected = pacing.round_robin(due, key=lambda r: r[1], limit=batch)
+
+            budgets = await _channel_budgets(db, {r.channel_id for r, _ in selected}, now)
+            claimed = _spend_budgets(selected, budgets, now=now, lease=lease)
         # transaction committed here → locks released
 
     for did in claimed:

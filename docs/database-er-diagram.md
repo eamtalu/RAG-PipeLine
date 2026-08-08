@@ -549,6 +549,12 @@ The gate is applied in SQL (`app/services/notifications/rules/stability.py`) bec
 
 Digest (window) rules do not use the cursor at all; they summarise a completed interval and keep their own `rule:{id}:window:{n}` dedup key.
 
+Delivery is paced.
+`customer_notification_channels.config` may carry `{"max_per_minute": N}`, overriding `notification_channel_max_per_minute`; the budget is measured by counting `notification_deliveries` already delivered inside the window, so it stays correct across restarts and worker processes without a counter table.
+A delivery beyond the budget is **rescheduled, never dropped**, and is not a failure - `attempts` is untouched and no error is recorded, or 50 quiet deferrals would dead-letter a perfectly good alert.
+The drain also claims round-robin across tenants, so one tenant's flood no longer fills every batch while another's single alert waits.
+An HTTP 429 raises `ChannelRateLimited` carrying the server's own `Retry-After`, which is honoured instead of the generic backoff ladder and likewise does not consume the retry budget.
+
 ```mermaid
 erDiagram
     customer_notification_channels {

@@ -285,6 +285,12 @@ class Settings(BaseSettings):
     # actually leaves the system per tick — crude pacing that keeps a burst from becoming one wall of
     # HTTP. Step 5 replaces it with a real per-channel budget; until then it is the only limiter.
     notification_delivery_batch: int = 100
+    # Per-channel send ceiling within notification_rate_window_seconds. A channel overrides it with
+    # {"max_per_minute": N} in its config JSONB - Teams and Slack do not throttle alike, and one
+    # tenant's tight webhook should not force every other channel down to its rate. Deliveries beyond
+    # the budget are RESCHEDULED, never dropped and never counted as failed attempts.
+    notification_channel_max_per_minute: int = 20
+    notification_rate_window_seconds: int = 60
     # Optional public base URL of the app/frontend; when set, alert cards include a deep link to the
     # transaction view. Empty ⇒ cards just show the transaction id/fields.
     app_public_base_url: str = ""

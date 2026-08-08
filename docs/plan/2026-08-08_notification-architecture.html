@@ -823,8 +823,12 @@ return rows</pre>
           <strong>0</strong> HTTP calls, and a batched drain delivers 2 / 2 / 1. No added latency -
           a new delivery has <code>next_attempt_at IS NULL</code>, which the drain already treats as
           due, so it still goes out on the tick it was raised</td></tr>
-      <tr><td class="num">5</td><td>Per-channel pacing, fairness, <code>Retry-After</code></td>
-          <td>Kills flaws 1 and 2 and the cross-tenant starvation</td></tr>
+      <tr><td class="num">5</td><td>Per-channel pacing, fairness, <code>Retry-After</code>
+          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
+          <td>Kills flaws 1 and 2 and the starvation. <code>pacing.py</code> holds the pure decisions
+          (100% covered). Measured: tenant A floods with 30 alerts and tenant B raises 2 — each sends
+          exactly its 3/min budget, B is not starved, and <strong>zero</strong> attempts are burned on
+          the 27 held rows, because a deferral is not a failure</td></tr>
       <tr><td class="num">6</td><td>Rollup threshold + summary card</td>
           <td>Kills flaw 7 — protects the reader, not just the webhook</td></tr>
       <tr><td class="num">7</td><td>Reject unimplemented channel types at config time</td>
