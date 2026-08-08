@@ -780,8 +780,15 @@ return rows</pre>
       one event to a handful of channels cannot flood).</li>
     <li><strong>Rollup hides detail by design.</strong> The summary card must carry enough — count, top
       offenders, time range, and a link — that nobody needs the 473 individual cards it replaced.</li>
-    <li><strong>Slack and WhatsApp still do not work.</strong> Until implemented, the API should refuse
-      to create channels of those types rather than letting them fail 50 times and dead-letter.</li>
+    <li><strong>Slack and WhatsApp still do not work</strong>, but they can no longer be configured —
+      the API refuses them, and any that already exist dead-letter on the first attempt instead of
+      burning 50. The <code>/channel-types</code> endpoint still lists them separately from
+      <code>implemented</code>, so a picker can grey them out rather than hide the roadmap.</li>
+    <li><strong>Two pre-existing complexity hotspots remain in this subsystem, both untested</strong>:
+      <code>publish_manual_endpoint</code> (CRAP 16) and <code>_validate_rule</code> (7) in
+      <code>api/v1/notifications.py</code>, plus <code>TeamsChannel._facts</code> (9). They are not
+      touched by this work; refactoring untested code blind would risk changing behaviour with nothing
+      to catch it. Tests first, then decompose.</li>
     <li><strong>The event bus earns nothing today.</strong> <code>bus.py:35</code> loops over
       subscribers and there is exactly one. It is indirection with a single implementation — worth
       keeping only if a second subscriber is genuinely coming.</li>
@@ -835,8 +842,12 @@ return rows</pre>
           <strong>4 cards</strong> — 3 individual plus one “497 more alerts…”. Every match still keeps
           its event row and a <code>suppressed</code> delivery row, so what the summary covered stays
           answerable</td></tr>
-      <tr><td class="num">7</td><td>Reject unimplemented channel types at config time</td>
-          <td>Kills flaw 6. Small and independent</td></tr>
+      <tr><td class="num">7</td><td>Reject unimplemented channel types at config time
+          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
+          <td>Kills flaw 6. Creating a Slack channel now 400s with a message distinguishing “known but
+          not built” from “never heard of it”. Anything already configured fails fast:
+          <code>NotImplementedError</code> dead-letters on the FIRST attempt rather than the 50th,
+          reusing the permanent-vs-transient distinction the Stage 1 queue already draws</td></tr>
       <tr><td class="num">8</td><td><code>consumer_cursors</code> registry + retention gate</td>
           <td>Do it <em>before</em> a slow consumer exists, so it is never a retrofit</td></tr>
     </tbody>

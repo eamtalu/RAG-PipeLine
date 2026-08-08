@@ -251,6 +251,24 @@ async def test_channel_endpoint(
 # ===================================================================================================
 # channels — customer-scoped collection
 # ===================================================================================================
+def _require_deliverable_channel_type(channel_type: str) -> None:
+    """Reject a channel that could never deliver.
+
+    Two distinct refusals, because they call for completely different reactions. A type we have never
+    heard of is a typo. A type we KNOW but have not built is a roadmap item — and creating one used to
+    be allowed, so every alert routed to it failed 50 times on the retry ladder before dead-lettering,
+    for a reason no retry could ever fix.
+    """
+    if channel_type not in KNOWN_CHANNEL_TYPES:
+        raise HTTPException(400, detail=f"Unknown channel_type {channel_type!r}. "
+                                        f"Expected one of {sorted(KNOWN_CHANNEL_TYPES)}.")
+    if channel_type not in IMPLEMENTED_CHANNEL_TYPES:
+        raise HTTPException(
+            400,
+            detail=f"Channel type {channel_type!r} is known but not implemented yet, so it could "
+                   f"never deliver. Deliverable today: {sorted(IMPLEMENTED_CHANNEL_TYPES)}.")
+
+
 @router.post("/{customer_code}/channels", status_code=201)
 async def create_channel_endpoint(
     customer_code: str, body: CreateChannelRequest,
@@ -258,9 +276,7 @@ async def create_channel_endpoint(
     customers: CustomerRepository = Depends(get_customer_repository),
 ):
     code = await _require_customer(customer_code, customers)
-    if body.channel_type not in KNOWN_CHANNEL_TYPES:
-        raise HTTPException(400, detail=f"Unknown channel_type {body.channel_type!r}. "
-                                        f"Expected one of {sorted(KNOWN_CHANNEL_TYPES)}.")
+    _require_deliverable_channel_type(body.channel_type)
     row = await repo.create_channel(customer_code=code, channel_type=body.channel_type,
                                     name=body.name, config=body.config, enabled=body.enabled)
     return _ser_channel(row)

@@ -256,12 +256,29 @@ def _record_throttled(delivery: NotificationDelivery, exc: ChannelRateLimited) -
                 delivery.id, delivery.next_attempt_at.isoformat())
 
 
+def _is_permanent(exc: Exception) -> bool:
+    """Whether another attempt could ever succeed.
+
+    Only a missing implementation qualifies: the adapter is a registered stub, so no amount of
+    retrying will make the code appear. A disabled or deleted channel is deliberately NOT permanent —
+    someone can re-enable it, and treating that as fatal would discard alerts an operator was about to
+    rescue. Same distinction the Stage 1 ingest queue draws in services/queueing/retry_policy.py.
+    """
+    return isinstance(exc, NotImplementedError)
+
+
 def _record_failure(delivery: NotificationDelivery, exc: Exception) -> None:
     if isinstance(exc, ChannelRateLimited):
         return _record_throttled(delivery, exc)
     delivery.attempts += 1
     delivery.last_error = str(exc)[:2000]
-    if delivery.attempts >= settings.notification_max_attempts:
+    if _is_permanent(exc):
+        # Straight to dead-letter. Spending 50 attempts on something that cannot succeed is pure log
+        # noise, and it delays the dead-letter that tells an operator the channel is misconfigured.
+        delivery.status = DeliveryStatus.dead.value
+        delivery.next_attempt_at = None
+        logger.error("notification delivery %s dead-lettered immediately: %s", delivery.id, exc)
+    elif delivery.attempts >= settings.notification_max_attempts:
         delivery.status = DeliveryStatus.dead.value
         delivery.next_attempt_at = None
     else:

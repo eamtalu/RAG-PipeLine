@@ -560,6 +560,10 @@ Past `notification_rule_burst_cap` (overridable per rule with `{"burst_cap": N}`
 Suppressed rows are deliberately created rather than skipped: the rule cursor has already moved past those transactions, so nothing else would record what the summary covered.
 Rollup summaries carry their rule's id for provenance but are exempt from the cap by event type - otherwise the cap would suppress the very card reporting the suppression.
 
+Only channel types that can actually deliver may be configured.
+`POST /{customer}/channels` refuses a type that is registered but unimplemented (Slack, WhatsApp), separately from one it has never heard of, since those need different reactions from the caller.
+Any such channel that already exists dead-letters on its FIRST attempt rather than after 50: a missing implementation is permanent, unlike a disabled channel someone may re-enable.
+
 ```mermaid
 erDiagram
     customer_notification_channels {
