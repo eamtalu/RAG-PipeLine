@@ -16,6 +16,7 @@ from sqlalchemy import select, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
+from app.services.notifications import tenant_gate
 from app.persistence.models.notification import (
     CustomerNotificationChannel,
     NotificationRule,
@@ -114,8 +115,21 @@ class NotificationRepository:
         return list((await self.db.execute(stmt)).scalars().all())
 
     async def list_active_rules(self) -> list[NotificationRule]:
-        """Every active rule across all tenants (the engine evaluates these each cycle)."""
-        return await self.list_rules(status=RuleStatus.active.value)
+        """Every active rule belonging to a tenant that has notifications switched on.
+
+        TWO switches, and both must be on: a rule's own `status`, and its tenant's
+        `notifications_enabled`. They mean different things — one is "should this rule fire", the
+        other is "is this tenant using notifications at all" — and conflating them would mean turning
+        the subsystem off for a customer silently rewrote all their rules.
+
+        This is the single choke point every rule path goes through, streaming and windowed alike, so
+        the tenant gate is applied once here rather than repeated in each evaluator.
+        """
+        stmt = (select(NotificationRule)
+                .where(NotificationRule.status == RuleStatus.active.value,
+                       tenant_gate.enabled(NotificationRule.customer_code))
+                .order_by(NotificationRule.customer_code.asc(), NotificationRule.created_at.asc()))
+        return list((await self.db.execute(stmt)).scalars().all())
 
     async def update_rule(self, rule_id: uuid.UUID, *, name: str | None = None,
                           description: str | None = None, rule_type: str | None = None,

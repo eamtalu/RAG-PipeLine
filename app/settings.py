@@ -252,8 +252,10 @@ class Settings(BaseSettings):
     # the in-process bus, and the dispatcher fans them out to each customer's enabled channels.
     # Delivery is durable store-and-forward (Postgres outbox + per-channel delivery rows), so a
     # channel/internet outage never drops an alert — it is retried when connectivity returns.
-    # OFF by default.
-    notifications_enabled: bool = False
+    # There is deliberately NO deployment-wide on/off flag here. The switch is per tenant
+    # (`customers.notifications_enabled`) and is read every tick, so it can be operated from the UI.
+    # A single boot-time boolean lived here before and made that impossible: it decided whether the
+    # worker task was ever created, so nothing existed at runtime to observe a change.
     notification_poll_seconds: float = 10.0
     # Streaming rules only consider transactions whose start is within this window — a flood guard so
     # enabling the worker on an existing DB doesn't replay the entire error history at once.

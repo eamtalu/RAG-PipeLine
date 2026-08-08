@@ -730,7 +730,6 @@ async def test_background_starts_parse_worker_only_when_enabled(monkeypatch):
     monkeypatch.setattr(bg, "run_log_parse_worker", _noop)
     monkeypatch.setattr(settings, "log_stitch_worker_enabled", False)
     monkeypatch.setattr(settings, "ssh_log_fetcher_enabled", False)
-    monkeypatch.setattr(settings, "notifications_enabled", False)
     monkeypatch.setattr(settings, "logspace_cleanup_worker_enabled", False)
 
     monkeypatch.setattr(settings, "log_parse_worker_enabled", False)
@@ -764,7 +763,6 @@ async def test_parse_worker_still_starts_to_drain_a_leftover_queue(monkeypatch, 
     monkeypatch.setattr(bg, "run_log_parse_worker", _noop)
     monkeypatch.setattr(settings, "log_stitch_worker_enabled", False)
     monkeypatch.setattr(settings, "ssh_log_fetcher_enabled", False)
-    monkeypatch.setattr(settings, "notifications_enabled", False)
     monkeypatch.setattr(settings, "logspace_cleanup_worker_enabled", False)
     monkeypatch.setattr(settings, "log_parse_worker_enabled", False)
 

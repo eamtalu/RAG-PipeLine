@@ -352,7 +352,6 @@ async def test_stitch_worker_registered_and_enabled_by_default(monkeypatch):
 
     monkeypatch.setattr(bg, "run_log_stitch_worker", _noop)
     monkeypatch.setattr(settings, "ssh_log_fetcher_enabled", False)
-    monkeypatch.setattr(settings, "notifications_enabled", False)
     monkeypatch.setattr(settings, "logspace_cleanup_worker_enabled", False)
     monkeypatch.setattr(settings, "log_parse_worker_enabled", False)
 
@@ -384,7 +383,7 @@ async def test_stitch_worker_starts_anyway_when_windows_are_open(monkeypatch):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(bg, "run_log_stitch_worker", _noop)
-    for name in ("ssh_log_fetcher_enabled", "notifications_enabled",
+    for name in ("ssh_log_fetcher_enabled",
                  "logspace_cleanup_worker_enabled", "log_parse_worker_enabled",
                  "log_stitch_worker_enabled"):
         monkeypatch.setattr(settings, name, False)

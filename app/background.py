@@ -146,12 +146,18 @@ async def start_background_tasks() -> list[asyncio.Task]:
                        "partitions must now be created MANUALLY. Ingestion stops when the existing "
                        "runway runs out.")
     # Notifications (rules → bus → channels). Subscribe the dispatcher to the bus once, then run the
-    # worker that drives rule evaluation + store-and-forward redelivery. Off unless enabled.
-    if settings.notifications_enabled:
-        notification_dispatcher.register()
-        tasks.append(asyncio.create_task(run_notification_worker()))
-    else:
-        logger.info("Notifications disabled (notifications_enabled=False)")
+    # worker that drives rule evaluation + store-and-forward redelivery.
+    #
+    # Started UNCONDITIONALLY. Whether anything actually happens is decided per tenant, every tick,
+    # by `customers.notifications_enabled` — so the switch lives in the product and takes effect
+    # within one poll interval instead of needing a worker restart.
+    #
+    # This used to be gated on a deployment-wide `settings.notifications_enabled`, which made a UI
+    # toggle impossible rather than merely inconvenient: the flag decided whether the task was ever
+    # CREATED, so flipping it at runtime had nothing to observe it. A tick with no enabled tenant is
+    # a couple of cheap queries that return nothing.
+    notification_dispatcher.register()
+    tasks.append(asyncio.create_task(run_notification_worker()))
     # Log-space cleanup: auto-expire disposables + sweep stale presence. Off unless explicitly enabled;
     # DELETE /customers/{code} performs the same purge on demand regardless of this flag.
     if settings.logspace_cleanup_worker_enabled:

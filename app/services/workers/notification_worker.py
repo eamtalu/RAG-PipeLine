@@ -5,7 +5,7 @@ subscribed, persists them to the outbox and attempts immediate delivery); (2) ru
 loop, which re-attempts any pending/failed deliveries whose backoff has elapsed — this is what makes
 delivery resilient to a channel/internet outage (they go out once connectivity returns).
 
-OFF by default — enable with settings.notifications_enabled.
+Always running; each tick does work only for tenants with `customers.notifications_enabled` set.
 """
 
 import asyncio

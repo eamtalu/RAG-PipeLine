@@ -62,6 +62,12 @@ class CreateCustomerRequest(BaseModel):
 
 class UpdateCustomerRequest(BaseModel):
     active: bool | None = Field(default=None, description="Set false to retire the tenant from ingestion + selection.")
+    notifications_enabled: bool | None = Field(
+        default=None,
+        description="Whether this tenant's notification rules run and its queued alerts are sent. "
+                    "Separate from a rule's own status: BOTH must be on. Takes effect within one "
+                    "worker poll (~10s), no restart. Turning it off pauses delivery rather than "
+                    "discarding it, so queued alerts resume if it is turned back on.")
     timezone: str | None = Field(default=None, description=_TZ_HELP)
     # permanent-space fields (admin-only edit)
     name: str | None = Field(default=None, description="Human name of a permanent space.")
@@ -109,6 +115,7 @@ def _serialize(c: Customer, presence: list[LogspacePresence] | None = None) -> d
         "timezone_set": c.timezone is not None,                      # false → needs attention
         "effective_timezone": c.timezone or settings.display_timezone,  # what ingestion/display use
         "active": c.active,
+        "notifications_enabled": c.notifications_enabled,   # the UI needs this to render its banner
         "created_at": c.created_at.isoformat() if c.created_at else None,
         # --- log-space kind + per-kind fields (permanent-only or disposable-only are null otherwise) ---
         "kind": c.kind.value if c.kind else None,
@@ -380,8 +387,10 @@ def _permanent_fields(body: UpdateCustomerRequest) -> dict:
 def _require_something_to_update(body: UpdateCustomerRequest, perm_kwargs: dict) -> None:
     """Reject an empty PATCH rather than silently returning the unchanged tenant, which reads to the
     caller exactly like a successful update."""
-    if body.active is None and body.timezone is None and not perm_kwargs:
-        raise HTTPException(400, detail="Provide 'active', 'timezone', and/or a permanent field "
+    if (body.active is None and body.timezone is None
+            and body.notifications_enabled is None and not perm_kwargs):
+        raise HTTPException(400, detail="Provide 'active', 'timezone', 'notifications_enabled', "
+                                        "and/or a permanent field "
                                         "('name'/'description'/'environment') to update.")
 
 
@@ -451,6 +460,8 @@ async def update_customer(
                                            allow_mixed=allow_mixed_timezones)
     if body.active is not None:
         cust = await repo.set_active(code, body.active)
+    if body.notifications_enabled is not None:
+        cust = await repo.set_notifications_enabled(code, body.notifications_enabled)
     presence = await presence_repo.list_for_code(code, fresh_after=_presence_fresh_after())
     return _serialize(cust, presence=presence)
 

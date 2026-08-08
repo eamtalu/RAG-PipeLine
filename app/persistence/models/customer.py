@@ -67,6 +67,17 @@ class Customer(Base):
     # cleanup worker only purges rows with a non-NULL expires_at that is due.
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+
+    #: Whether this tenant's notification rules run at all, and whether its queued alerts go out.
+    #: Separate from a RULE's own status: this is the subsystem switch for the tenant, and both must
+    #: be on. It replaced a single deployment-wide env flag that was read once at process boot, which
+    #: no UI could ever have controlled.
+    #:
+    #: Defaults FALSE, and deliberately so — every existing tenant acquires this column at once, and a
+    #: default of true would start alerting for people who never asked for it.
+    notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -31,6 +31,7 @@ from app.persistence.models.notification import (
     NotificationDelivery,
     DeliveryStatus,
 )
+from app.services.notifications import tenant_gate
 from app.services.notifications.bus import bus
 from app.services.notifications.events import NotificationEvent
 from app.services.notifications import pacing, rollup
@@ -322,6 +323,11 @@ async def _claim_due(db, now: datetime) -> list[tuple[NotificationDelivery, str]
                 [DeliveryStatus.pending.value, DeliveryStatus.failed.value]),
             (NotificationDelivery.next_attempt_at.is_(None)) |
             (NotificationDelivery.next_attempt_at <= now),
+            # Switching a tenant off has to stop MESSAGES, not just rule evaluation. Without this,
+            # an already-queued burst would keep arriving for as long as pacing took to drain it —
+            # which is the situation someone would be hitting the switch to escape. The rows stay
+            # `pending` rather than being failed or discarded, so re-enabling resumes them.
+            tenant_gate.enabled(NotificationEventRow.customer_code),
         )
         .order_by(NotificationDelivery.created_at.asc())
         .with_for_update(skip_locked=True, of=NotificationDelivery)

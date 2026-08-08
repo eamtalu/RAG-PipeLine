@@ -496,6 +496,7 @@ erDiagram
         string owner_name "disposable-only"
         datetime expires_at "disposable-only: auto-purge"
         bool active
+        bool notifications_enabled "per-tenant notifications switch; default false"
         datetime created_at
         datetime updated_at
     }
@@ -550,6 +551,24 @@ erDiagram
 
 A data-driven alerting pipeline with a durable outbox so no alert is lost during an outage.
 `notification_rules` decide WHEN to alert, `customer_notification_channels` decide WHERE alerts go, `notification_events` is the durable outbox of published alerts, and `notification_deliveries` tracks each (event x channel) send attempt with retries and backoff.
+
+### Two switches, and both must be on
+
+`customers.notifications_enabled` (migration `e4b28f5c9107`) is the SUBSYSTEM switch for a tenant; a rule's own `status` is the switch for that rule.
+They mean different things, so they are separate columns: turning the subsystem off for a customer must not silently rewrite all their rules.
+It replaced a deployment-wide env flag that was read ONCE at process boot to decide whether the worker task was ever created - a shape that made a UI toggle impossible rather than merely inconvenient, since flipping it at runtime had nothing to observe it.
+The worker now always runs and reads the flag each tick, so a change takes effect within one poll interval with no restart.
+
+One predicate, `app/services/notifications/tenant_gate.enabled()`, is applied in exactly three places, and they must never disagree:
+
+- `NotificationRepository.list_active_rules` - a switched-off tenant's rules are not evaluated;
+- `dispatcher._claim_due` - and its already-queued alerts stop going out, staying `pending` rather than being discarded, so re-enabling resumes them;
+- `consumer_cursors.notifications_position` - and its frozen cursors do not hold retention hostage.
+
+The third is the dangerous one and is the reason the predicate is shared rather than copied.
+A switched-off customer keeps rules whose `status` is still active, so their `cursor_at` simply stops advancing.
+Publishing that frozen minimum would pin partition retention for the WHOLE INSTANCE, because retention gates drops on it - one tenant's notification preference would quietly stop the disk being reclaimed.
+A disabled tenant is not a slow reader; it is not a reader.
 
 Streaming rules read `log_transactions` **incrementally**, via `notification_rules.cursor_at` (migration `c7a02f68b1d4`).
 The cursor is a `log_transactions.created_at` - the WRITE time, not `started_at` which is when the log line happened.

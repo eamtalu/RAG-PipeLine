@@ -96,6 +96,22 @@ class CustomerRepository:
         await self.db.refresh(cust)
         return cust
 
+    async def set_notifications_enabled(self, customer_code: str,
+                                        enabled: bool) -> Customer | None:
+        """Switch this tenant's notification subsystem on or off.
+
+        Its own method rather than a branch of `update_fields`, which is the ADMIN-gated updater for
+        permanent-space metadata (name/description/environment). This is an ordinary tenant setting
+        and must not inherit that gate.
+        """
+        cust = await self.get_by_code(customer_code)
+        if cust is None:
+            return None
+        cust.notifications_enabled = enabled
+        await self.db.commit()
+        await self.db.refresh(cust)
+        return cust
+
     # --- additional display names (usernames) per tenant ---------------------------------------
 
     async def list_display_names(

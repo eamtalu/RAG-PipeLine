@@ -85,13 +85,16 @@ async def test_start_background_tasks_assembles_enabled_loops(monkeypatch):
     # durable backlog to fall back on, so it runs by default and is only silenced explicitly.
     monkeypatch.setattr(settings, "log_stitch_worker_enabled", False)
     monkeypatch.setattr(settings, "ssh_log_fetcher_enabled", True)
-    monkeypatch.setattr(settings, "notifications_enabled", False)
     monkeypatch.setattr(settings, "logspace_cleanup_worker_enabled", False)
     monkeypatch.setattr(settings, "log_parse_worker_enabled", False)
     tasks = await bg.start_background_tasks()
     try:
-        assert len(tasks) == 4
-        assert reg["n"] == 0                     # dispatcher NOT registered when notifications off
+        # 5, not 4: notifications has NO deployment-wide flag any more (chunk 36). The worker always
+        # starts and each tick does work only for tenants with `customers.notifications_enabled`.
+        # The old boot-time boolean is what made a UI toggle impossible — it decided whether the task
+        # was ever CREATED, so flipping it at runtime had nothing to observe it.
+        assert len(tasks) == 5
+        assert reg["n"] == 1                     # dispatcher registered unconditionally now
     finally:
         await bg.stop_background_tasks(tasks)
     assert all(t.cancelled() or t.done() for t in tasks)   # stop cancels everything
@@ -99,13 +102,15 @@ async def test_start_background_tasks_assembles_enabled_loops(monkeypatch):
     # everything on -> embedding + watcher + stitch + ssh + parse + notifications + cleanup
     #                  + partition = 8
     monkeypatch.setattr(settings, "log_stitch_worker_enabled", True)
-    monkeypatch.setattr(settings, "notifications_enabled", True)
     monkeypatch.setattr(settings, "logspace_cleanup_worker_enabled", True)
     monkeypatch.setattr(settings, "log_parse_worker_enabled", True)
     tasks = await bg.start_background_tasks()
     try:
         assert len(tasks) == 8
-        assert reg["n"] == 1                     # dispatcher registered exactly once
+        # Once per startup — this is the SECOND start in this test, hence 2. Not a leak: `bus.subscribe`
+        # ignores a handler it already holds (bus.py:25), so the subscriber list stays at one however
+        # many times a process starts its background tasks.
+        assert reg["n"] == 2
     finally:
         await bg.stop_background_tasks(tasks)
 
@@ -114,7 +119,7 @@ async def test_the_partition_worker_can_be_turned_off(monkeypatch):
     """It defaults ON because nothing else provisions partitions, but an operator managing them by
     hand must still be able to silence it — and the count must actually drop when they do."""
     _stub_loops(monkeypatch)
-    for flag in ("log_stitch_worker_enabled", "notifications_enabled",
+    for flag in ("log_stitch_worker_enabled",
                  "logspace_cleanup_worker_enabled", "log_parse_worker_enabled",
                  "ssh_log_fetcher_enabled"):
         monkeypatch.setattr(settings, flag, False)

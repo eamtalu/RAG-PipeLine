@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.consumer_cursor import ConsumerCursor
 from app.persistence.models.notification import NotificationRule, RuleStatus
+from app.services.notifications import tenant_gate
 from app.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -116,11 +117,20 @@ async def notifications_position(db: AsyncSession) -> datetime | None:
     SQL's `MIN` already skips NULLs (measured, not assumed), so the explicit `isnot(None)` below is
     redundant for correctness. It is kept to state the intent at the point it matters, since the
     behaviour depends on aggregate semantics a reader would otherwise have to know by heart.
+
+    The tenant gate is NOT optional here, and this is the most dangerous of its three call sites. A
+    customer with notifications switched off keeps rules whose `status` is still active; their cursors
+    simply stop advancing. Publishing that frozen minimum would hold retention at a timestamp that
+    never moves again — so one tenant's notification preference would stop partition drops for the
+    WHOLE INSTANCE and fill the disk, with nothing anywhere reporting why.
+
+    A disabled tenant is not a slow reader. It is not a reader.
     """
     return await db.scalar(
         select(func.min(NotificationRule.cursor_at)).where(
             NotificationRule.status == RuleStatus.active.value,
-            NotificationRule.cursor_at.isnot(None)))
+            NotificationRule.cursor_at.isnot(None),
+            tenant_gate.enabled(NotificationRule.customer_code)))
 
 
 async def report_notifications(db: AsyncSession) -> None:
