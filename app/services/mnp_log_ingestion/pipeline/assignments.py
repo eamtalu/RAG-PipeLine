@@ -160,6 +160,46 @@ async def load_transaction_by_entry(db: AsyncSession,
     return {entry_id: txn_id for entry_id, txn_id in rows}
 
 
+def owners_in_window_stmt(customer_code: str, window: UtcWindow | None):
+    """The SELECT behind `load_owners_in_window`, separated so a test can EXPLAIN it.
+
+    The `entry_ts` predicate is the whole point and is not interchangeable with an equivalent filter
+    on `transaction_id`. `entry_ts` is the PARTITION KEY, so bounding it prunes at PLAN time; without
+    it the planner opens every partition and plans an index scan into each. Measured on production:
+
+        transaction_id IN (...)             planning 109.1 ms, execution 4.98 ms
+        customer_code + entry_ts window     planning  23.3 ms, execution 0.50 ms
+
+    Planning dominated the first shape by 22x. Restricting to the transactions actually being rebuilt
+    is done afterwards, in memory, by `Continuity.owner_of`.
+
+    `include_null` because an entry whose timestamp did not parse has a NULL `entry_ts` and lives in
+    the default partition. A range predicate is FALSE for NULL, so without this branch those entries
+    would drop out of the map and silently lose their identity - the same trap `_existing_ids_stmt`
+    documents on the transaction side.
+    """
+    stmt = select(LogEntryAssignment.entry_id, LogEntryAssignment.transaction_id).where(
+        LogEntryAssignment.customer_code == customer_code)
+    if window is not None:
+        stmt = stmt.where(window.covers(LogEntryAssignment.entry_ts, include_null=True))
+    return stmt
+
+
+async def load_owners_in_window(db: AsyncSession, customer_code: str,
+                                window: UtcWindow | None) -> dict[uuid.UUID, uuid.UUID]:
+    """`{entry_id: transaction_id}` for every assigned entry in the window - ONE bulk query.
+
+    The sibling of `load_transaction_by_entry`, keyed by a time window rather than a list of entry
+    ids, because `regroup_window` needs this BEFORE it knows which entries it will re-read. Reading it
+    afterwards would return an empty map: the delete it precedes destroys exactly these rows.
+
+    A single query, never one per entry or per transaction. An N+1 here would cost more than
+    everything else the rebuild does put together.
+    """
+    rows = (await db.execute(owners_in_window_stmt(customer_code, window))).all()
+    return {entry_id: txn_id for entry_id, txn_id in rows}
+
+
 def entries_stmt(transaction_ids: list[uuid.UUID], *, limit: int,
                  window: UtcWindow | None):
     """The SELECT behind `load_entries`, as a statement.

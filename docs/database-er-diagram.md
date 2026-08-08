@@ -186,7 +186,7 @@ One transaction groups many entries.
 ```mermaid
 erDiagram
     log_transactions {
-        uuid id "deterministic uuid5; unique w/ started_at, NOT a PK"
+        uuid id "inherited on rebuild, else uuid5; unique w/ started_at, NOT a PK"
         uuid job_id FK "-> jobs.id (CASCADE)"
         string customer_code "soft tenant key"
         bool sealed
@@ -297,6 +297,25 @@ The `log_entries.transaction_id` / `seq` columns and their index are **gone** (m
 `log_entries` is now strictly insert-only: five consecutive regroups of the same window perform **0** row updates, against ~55 rewrites per row before.
 
 Note: `log_transactions.flow_id` is a nullable hook for a future `log_flow` table and has no foreign key today.
+
+### How `log_transactions.id` is decided
+
+A transaction is deleted and rebuilt whenever Stage 2 re-stitches its time window, so its id has to survive that.
+
+A NEW group gets `uuid5(customer_code + anchor entry hash)`, where the anchor is the REQUEST entry if the group has one and the earliest entry otherwise.
+That is content-derived, and content changes: a backfilled file can add an earlier line, or supply the REQUEST line that failed to parse, which moves the anchor and therefore the id.
+Measured on production, 1.3% of transactions have no REQUEST entry and are exposed to this.
+
+So a REBUILT group does not recompute its id, it inherits one.
+`regroup_window` reads `{entry_id -> transaction_id}` from `log_entry_assignment` before deleting those rows, and each rebuilt group reuses the id of the transaction that owned the plurality of its entries (`app/services/mnp_log_ingestion/pipeline/continuity.py`).
+A merge keeps the larger contributor's id; a split keeps it for the larger half and the remainder mints a fresh one.
+
+Two consequences worth stating, because the schema cannot enforce either:
+
+- Only a transaction being rebuilt in that same window may have its id reused.
+  `uq_log_transactions_id` is `UNIQUE NULLS NOT DISTINCT (id, started_at)` rather than unique on `id`, because a partitioned table requires the partition key inside the constraint.
+  Two rows sharing an id but differing in `started_at` therefore land in different partitions and are accepted silently.
+- For the same reason, one id may never be awarded to two rebuilt groups.
 
 ### Daily partitioning
 

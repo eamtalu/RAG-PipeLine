@@ -35,7 +35,7 @@ from app.services.mnp_log_ingestion.timefmt import to_display, set_display_timez
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun, LogRegroupRunStatus
 from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
-from app.services.mnp_log_ingestion.pipeline import assignments, time_bounds
+from app.services.mnp_log_ingestion.pipeline import assignments, continuity, time_bounds
 from app.services.queueing import retry_policy
 
 logger = logging.getLogger(__name__)
@@ -552,19 +552,29 @@ def _is_sealed(values: dict, seal_cutoff: datetime | None, abandon_cutoff: datet
     return ended < seal_cutoff
 
 
-async def _resolve_ids(db: AsyncSession, builders: list[_TxnBuilder],
-                       customer_code: str) -> tuple[list[uuid.UUID], set[uuid.UUID]]:
-    """Each builder's deterministic id, plus the subset of them that already exist.
+async def _resolve_ids(db: AsyncSession, builders: list[_TxnBuilder], customer_code: str,
+                       cont: continuity.Continuity = continuity.EMPTY
+                       ) -> tuple[list[uuid.UUID], set[uuid.UUID]]:
+    """Each builder's id, plus the subset of them that already exist.
 
     The sort comes first and is not cosmetic: entries are attached out of stream order (a REQUEST is
     bound after its work appears), and `_txn_id` reads the ANCHOR entry, which is whichever entry the
     order puts first. Computing ids before sorting would produce a different id for the same
     transaction and break the idempotency the whole design rests on. Sorting also makes seq,
     source_file_start/end and the rendered timeline correct.
+
+    An id is INHERITED where the builder rebuilds a transaction that just got freed, and MINTED by
+    `_txn_id` where it does not. Inheriting is what stops an id changing when a backfill alters the
+    anchor entry — see `continuity` for why a content-derived id cannot be stable. `_txn_id` is
+    untouched, so a first-time group is identified exactly as it is today and no existing id is ever
+    rewritten.
+
+    `cont` defaults to no predecessors, which reduces this to the previous behaviour. Only
+    `regroup_window` can supply one, because only it frees transactions.
     """
     for b in builders:
         b.entries.sort(key=_entry_stream_order)
-    ids = [_txn_id(b.entries) for b in builders]
+    ids = continuity.assign([b.entries for b in builders], cont, fallback=_txn_id)
     existing = await _existing_transaction_ids(
         db, customer_code, ids,
         window=_clash_window([e.timestamp for b in builders for e in b.entries]))
@@ -606,7 +616,8 @@ async def _write_transaction(db: AsyncSession, *, tid: uuid.UUID, values: dict, 
 
 
 async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code: str,
-                   seal_cutoff: datetime | None, abandon_cutoff: datetime | None) -> dict:
+                   seal_cutoff: datetime | None, abandon_cutoff: datetime | None,
+                   cont: continuity.Continuity = continuity.EMPTY) -> dict:
     """Compute + insert each builder with a deterministic id, assign its entries, and seal those
     nothing more can join. Caller commits.
 
@@ -623,7 +634,7 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
     created = sealed = assigned = skipped = 0
     by_status: dict[str, int] = {}
     seen: set[uuid.UUID] = set()
-    ids, existing = await _resolve_ids(db, builders, customer_code)
+    ids, existing = await _resolve_ids(db, builders, customer_code, cont)
     for b, tid in zip(builders, ids):
         if tid in seen or tid in existing:
             skipped += 1
@@ -838,6 +849,17 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
             LogTransaction.started_at <= hi,
         )
     )).scalars().all())
+
+    # 1b. record which transaction owned each entry, BEFORE the delete below destroys the evidence.
+    #     Ordering is the correctness condition, not a preference: reading this afterwards returns an
+    #     empty map, which does not fail — it silently reverts to minting a fresh id per rebuild, and
+    #     the identity instability returns unnoticed. One bulk query, bounded by the same window; see
+    #     `assignments.owners_in_window_stmt` for why it is keyed on entry_ts and not on `freed`.
+    cont = continuity.Continuity(
+        owner_by_entry=await assignments.load_owners_in_window(
+            db, customer_code, time_bounds.from_instants([lo_p, hi_p], pad=timedelta(0))),
+        reusable=frozenset(freed))
+
     await assignments.delete_for_transactions(db, freed)
     await db.execute(delete(LogTransaction).where(LogTransaction.id.in_(freed)) if freed
                      else delete(LogTransaction).where(sa_false()))
@@ -870,7 +892,7 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
         return {**stats, "customers": 0, "entries_scanned": 0,
                 "transactions_created": 0, "transactions_sealed": 0}
     seal_cutoff, abandon_cutoff = await _cutoffs(db, customer_code)
-    result = await _persist(db, _group(rows), customer_code, seal_cutoff, abandon_cutoff)
+    result = await _persist(db, _group(rows), customer_code, seal_cutoff, abandon_cutoff, cont)
     if commit:
         await db.commit()
     _merge_stats(stats, {**result, "entries_scanned": len(rows),

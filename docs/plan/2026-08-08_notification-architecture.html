@@ -506,6 +506,32 @@ error / soft / success →  alert     <span class="c"># already terminal</span><
   redundant: a rule edited, replayed, or with a reset cursor would re-alert without it. Dedupe is the
   safety net that makes every other optimisation safe to get wrong.</p>
 
+  <h3>What dedupe rests on: a transaction id that does not move</h3>
+  <p>A <code>dedup_key</code> is built from the transaction's id, so &ldquo;nothing is sent twice&rdquo;
+  is only true while that id is <strong>stable</strong>. It was not.</p>
+  <p>Stage 2 deletes and rebuilds every transaction in a re-stitched window, and the id was derived
+  from the transaction's <em>content</em> &mdash; the hash of its REQUEST entry, or of its earliest
+  entry when it had none. A backfilled file that adds an earlier line, or supplies the REQUEST line
+  that failed to parse, moved the anchor and therefore the id. Measured on production over one full
+  day: <strong>216 of 16,153 transactions (1.3%)</strong> have no REQUEST entry and were exposed to
+  this. The same transaction would alert again under a new identity, and the deep link in the first
+  card would 404.</p>
+  <div class="panel good">
+    <h4>The fix: identity is carried, not recomputed</h4>
+    <p><code>app/services/mnp_log_ingestion/pipeline/continuity.py</code>.
+    <code>log_entry_assignment</code> already records which entries belonged to which transaction, and
+    <code>regroup_window</code> was discarding that a moment before it would have answered the
+    question. It now reads <code>{entry_id &rarr; transaction_id}</code> in one bulk query
+    <em>before</em> the delete, and each rebuilt group reuses the id of the transaction that owned the
+    plurality of its entries. A merge keeps the larger contributor's id; a split keeps it for the
+    larger half.</p>
+    <p>New groups still mint <code>uuid5</code> exactly as before, so no id that exists today was
+    rewritten &mdash; deploying it re-fired no alert and broke no saved link. Cost is one added query
+    per rebuild: <strong>0.50 ms</strong>, on rows that were about to be deleted anyway.</p>
+  </div>
+  <p class="note">Nothing in the notification pipeline changed for this. That is the point: dedupe was
+  never the broken part, it was resting on something that was.</p>
+
   <h3>The burst cap and the rollup</h3>
   <p><code>app/services/notifications/rollup.py</code>. Pacing protects the webhook; this protects the
   person reading the channel, for whom 500 cards delivered slowly is still 500 cards.</p>
