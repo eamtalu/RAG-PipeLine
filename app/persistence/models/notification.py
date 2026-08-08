@@ -44,6 +44,10 @@ class DeliveryStatus(str, enum.Enum):
     delivered = "delivered"    # accepted by the channel
     failed = "failed"          # last attempt failed; will be retried after next_attempt_at
     dead = "dead"              # exceeded max attempts — dead-lettered (surfaced, not retried)
+    # Past its rule's burst cap for the window: represented by a rollup summary card instead of being
+    # sent individually. RECORDED rather than skipped, so "which transactions were in that rollup?"
+    # stays answerable — the cursor has already moved past them. Never claimed by the drain.
+    suppressed = "suppressed"
 
 
 # ---------------------------------------------------------------------------------------------------

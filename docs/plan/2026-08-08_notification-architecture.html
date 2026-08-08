@@ -829,8 +829,12 @@ return rows</pre>
           (100% covered). Measured: tenant A floods with 30 alerts and tenant B raises 2 — each sends
           exactly its 3/min budget, B is not starved, and <strong>zero</strong> attempts are burned on
           the 27 held rows, because a deferral is not a failure</td></tr>
-      <tr><td class="num">6</td><td>Rollup threshold + summary card</td>
-          <td>Kills flaw 7 — protects the reader, not just the webhook</td></tr>
+      <tr><td class="num">6</td><td>Rollup threshold + summary card
+          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
+          <td>Kills flaw 7. Measured: 500 matching transactions with <code>burst_cap=3</code> produce
+          <strong>4 cards</strong> — 3 individual plus one “497 more alerts…”. Every match still keeps
+          its event row and a <code>suppressed</code> delivery row, so what the summary covered stays
+          answerable</td></tr>
       <tr><td class="num">7</td><td>Reject unimplemented channel types at config time</td>
           <td>Kills flaw 6. Small and independent</td></tr>
       <tr><td class="num">8</td><td><code>consumer_cursors</code> registry + retention gate</td>

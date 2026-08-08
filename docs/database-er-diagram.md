@@ -555,6 +555,11 @@ A delivery beyond the budget is **rescheduled, never dropped**, and is not a fai
 The drain also claims round-robin across tenants, so one tenant's flood no longer fills every batch while another's single alert waits.
 An HTTP 429 raises `ChannelRateLimited` carrying the server's own `Retry-After`, which is honoured instead of the generic backoff ladder and likewise does not consume the retry budget.
 
+Pacing protects the webhook; a per-rule **burst cap** protects the person reading the channel, since 500 cards delivered slowly is still 500 cards.
+Past `notification_rule_burst_cap` (overridable per rule with `{"burst_cap": N}` in `match`), further deliveries are created with status **`suppressed`** rather than `pending` - recorded, never claimed by the drain, and represented by one rollup summary card per completed window.
+Suppressed rows are deliberately created rather than skipped: the rule cursor has already moved past those transactions, so nothing else would record what the summary covered.
+Rollup summaries carry their rule's id for provenance but are exempt from the cap by event type - otherwise the cap would suppress the very card reporting the suppression.
+
 ```mermaid
 erDiagram
     customer_notification_channels {

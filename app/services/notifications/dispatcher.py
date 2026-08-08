@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.settings import settings
 from app.config.database import async_session
 from app.persistence.models.notification import (
+    NotificationRule,
     CustomerNotificationChannel,
     NotificationEvent as NotificationEventRow,
     NotificationDelivery,
@@ -32,7 +33,7 @@ from app.persistence.models.notification import (
 )
 from app.services.notifications.bus import bus
 from app.services.notifications.events import NotificationEvent
-from app.services.notifications import pacing
+from app.services.notifications import pacing, rollup
 from app.services.notifications.channels import get_channel
 from app.services.notifications.channels.base import ChannelRateLimited
 
@@ -63,6 +64,31 @@ def _event_from_row(row: NotificationEventRow) -> NotificationEvent:
 
 
 # ---- publish path (bus subscriber) ----------------------------------------------------------------
+async def _delivery_status_for(db, event: NotificationEvent) -> str:
+    """`pending` normally; `suppressed` once this rule has spilled past its burst cap for the window.
+
+    Two exemptions, both load-bearing:
+
+    *Events with no rule* — manual publishes and channel tests. Human-initiated, cannot flood, and
+    silently collapsing them would be baffling.
+
+    *Rollup summaries* — they carry their rule's id for provenance, so without this the cap would
+    suppress the very card that exists to report the suppression, and the flood would vanish in
+    silence. Exempted by event TYPE rather than by a missing rule, so the provenance is kept.
+    """
+    if not event.rule_id or event.event_type == rollup.EVENT_TYPE:
+        return DeliveryStatus.pending.value
+    rule_id = uuid.UUID(event.rule_id)
+    window = settings.notification_rollup_window_seconds
+    since = _now() - timedelta(seconds=window)
+    rule = await db.get(NotificationRule, rule_id)
+    cap = rollup.burst_cap(rule.match if rule else None)
+    already = await rollup.count_delivered_this_window(db, rule_id, since)
+    if rollup.should_suppress(already_sent=already, cap=cap):
+        return DeliveryStatus.suppressed.value
+    return DeliveryStatus.pending.value
+
+
 def _event_row(event: NotificationEvent) -> NotificationEventRow:
     """The outbox row for a published event."""
     return NotificationEventRow(
@@ -108,14 +134,16 @@ async def enqueue(event: NotificationEvent) -> list[uuid.UUID]:
         db.add(event_row)
         await db.flush()  # assign event_row.id
 
+        status = await _delivery_status_for(db, event)
         for ch in channels:
             d = NotificationDelivery(
                 event_id=event_row.id, channel_id=ch.id, channel_type=ch.channel_type,
-                status=DeliveryStatus.pending.value, attempts=0,
+                status=status, attempts=0,
             )
             db.add(d)
             await db.flush()
-            delivery_ids.append(d.id)
+            if status == DeliveryStatus.pending.value:
+                delivery_ids.append(d.id)
         await db.commit()   # durable BEFORE anything is sent — an outage cannot lose the alert
     return delivery_ids
 

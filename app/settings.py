@@ -291,6 +291,12 @@ class Settings(BaseSettings):
     # the budget are RESCHEDULED, never dropped and never counted as failed attempts.
     notification_channel_max_per_minute: int = 20
     notification_rate_window_seconds: int = 60
+    # Individual cards one RULE may send per rollup window before the rest are collapsed into a single
+    # summary. Overridable per rule with {"burst_cap": N} in its match JSONB; 0 means "always
+    # summarise, never send an individual card". Pacing protects the webhook; this protects the person
+    # reading the channel, for whom 500 cards delivered slowly is still 500 cards.
+    notification_rule_burst_cap: int = 5
+    notification_rollup_window_seconds: int = 300
     # Optional public base URL of the app/frontend; when set, alert cards include a deep link to the
     # transaction view. Empty ⇒ cards just show the transaction id/fields.
     app_public_base_url: str = ""

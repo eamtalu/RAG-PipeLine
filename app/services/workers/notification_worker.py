@@ -13,6 +13,7 @@ import logging
 
 from app.settings import settings
 from app.services.notifications.rules.engine import run_rules_once
+from app.services.notifications import rollup
 from app.services.notifications.dispatcher import deliver_due
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,11 @@ async def run_notification_worker() -> None:
     while True:
         try:
             await run_rules_once()
+            # Summarise what the burst cap suppressed. Must run BEFORE the drain so a summary
+            # published this tick goes out on the same tick, exactly like any other alert — and must
+            # run at all, or suppressed alerts would be collapsed and then never represented, which
+            # is strictly worse than not suppressing them.
+            await rollup.run_once()
             attempted = await deliver_due()
             if attempted:
                 logger.info("Notification drain attempted %d delivery(ies)", attempted)
