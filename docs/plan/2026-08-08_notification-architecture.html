@@ -767,9 +767,11 @@ return rows</pre>
       and Stage 2 rewrites the unsealed tail constantly — so the same transaction re-enters the feed
       repeatedly for ~15 minutes. That is correct (the row genuinely changed) but it means every
       consumer <em>must</em> be idempotent. Seal-gating removes most of this churn.</li>
-    <li><strong>Seal-gating trades latency for accuracy.</strong> Gate only <code>incomplete</code>.
-      Gating everything would delay a genuine error alert by up to the 15-minute seal window, which
-      defeats the point of alerting.</li>
+    <li><strong>Seal-gating trades latency for accuracy.</strong> Only <code>incomplete</code> is
+      gated by default. The residual edge: a late error entry can join an already-responded
+      transaction inside the seal window and flip <code>success</code> to <code>error</code> — rare,
+      but real. <code>notification_alert_only_sealed=true</code> closes it by requiring a seal for
+      every status, at the cost of delaying every alert by up to 15 minutes.</li>
     <li><strong>Moving the send off the publish path adds latency.</strong> An alert waits for the
       delivery tick instead of going out during evaluation. Run the delivery loop faster than
       evaluation (~1–2 s) so worst-case latency stays roughly where it is today.</li>
@@ -805,8 +807,12 @@ return rows</pre>
           <td>Migrations <code>c7a02f68b1d4</code> + <code>app/services/notifications/cursor.py</code>.
           Measured: 50 matching rows publish once on tick 1 (131 ms), then ticks 2-3 read
           <strong>zero rows</strong> in 13 ms. Dedupe kept as the safety net</td></tr>
-      <tr><td class="num">3</td><td>Seal-gate <code>incomplete</code></td>
-          <td>Kills flaw 4 and removes most of the regroup churn from step 2</td></tr>
+      <tr><td class="num">3</td><td>Seal-gate <code>incomplete</code>
+          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
+          <td>Kills flaw 4. <code>rules/stability.py</code> — applied in SQL, so churning in-flight
+          rows are never fetched. Verified end to end: in-flight <code>incomplete</code> held back,
+          sealed <code>incomplete</code> alerts, unsealed <code>error</code>/<code>success</code>
+          alert immediately</td></tr>
       <tr><td class="num">4</td><td><strong>Move the send out of the publish path</strong></td>
           <td>The structural change. Nothing in 5 or 6 is possible before it</td></tr>
       <tr><td class="num">5</td><td>Per-channel pacing, fairness, <code>Retry-After</code></td>

@@ -274,6 +274,13 @@ class Settings(BaseSettings):
     # cursor only as far as it actually read, so a backlog is drained over several ticks rather than
     # skipped.
     notification_candidate_limit: int = 2000
+    # Require a transaction to be SEALED before any rule may alert on it. Off by default: an
+    # `incomplete` transaction is always gated (it routinely becomes `success`, and the stable
+    # dedup_key means that false alert could never be corrected), but error/soft/success alert
+    # immediately so a real failure is not delayed by the 15-minute seal window. Turn this on to
+    # close the remaining edge - a late error entry flipping an already-responded transaction - at
+    # the cost of that delay on every alert.
+    notification_alert_only_sealed: bool = False
     # Optional public base URL of the app/frontend; when set, alert cards include a deep link to the
     # transaction view. Empty ⇒ cards just show the transaction id/fields.
     app_public_base_url: str = ""

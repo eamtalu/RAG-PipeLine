@@ -272,6 +272,28 @@ async def test_reset_abandoned_re_arms_for_retry(clean):
     assert rid in claimable, "a re-armed row is not visible to the claim query"
 
 
+async def test_re_arm_uses_the_database_clock_not_the_app_clock(clean):
+    """Regression guard for a real flake that was a real bug.
+
+    `claim_one` gates on `available_at <= clock_timestamp()` — the DATABASE clock. Re-arming used to
+    write `datetime.now()` — the APP HOST's clock. Measured drift on this deployment swings roughly
+    +3 ms to -55 ms, so whenever the host ran ahead the re-armed row sat in the database's future and
+    was silently unclaimable for that long.
+
+    Checked 25 times because the failure only appears on the positive excursions.
+    """
+    for _ in range(25):
+        rid = await _mk_row(status=SourceObjectStatus.abandoned,
+                            attempts=settings.log_parse_max_attempts)
+        async with async_session() as s:
+            await lpw.reset_abandoned_objects(s, CC)
+            due = await s.scalar(
+                select(LogSourceObject.available_at <= func.clock_timestamp())
+                .where(LogSourceObject.id == rid))
+        assert due is True, "a re-armed row must be due immediately by the DATABASE's clock"
+        await _cleanup(CC)
+
+
 # =============================================================== the atomic write
 async def test_checkpoint_and_queue_row_commit_together(committed_source, clean):
     """The load-bearing guarantee: bookmark and to-do note land as one action."""

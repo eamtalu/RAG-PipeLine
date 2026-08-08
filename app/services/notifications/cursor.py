@@ -132,8 +132,13 @@ def advance(window: Window, *, rows_read: int, limit: int,
     return window.lo + _TICK
 
 
-def window_stmt(customer_code: str, window: Window, *, limit: int):
+def window_stmt(customer_code: str, window: Window, *, limit: int, extra=None):
     """The SELECT for one customer's window.
+
+    `extra` is an optional list of additional criteria the CALLER supplies. This module stays
+    deliberately ignorant of what they mean: it is generic incremental-read machinery that ML feature
+    extraction and analytics are expected to reuse, so one consumer's semantics — notifications only
+    wanting settled transactions, say — must not be baked in here.
 
     Ordered by `created_at` ASCENDING, which `advance` depends on: it moves the cursor to the newest
     row read, and that is only sound if the batch is a contiguous prefix of the window. Newest-first
@@ -147,6 +152,7 @@ def window_stmt(customer_code: str, window: Window, *, limit: int):
             LogTransaction.customer_code == customer_code,
             LogTransaction.created_at >= window.lo,   # inclusive — see the module docstring
             LogTransaction.created_at < window.hi,
+            *(extra or []),
         )
         .order_by(LogTransaction.created_at.asc())
         .limit(limit)
@@ -171,7 +177,8 @@ def last_window(rule: NotificationRule, *, now: datetime | None = None) -> Windo
 
 async def fetch_for_rule(db: AsyncSession, rule: NotificationRule, *,
                          now: datetime | None = None,
-                         limit: int | None = None) -> list[LogTransaction]:
+                         limit: int | None = None,
+                         extra=None) -> list[LogTransaction]:
     """Transactions this rule has not read yet. Empty when there is nothing safely readable.
 
     Convenience for one rule; the engine reads a whole customer at once via `window_stmt` and filters
@@ -181,7 +188,8 @@ async def fetch_for_rule(db: AsyncSession, rule: NotificationRule, *,
     if window is None:
         return []
     n = limit if limit is not None else settings.notification_candidate_limit
-    return list((await db.execute(window_stmt(rule.customer_code, window, limit=n))).scalars().all())
+    return list((await db.execute(
+        window_stmt(rule.customer_code, window, limit=n, extra=extra))).scalars().all())
 
 
 def _newest(rows: list[LogTransaction]) -> datetime | None:

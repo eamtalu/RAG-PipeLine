@@ -21,6 +21,7 @@ from app.persistence.repositories.notification_repository import NotificationRep
 from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.services.notifications import cursor
 from app.services.notifications.bus import bus
+from app.services.notifications.rules import stability
 from app.services.notifications.rules.base import build_evaluator, is_streaming
 from app.services.mnp_log_ingestion.timefmt import set_display_timezone
 
@@ -107,8 +108,12 @@ async def _run_customer_streaming(db: AsyncSession, repo: NotificationRepository
         return  # nothing has aged past the lag yet
 
     set_display_timezone(await get_customer_timezone(db, customer_code))  # localize message times
+    # The stability gate is a NOTIFICATION concern, so it is passed to the generic reader rather than
+    # living inside it. Applied in SQL: Stage 2 refreshes created_at on every rebuild, so an in-flight
+    # transaction would otherwise re-enter the feed on every single tick until it sealed.
     txns = list((await db.execute(
-        cursor.window_stmt(customer_code, window, limit=settings.notification_candidate_limit)
+        cursor.window_stmt(customer_code, window, limit=settings.notification_candidate_limit,
+                           extra=[stability.alertable_predicate()])
     )).scalars().all())
 
     await _publish_new(repo, _candidates_for(rules, txns))

@@ -208,7 +208,13 @@ async def reset_abandoned_objects(db: AsyncSession, customer_code: str) -> int:
                LogSourceObject.status == SourceObjectStatus.abandoned)
         .values(status=SourceObjectStatus.pending, attempts=0, last_error=None,
                 lease_owner=None, lease_expires_at=None,
-                available_at=datetime.now(timezone.utc))
+                # clock_timestamp(), evaluated by the DATABASE — the same clock `claim_one` compares
+                # against (`available_at <= clock_timestamp()`). Using the app host's clock here made
+                # a re-armed row briefly unclaimable whenever that host ran ahead of the database:
+                # measured drift on this deployment swings roughly +3 ms to -55 ms, and the row stays
+                # invisible for the whole positive excursion. Same reason as the Stage 2 backoff in
+                # derive_transactions.py:1035.
+                available_at=func.clock_timestamp())
     )
     await db.commit()
     n = res.rowcount or 0

@@ -541,6 +541,12 @@ The engine never reads closer to the present than `notification_cursor_lag_secon
 `created_at` is stamped when Python builds the row rather than when Postgres commits it, so a long Stage 2 transaction can commit a row whose timestamp already sits behind the cursor; without the lag that row is never read, and dedupe cannot recover something never seen.
 Dedupe by `dedup_key` remains as the safety net - the cursor prevents re-reading, dedupe prevents re-sending.
 
+Streaming rules also skip transactions that are still changing.
+Stage 2 rebuilds its unsealed tail every cycle, so an `incomplete` transaction (REQUEST seen, no RESPONSE yet) routinely becomes `success` minutes later - and because `dedup_key` is stable per (rule, transaction), an alert fired on the in-flight version could never be corrected.
+So `incomplete` is held until `sealed`; `error`, `soft` and `success` alert immediately, since delaying them by the 15-minute seal window would defeat the point of alerting.
+Set `notification_alert_only_sealed` to require a seal for every status.
+The gate is applied in SQL (`app/services/notifications/rules/stability.py`) because every Stage 2 rebuild refreshes `created_at`, so an in-flight transaction would otherwise re-enter the cursor feed on every tick until it sealed.
+
 Digest (window) rules do not use the cursor at all; they summarise a completed interval and keep their own `rule:{id}:window:{n}` dedup key.
 
 ```mermaid
