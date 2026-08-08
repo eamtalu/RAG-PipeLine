@@ -201,10 +201,11 @@
   <a href="#delivery"><strong>6. Delivery</strong><span>getting it out</span></a>
   <a href="#data"><strong>7. Data model</strong><span>every table</span></a>
   <a href="#tenancy"><strong>8. Multi-tenant</strong><span>rules and channels</span></a>
-  <a href="#before"><strong>9. Before &amp; after</strong><span>measured</span></a>
-  <a href="#reuse"><strong>10. Reusing it</strong><span>ML &amp; analytics</span></a>
-  <a href="#config"><strong>11. Configuration</strong><span>every setting</span></a>
-  <a href="#caveats"><strong>12. Caveats</strong><span>what is not done</span></a>
+  <a href="#switch"><strong>9. The on/off switch</strong><span>per customer</span></a>
+  <a href="#before"><strong>10. Before &amp; after</strong><span>measured</span></a>
+  <a href="#reuse"><strong>11. Reusing it</strong><span>ML &amp; analytics</span></a>
+  <a href="#config"><strong>12. Configuration</strong><span>every setting</span></a>
+  <a href="#caveats"><strong>13. Caveats</strong><span>what is not done</span></a>
 </nav>
 
 <section>
@@ -379,11 +380,16 @@ while True:
   <div class="panel">
     <h4>Two lines start all of it</h4>
     <pre class="code" style="background:transparent;border:0;padding:0"><span class="c"># app/background.py</span>
-151    notification_dispatcher.register()                           <span class="c"># wire the subscriber</span>
-152    tasks.append(asyncio.create_task(run_notification_worker())) <span class="c"># start the loop</span></pre>
-    <p>Line 151 is easy to miss and load-bearing: it is the only link between rule evaluation and
+159    notification_dispatcher.register()                           <span class="c"># wire the subscriber</span>
+160    tasks.append(asyncio.create_task(run_notification_worker())) <span class="c"># start the loop</span></pre>
+    <p>Line 159 is easy to miss and load-bearing: it is the only link between rule evaluation and
     delivery. The engine publishes to a bus and never imports the dispatcher. Without it, rules
     evaluate correctly every ten seconds and nothing is ever sent.</p>
+    <p>Both lines are <strong>unconditional</strong>. They used to sit behind a boot-time
+    <code>if settings.notifications_enabled:</code>, which is exactly why no UI could control the
+    subsystem — the flag decided whether the task was ever created, so changing it at runtime had
+    nothing to observe it. Whether a tick does any work is now decided per customer, every tick
+    (<a href="#switch">section 9</a>).</p>
   </div>
 </section>
 
@@ -751,8 +757,146 @@ if event.target_channel_ids:                  <span class="c"># 3. only THEN nar
 </section>
 
 <!-- ================================================================= 9 -->
-<section id="before">
+<section id="switch">
   <div class="tag">09</div>
+  <h2>The on/off switch</h2>
+  <p class="lead">There is <strong>one worker</strong>, always running, serving <strong>every</strong>
+  customer. Each customer has their own switch. Turning one off never touches another, and never stops
+  the worker.</p>
+
+  <figure>
+    <svg viewBox="0 0 860 250" role="img" aria-label="One always-running worker checking each customer's switch every ten seconds">
+      <rect x="285" y="14" width="290" height="52" rx="9" fill="var(--dels)" stroke="var(--del)"/>
+      <text class="sm" x="430" y="36" text-anchor="middle" font-weight="700">ONE notification worker</text>
+      <text class="sm" x="430" y="54" text-anchor="middle">always running · wakes every 10s</text>
+
+      <path d="M430,66 L430,96" stroke="var(--rule2)" stroke-width="1.2" fill="none"/>
+      <text class="sm" x="440" y="86">“who has it switched on?”</text>
+
+      <path d="M150,96 L710,96" stroke="var(--rule2)" stroke-width="1.2" fill="none"/>
+      <path d="M150,96 L150,120 M430,96 L430,120 M710,96 L710,120" stroke="var(--rule2)" stroke-width="1.2" fill="none"/>
+
+      <rect x="60" y="120" width="180" height="98" rx="9" fill="var(--decs)" stroke="var(--ok)"/>
+      <text class="sm" x="150" y="143" text-anchor="middle" font-weight="700">tmp-live</text>
+      <text class="sm" x="150" y="163" text-anchor="middle" fill="var(--ok)">switch: ON</text>
+      <text class="sm" x="150" y="184" text-anchor="middle">rules run</text>
+      <text class="sm" x="150" y="202" text-anchor="middle">alerts sent</text>
+
+      <rect x="340" y="120" width="180" height="98" rx="9" fill="var(--panel2)" stroke="var(--rule2)" stroke-dasharray="5 4"/>
+      <text class="sm" x="430" y="143" text-anchor="middle" font-weight="700">mnp</text>
+      <text class="sm" x="430" y="163" text-anchor="middle" fill="var(--muted)">switch: OFF</text>
+      <text class="sm" x="430" y="184" text-anchor="middle" fill="var(--muted)">skipped entirely</text>
+      <text class="sm" x="430" y="202" text-anchor="middle" fill="var(--muted)">silent</text>
+
+      <rect x="620" y="120" width="180" height="98" rx="9" fill="var(--decs)" stroke="var(--ok)"/>
+      <text class="sm" x="710" y="143" text-anchor="middle" font-weight="700">acme</text>
+      <text class="sm" x="710" y="163" text-anchor="middle" fill="var(--ok)">switch: ON</text>
+      <text class="sm" x="710" y="184" text-anchor="middle">rules run</text>
+      <text class="sm" x="710" y="202" text-anchor="middle">alerts sent</text>
+
+      <text class="sm" x="430" y="240" text-anchor="middle" fill="var(--muted)">mnp being off changes nothing for tmp-live or acme</text>
+    </svg>
+    <figcaption>One worker, many customers, one switch each. There is no per-customer agent and no
+    per-customer process.</figcaption>
+  </figure>
+
+  <h3>Two switches, and both must be on</h3>
+  <p>This is the distinction that caused a real confusion: a rule was set to <em>active</em> in the UI
+  and never fired, because the subsystem itself was off in a file on the server that nothing in the
+  product could show.</p>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Switch</th><th>Where it lives</th><th>What it means</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Subsystem</strong></td><td><code>customers.notifications_enabled</code></td>
+          <td>“Is this customer using notifications at all?” One per customer, toggled in the UI.</td></tr>
+      <tr><td><strong>Rule</strong></td><td><code>notification_rules.status</code></td>
+          <td>“Should this particular rule fire?” One per rule.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>They are separate columns on purpose. Turning the subsystem off for a customer must not silently
+  rewrite all of their rules, and turning a rule off must not imply anything about the others.</p>
+
+  <h3>What the worker does when nobody has it on</h3>
+  <p>It keeps running. Every 10 seconds it asks four short questions, gets nothing back, and sleeps
+  again - <strong>4 queries, about 24 ms</strong>, roughly 34,500 queries a day. All four are indexed
+  lookups returning zero rows.</p>
+  <p>That cost is the price of the switch being live. It used to be a boot-time flag read
+  <em>once</em>, which is precisely why no UI could control it: the flag decided whether the worker
+  task was ever <em>created</em>, so changing it at runtime had nothing to observe it. Moving the
+  check into the loop is what makes a toggle take effect in about ten seconds with no restart.</p>
+
+  <h3>One predicate, three places</h3>
+  <p>“Is this tenant switched on?” is answered by a single function,
+  <code>tenant_gate.enabled()</code>, used in three queries. It is shared rather than copied because
+  they must never disagree.</p>
+  <pre class="code"><span class="c"># app/services/notifications/tenant_gate.py</span>
+def enabled(customer_code_column):
+    return customer_code_column.in_(
+        select(Customer.customer_code).where(Customer.notifications_enabled.is_(True)))</pre>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Call site</th><th>Effect when a customer is off</th></tr></thead>
+    <tbody>
+      <tr><td><code>list_active_rules</code></td><td>their rules are not evaluated</td></tr>
+      <tr><td><code>dispatcher._claim_due</code></td><td>their already-queued alerts stop going out</td></tr>
+      <tr><td><code>notifications_position</code></td><td>their frozen cursors do not hold retention</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="panel warn">
+    <h4>Why the third one exists, and why it is the dangerous one</h4>
+    <p>A switched-off customer keeps rules whose <code>status</code> is still <em>active</em>; their
+    <code>cursor_at</code> simply stops advancing. Retention gates partition drops on the oldest
+    consumed position, so publishing that frozen minimum would pin retention at a timestamp that never
+    moves again - <strong>one customer's notification preference would stop the disk being reclaimed
+    for the entire instance</strong>, with nothing anywhere reporting why.</p>
+    <p>A disabled tenant is not a slow reader. It is not a reader.</p>
+  </div>
+
+  <h3>Off pauses; it does not discard</h3>
+  <p>Gating only rule evaluation would leave an already-queued burst draining into Teams for as long as
+  pacing took - which is the situation someone would be hitting the switch to escape. So the drain is
+  gated too. Those deliveries stay <code>pending</code>: nothing is failed, nothing is dead-lettered,
+  and switching back on resumes them.</p>
+
+  <h3>How to turn things off</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Goal</th><th>Do this</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td>Stop one customer's alerts</td>
+          <td>the switch on their notifications page</td>
+          <td>that customer only, within ~10s. Other customers unaffected. Queued alerts pause.</td></tr>
+      <tr><td>Stop one rule</td>
+          <td>set the rule to <em>inactive</em></td>
+          <td>that rule only; the customer's other rules keep running</td></tr>
+      <tr><td>Stop one destination</td>
+          <td>disable the channel</td>
+          <td>rules still evaluate; nothing is delivered to that channel</td></tr>
+      <tr><td>Stop the worker entirely</td>
+          <td><code>systemctl stop fastapirag-worker</code></td>
+          <td><strong>also stops SSH log polling, Stage 2 stitching and the partition worker.</strong>
+              There is deliberately no notifications-only kill switch.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The last row is the one trade-off of making this per-customer rather than global: retiring the
+  deployment-wide flag removed the single lever that stopped notifications and nothing else. Adding an
+  operator-only override later is small and additive; it was left out rather than guessed at.</p>
+
+  <h3>Defaults, and what a deploy does</h3>
+  <p>The column defaults to <code>false</code>, so every existing customer acquires it switched off and
+  a deploy sends nothing to anybody. That is deliberate: a default of true would have started alerting
+  for people who never asked - including, on this deployment, a rule matching 49,040 of 49,521
+  transactions aimed at a live Teams channel.</p>
+</section>
+
+<!-- ================================================================= 10 -->
+<section id="before">
+  <div class="tag">10</div>
   <h2>Before &amp; after, measured</h2>
   <p class="lead">Every figure below was measured against the real database, not estimated.</p>
   <div class="tw">
@@ -822,9 +966,9 @@ if event.target_channel_ids:                  <span class="c"># 3. only THEN nar
   </div>
 </section>
 
-<!-- ================================================================= 10 -->
+<!-- ================================================================= 11 -->
 <section id="reuse">
-  <div class="tag">10</div>
+  <div class="tag">11</div>
   <h2>Reusing this for ML and analytics</h2>
   <p class="lead">Notifications is the first incremental reader of <code>log_transactions</code>. The
   machinery it uses is deliberately generic, so the next one costs almost nothing — and
@@ -893,15 +1037,18 @@ if event.target_channel_ids:                  <span class="c"># 3. only THEN nar
   </div>
 </section>
 
-<!-- ================================================================= 11 -->
+<!-- ================================================================= 12 -->
 <section id="config">
-  <div class="tag">11</div>
+  <div class="tag">12</div>
   <h2>Configuration</h2>
   <div class="tw">
   <table>
     <thead><tr><th>Setting</th><th>Default</th><th>Effect</th></tr></thead>
     <tbody>
-      <tr><td><code>notifications_enabled</code></td><td class="num">False</td><td>master switch — currently OFF in production</td></tr>
+      <tr><td colspan="3" style="background:var(--panel2)"><strong>There is no longer a deployment-wide
+          on/off setting.</strong> The switch is <code>customers.notifications_enabled</code>, one per
+          customer, read every tick — see <a href="#switch">section 9</a>. A stale
+          <code>NOTIFICATIONS_ENABLED</code> left in a <code>.env</code> is ignored, not an error.</td></tr>
       <tr><td><code>notification_poll_seconds</code></td><td class="num">10</td><td>the worker tick</td></tr>
       <tr><td colspan="3" style="background:var(--diss)"><strong>Discovery</strong></td></tr>
       <tr><td><code>notification_cursor_lag_seconds</code></td><td class="num">60</td>
@@ -926,13 +1073,17 @@ if event.target_channel_ids:                  <span class="c"># 3. only THEN nar
   </div>
 </section>
 
-<!-- ================================================================= 12 -->
+<!-- ================================================================= 13 -->
 <section id="caveats">
-  <div class="tag">12</div>
+  <div class="tag">13</div>
   <h2>Caveats and what is not done</h2>
   <ul class="bul">
-    <li><strong>It is switched off.</strong> <code>notifications_enabled=False</code> in production.
-      Nothing here is live yet.</li>
+    <li><strong>It is live, per customer.</strong> Every customer defaults to OFF; on this deployment
+      <code>tmp-live</code> is switched on and its cursor is advancing. Switching a customer on is a UI
+      action now, not a server-file edit — see <a href="#switch">section 9</a>.</li>
+    <li><strong>No notifications-only kill switch.</strong> Stopping <code>fastapirag-worker</code>
+      also stops SSH polling, Stage 2 and the partition worker. An operator-level override was left
+      out rather than guessed at.</li>
     <li><strong>Deploying needs a stop.</strong> Three migrations
       (<code>b3d914c7ea52</code>, <code>c7a02f68b1d4</code>, <code>d5c81b60a473</code>) — stop workers,
       migrate, deploy, start. Not <code>deploy.sh</code>'s pull-then-migrate order.</li>
