@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
 from app.persistence import partitioning as pt
+from app.services import consumer_cursors
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.settings import settings
 
@@ -112,6 +113,23 @@ async def days_blocked_by_pending(db: AsyncSession, days: list[date_type]) -> se
     return {d for d in days for start, end in rows if _overlaps(d, start, end)}
 
 
+async def days_blocked_by_consumers(db: AsyncSession, days: list[date_type]) -> set[date_type]:
+    """Of `days`, those some incremental reader has not finished consuming.
+
+    Same shape as `days_blocked_by_pending`, and applied alongside it: Stage 2 must have finished
+    WRITING a day and every consumer must have finished READING it before the day can go. Dropping a
+    day a consumer has not reached destroys that data permanently, and the consumer's cursor would
+    simply move past the gap without noticing.
+
+    A consumer that has stopped reporting is excluded upstream (and alarmed), so a dead reader cannot
+    hold retention hostage until the disk fills.
+    """
+    if not days:
+        return set()
+    floor = await consumer_cursors.min_live_position(db)
+    return {d for d in days if consumer_cursors.blocks(d, min_position=floor)}
+
+
 async def _create_runway(db: AsyncSession, today: date_type) -> int:
     days = pt.coverage_days(today, ahead=settings.log_partition_precreate_days)
     return await pt.ensure_coverage(db, days=days)
@@ -149,10 +167,12 @@ async def _drop_expired(db: AsyncSession, today: date_type) -> list[str]:
     would leave exactly the torn state the gate exists to prevent.
     """
     candidates = await _expired_candidates(db, today)
-    blocked = await days_blocked_by_pending(
-        db, sorted({d for days in candidates.values() for d in days}))
+    days = sorted({d for days_ in candidates.values() for d in days_})
+    # Two independent holds, both required: Stage 2 must have finished WRITING the day, and every
+    # live consumer must have finished READING it.
+    blocked = (await days_blocked_by_pending(db, days)) | (await days_blocked_by_consumers(db, days))
     if blocked:
-        logger.info("Partition retention: holding %d day(s) with unstitched windows: %s",
+        logger.info("Partition retention: holding %d day(s) still needed by a writer or a reader: %s",
                     len(blocked), ", ".join(str(d) for d in sorted(blocked)))
     return await _drop_each(db, candidates, blocked)
 

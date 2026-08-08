@@ -848,8 +848,12 @@ return rows</pre>
           not built” from “never heard of it”. Anything already configured fails fast:
           <code>NotImplementedError</code> dead-letters on the FIRST attempt rather than the 50th,
           reusing the permanent-vs-transient distinction the Stage 1 queue already draws</td></tr>
-      <tr><td class="num">8</td><td><code>consumer_cursors</code> registry + retention gate</td>
-          <td>Do it <em>before</em> a slow consumer exists, so it is never a retrofit</td></tr>
+      <tr><td class="num">8</td><td><code>consumer_cursors</code> registry + retention gate
+          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
+          <td>Migration <code>d5c81b60a473</code>. Retention now refuses to drop a day a live consumer
+          has not read, alongside the existing unstitched-window gate. A consumer that stops reporting
+          for 24 h stops blocking and is alarmed CRITICAL — blocking forever would fill the disk,
+          which is the worse failure. ML and analytics register the same way</td></tr>
     </tbody>
   </table>
   </div>

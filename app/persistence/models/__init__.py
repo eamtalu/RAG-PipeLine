@@ -1,3 +1,4 @@
+from app.persistence.models.consumer_cursor import ConsumerCursor  # noqa: F401
 from app.config.database import Base
 from app.persistence.models.job import Job
 from app.persistence.models.chunk import Chunk

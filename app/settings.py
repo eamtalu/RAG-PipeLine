@@ -297,6 +297,12 @@ class Settings(BaseSettings):
     # reading the channel, for whom 500 cards delivered slowly is still 500 cards.
     notification_rule_burst_cap: int = 5
     notification_rollup_window_seconds: int = 300
+    # How long a consumer may go without publishing its position before retention stops waiting for
+    # it. Blocking forever on a dead consumer fills the disk (a total outage); ignoring it loses data
+    # for that one consumer (bad, but contained), so this fails in the survivable direction and logs
+    # CRITICAL when it does. Generous enough that an ordinary deploy or restart never trips it, or
+    # the alarm would be noise. 24 h.
+    consumer_cursor_stale_after_seconds: int = 86400
     # Optional public base URL of the app/frontend; when set, alert cards include a deep link to the
     # transaction view. Empty ⇒ cards just show the transaction id/fields.
     app_public_base_url: str = ""

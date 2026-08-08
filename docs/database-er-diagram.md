@@ -564,6 +564,21 @@ Only channel types that can actually deliver may be configured.
 `POST /{customer}/channels` refuses a type that is registered but unimplemented (Slack, WhatsApp), separately from one it has never heard of, since those need different reactions from the caller.
 Any such channel that already exists dead-letters on its FIRST attempt rather than after 50: a missing implementation is permanent, unlike a disabled channel someone may re-enable.
 
+### `consumer_cursors` - retention must not outrun its readers
+
+`consumer_cursors` holds one row per incremental reader of `log_transactions`: `consumer` (the name), `position` (a `created_at` watermark meaning "everything strictly before here is consumed") and `updated_at` (a heartbeat).
+
+The partition worker already refuses to drop a day Stage 2 has not finished stitching.
+It now also refuses to drop a day a live consumer has not finished READING - `days_blocked_by_consumers`, gated on the minimum position across the registry.
+Without it, dropping day 70 while a reader sits at day 70 destroys that data permanently and the reader simply skips the gap.
+
+This is deliberately separate from a subsystem's INTERNAL cursors.
+`notification_rules.cursor_at` tracks each rule independently, because one rule being replayed must not drag another's position; what notifications publishes here is the minimum across its active rules - the oldest data the subsystem as a whole still needs.
+
+A consumer that stops reporting for `consumer_cursor_stale_after_seconds` (24 h) is treated as gone: it stops blocking retention and is logged CRITICAL.
+That is the survivable failure - blocking forever fills the disk, which is a total outage, while losing data for one dead consumer is contained - but it is made loud rather than silent.
+The table is created empty and nothing is backfilled: an invented position would assert that a consumer has read data it never saw, and retention would believe it.
+
 ```mermaid
 erDiagram
     customer_notification_channels {
