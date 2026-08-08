@@ -164,11 +164,12 @@
   <a href="#stage1"><strong>2. Stage 1</strong><span>producers &amp; the fetch ticket</span></a>
   <a href="#parse"><strong>3. Parsing</strong><span>ticket → raw entries</span></a>
   <a href="#stage2"><strong>4. Stage 2</strong><span>stitch ticket → transactions</span></a>
-  <a href="#storage"><strong>5. Storage</strong><span>daily partitions</span></a>
-  <a href="#data"><strong>6. Data model</strong><span>every table</span></a>
-  <a href="#why"><strong>7. Why it looks like this</strong><span>the failures behind it</span></a>
-  <a href="#ops"><strong>8. Operating it</strong><span>knobs &amp; signals</span></a>
-  <a href="#next"><strong>9. Next steps</strong><span>what is not built</span></a>
+  <a href="#clocks"><strong>5. The two clocks</strong><span>event vs write time</span></a>
+  <a href="#storage"><strong>6. Storage</strong><span>daily partitions</span></a>
+  <a href="#data"><strong>7. Data model</strong><span>every table</span></a>
+  <a href="#why"><strong>8. Why it looks like this</strong><span>the failures behind it</span></a>
+  <a href="#ops"><strong>9. Operating it</strong><span>knobs &amp; signals</span></a>
+  <a href="#next"><strong>10. Next steps</strong><span>what is not built</span></a>
 </nav>
 
 <!-- ============================================================ 1 -->
@@ -453,8 +454,124 @@
 </section>
 
 <!-- ============================================================ 5 -->
-<section id="storage">
+<section id="clocks">
   <div class="tag">05</div>
+  <h2>The two clocks: event time and write time</h2>
+  <p class="lead">Every row in this pipeline carries <strong>two</strong> timestamps, and they answer
+  different questions. Almost every subtle bug in this system has been someone reaching for the wrong
+  one, so it is worth learning once.</p>
+
+  <figure>
+<pre>
+   ONE backfilled transaction, two clocks, two correct answers
+
+   a rotated file from 1 August is fetched today, 9 August
+                          │
+                          ▼
+   ┌──────────────────────────────────────────────────────────────────┐
+   │  <span style="color:var(--q2)">started_at  = 2026-08-01</span>   ← EVENT time: when it HAPPENED   │
+   │  <span style="color:var(--q3)">created_at  = 2026-08-09</span>   ← WRITE time: when we STORED it  │
+   └──────────────────────────────────────────────────────────────────┘
+         │                                    │
+         │ decides WHERE it lives             │ decides WHETHER it is new
+         ▼                                    ▼
+   <span style="color:var(--q2)">log_transactions_2026_08_01</span>          ahead of every reader's cursor
+   (the 1 August partition)                   so it is picked up on the next tick
+</pre>
+    <figcaption>The same row is simultaneously eight days old and brand new. Both are true; they are
+    answers to different questions.</figcaption>
+  </figure>
+
+  <h3>Which column is which</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Clock</th><th>Columns</th><th>What it drives</th></tr></thead>
+    <tbody>
+      <tr><td><strong style="color:var(--q2)">EVENT time</strong><br><span class="sub">when the log line happened</span></td>
+          <td><code>log_entries.timestamp</code> <span class="pill s1">partition key</span><br>
+              <code>log_transactions.started_at</code> <span class="pill s1">partition key</span><br>
+              <code>log_transactions.ended_at</code>, <code>.date</code><br>
+              <code>log_entry_assignment.entry_ts</code> <span class="pill s1">partition key</span><br>
+              <code>log_regroup_pending.range_start/end</code></td>
+          <td>partitioning, retention, Stage 2's rebuild window, the seal window, grouping, display</td></tr>
+      <tr><td><strong style="color:var(--q3)">WRITE time</strong><br><span class="sub">when the row was stored</span></td>
+          <td><code>log_transactions.created_at</code><br>
+              <code>notification_rules.cursor_at</code><br>
+              <code>consumer_cursors.position</code></td>
+          <td>incremental reading, and nothing else</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="panel good">
+    <h4>The rule, in one line each</h4>
+    <ul class="bul">
+      <li><strong>“Where does this row live, and when did it happen?”</strong> → event time.</li>
+      <li><strong>“Have I seen this row yet?”</strong> → write time.</li>
+    </ul>
+  </div>
+
+  <h3>Why a reader must never cursor on event time</h3>
+  <p>Because event time <strong>arrives out of order</strong>, and not rarely - it is the normal case
+  here. Every SSH poll considers ~98 rotated files (<code>eSmartServerLog.txt.1</code> through
+  <code>.99</code>); each one is older data landing later.</p>
+  <figure>
+<pre>
+   a reader cursoring on EVENT time            a reader cursoring on WRITE time
+
+   cursor ──────────────▶ 9 Aug               cursor ──────────────▶ now
+                                                                     │
+   backfill arrives, started_at = 1 Aug        backfill arrives, created_at = now
+             ▲ BEHIND the cursor                         ▲ AHEAD of the cursor
+             <span style="color:var(--bad)">✗ never seen, silently</span>                        <span style="color:var(--ok)">✓ read on the next tick</span>
+</pre>
+    <figcaption>This is not hypothetical: it is the bug the notification cursor was built to avoid,
+    and it is why <code>cursor_at</code> is a <code>created_at</code>.</figcaption>
+  </figure>
+
+  <div class="panel warn">
+    <h4>The one sharp edge: written is not committed</h4>
+    <p><code>created_at</code> is stamped when Python <em>builds</em> the row
+    (<code>log_transaction.py:132</code>), not when Postgres <em>commits</em> it. So there is a window
+    where a row exists carrying a timestamp the reader has already passed:</p>
+<pre>
+   build row (created_at = T) ─────────────────▶ commit at T+X
+                                       ▲
+             if X &gt; the reader's lag, the cursor has already gone past T
+             and that row is skipped <span style="color:var(--bad)">permanently</span> - dedupe cannot recover
+             something that was never seen
+</pre>
+    <p>The defence is that readers stay a fixed lag behind the present rather than reading up to
+    <code>now()</code>. <code>notification_cursor_lag_seconds = 60</code>, and the setting's comment
+    states the correctness condition plainly: <em>it must exceed the longest Stage 2 transaction.</em></p>
+    <p><strong>Measured on production:</strong> the longest single commit spans about
+    <strong>30 seconds</strong> of row-building, against a 60-second lag. Roughly 2x headroom - real,
+    but not generous. If Stage 2 batches ever slow down (larger files, a slower disk), this is the
+    margin that erodes first, and it erodes <em>silently</em>. It is a good thing to monitor rather
+    than a thing to fix.</p>
+  </div>
+
+  <div class="panel">
+    <h4>One place the two clocks are compared - worth verifying</h4>
+    <p><code>consumer_cursors.blocks()</code> decides whether retention may drop a day. It compares a
+    <em>write</em>-time position against an <em>event</em>-time day boundary:</p>
+<pre>
+   day_end = &lt;end of event-day D&gt;        <span style="color:var(--muted)"># EVENT time</span>
+   return min_position &lt; day_end         <span style="color:var(--muted)"># a created_at → WRITE time</span>
+</pre>
+    <p>Conservative in the ordinary direction. The case to check is a backfill landing in a partition
+    older than the retention horizon: its <code>created_at</code> is <em>now</em>, so a reader sitting
+    just behind it has not read it - yet the day boundary is 60 days old, so the comparison says the
+    partition is droppable.</p>
+    <p>Recorded as <strong>unverified</strong>, not as a defect: it needs a reproduction before it
+    means anything, and it is not reachable today (the first real partition drop is around 5 October
+    2026, and it requires backfilling data older than 60 days).</p>
+  </div>
+</section>
+
+<!-- ================================================================= 6 -->
+<section id="storage">
+  <div class="tag">06</div>
   <h2>Storage: the three hot tables are cut into one file per day</h2>
   <p class="lead">All three high-volume tables are <strong>range-partitioned by UTC day</strong>.
   Deleting old data is now <code>DROP TABLE</code> on one day's partition — a file unlink — instead of
@@ -531,7 +648,7 @@
 
 <!-- ============================================================ 6 -->
 <section id="data">
-  <div class="tag">06</div>
+  <div class="tag">07</div>
   <h2>The data model, grouped by what each table is for</h2>
 
   <h3><span class="pill s1">Group A</span> Transport &amp; provenance — how bytes got here</h3>
@@ -607,7 +724,7 @@
 
 <!-- ============================================================ 7 -->
 <section id="why">
-  <div class="tag">07</div>
+  <div class="tag">08</div>
   <h2>Why it looks like this: the failures each decision came from</h2>
   <p class="lead">Almost nothing here is a preference. Each piece exists because something specific
   broke.</p>
@@ -655,7 +772,7 @@
 
 <!-- ============================================================ 8 -->
 <section id="ops">
-  <div class="tag">08</div>
+  <div class="tag">09</div>
   <h2>Operating it</h2>
 
   <h3>The one endpoint that tells you if things are healthy</h3>
@@ -712,7 +829,7 @@
 
 <!-- ============================================================ 9 -->
 <section id="next">
-  <div class="tag">09</div>
+  <div class="tag">10</div>
   <h2>Next steps</h2>
 
   <div class="panel warn">

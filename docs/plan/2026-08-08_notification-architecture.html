@@ -465,6 +465,12 @@ while True:
     the row was <em>written</em>. Backfill a week-old file and those rows have an old
     <code>started_at</code> but a new <code>created_at</code>. Cursoring on event time would silently
     skip every backfilled transaction — which is exactly what the old one-hour lookback did.</p>
+    <p>This is not a notifications rule, it is a platform-wide one: every row carries an EVENT clock and
+    a WRITE clock, and reaching for the wrong one is behind most of the subtle bugs in this system.
+    The full account, including which column belongs to which clock and the measured headroom on the
+    lag, is section 5 of the pipeline document,
+    <em>“The two clocks: event time and write time”</em>
+    (<code>docs/plan/2026-08-06_log-pipeline-architecture.html</code>).</p>
   </div>
 
   <h3>The seal gate</h3>
