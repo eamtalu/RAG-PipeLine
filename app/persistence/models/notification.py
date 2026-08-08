@@ -91,6 +91,11 @@ class NotificationRule(Base):
     # optional fan-out narrowing: list of channel ids (as strings). Empty/None ⇒ all enabled channels.
     target_channel_ids: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
+    # How far this rule has read the transaction feed, as a log_transactions.created_at (WRITE time,
+    # not event time). NULL means "never run" and bootstraps to the lookback window, so activating a
+    # rule alerts on recent data rather than replaying all history. Each rule owns its own position,
+    # so activating or replaying one never disturbs another. See services/notifications/cursor.py.
+    cursor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # lifecycle: only `active` rows are evaluated (publish/deactivate flip this).
     status: Mapped[str] = mapped_column(String(16), default=RuleStatus.draft.value,
                                         server_default=RuleStatus.draft.value, index=True)

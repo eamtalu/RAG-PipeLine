@@ -264,6 +264,16 @@ class Settings(BaseSettings):
     # After this many failed attempts a delivery is dead-lettered (status=dead) instead of retried
     # forever. Kept high so long outages (overnight, multi-hour) still recover on their own.
     notification_max_attempts: int = 50
+    # How far behind the present the rule engine reads. NOT an optimisation: log_transactions.created_at
+    # is stamped when Python builds the row, not when Postgres commits it, so a long Stage 2
+    # transaction can commit a row whose timestamp already sits behind the cursor. Reading only up to
+    # now() - this would skip that row permanently, and dedupe cannot recover something never seen.
+    # Must exceed the longest Stage 2 transaction.
+    notification_cursor_lag_seconds: int = 60
+    # Rows the engine will read for one customer in a single tick. A truncated batch advances the
+    # cursor only as far as it actually read, so a backlog is drained over several ticks rather than
+    # skipped.
+    notification_candidate_limit: int = 2000
     # Optional public base URL of the app/frontend; when set, alert cards include a deep link to the
     # transaction view. Empty ⇒ cards just show the transaction id/fields.
     app_public_base_url: str = ""

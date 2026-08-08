@@ -795,10 +795,16 @@ return rows</pre>
   <table>
     <thead><tr><th>#</th><th>Step</th><th>Why here</th></tr></thead>
     <tbody>
-      <tr><td class="num">1</td><td>Index <code>log_transactions.created_at</code></td>
-          <td>Every incremental reader needs it. <code>CREATE INDEX CONCURRENTLY</code> per the repo rule</td></tr>
-      <tr><td class="num">2</td><td>Cursor + lag on the engine query</td>
-          <td>Kills flaws 3 and 5. Dedupe stays as the safety net, so this is low risk</td></tr>
+      <tr><td class="num">1</td><td>Index <code>log_transactions.created_at</code>
+          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
+          <td>Migration <code>b3d914c7ea52</code>. PostgreSQL <em>refuses</em>
+          <code>CREATE INDEX CONCURRENTLY</code> on a partitioned parent, so it is built per partition
+          and attached to an <code>ON ONLY</code> parent index. New partitions inherit it automatically</td></tr>
+      <tr><td class="num">2</td><td>Cursor + lag on the engine query
+          <span class="pill ok" style="background:var(--oks);color:var(--ok)">done</span></td>
+          <td>Migrations <code>c7a02f68b1d4</code> + <code>app/services/notifications/cursor.py</code>.
+          Measured: 50 matching rows publish once on tick 1 (131 ms), then ticks 2-3 read
+          <strong>zero rows</strong> in 13 ms. Dedupe kept as the safety net</td></tr>
       <tr><td class="num">3</td><td>Seal-gate <code>incomplete</code></td>
           <td>Kills flaw 4 and removes most of the regroup churn from step 2</td></tr>
       <tr><td class="num">4</td><td><strong>Move the send out of the publish path</strong></td>
@@ -816,11 +822,20 @@ return rows</pre>
   </div>
 
   <div class="panel good">
-    <h4>Note on testing</h4>
-    <p>There are currently <strong>no tests for the notification subsystem at all</strong>. Steps 2–6
-    each change behaviour that is only observable under load or over time, so each should land
-    failing-test-first — particularly the lag (a missed row is invisible without a test that
-    reproduces a late commit) and the rollup reconciliation.</p>
+    <h4>Steps 1-2 shipped, 8 August</h4>
+    <p>29 tests in <code>tests/test_notification_cursor_chunk28.py</code> — the first tests this
+    subsystem has ever had. All eight correctness decisions mutation-checked; two initially escaped
+    and needed better tests (an exclusive lower bound, and a rule re-evaluating rows behind its own
+    cursor). Everything A-grade complexity. Full suite 378 green.</p>
+    <p>Two bugs were caught during implementation rather than in production: <code>advance_rule</code>
+    was <code>async</code> but called without <code>await</code>, so no cursor ever moved — it is now
+    synchronous, since it performs no I/O and that shape makes the mistake impossible. And the
+    end-to-end test initially published into a void because <code>bus.publish</code> has no
+    subscribers until <code>dispatcher.register()</code> runs.</p>
+    <p>One design decision changed after measurement: rules were going to get one query each, but
+    planning a query against the partitioned table costs ~50 ms regardless of how little it returns,
+    so a customer's rules now share ONE query starting from the oldest cursor among them and filter
+    in memory. Query count is unchanged from before; every rule still keeps an independent cursor.</p>
   </div>
 </section>
 

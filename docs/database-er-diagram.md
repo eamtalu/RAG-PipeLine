@@ -532,6 +532,17 @@ erDiagram
 A data-driven alerting pipeline with a durable outbox so no alert is lost during an outage.
 `notification_rules` decide WHEN to alert, `customer_notification_channels` decide WHERE alerts go, `notification_events` is the durable outbox of published alerts, and `notification_deliveries` tracks each (event x channel) send attempt with retries and backoff.
 
+Streaming rules read `log_transactions` **incrementally**, via `notification_rules.cursor_at` (migration `c7a02f68b1d4`).
+The cursor is a `log_transactions.created_at` - the WRITE time, not `started_at` which is when the log line happened.
+That distinction is load-bearing: a week-old file backfilled today produces rows with an old `started_at` but a new `created_at`, so a cursor on `started_at` would silently never see them.
+`log_transactions.created_at` is indexed for exactly this (migration `b3d914c7ea52`); because the table is partitioned, that index had to be built per-partition and attached, since PostgreSQL refuses `CREATE INDEX CONCURRENTLY` on a partitioned parent.
+
+The engine never reads closer to the present than `notification_cursor_lag_seconds`.
+`created_at` is stamped when Python builds the row rather than when Postgres commits it, so a long Stage 2 transaction can commit a row whose timestamp already sits behind the cursor; without the lag that row is never read, and dedupe cannot recover something never seen.
+Dedupe by `dedup_key` remains as the safety net - the cursor prevents re-reading, dedupe prevents re-sending.
+
+Digest (window) rules do not use the cursor at all; they summarise a completed interval and keep their own `rule:{id}:window:{n}` dedup key.
+
 ```mermaid
 erDiagram
     customer_notification_channels {
@@ -555,6 +566,7 @@ erDiagram
         string severity
         jsonb target_channel_ids
         string status "draft/active/inactive"
+        datetime cursor_at "how far this rule has read (log_transactions.created_at); NULL = never run"
         datetime created_at
         datetime updated_at
     }
