@@ -276,6 +276,7 @@
   Phase 2 and verification item 5. This is the only defect in the design that erases its own evidence, so
   it is the one item worth treating as blocking for Phase 2.</p>
   <p><b>Third change: a third removal path, needing the opposite fix (F13).</b> The tenant purge also removes <code>log_transactions</code>, through the same <code>jobs</code> cascade. Section 6 previously asserted that it does not; that sentence is corrected. Because the tenant itself is going away, the fix is to delete its <code>analytics_*</code> rows rather than publish a ticket. Recorded in section 6, F13, invariant 15, Phase 1 and verification item 12b.</p>
+  <p><b>Fourth change: the partition manager (E4) was extended so Phase 1 can register its tables at all.</b> <code>partitioning.py</code> was daily in every function and retention was one global setting, so a monthly, retained-forever table could not be expressed: it would have got daily partitions and been dropped at 60 days. It now carries a per-table grain and a <code>KEEP_FOREVER</code> / <code>RETENTION_DAYS</code> policy, and three grain-only bugs were fixed with it. Recorded as a new E4 component-detail section, in the component map, Phase 1 and invariant 16. Behaviour for the three log tables is unchanged and tested.</p>
   <p><b>The general lesson</b>, worth more than either finding: the list of places to hook was built by asking "where does Stage 2 rebuild". The question that produces a complete list is <b>"where does a row leave <code>log_transactions</code>"</b>, answered by grep rather than by reasoning. There are seven answers: three rebuild paths, two API deletes, one tenant purge, and retention's partition drop, which is the one deliberate exception.</p>
 </div>
 
@@ -352,7 +353,7 @@
     <div class="fc"><p class="h">Identity</p><p>A <b>new</b> record's id is <code>uuid5</code> of an anchor line's hash. A <b>rebuilt</b> record <b>inherits</b> its id. Source uniqueness is <code>(id, started_at)</code>, <b>not</b> unique on id alone. See the correction below.</p></div>
     <div class="fc"><p class="h">Live checks, 2026-08-17</p><p>NULL <code>started_at</code>: 0. Duplicate ids: 0. NULL <code>ended_at</code>: 0. Unsealed at any moment: 1,638. Regroup tickets: 7,407 with 0 pending, 0 abandoned, 0 retries.</p></div>
     <div class="fc"><p class="h">Real data loss, today</p><p><b>847 to 1,079 orphaned log lines</b> belong to no record, all past the abandon window, from two files. Only 7 are pick-related.</p></div>
-    <div class="fc"><p class="h">Infrastructure limits</p><p>Stock PostgreSQL 16. <b>No TimescaleDB, Citus, columnar, hll, tdigest or pg_partman.</b> <code>work_mem</code> is 4 MB. Partitioning helper supports <b>daily bounds only</b>.</p></div>
+    <div class="fc"><p class="h">Infrastructure limits</p><p>Stock PostgreSQL 16. <b>No TimescaleDB, Citus, columnar, hll, tdigest or pg_partman.</b> <code>work_mem</code> is 4 MB. Partitioning helper supported <b>daily bounds only</b>; <b>resolved 2026-08-21</b>, it now carries a per-table grain (daily / monthly / yearly) plus keep-forever retention.</p></div>
     <div class="fc"><p class="h">Frontend limits</p><p><b>No chart library</b>, so charts are hand-built. <code>next.config.mjs</code> needs a rewrite entry or <code>/api/v1/analytics/*</code> returns 404.</p></div>
   </div>
 
@@ -759,7 +760,7 @@ staging directory, bypassing the fetcher entirely. Retention-cursor arrows from 
       <tr><td>E1</td><td>Log fetch and parse (Stage 1)</td><td class="ex">exists</td><td><code>pipeline/parse_insert.py</code></td></tr>
       <tr><td>E2</td><td>Transaction stitcher (Stage 2)</td><td class="ex">exists</td><td><code>pipeline/derive_transactions.py</code></td></tr>
       <tr><td>E3</td><td>Retention cursor registry</td><td class="ex">exists</td><td><code>services/consumer_cursors.py</code></td></tr>
-      <tr><td>E4</td><td>Partition manager</td><td class="ex">exists</td><td><code>persistence/partitioning.py</code></td></tr>
+      <tr><td>E4</td><td>Partition manager</td><td class="ex">exists, <b>extended 2026-08-21</b></td><td><code>persistence/partitioning.py</code>, <code>workers/log_partition_worker.py</code></td></tr>
       <tr><td>E5</td><td>Alerting engine</td><td class="ex">exists</td><td><code>services/notifications/</code></td></tr>
       <tr><td>N1</td><td>Ticket publisher</td><td class="nw">new</td><td><code>analytics/pending_windows.py</code></td></tr>
       <tr><td>N2</td><td>Fact normaliser</td><td class="nw">new</td><td><code>analytics/normalizer.py</code></td></tr>
@@ -812,6 +813,72 @@ staging directory, bypassing the fetcher entirely. Retention-cursor arrows from 
 </section>
 <section id="detail">
   <h2>Component detail</h2>
+
+  <div class="comp" style="border-left:3px solid var(--amber);">
+    <div class="hd"><span class="cid" style="color:var(--amber);">E4</span><p class="nm">Partition manager</p><span class="path">persistence/partitioning.py, workers/log_partition_worker.py</span></div>
+    <div class="kv">
+      <span class="k">status</span><span class="v"><b>Exists, extended 2026-08-21</b> for per-table grain and keep-forever retention.</span>
+      <span class="k">job</span><span class="v">Provision partitions ahead of ingestion, and drop what is past retention. Hourly, idempotent.</span>
+      <span class="k">owns</span><span class="v">the partition DDL for every partitioned table, and the retention policy</span>
+    </div>
+    <p>Listed here rather than left implicit under "exists" because <b>every partitioned analytics table
+    is registered with it, and a mistake in that registration destroys data no other component can
+    rebuild.</b></p>
+    <p><b>Create</b> provisions today through today + <code>log_partition_precreate_days</code> (14).
+    This half must not fail quietly: an insert into a period with no partition fails outright, so an
+    exhausted runway stops Stage 1 dead. <b>Drop</b> reclaims disk by unlinking a partition rather than
+    <code>DELETE</code> + <code>VACUUM</code>, which is why these tables were partitioned at all.</p>
+
+    <h4>What was extended, and why it had to be before Phase 1</h4>
+    <p>The module was daily in every function: the name format, the FROM/TO bounds, the coverage
+    arithmetic and the expiry comparison. Retention was a single setting applied to every registered
+    table. This plan partitions <b>seven</b> analytics tables: five monthly (<code>analytics_facts</code>,
+    <code>analytics_fact_ledger</code>, <code>analytics_quality_issues</code>,
+    <code>analytics_feature_sets</code>, <code>analytics_predictions</code>), one yearly
+    (<code>analytics_daily_rollups</code>) and one daily (<code>analytics_hourly_rollups</code>). Five of
+    the seven are retained forever. Registering them under the old code would have done two silent,
+    destructive things: created daily
+    partitions instead of monthly ones, and had the worker drop the forever tables at 60 days, a whole
+    month at a time. Raw data is gone at 60 days, so a dropped fact partition cannot be rebuilt from
+    anything.</p>
+    <p>Three bugs only exist once grains do, and all three were fixed with the extension:</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Bug</th><th>Effect if left</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td>expiry compared the partition's FIRST day</td><td>January droppable on 2 March under 60-day retention, throwing away 30 in-policy days</td><td><code>expired_days</code> compares <code>period_end</code></td></tr>
+        <tr><td>the retention gates protected a DAY</td><td>a window or reader working on 15 August would not hold the August partition</td><td>gates keyed on <code>(table, period_start)</code> and compared against the period's span</td></tr>
+        <tr><td>runway measured to the partition's START</td><td>a monthly table reports 0 days of runway on the 1st, tripping the CRITICAL alarm all month</td><td><code>_runway_for</code> measures to <code>period_end</code></td></tr>
+      </tbody>
+    </table></div>
+
+    <h4>The interface Phase 1 registers against</h4>
+<pre class="flow"># app/persistence/partitioning.py
+class Grain(str, enum.Enum):
+    daily = "daily"; monthly = "monthly"; yearly = "yearly"
+
+PartitionedTable(table="analytics_facts", key="event_time",
+                 note="...", grain=Grain.monthly)
+
+# app/services/workers/log_partition_worker.py
+KEEP_FOREVER: frozenset[str]   # never dropped, whatever retention is configured
+RETENTION_DAYS: dict[str, int] # per-table override in days, ignored if in KEEP_FOREVER</pre>
+    <div class="co ok">
+      <h4>Provably behaviour-preserving for the log tables</h4>
+      <p>Both collections are <b>empty today</b>. Their retention arithmetic is unchanged, and at a daily
+      grain <code>period_start</code> and <code>period_end</code> are the identity, so every new
+      comparison collapses to the old one. All three are explicitly <code>grain=Grain.daily</code> at
+      their definition site, and a test asserts they still are, so a future change to one of them fails
+      loudly instead of reshaping live retention.</p>
+      <p>Verified by <code>tests/test_partition_grains_chunk36.py</code> (31 tests) plus the pre-existing
+      <code>test_partitioning_chunk23</code>, <code>test_partition_worker_chunk25</code>,
+      <code>test_partition_status_chunk27</code> and <code>test_consumer_cursors_chunk34</code>. Every
+      public signature the migration <code>a1f6d70b3e92</code>, <code>alembic/env.py</code> and the status
+      endpoint depend on is unchanged.</p>
+    </div>
+    <p class="note"><b>What Phase 1 must decide per table:</b> grain, retention, and the DEFAULT
+    partition. The third is not optional: every partition key in this schema is nullable, and without a
+    DEFAULT an insert of a NULL key fails outright and takes the batch with it.</p>
+  </div>
 
   <div class="comp new">
     <div class="hd"><span class="cid">N1</span><p class="nm">Ticket publisher</p><span class="path">analytics/pending_windows.py</span></div>
@@ -1308,7 +1375,7 @@ E5 ─► consumer_cursors('notifications')           ┘        │
   <h2>Delivery sequence</h2>
   <div class="phz">
     <span class="k">Phase 0</span><span class="v"><b>Contract and fixtures.</b> The consumption definition with the three counters. Fixtures for zero pick, short pick, error, incomplete, late backfill, rebuild, <b>merge</b>, <b>split</b>, and a multi-confirmation line whose expected quantity changes. Build the synthetic tenant generator here so it serves both correctness and load.</span>
-    <span class="k">Phase 1</span><span class="v"><b>Schema.</b> Wide fact ledger, history table, generic per-definition grains, the definition table, quality, the state row, and the ticket table. Register each partitioned table and give each its own retention lag. <b>Add every new table to the purge cascade map in <code>logspace_cleanup.py</code> in the same change</b> (F13); a table created without deciding how it gets purged is a table that never does. Update the ER diagram in the same change. <b>The width of the fact row is the load-bearing decision here</b>, since omissions cannot be backfilled after 60 days.</span>
+    <span class="k">Phase 1</span><span class="v"><b>Schema.</b> Wide fact ledger, history table, generic per-definition grains, the definition table, quality, the state row, and the ticket table. Register each partitioned table in <code>partitioning.PARTITIONED</code> with an <b>explicit grain</b>, and give it a retention policy in <code>log_partition_worker</code>: <code>KEEP_FOREVER</code> takes the five partitioned tables retained forever (<code>analytics_facts</code>, <code>analytics_fact_ledger</code>, <code>analytics_daily_rollups</code>, <code>analytics_feature_sets</code>, <code>analytics_predictions</code>); <code>RETENTION_DAYS</code> takes the two finite ones (<code>analytics_hourly_rollups</code> at 90 days, <code>analytics_quality_issues</code> at a year). Neither applies to the four tables that are not partitioned. Both are new as of 2026-08-21; see the E4 component detail. A table registered without a grain silently gets daily partitions, and one registered without a retention decision silently inherits the 60-day log retention. <b>Add every new table to the purge cascade map in <code>logspace_cleanup.py</code> in the same change</b> (F13); a table created without deciding how it gets purged is a table that never does. Update the ER diagram in the same change. <b>The width of the fact row is the load-bearing decision here</b>, since omissions cannot be backfilled after 60 days.</span>
     <span class="k">Phase 2</span><span class="v"><b>Ticket publication</b> from every path that creates, deletes or rebuilds, with bounds from the freed set. <b>All five sites in the N1 table, including both halves of <code>DELETE /logs/data</code></b> (F12), not only the three in <code>derive_transactions.py</code>. Deployed with the worker disabled, so coverage is proven against real traffic while the only cost is a growing table. Prove coverage by grepping for every statement that removes a <code>log_transactions</code> row and checking each against the N1 table, rather than by reasoning about which paths rebuild.</span>
     <span class="k">Phase 3</span><span class="v"><b>Normalizer, diff, worker.</b> Range diff, never per-record update. Quarantine without halting. Own lock namespace. Write-time cursor.</span>
     <span class="k">Phase 4</span><span class="v"><b>Backfill and checks.</b> Windowed routine reconciliation plus explicit full runs, and the completeness check against raw lines. Gate retention on healthy state.</span>
@@ -1337,6 +1404,7 @@ E5 ─► consumer_cursors('notifications')           ┘        │
     <span class="n">13</span><span class="t">Quarantine <b>never halts a tenant</b>.</span>
     <span class="n">14</span><span class="t">The analytics cursor field is <b>one named constant</b>, so an upstream move to <code>updated_at</code> is a single edit.</span>
     <span class="n">15</span><span class="t">A tenant purge removes that tenant's <code>analytics_*</code> rows outright, and does <b>not</b> publish a ticket (F13). Every analytics table keys on <code>customer_code</code> with no foreign key, so nothing cascades on its behalf.</span>
+    <span class="n">16</span><span class="t">Every partitioned table declares an explicit <code>grain</code>, and a table whose raw source expires before it does is registered <code>KEEP_FOREVER</code>. Both default silently to the log tables' policy, and a wrongly-dropped fact partition is the one loss in this design that nothing can rebuild.</span>
   </div>
 </section>
 <section id="verify">

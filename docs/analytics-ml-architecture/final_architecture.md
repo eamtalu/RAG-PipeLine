@@ -28,6 +28,16 @@ Section 6 previously asserted that it does not; that sentence is corrected.
 Because the tenant itself is going away, the fix is to delete its `analytics_*` rows rather than publish a ticket.
 Recorded in section 6, F13, invariant 15, Phase 1 and verification item 12b.
 
+**4. The partition manager (E4) was extended so Phase 1 can register its tables at all.**
+`partitioning.py` was daily in every function and retention was one global setting, so a monthly,
+retained-forever table could not be expressed: it would have got daily partitions and been dropped at
+60 days.
+It now carries a per-table `Grain` and a `KEEP_FOREVER` / `RETENTION_DAYS` policy, and three
+grain-only bugs were fixed with it (early expiry, day-keyed retention gates, and runway measured to the
+wrong end of a period).
+Recorded as a new E4 component-detail section, in the component map, Phase 1 and invariant 16.
+Behaviour for the three log tables is unchanged and tested.
+
 **The general lesson from 2 and 3**, worth more than either finding: the list of places to hook was built by asking "where does Stage 2 rebuild".
 The question that produces a complete list is **"where does a row leave `log_transactions`"**, answered by grep rather than by reasoning.
 There are seven answers: three rebuild paths, two API deletes, one tenant purge, and retention's partition drop, which is the one deliberate exception.
@@ -261,7 +271,12 @@ Only 7 are pick-related.
 **Infrastructure.**
 Stock PostgreSQL 16, 48 available extensions, with **no TimescaleDB, Citus, columnar, hll, tdigest or pg_partman**.
 `work_mem` is 4 MB, `shared_buffers` 8 GB.
-`partitioning.py` supports daily bounds only.
+`partitioning.py` supported daily bounds only.
+**Resolved 2026-08-21**: it now carries a per-table `Grain` (daily, monthly, yearly), and
+`log_partition_worker` gained `KEEP_FOREVER` and per-table `RETENTION_DAYS`.
+Both were prerequisites for Phase 1 rather than part of it: registering a monthly, retained-forever
+table under the old code produced daily partitions and had the retention worker drop them at 60 days.
+See `tests/test_partition_grains_chunk36.py`.
 The frontend has no chart library, and `next.config.mjs` needs a rewrite entry or `/api/v1/analytics/*` returns 404.
 
 ---
@@ -331,7 +346,7 @@ The document-RAG side of this codebase (embedding worker, `chunks`, `embedding_q
 | E1 | SSH log fetcher | exists | `workers/ssh_log_fetcher.py`, `mnp_log_ingestion/remote/remote_fetcher.py` |
 | E2 | Parse worker, Stage 1 | exists | `workers/log_parse_worker.py`, `pipeline/parse_insert.py` |
 | E3 | Stitch worker, Stage 2 | exists | `workers/log_stitch_worker.py`, `pipeline/derive_transactions.py` |
-| E4 | Partition manager | exists | `persistence/partitioning.py`, `workers/log_partition_worker.py` |
+| E4 | Partition manager | exists, **extended 2026-08-21** for per-table grain and keep-forever retention (see E4 detail) | `persistence/partitioning.py`, `workers/log_partition_worker.py` |
 | E5 | Alerting engine | exists | `services/notifications/` |
 | E6 | Logspace cleanup | exists | `workers/logspace_cleanup_worker.py`, `services/logspace_cleanup.py` |
 | E7 | Retention cursor registry | exists | `services/consumer_cursors.py` |
@@ -425,6 +440,74 @@ The problem has already been solved once here; N1 is applying the established pa
 The analytics module adds a **fifth** of its own, `analytics_pending_windows`, deliberately shaped like `log_regroup_pending` and explained under N1.
 
 # 7. Component detail
+
+## E4. Partition manager (exists, extended 2026-08-21)
+
+Owned by `app/persistence/partitioning.py` (pure: registry, names, bounds, arithmetic) and
+`app/services/workers/log_partition_worker.py` (the hourly loop and the retention policy).
+Listed here rather than left implicit under "exists" because **every partitioned analytics table is
+registered with it, and a mistake in that registration destroys data no other component can rebuild.**
+
+It has two jobs per tick, both idempotent.
+**Create** provisions today through today + `log_partition_precreate_days` (14).
+This half must not fail quietly: an insert into a period with no partition fails outright, so an
+exhausted runway stops Stage 1 dead.
+**Drop** reclaims disk by unlinking a partition rather than `DELETE` + `VACUUM`, which is why these
+tables were partitioned at all.
+
+### What was extended, and why it had to be before Phase 1
+
+The module was daily in every function: the name format, the FROM/TO bounds, the coverage arithmetic
+and the expiry comparison.
+Retention was a single setting applied to every registered table.
+This plan partitions seven analytics tables: **five monthly** (`analytics_facts`, `analytics_fact_ledger`,
+`analytics_quality_issues`, `analytics_feature_sets`, `analytics_predictions`), **one yearly**
+(`analytics_daily_rollups`) and **one daily** (`analytics_hourly_rollups`).
+Five of the seven are retained forever.
+Registering them under the old code would have done two silent, destructive things: created daily partitions instead of
+monthly ones, and had the worker drop the forever tables at 60 days, a whole month at a time.
+Raw data is gone at 60 days, so a dropped fact partition cannot be rebuilt from anything.
+
+Three bugs only exist once grains do, and all three were fixed with the extension:
+
+| Bug | Effect if left | Fix |
+|---|---|---|
+| expiry compared the partition's FIRST day | January droppable on 2 March under 60-day retention, throwing away 30 in-policy days | `expired_days` compares `period_end` |
+| the retention gates protected a DAY | a window or reader working on 15 August would not hold the August partition | gates keyed on `(table, period_start)` and compared against the period's span |
+| runway measured to the partition's START | a monthly table reports 0 days of runway on the 1st, tripping the CRITICAL alarm all month | `_runway_for` measures to `period_end` |
+
+### The interface Phase 1 registers against
+
+```python
+# app/persistence/partitioning.py
+class Grain(str, enum.Enum):
+    daily = "daily"; monthly = "monthly"; yearly = "yearly"
+
+PartitionedTable(table="analytics_facts", key="event_time",
+                 note="...", grain=Grain.monthly)
+
+# app/services/workers/log_partition_worker.py
+KEEP_FOREVER: frozenset[str]   # never dropped, whatever retention is configured
+RETENTION_DAYS: dict[str, int] # per-table override in days, ignored if in KEEP_FOREVER
+```
+
+Both collections are **empty today**, which is what makes the extension provably behaviour-preserving
+for the three log tables: their retention arithmetic is unchanged, and at a daily grain
+`period_start` and `period_end` are the identity, so every new comparison collapses to the old one.
+All three are explicitly `grain=Grain.daily` at their definition site, and a test asserts they still
+are, so a future change to one of them fails loudly instead of reshaping live retention.
+
+Verified by `tests/test_partition_grains_chunk36.py` (31 tests) plus the pre-existing
+`test_partitioning_chunk23`, `test_partition_worker_chunk25`, `test_partition_status_chunk27` and
+`test_consumer_cursors_chunk34`.
+Every public signature the migration `a1f6d70b3e92`, `alembic/env.py` and the status endpoint depend on
+is unchanged.
+
+### What Phase 1 must decide per table
+
+Grain, retention, and the DEFAULT partition.
+The third is not optional: every partition key in this schema is nullable, and without a DEFAULT an
+insert of a NULL key fails outright and takes the batch with it.
 
 ## N1. Ticket publisher
 
@@ -928,7 +1011,12 @@ Build the synthetic tenant generator here so it serves both correctness and load
 
 **Phase 1. Schema, models, ER diagram.**
 Wide fact table with the F3 key, the ledger, generic per-definition grains, the definition table, quality, state, and the ticket table.
-Register each partitioned table in `partitioning.py` and give each its own retention lag in `log_partition_worker.droppable_days`.
+Register each partitioned table in `partitioning.PARTITIONED` with an **explicit `grain`**, and give it a retention policy in `log_partition_worker`.
+`KEEP_FOREVER` takes the five partitioned tables retained forever: `analytics_facts`, `analytics_fact_ledger`, `analytics_daily_rollups`, `analytics_feature_sets`, `analytics_predictions`.
+`RETENTION_DAYS` takes the two with a finite number: `analytics_hourly_rollups` at 90 days and `analytics_quality_issues` at a year.
+Neither applies to `analytics_monthly_rollups`, `analytics_metrics`, `analytics_pending_windows` or `analytics_tenant_state`, which are not partitioned at all.
+Both are new as of 2026-08-21; see the E4 component detail.
+A table registered without a grain silently gets daily partitions, and one registered without a retention decision silently inherits the 60-day log retention.
 **Add every new table to the purge cascade map in `logspace_cleanup.py` in the same change** (F13); a table created without deciding how it gets purged is a table that never does.
 **Update `docs/database-er-diagram.md` in the same change**, per repo `CLAUDE.md`: the per-subsystem `erDiagram` block, the master overview, the tenant-partitioning diagram, and the relationship reference tables.
 The width of the fact row is the load-bearing decision here, since omissions cannot be backfilled after 60 days.
@@ -975,6 +1063,7 @@ Each fails **silently**, producing a plausible wrong number rather than an error
 13. Quarantine never halts a tenant.
 14. The analytics cursor field is one named constant.
 15. A tenant purge removes that tenant's `analytics_*` rows outright, and does not publish a ticket (F13). Every analytics table keys on `customer_code` with no foreign key, so nothing cascades on its behalf.
+16. Every partitioned table declares an explicit `grain`, and a table whose raw source expires before it does is registered `KEEP_FOREVER`. Both default silently to the log tables' policy, and a wrongly-dropped fact partition is the one loss in this design that nothing can rebuild.
 
 # 14. Verification
 

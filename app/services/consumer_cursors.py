@@ -35,20 +35,32 @@ logger = logging.getLogger(__name__)
 NOTIFICATIONS = "notifications"
 
 
-def blocks(day: date_type, *, min_position: datetime | None) -> bool:
-    """Whether this UTC day must be kept because some consumer has not finished reading it.
+def blocks_until(end: datetime, *, min_position: datetime | None) -> bool:
+    """Whether a partition whose EXCLUSIVE upper bound is `end` must be kept.
 
-    `position` means "everything strictly before here is consumed", so a day is safe only once the
-    slowest reader has passed its END. A consumer partway through still blocks: dropping the day would
+    `position` means "everything strictly before here is consumed", so a partition is safe only once
+    the slowest reader has passed its end. A consumer partway through still blocks: dropping it would
     lose the remainder, and its cursor would simply move past the gap without noticing.
 
     No consumers means nothing is blocked. That default matters — failing closed here would freeze
     retention on an empty registry and fill the disk.
+
+    Stated on an instant rather than a day because partitions are not all one day wide. A monthly
+    partition asked about by its first day would be released while a reader sat in the middle of it.
     """
     if min_position is None:
         return False
+    return min_position < end
+
+
+def blocks(day: date_type, *, min_position: datetime | None) -> bool:
+    """Whether this UTC day must be kept because some consumer has not finished reading it.
+
+    The daily special case of `blocks_until`, kept because the log tables are all daily and every
+    caller and test here speaks in days.
+    """
     day_end = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
-    return min_position < day_end
+    return blocks_until(day_end, min_position=min_position)
 
 
 def is_live(updated_at: datetime, *, now: datetime | None = None) -> bool:

@@ -133,15 +133,23 @@ async def test_a_timestampless_entry_shows_up_in_the_default_partition_count(db)
 
 
 async def test_a_timestamped_entry_does_not_touch_the_default_count(db):
-    """The guard against the count being something cheap-but-wrong, like all entries."""
+    """The guard against the count being something cheap-but-wrong, like all entries.
+
+    The partition for the day being written has to exist first, or PostgreSQL routes a perfectly good
+    timestamp into DEFAULT and this fails for a reason that has nothing to do with the count. In
+    production the partition worker guarantees that; here it is stated explicitly, so a lapsed runway
+    in a development database (the app not having run for a couple of days) cannot make a correct
+    metric look broken. Runway health has its own tests in test_partition_worker_chunk25.
+    """
     await _cleanup(db)
+    ts = datetime.now(timezone.utc)
+    await pt.ensure_coverage(db, days=[ts.date()])
     before = (await _status(db))["partitions"]["default_partition_rows"]
     j = Job(customer_code=CC, filename="c27.log", storage_key=f"{CC}/{uuid.uuid4().hex}/c27.log",
             document_type="transaction_log", status="completed")
     db.add(j)
     await db.flush()
-    db.add(LogEntry(customer_code=CC, job_id=j.id,
-                    timestamp=datetime.now(timezone.utc), source_file="c27.log",
+    db.add(LogEntry(customer_code=CC, job_id=j.id, timestamp=ts, source_file="c27.log",
                     line_number=1, level="INFO", raw_body="x", entry_hash=uuid.uuid4().hex))
     await db.flush()
     assert (await _status(db))["partitions"]["default_partition_rows"] == before
@@ -170,6 +178,77 @@ async def test_the_default_partition_count_touches_only_the_default_partition(db
             db.bind, compile_kwargs={"literal_binds": True}))))).all())
     scanned = [ln for ln in plan.splitlines() if "log_entries_2026" in ln]
     assert not scanned, f"must not touch dated partitions:\n{plan}"
+
+
+# ==================================================== TWO causes, not one
+# The DEFAULT partition catches rows for TWO unrelated reasons, and the single
+# `default_partition_rows` count conflates them:
+#
+#   1. the partition key is NULL — the parser could not read the timestamp;
+#   2. the key is perfectly valid but NO PARTITION EXISTS for its day.
+#
+# Only (1) is a parser fault. (2) happens because the runway is built FORWARD
+# only (`coverage_days(today, ahead=...)`), so nothing ever provisions a past day
+# and a backfill of older log files lands in DEFAULT permanently.
+#
+# Measured on the live server 2026-08-21: 294,748 rows in the DEFAULT entry
+# partition, of which exactly ONE had a NULL timestamp. The other 294,747 were
+# valid instants between 2026-06-29 and 2026-08-05, all predating the oldest
+# partition. The card reported that as a parser failure, which sent the operator
+# looking in the wrong place. These tests pin the split so it cannot recur.
+
+
+async def test_the_split_separates_a_null_key_from_a_missing_partition(db):
+    await _cleanup(db)
+    j = Job(customer_code=CC, filename="c27.log", storage_key=f"{CC}/{uuid.uuid4().hex}/c27.log",
+            document_type="transaction_log", status="completed")
+    db.add(j)
+    await db.flush()
+
+    # A day with no partition. Far enough back that the runway can never reach it.
+    orphan_day = datetime(2019, 3, 4, 9, 30, tzinfo=timezone.utc)
+    assert not await pt.partition_exists(db, "log_entries", orphan_day.date()), \
+        "the premise of this test is that no partition exists for that day"
+
+    before = (await _status(db))["partitions"]
+    db.add(LogEntry(customer_code=CC, job_id=j.id, timestamp=None, source_file="c27.log",
+                    line_number=1, level="INFO", raw_body="a", entry_hash=uuid.uuid4().hex))
+    db.add(LogEntry(customer_code=CC, job_id=j.id, timestamp=orphan_day, source_file="c27.log",
+                    line_number=2, level="INFO", raw_body="b", entry_hash=uuid.uuid4().hex))
+    await db.flush()
+    after = (await _status(db))["partitions"]
+
+    assert after["unparsable_timestamp_rows"] == before["unparsable_timestamp_rows"] + 1, \
+        "only the NULL-timestamp row is a parser fault"
+    assert after["unpartitioned_rows"] == before["unpartitioned_rows"] + 1, \
+        "the valid-timestamp row is in DEFAULT because its day has no partition"
+    assert after["default_partition_rows"] == before["default_partition_rows"] + 2
+    await _cleanup(db)
+
+
+async def test_the_two_causes_always_sum_to_the_total(db):
+    """They partition the DEFAULT partition exactly: a row's key is either NULL or it is not."""
+    p = (await _status(db))["partitions"]
+    assert p["unparsable_timestamp_rows"] + p["unpartitioned_rows"] == p["default_partition_rows"]
+
+
+async def test_both_counts_come_from_one_scan_of_only_the_default_partition(db):
+    """The card polls this on a timer, so the split must not cost a second pass over 300k rows."""
+    from app.api.v1.logs import _default_partition_count_stmt
+    sql = str(_default_partition_count_stmt().compile(
+        db.bind, compile_kwargs={"literal_binds": True}))
+    assert sql.upper().count("FROM") == 1, f"the split must be one scan, not two:\n{sql}"
+    plan = "\n".join(r[0] for r in (await db.execute(text("EXPLAIN " + sql))).all())
+    assert not [ln for ln in plan.splitlines() if "log_entries_2026" in ln], \
+        f"must not touch dated partitions:\n{plan}"
+
+
+async def test_healthy_still_keys_on_the_total_so_the_contract_is_unchanged(db):
+    """The split is for the MESSAGE, not for the verdict. Either cause needs attention, so both keep
+    the card amber; what changes is that the operator is now told which one."""
+    from app.api.v1.logs import _partitions_healthy
+    assert _partitions_healthy(days_ahead=30, default_rows=0) is True
+    assert _partitions_healthy(days_ahead=30, default_rows=1) is False
 
 
 # ==================================================== no regression

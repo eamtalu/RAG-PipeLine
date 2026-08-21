@@ -1,4 +1,4 @@
-"""Daily UTC range partitioning for the three hot log tables.
+"""UTC range partitioning, at a per-table grain, for every partitioned table.
 
 Retention used to mean `DELETE` + `VACUUM`, both of which read the whole table — on a disk with bad
 sectors, on a heap that reached 40 GB. Partitioned by day it becomes `DROP TABLE <partition>`: a file
@@ -29,8 +29,18 @@ of relation found for row" and take the whole batch down with them.
 table to contain every partition-key column, and silently forces PK columns to NOT NULL — which would
 make the NULL-key rows above un-insertable. So identity is `UNIQUE NULLS NOT DISTINCT (id, key)`. The
 key is included but never FIRST: leading with it measured 240x slower on lookups by id alone.
+
+*A partition is identified by its FIRST DAY, at whatever grain its table uses.* The three log tables
+are daily, so a partition start and "a day" were the same thing and this module could talk only in
+days. They are not the same thing for a monthly or yearly table, and conflating them fails in two
+directions that both look like working code: a mid-month date names a partition that does not exist,
+and an expiry check keyed on the start throws a month away up to 30 days early. So every function below
+takes an arbitrary date and floors it to its table's period, and expiry compares against the period's
+LAST day rather than its first. `Grain` is an enum and not a `timedelta` because months and years have
+no fixed length; February and leap years are read off the calendar, never computed.
 """
 
+import enum
 from dataclasses import dataclass
 from datetime import date as date_type, datetime, time, timedelta, timezone
 
@@ -42,6 +52,28 @@ _MAX_IDENTIFIER = 63
 _DEFAULT_SUFFIX = "default"
 
 
+class Grain(str, enum.Enum):
+    """How wide one partition is.
+
+    An enum rather than a duration because months and years have no fixed length. Anything that needs
+    "the next boundary" asks the calendar, so February and leap years are correct by construction
+    instead of by a constant that is wrong for one day in four years.
+    """
+
+    daily = "daily"
+    monthly = "monthly"
+    yearly = "yearly"
+
+
+#: Name suffix per grain. Narrower than the period it describes would collide (two months sharing
+#: `_2026`); wider would name a partition that does not match its own bounds.
+_SUFFIX_FORMAT: dict[Grain, str] = {
+    Grain.daily: "%Y_%m_%d",
+    Grain.monthly: "%Y_%m",
+    Grain.yearly: "%Y",
+}
+
+
 @dataclass(frozen=True)
 class PartitionedTable:
     table: str
@@ -49,28 +81,117 @@ class PartitionedTable:
     #: Why this table is cut on this column — kept with the config so the co-partitioning
     #: relationship between entries and their assignments is visible at the definition site.
     note: str
+    #: How wide one partition is. Stated explicitly on every entry rather than defaulted, because a
+    #: table silently taking the wrong grain is the failure this field exists to prevent.
+    grain: Grain = Grain.daily
 
 
 PARTITIONED: tuple[PartitionedTable, ...] = (
     PartitionedTable("log_entries", "timestamp",
-                     "when the log line happened"),
+                     "when the log line happened", grain=Grain.daily),
     PartitionedTable("log_transactions", "started_at",
-                     "its first entry's timestamp"),
+                     "its first entry's timestamp", grain=Grain.daily),
     # Co-partitioned with log_entries ON PURPOSE: entry_ts is a copy of the entry's own timestamp, so
     # day D's assignments live in the same day as day D's entries and retention drops the pair
     # together. If these two keys ever disagreed, dropping a day of entries would strand that day's
-    # assignments pointing at rows that no longer exist.
+    # assignments pointing at rows that no longer exist. The shared GRAIN is part of that guarantee:
+    # a monthly assignment table beside daily entries would drop 30 days of one at a time.
     PartitionedTable("log_entry_assignment", "entry_ts",
-                     "a copy of its entry's timestamp, so it co-partitions with log_entries"),
+                     "a copy of its entry's timestamp, so it co-partitions with log_entries",
+                     grain=Grain.daily),
 )
 
 BY_TABLE: dict[str, PartitionedTable] = {t.table: t for t in PARTITIONED}
 
 
+# ============================================================== grain arithmetic (pure)
+def grain_of(table: str) -> Grain:
+    """The grain `table` is partitioned at.
+
+    Raises rather than defaulting to daily. A default would give a monthly table daily partitions,
+    which is precisely the silent misconfiguration this module was generalised to prevent, and it
+    would surface much later as a partition count nobody can explain.
+    """
+    try:
+        return BY_TABLE[table].grain
+    except KeyError:
+        raise KeyError(
+            f"{table!r} is not a registered partitioned table. Add it to partitioning.PARTITIONED "
+            f"with an explicit grain, and give it a retention policy in "
+            f"log_partition_worker (KEEP_FOREVER or RETENTION_DAYS)."
+        ) from None
+
+
+def period_start(grain: Grain, day: date_type) -> date_type:
+    """The first day of the partition `day` falls in. Idempotent, so it is safe to apply twice."""
+    match grain:
+        case Grain.daily:
+            return day
+        case Grain.monthly:
+            return day.replace(day=1)
+        case Grain.yearly:
+            return day.replace(month=1, day=1)
+
+
+def next_period_start(grain: Grain, day: date_type) -> date_type:
+    """The first day of the NEXT partition, which is this one's EXCLUSIVE upper bound.
+
+    Floors its input first, so advancing from a mid-period date lands on the next boundary rather than
+    the same day of the following period. Without that, two adjacent partitions would be emitted with
+    overlapping ranges and the second CREATE would fail.
+    """
+    start = period_start(grain, day)
+    match grain:
+        case Grain.daily:
+            return start + timedelta(days=1)
+        case Grain.monthly:
+            # Not `month + 1`: that raises on December. Integer division rolls the year instead.
+            return date_type(start.year + start.month // 12, start.month % 12 + 1, 1)
+        case Grain.yearly:
+            return date_type(start.year + 1, 1, 1)
+
+
+def period_end(grain: Grain, day: date_type) -> date_type:
+    """The LAST day inside the partition, inclusive.
+
+    This is what retention and runway must key on. A monthly partition starting 1 January is still in
+    policy on 2 March under 60-day retention, because its newest row is from 31 January; comparing
+    against the start would drop it 30 days early. For a daily grain start and end are the same day,
+    which is why the old day-only code was correct until it was not.
+    """
+    return next_period_start(grain, day) - timedelta(days=1)
+
+
+def periods_covering(grain: Grain, first: date_type, last: date_type) -> list[date_type]:
+    """Every partition start whose partition intersects `[first, last]`, ascending.
+
+    Callers state the calendar range they need covered and stay grain-agnostic: twenty days of one
+    month is one monthly partition and twenty daily ones, and neither caller has to know which.
+
+    An inverted range raises rather than returning empty, for the same reason `days_between` does:
+    it means the caller derived its bounds wrongly, and quietly creating nothing would leave the table
+    with no partition for the period being written.
+    """
+    if last < first:
+        raise ValueError(f"inverted partition range: {first} .. {last}")
+    out: list[date_type] = []
+    cur, stop = period_start(grain, first), period_start(grain, last)
+    while cur <= stop:
+        out.append(cur)
+        cur = next_period_start(grain, cur)
+    return out
+
+
 # ============================================================== naming and bounds (pure)
 def partition_name(table: str, day: date_type) -> str:
-    """`log_entries_2026_08_05`. Underscores rather than dashes so it needs no quoting."""
-    name = f"{table}_{day:%Y_%m_%d}"
+    """`log_entries_2026_08_05` daily, `analytics_facts_2026_08` monthly, `..._2026` yearly.
+
+    Underscores rather than dashes so it needs no quoting. `day` may be any date inside the partition;
+    it is floored first, so two days of one month resolve to the same name instead of inventing two.
+    """
+    grain = grain_of(table)
+    start = period_start(grain, day)
+    name = f"{table}_{start:{_SUFFIX_FORMAT[grain]}}"
     if len(name) > _MAX_IDENTIFIER:  # pragma: no cover - guarded by a test over every real table
         raise ValueError(f"partition name {name!r} exceeds PostgreSQL's {_MAX_IDENTIFIER}-char limit")
     return name
@@ -101,11 +222,20 @@ def day_end(day: date_type) -> datetime:
 
 
 def create_partition_sql(table: str, day: date_type) -> str:
-    """DDL for one day. Idempotent: the migration pre-creates a range and the worker re-runs on a
-    schedule, so meeting an existing partition is normal, not an error."""
-    return (f"CREATE TABLE IF NOT EXISTS {partition_name(table, day)} "
+    """DDL for the one partition `day` falls in, at the table's own grain.
+
+    Idempotent: the migration pre-creates a range and the worker re-runs on a schedule, so meeting an
+    existing partition is normal, not an error.
+
+    The bounds come from `period_start`/`next_period_start` rather than `day` and `day + 1`, so a
+    monthly table gets one partition spanning the month instead of a day-wide one misnamed after it.
+    Half-open, so consecutive partitions tile exactly: this one's TO is the next one's FROM.
+    """
+    grain = grain_of(table)
+    start = period_start(grain, day)
+    return (f"CREATE TABLE IF NOT EXISTS {partition_name(table, start)} "
             f"PARTITION OF {table} "
-            f"FOR VALUES FROM ({_bound(day)}) TO ({_bound(day + timedelta(days=1))})")
+            f"FOR VALUES FROM ({_bound(start)}) TO ({_bound(next_period_start(grain, start))})")
 
 
 def create_default_sql(table: str) -> str:
@@ -171,11 +301,20 @@ def migration_days(lo: date_type | None, hi: date_type | None, today: date_type,
     return days_between(first, last)
 
 
-def expired_days(covered: list[date_type], today: date_type, *, retention_days: int) -> list[date_type]:
-    """Which of `covered` are past retention. Strictly older than the cutoff, so the boundary day is
-    KEPT — off-by-one here deletes a day of production data that was still in policy."""
+def expired_days(covered: list[date_type], today: date_type, *, retention_days: int,
+                 grain: Grain = Grain.daily) -> list[date_type]:
+    """Which of `covered` (partition starts) are past retention, oldest first.
+
+    Strictly older than the cutoff, so the boundary is KEPT — off-by-one here deletes production data
+    that was still in policy.
+
+    Compares the partition's LAST day, not its first. At a daily grain those are identical, which is
+    why `grain` defaults to daily and every existing caller is unaffected. At a monthly grain the
+    difference is up to 30 days of data: January would otherwise be droppable on 2 March under 60-day
+    retention, when its newest row is only 30 days old.
+    """
     cutoff = today - timedelta(days=retention_days)
-    return sorted(d for d in covered if d < cutoff)
+    return sorted(s for s in covered if period_end(grain, s) < cutoff)
 
 
 # ============================================================== async facade
@@ -206,14 +345,21 @@ async def covered_days(db, table: str) -> list[date_type]:
 
 
 async def ensure_coverage(db, *, days: list[date_type]) -> int:
-    """Create any missing partition for `days` across every partitioned table. Returns how many were
-    created. Safe to re-run — the DDL is `IF NOT EXISTS`."""
+    """Create any missing partition covering `days`, across every partitioned table. Returns how many
+    were created. Safe to re-run — the DDL is `IF NOT EXISTS`.
+
+    `days` is a list of DAYS the caller needs covered, not a list of partitions. Each table maps them
+    onto its own grain and de-duplicates, so a month of requested days is one CREATE for a monthly
+    table and thirty for a daily one. That keeps every caller grain-agnostic: the worker asks for
+    "today plus the precreate window" and the migration asks for the span of existing data, and neither
+    has to know how any table is cut.
+    """
     from sqlalchemy import text
     created = 0
     for t in PARTITIONED:
-        for day in days:
-            if await partition_exists(db, t.table, day):
+        for start in sorted({period_start(t.grain, d) for d in days}):
+            if await partition_exists(db, t.table, start):
                 continue
-            await db.execute(text(create_partition_sql(t.table, day)))
+            await db.execute(text(create_partition_sql(t.table, start)))
             created += 1
     return created

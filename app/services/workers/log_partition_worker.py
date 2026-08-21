@@ -1,4 +1,4 @@
-"""Keeps the daily log partitions provisioned ahead of ingestion, and drops them past retention.
+"""Keeps every partitioned table provisioned ahead of ingestion, and drops what is past retention.
 
 Two jobs per tick, both idempotent — which is what makes an hourly cadence and the occasional missed
 tick harmless.
@@ -10,12 +10,19 @@ runs out days later, so a creation error is logged CRITICAL and the remaining co
 every tick rather than only when something is built.
 
 **Drop** reclaims disk by unlinking a day's file instead of `DELETE` + `VACUUM` reading the whole
-table — the reason the tables were partitioned at all. Being irreversible, it sits behind three gates:
+table — the reason the tables were partitioned at all. Being irreversible, it sits behind four gates:
 
-  1. the day is older than `log_partition_retention_days`;
+  1. the partition is past ITS retention, which may be `log_partition_retention_days`, a per-table
+     override, or never (see `KEEP_FOREVER` and `retention_days_for`);
   2. no OPEN `log_regroup_pending` window overlaps it, so data Stage 2 has not stitched yet is never
      destroyed;
-  3. entries lag transactions by one day (see `droppable_days`).
+  3. no live consumer is still reading it (see `consumer_cursors`);
+  4. entries lag transactions by one day (see `droppable_days`).
+
+Each table declares its own GRAIN in `partitioning.PARTITIONED`, so a partition is not necessarily a
+day. Every gate here therefore compares against the partition's own span rather than a date: keying
+on the first day of a monthly partition would expire it up to 30 days early, release it while a writer
+or reader was still inside it, and report a freshly created month as zero runway.
 
 Creation runs FIRST and independently of the drop. A drop failure reclaims no disk and retries next
 tick, which is survivable; a creation failure is not, so it must never be prevented by one.
@@ -27,7 +34,7 @@ so a second runner would be harmless rather than an error.
 
 import asyncio
 import logging
-from datetime import date as date_type
+from datetime import date as date_type, datetime
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +54,22 @@ logger = logging.getLogger(__name__)
 #: longer exist.
 _LAG_ONE_DAY = frozenset({"log_entries", "log_entry_assignment"})
 
+#: Tables whose partitions are NEVER dropped. `droppable_days` returns nothing for these, whatever
+#: `log_partition_retention_days` is set to, so no configuration change can reach them.
+#:
+#: Empty today, and deliberately so: this change is then provably behaviour-preserving for the three
+#: log tables. The analytics fact table, its ledger and the daily and monthly rollups belong here when
+#: they land (see docs/analytics-ml-architecture/final_architecture.md, section 6). They are not merely
+#: long-lived: their raw source is dropped at 60 days, so a dropped fact partition cannot be rebuilt
+#: from anything. Before this set existed there was no way to express that, and registering such a
+#: table would have had the worker delete it a month at a time.
+KEEP_FOREVER: frozenset[str] = frozenset()
+
+#: Retention in days for tables that do NOT follow `log_partition_retention_days`, keyed by table.
+#: Empty today. The plan wants 90 days for the hourly rollups and a year for the quality issues.
+#: A table listed in KEEP_FOREVER ignores this.
+RETENTION_DAYS: dict[str, int] = {}
+
 
 async def db_today(db: AsyncSession) -> date_type:
     """Today in UTC, per the DATABASE clock.
@@ -58,8 +81,24 @@ async def db_today(db: AsyncSession) -> date_type:
     return await db.scalar(text("SELECT (now() AT TIME ZONE 'UTC')::date"))
 
 
+def retention_days_for(table: str) -> int | None:
+    """How many days `table` keeps a partition after its LAST day, or None to keep it forever.
+
+    Read at call time, not frozen into a module constant, because the log retention is an environment
+    setting and a constant would pin whatever it happened to be at import.
+    """
+    if table in KEEP_FOREVER:
+        return None
+    base = RETENTION_DAYS.get(table, settings.log_partition_retention_days)
+    return base + (1 if table in _LAG_ONE_DAY else 0)
+
+
 def droppable_days(table: str, covered: list[date_type], today: date_type) -> list[date_type]:
-    """Which of `covered` are past retention for `table`, oldest first.
+    """Which of `covered` partition starts are past retention for `table`, oldest first.
+
+    A keep-forever table returns nothing at all. That is the only branch here that can prevent data
+    loss rather than cause it, so it comes first and it is total: no grain, cutoff or setting is
+    consulted afterwards.
 
     `log_transactions` is dropped at the retention cutoff. `log_entries` and `log_entry_assignment`
     are held one day LONGER, and that asymmetry is the midnight rule rather than a safety margin: a
@@ -71,63 +110,111 @@ def droppable_days(table: str, covered: list[date_type], today: date_type) -> li
     assignments pointing at a transaction that is gone — harmless, since nothing queries by a
     transaction id that no longer exists, and self-healing when that entry day is dropped a day later.
     Dropping entries ahead of transactions is the one that loses information a reader would notice.
+
+    The comparison is made against each partition's last day, via the table's grain. For the three
+    daily log tables that is the same as its first, so their behaviour is unchanged.
     """
-    retention = settings.log_partition_retention_days + (1 if table in _LAG_ONE_DAY else 0)
-    return pt.expired_days(covered, today, retention_days=retention)
+    retention = retention_days_for(table)
+    if retention is None:
+        return []
+    return pt.expired_days(covered, today, retention_days=retention, grain=pt.grain_of(table))
 
 
-def _overlaps(day: date_type, start, end) -> bool:
-    """Whether a stitch window `[start, end]` touches `day`.
+#: One candidate partition: which table, and which period start within it.
+Period = tuple[str, date_type]
 
-    Inclusive at the boundaries, because windows are padded and routinely straddle midnight; a
-    comparison that missed the edge would drop the very day a straddling window is about to rebuild.
+
+def _period_bounds(table: str, start: date_type) -> tuple[datetime, datetime]:
+    """The `[start, end)` UTC instants one partition spans, at its table's grain.
+
+    Half-open, matching the partition bounds themselves. Every gate below compares against these
+    rather than against a day, because a monthly partition asked about by its first day would be
+    released while a writer or a reader was still working in the middle of it.
     """
-    return start < pt.day_end(day) and end >= pt.day_start(day)
+    grain = pt.grain_of(table)
+    first = pt.period_start(grain, start)
+    return pt.day_start(first), pt.day_start(pt.next_period_start(grain, first))
 
 
-async def days_blocked_by_pending(db: AsyncSession, days: list[date_type]) -> set[date_type]:
-    """Of `days`, those overlapped by an OPEN stitch window.
+def _overlaps(bounds: tuple[datetime, datetime], start, end) -> bool:
+    """Whether a stitch window `[start, end]` touches the half-open partition span `bounds`.
+
+    Inclusive at the window's boundaries, because windows are padded and routinely straddle midnight;
+    a comparison that missed the edge would drop the very partition a straddling window is about to
+    rebuild.
+    """
+    lo, hi = bounds
+    return start < hi and end >= lo
+
+
+async def periods_blocked_by_pending(db: AsyncSession, periods: list[Period]) -> set[Period]:
+    """Of `periods`, those overlapped by an OPEN stitch window.
 
     Open means neither consumed nor abandoned — the same definition the read gate and
     `GET /regroup/status` use, so an operator sees one consistent notion of outstanding work.
     Consumed windows have already been stitched; abandoned ones are parked awaiting a human, and
     letting either pin retention would mean one dead-lettered window stops disk being reclaimed
     forever.
-
-    Overlap is inclusive of the boundaries, because stitch windows are padded and routinely straddle
-    midnight; a comparison that missed the boundary would drop the very day a straddling window is
-    about to rebuild.
     """
-    if not days:
+    if not periods:
         return set()
-    # One query over the whole candidate span, then map to days in Python. Asking per day would be
-    # one round-trip per expired partition, and the set is small either way.
+    bounds = {p: _period_bounds(*p) for p in periods}
+    # One query over the whole candidate span, then map to periods in Python. Asking per partition
+    # would be one round-trip each, and the set is small either way.
+    lo = min(b[0] for b in bounds.values())
+    hi = max(b[1] for b in bounds.values())
     rows = (await db.execute(
         select(LogRegroupPending.range_start, LogRegroupPending.range_end).where(
             LogRegroupPending.consumed_at.is_(None),
             LogRegroupPending.abandoned_at.is_(None),
-            LogRegroupPending.range_start < pt.day_end(max(days)),
-            LogRegroupPending.range_end >= pt.day_start(min(days)),
+            LogRegroupPending.range_start < hi,
+            LogRegroupPending.range_end >= lo,
         )
     )).all()
-    return {d for d in days for start, end in rows if _overlaps(d, start, end)}
+    return {p for p, b in bounds.items() for start, end in rows if _overlaps(b, start, end)}
+
+
+async def periods_blocked_by_consumers(db: AsyncSession, periods: list[Period]) -> set[Period]:
+    """Of `periods`, those some incremental reader has not finished consuming.
+
+    Same shape as `periods_blocked_by_pending`, and applied alongside it: Stage 2 must have finished
+    WRITING a partition and every consumer must have finished READING it before it can go. Dropping a
+    partition a consumer has not reached destroys that data permanently, and the consumer's cursor
+    would simply move past the gap without noticing.
+
+    A consumer that has stopped reporting is excluded upstream (and alarmed), so a dead reader cannot
+    hold retention hostage until the disk fills.
+    """
+    if not periods:
+        return set()
+    floor = await consumer_cursors.min_live_position(db)
+    return {p for p in periods
+            if consumer_cursors.blocks_until(_period_bounds(*p)[1], min_position=floor)}
+
+
+async def periods_blocked(db: AsyncSession, periods: list[Period]) -> set[Period]:
+    """Both holds, and both are required: Stage 2 must have finished writing a partition, and every
+    live consumer must have finished reading it."""
+    return (await periods_blocked_by_pending(db, periods)
+            | await periods_blocked_by_consumers(db, periods))
+
+
+async def days_blocked_by_pending(db: AsyncSession, days: list[date_type]) -> set[date_type]:
+    """Of `days`, those overlapped by an OPEN stitch window.
+
+    The DAILY view of `periods_blocked_by_pending`, kept because the three log tables are all daily and
+    every caller and test here speaks in days. It asks about `log_entries` so the answer is the day
+    itself; the three log tables share a grain, so which one is named cannot change the result.
+    """
+    return {d for _t, d in await periods_blocked_by_pending(db, [("log_entries", d) for d in days])}
 
 
 async def days_blocked_by_consumers(db: AsyncSession, days: list[date_type]) -> set[date_type]:
     """Of `days`, those some incremental reader has not finished consuming.
 
-    Same shape as `days_blocked_by_pending`, and applied alongside it: Stage 2 must have finished
-    WRITING a day and every consumer must have finished READING it before the day can go. Dropping a
-    day a consumer has not reached destroys that data permanently, and the consumer's cursor would
-    simply move past the gap without noticing.
-
-    A consumer that has stopped reporting is excluded upstream (and alarmed), so a dead reader cannot
-    hold retention hostage until the disk fills.
+    The daily view of `periods_blocked_by_consumers`, for the same reason as above.
     """
-    if not days:
-        return set()
-    floor = await consumer_cursors.min_live_position(db)
-    return {d for d in days if consumer_cursors.blocks(d, min_position=floor)}
+    return {d for _t, d in await periods_blocked_by_consumers(db, [("log_entries", d) for d in days])}
 
 
 async def _create_runway(db: AsyncSession, today: date_type) -> int:
@@ -136,24 +223,29 @@ async def _create_runway(db: AsyncSession, today: date_type) -> int:
 
 
 async def _drop_each(db: AsyncSession, candidates: dict[str, list[date_type]],
-                     blocked: set[date_type]) -> list[str]:
-    """Drop each candidate day that nothing is holding open. Returns the partition names removed."""
+                     blocked: set[Period]) -> list[str]:
+    """Drop each candidate partition that nothing is holding open. Returns the names removed.
+
+    `blocked` is keyed on (table, period start) rather than on a bare date, because two tables at
+    different grains can have candidates that share a start date while spanning different ranges.
+    """
     dropped = []
-    for table, days in candidates.items():
-        for day in days:
-            if day in blocked:
+    for table, starts in candidates.items():
+        for start in starts:
+            if (table, start) in blocked:
                 continue
-            await db.execute(text(pt.drop_partition_sql(table, day)))
-            dropped.append(pt.partition_name(table, day))
+            await db.execute(text(pt.drop_partition_sql(table, start)))
+            dropped.append(pt.partition_name(table, start))
     return dropped
 
 
 async def _expired_candidates(db: AsyncSession, today: date_type) -> dict[str, list[date_type]]:
-    """Per table, the days past ITS retention (entries and assignments lag by one, see droppable_days).
+    """Per table, the partition starts past ITS retention (see `droppable_days` for the lag and for
+    keep-forever tables, which yield nothing here).
 
-    Gathered for all three tables before anything is dropped, so the pending gate below can be applied
-    once across their union: a day held open must protect entries, transactions and assignments
-    together, and gating them separately would leave exactly the torn state the gate exists to prevent.
+    Gathered for every table before anything is dropped, so the gates below can be applied in one pass:
+    a period held open must protect entries, transactions and assignments together, and gating them
+    separately would leave exactly the torn state the gate exists to prevent.
     """
     return {t.table: droppable_days(t.table, await pt.covered_days(db, t.table), today)
             for t in pt.PARTITIONED}
@@ -162,18 +254,19 @@ async def _expired_candidates(db: AsyncSession, today: date_type) -> dict[str, l
 async def _drop_expired(db: AsyncSession, today: date_type) -> list[str]:
     """Drop every partition past retention that no open stitch window protects. Returns their names.
 
-    The pending check is done ONCE over the union of candidate days rather than per table, so a day
-    held open protects entries, transactions and assignments together — protecting only some of them
-    would leave exactly the torn state the gate exists to prevent.
+    The gates are applied ONCE over the union of candidate partitions rather than per table, so a
+    period held open protects entries, transactions and assignments together — protecting only some of
+    them would leave exactly the torn state the gate exists to prevent.
     """
     candidates = await _expired_candidates(db, today)
-    days = sorted({d for days_ in candidates.values() for d in days_})
-    # Two independent holds, both required: Stage 2 must have finished WRITING the day, and every
-    # live consumer must have finished READING it.
-    blocked = (await days_blocked_by_pending(db, days)) | (await days_blocked_by_consumers(db, days))
+    periods = sorted({(table, start) for table, starts in candidates.items() for start in starts})
+    # Two independent holds, both required: Stage 2 must have finished WRITING the partition, and
+    # every live consumer must have finished READING it.
+    blocked = await periods_blocked(db, periods)
     if blocked:
-        logger.info("Partition retention: holding %d day(s) still needed by a writer or a reader: %s",
-                    len(blocked), ", ".join(str(d) for d in sorted(blocked)))
+        logger.info("Partition retention: holding %d partition(s) still needed by a writer or a "
+                    "reader: %s", len(blocked),
+                    ", ".join(pt.partition_name(t, d) for t, d in sorted(blocked)))
     return await _drop_each(db, candidates, blocked)
 
 
@@ -213,9 +306,17 @@ async def run_once(db: AsyncSession) -> dict:
 
 
 async def _runway_for(db: AsyncSession, table: str, today: date_type) -> int:
-    """Days ahead of `today` that one table is provisioned; -1 when it has no future partition."""
-    days = [d for d in await pt.covered_days(db, table) if d >= today]
-    return (max(days) - today).days if days else -1
+    """Days ahead of `today` that one table is provisioned; -1 when it has no future partition.
+
+    Measured to the LAST day of the newest covered partition, not its first. One monthly partition
+    created on the 1st is a month of runway; keying on the start would report zero and trip the
+    CRITICAL runway alarm on every tick for the rest of the month. For a daily table the two are the
+    same day, so this is unchanged for the log tables.
+    """
+    grain = pt.grain_of(table)
+    ends = [pt.period_end(grain, s) for s in await pt.covered_days(db, table)]
+    future = [e for e in ends if e >= today]
+    return (max(future) - today).days if future else -1
 
 
 async def days_of_runway(db: AsyncSession, today: date_type) -> int:

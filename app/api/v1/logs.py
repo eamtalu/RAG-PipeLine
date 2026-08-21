@@ -12,7 +12,8 @@ from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, delete, table as sa_table
+from sqlalchemy import (func, select, delete, table as sa_table, column as sa_column,
+                        DateTime)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
@@ -439,15 +440,34 @@ def _partitions_healthy(*, days_ahead: int, default_rows: int) -> bool:
 
 
 def _default_partition_count_stmt():
-    """Rows sitting in the DEFAULT entry partition.
+    """Rows in the DEFAULT entry partition, split by WHY they are there. One scan, two counts.
 
-    Addressed as the partition DIRECTLY rather than as `log_entries WHERE timestamp IS NULL`. Both
-    are equally cheap in practice — measured, PostgreSQL prunes an `IS NULL` predicate down to the
-    DEFAULT partition on its own — but naming it leaves nothing resting on the planner continuing to
-    do that, and this runs on a polled status card. Exposed as a statement so a test can EXPLAIN it.
+    Addressed as the partition DIRECTLY rather than through `log_entries`, so nothing rests on the
+    planner continuing to prune the parent down to it. Exposed as a statement so a test can EXPLAIN it.
+
+    The split is the point. A row lands in DEFAULT for TWO unrelated reasons:
+
+      1. `timestamp IS NULL` — the parser could not read the timestamp. A genuine parser fault, and
+         the DEFAULT partition is the only place it is reported.
+      2. the timestamp is perfectly VALID but no partition exists for its day. The runway is built
+         FORWARD only (`partitioning.coverage_days(today, ahead=...)`), so nothing ever provisions a
+         past day and a backfill of older log files lands here permanently.
+
+    An earlier version of this returned one number and its docstring claimed it was equivalent to
+    `WHERE timestamp IS NULL`. The pruning half of that claim is true; the equivalence is not.
+    Measured on the live server 2026-08-21: 294,748 rows here, of which exactly ONE had a NULL
+    timestamp. The other 294,747 were valid instants predating the oldest partition. The status card
+    reported all of it as a parser failure and sent the operator looking in the wrong place.
+
+    `count(*) FILTER` rather than a second query: same single pass, and both numbers come from one
+    snapshot so they cannot disagree or sum to something other than the total.
     """
-    return select(func.count()).select_from(
-        sa_table(pt.default_partition_name("log_entries")))
+    default = sa_table(pt.default_partition_name("log_entries"),
+                       sa_column("timestamp", DateTime(timezone=True)))
+    return select(
+        func.count().label("total"),
+        func.count().filter(default.c.timestamp.is_(None)).label("unparsable"),
+    ).select_from(default)
 
 
 async def _partition_status(db: AsyncSession) -> dict:
@@ -460,7 +480,8 @@ async def _partition_status(db: AsyncSession) -> dict:
     today = await db_today(db)
     covered = await pt.covered_days(db, "log_entries")
     days_ahead = await days_of_runway(db, today)
-    default_rows = int(await db.scalar(_default_partition_count_stmt()) or 0)
+    row = (await db.execute(_default_partition_count_stmt())).one()
+    default_rows, unparsable = int(row.total or 0), int(row.unparsable or 0)
     return {
         # Hits 0 -> ingestion stops. The number that pages someone.
         "days_ahead": days_ahead,
@@ -468,8 +489,16 @@ async def _partition_status(db: AsyncSession) -> dict:
         "oldest_day": min(covered).isoformat() if covered else None,
         "newest_day": max(covered).isoformat() if covered else None,
         "retention_days": settings.log_partition_retention_days,
-        # Growth here means the parser is silently failing to read timestamps on some log format.
+        # Rows in the DEFAULT partition, and WHY (see _default_partition_count_stmt). The total is
+        # kept as-is for existing clients; the two causes below are unrelated problems needing
+        # unrelated responses, so a client must never attribute the total to either one alone.
         "default_partition_rows": default_rows,
+        # The parser could not read these timestamps. Nothing else in the system reports it.
+        "unparsable_timestamp_rows": unparsable,
+        # Valid timestamps with no partition for their day: a backfill older than the oldest
+        # partition. These can never be reclaimed by retention (it only drops DATED partitions) and
+        # every range query scans them, which is the single-heap cost partitioning exists to avoid.
+        "unpartitioned_rows": default_rows - unparsable,
         "healthy": _partitions_healthy(days_ahead=days_ahead, default_rows=default_rows),
     }
 
