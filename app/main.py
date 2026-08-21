@@ -21,6 +21,7 @@ setup_logging()
 # - any background service that would be running applicationwide
 # you need to do it with decorator @asynccontextmanager
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Background loops run in EXACTLY ONE process. When run_background_workers is false (the web tier
