@@ -1,0 +1,1333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body, h1, h2, h3, h4, p, ul, ol, table { margin: 0; padding: 0; }
+  body { margin: 0; }
+</style>
+<title>Stage 2 Sealing and Data-Loss Audit</title>
+<style>
+  :root{
+    --paper:#F7F6F3; --card:#FFFFFF; --sunk:#EFEDE8; --code:#F1EFEA;
+    --ink:#191714; --ink-2:#4E4840; --ink-3:#847C71;
+    --rule:#DEDAD2; --rule-2:#EAE7E0;
+    --navy:#1B4A6F; --navy-bg:#E4EDF3;
+    --green:#2C6B4A; --green-bg:#E2EFE7;
+    --amber:#8C5407; --amber-bg:#F8EEDA;
+    --red:#9B2033; --red-bg:#FAE5E7;
+    --violet:#5B3B7A; --violet-bg:#EDE6F3;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--paper:#0F0E0D;--card:#191817;--sunk:#141312;--code:#121110;
+      --ink:#EFEBE6;--ink-2:#B9B1A8;--ink-3:#8B837A;--rule:#302D2A;--rule-2:#232120;
+      --navy:#7BAED5;--navy-bg:#12212B;--green:#6BC094;--green-bg:#122419;
+      --amber:#DFA357;--amber-bg:#281D0C;--red:#EE7484;--red-bg:#2A1114;
+      --violet:#B394D4;--violet-bg:#1E1628;}
+  }
+  :root[data-theme="dark"]{--paper:#0F0E0D;--card:#191817;--sunk:#141312;--code:#121110;
+    --ink:#EFEBE6;--ink-2:#B9B1A8;--ink-3:#8B837A;--rule:#302D2A;--rule-2:#232120;
+    --navy:#7BAED5;--navy-bg:#12212B;--green:#6BC094;--green-bg:#122419;
+    --amber:#DFA357;--amber-bg:#281D0C;--red:#EE7484;--red-bg:#2A1114;
+    --violet:#B394D4;--violet-bg:#1E1628;}
+  :root[data-theme="light"]{--paper:#F7F6F3;--card:#FFFFFF;--sunk:#EFEDE8;--code:#F1EFEA;
+    --ink:#191714;--ink-2:#4E4840;--ink-3:#847C71;--rule:#DEDAD2;--rule-2:#EAE7E0;
+    --navy:#1B4A6F;--navy-bg:#E4EDF3;--green:#2C6B4A;--green-bg:#E2EFE7;
+    --amber:#8C5407;--amber-bg:#F8EEDA;--red:#9B2033;--red-bg:#FAE5E7;
+    --violet:#5B3B7A;--violet-bg:#EDE6F3;}
+
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.62;
+       -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:880px;margin:0 auto;padding:44px 22px 110px;display:flex;flex-direction:column;gap:50px;}
+  h1{font-size:clamp(27px,4.3vw,39px);line-height:1.05;letter-spacing:-.032em;font-weight:800;margin:0 0 12px;}
+  .kick{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+        color:var(--ink-3);margin:0 0 9px;}
+  .sub{font-size:16.5px;color:var(--ink-2);margin:0;max-width:60ch;}
+  h2{font-size:clamp(20px,2.6vw,25px);line-height:1.15;letter-spacing:-.022em;font-weight:760;
+     margin:0 0 8px;padding-bottom:9px;border-bottom:2px solid var(--rule);}
+  h3{font-size:16px;font-weight:720;margin:24px 0 8px;letter-spacing:-.01em;}
+  h4{font-size:14px;font-weight:700;margin:18px 0 6px;}
+  p{margin:0 0 13px;color:var(--ink-2);max-width:68ch;font-size:14.5px;}
+  ul,ol{margin:0 0 13px;padding-left:21px;}
+  li{color:var(--ink-2);margin-bottom:6px;font-size:14.5px;}
+  .lede{font-size:15px;color:var(--ink-2);margin:12px 0 20px;max-width:66ch;}
+  code,.c{font-family:var(--mono);font-size:.87em;background:var(--sunk);padding:1.5px 5px;
+          border-radius:3px;color:var(--ink);}
+  .note{font-size:13px;color:var(--ink-3);margin:13px 0 0;max-width:68ch;}
+  b{color:var(--ink);}
+
+  /* TOC */
+  .toc{background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:18px 22px;}
+  .toc ol{margin:0;padding-left:20px;columns:2;column-gap:30px;}
+  @media (max-width:640px){.toc ol{columns:1;}}
+  .toc li{font-size:13.5px;margin-bottom:5px;}
+  .toc a{color:var(--navy);text-decoration:none;border-bottom:1px solid transparent;}
+  .toc a:hover,.toc a:focus{border-bottom-color:var(--navy);}
+
+  /* stat row */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;}
+  @media (max-width:700px){.stats{grid-template-columns:repeat(2,1fr);}}
+  .stat{background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:15px 14px;text-align:center;}
+  .stat .n{font-size:25px;font-weight:800;letter-spacing:-.025em;line-height:1.05;display:block;
+           font-variant-numeric:tabular-nums;}
+  .stat .l{font-size:11.5px;color:var(--ink-3);display:block;margin-top:6px;line-height:1.35;}
+  .stat.hot .n{color:var(--red);} .stat.warm .n{color:var(--amber);} .stat.cool .n{color:var(--navy);}
+  .stat.good .n{color:var(--green);}
+
+  /* callouts */
+  .co{border-left:3px solid var(--amber);background:var(--amber-bg);border-radius:0 9px 9px 0;
+      padding:14px 18px;margin:0 0 13px;}
+  .co.bad{border-left-color:var(--red);background:var(--red-bg);}
+  .co.ok{border-left-color:var(--green);background:var(--green-bg);}
+  .co.info{border-left-color:var(--navy);background:var(--navy-bg);}
+  .co h4{margin:0 0 5px;font-size:14px;color:var(--amber);}
+  .co.bad h4{color:var(--red);} .co.ok h4{color:var(--green);} .co.info h4{color:var(--navy);}
+  .co p{margin:0;font-size:13.5px;} .co p + p{margin-top:8px;}
+
+  /* glossary */
+  .gl{display:grid;grid-template-columns:1fr 1fr 1fr;gap:11px;}
+  @media (max-width:760px){.gl{grid-template-columns:1fr;}}
+  .gi{background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:12px 15px;}
+  .gi .w{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--violet);margin:0 0 4px;}
+  .gi .m{font-size:13px;color:var(--ink-2);margin:0;}
+
+  /* steps */
+  .steps{display:flex;flex-direction:column;}
+  .sp{display:grid;grid-template-columns:27px 1fr;gap:14px;position:relative;padding-bottom:16px;}
+  .sp:last-child{padding-bottom:0;}
+  .sp::before{content:"";position:absolute;left:13px;top:27px;bottom:0;width:2px;background:var(--rule);}
+  .sp:last-child::before{display:none;}
+  .sp .n{width:27px;height:27px;border-radius:7px;background:var(--navy-bg);border:1.5px solid var(--navy);
+         color:var(--navy);display:grid;place-items:center;font-family:var(--mono);font-size:11.5px;
+         font-weight:700;position:relative;z-index:1;}
+  .sp .t{padding-top:2px;font-size:14px;color:var(--ink-2);}
+  .sp .t > :last-child{margin-bottom:0;}
+
+  /* code snippets with a path caption */
+  .snip{margin:0 0 15px;}
+  .snip .path{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);margin:0 0 5px;
+              overflow-wrap:anywhere;}
+  pre{background:var(--code);border:1px solid var(--rule);border-radius:9px;padding:15px 17px;
+      overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;margin:0;color:var(--ink);}
+  pre.flow{background:var(--code);border:1px solid var(--rule);border-radius:9px;padding:16px 18px;
+           overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.62;margin:0 0 13px;color:var(--ink);}
+  pre b{color:var(--red);font-weight:700;}
+  pre i{color:var(--ink-3);font-style:normal;}
+
+  /* leak cards */
+  .fix{background:var(--card);border:1px solid var(--rule);border-radius:11px;overflow:hidden;}
+  .fix + .fix{margin-top:16px;}
+  .fix > .hd{display:flex;gap:10px;align-items:baseline;padding:13px 17px;border-bottom:1px solid var(--rule);
+             background:var(--sunk);}
+  .fix .id{font-family:var(--mono);font-size:12px;font-weight:800;flex-shrink:0;color:var(--red);}
+  .fix .ti{font-size:15px;font-weight:700;letter-spacing:-.01em;margin:0;}
+  .fix > .bd{padding:15px 17px;}
+  .fix .bd > :last-child{margin-bottom:0;}
+  .lbl{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.09em;
+       text-transform:uppercase;padding:2px 7px;border-radius:3px;margin-bottom:6px;font-weight:700;}
+  .lbl.d{background:var(--red-bg);color:var(--red);}
+  .lbl.f{background:var(--green-bg);color:var(--green);}
+  .lbl.x{background:var(--amber-bg);color:var(--amber);}
+
+  /* tables */
+  .scroll{overflow-x:auto;border:1px solid var(--rule);border-radius:9px;background:var(--card);margin:0 0 13px;}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:560px;}
+  th{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+     color:var(--ink-3);font-weight:600;padding:10px 14px;border-bottom:1px solid var(--rule);vertical-align:bottom;}
+  td{padding:10px 14px;border-bottom:1px solid var(--rule-2);color:var(--ink-2);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  td code{font-size:11.8px;}
+  td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right;}
+  td.lk{font-family:var(--mono);font-weight:700;color:var(--red);text-align:center;white-space:nowrap;}
+
+  /* priority list */
+  .pri{display:flex;flex-direction:column;gap:11px;}
+  .pi{background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:13px 17px;
+      display:grid;grid-template-columns:26px 1fr;gap:13px;}
+  .pi.p1{border-left:3px solid var(--red);}
+  .pi.p2{border-left:3px solid var(--amber);}
+  .pi.p3{border-left:3px solid var(--navy);}
+  .pi .rk{font-family:var(--mono);font-size:12px;font-weight:800;color:var(--ink-3);padding-top:2px;}
+  .pi .bx{font-size:13.5px;color:var(--ink-2);}
+  .pi .bx > :last-child{margin-bottom:0;}
+  .pi .bx p{font-size:13.5px;margin:0 0 6px;}
+</style>
+</head>
+<body>
+
+<div style="max-width:880px;margin:0 auto;padding:26px 22px 0;">
+  <div style="background:var(--navy-bg);border-left:3px solid var(--navy);border-radius:0 9px 9px 0;padding:13px 17px;font:13.5px/1.55 var(--sans);color:var(--ink-2);">
+    <strong style="color:var(--ink);">Rendered companion document.</strong>
+    The authoritative source is
+    <code style="font-family:var(--mono);font-size:12.5px;">docs/analytics-ml-architecture/stage2-sealing-and-data-loss-audit.md</code>.
+    This file is for reading; if the two disagree, the Markdown wins.
+  </div>
+</div>
+
+<div class="wrap">
+
+<header>
+  <p class="kick">Audit · 2026-08-20 · alembic head e4b28f5c9107</p>
+  <h1>Stage 2 sealing and data-loss audit</h1>
+  <p class="sub">A beginner-readable walkthrough of how log entries become log transactions, what
+  <code>sealed</code> actually does today, and the eleven ways an entry can end up belonging to no
+  transaction.</p>
+</header>
+
+<section>
+  <div class="co info">
+    <h4>How to read this</h4>
+    <p>Every claim here comes from <b>executable code</b>: function bodies, SQL, ORM column definitions,
+    alembic migrations, config defaults, and test assertions. Docstrings, comments, other documents in
+    <code>docs/</code>, and commit messages were deliberately excluded as evidence. That was the point of
+    the exercise, and it is why several findings below are places where a docstring states a guarantee
+    the code does not make. Where that happens it is called out explicitly.</p>
+    <p>Sections 1 to 5 build the mental model from nothing. Section 6 answers "is <code>sealed</code>
+    still used for regroup". Section 7 is the eleven leaks. Section 8 is measured evidence from a real
+    database. If you already know the pipeline, skip to section 6.</p>
+  </div>
+  <div class="co bad">
+    <h4>Status</h4>
+    <p>Nothing in this document has been fixed. It records the code as it stood on 2026-08-20. The fixes
+    in section 9 are recommendations for a separate change, not work that has happened.</p>
+  </div>
+</section>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#tables">The three tables</a></li>
+    <li><a href="#why">Why Stage 2 repeats itself</a></li>
+    <li><a href="#sealed">What <code>sealed</code> means</a></li>
+    <li><a href="#path">The live path, step by step</a></li>
+    <li><a href="#diagram">The path in one diagram</a></li>
+    <li><a href="#verdict">Is <code>sealed</code> still used for regroup?</a></li>
+    <li><a href="#leaks">How data goes missing</a></li>
+    <li><a href="#evidence">Measured evidence</a></li>
+    <li><a href="#fixes">Recommended fixes</a></li>
+    <li><a href="#verify">How to verify</a></li>
+    <li><a href="#appendix-a">Appendix A: where NULL timestamps come from</a></li>
+  </ol>
+</nav>
+
+<!-- ============================================ 1 -->
+<section id="tables">
+  <h2>1. The three tables, in plain words</h2>
+  <p>The WMS server writes a text log file. Every <b>line</b> of that file becomes one row in
+  <code>log_entries</code>.</p>
+  <p>A single user action, say scanning an item, produces <b>many</b> lines: a REQUEST line, some
+  internal work lines, some M3 calls, then a RESPONSE line. Those lines together are one
+  <b>transaction</b>.</p>
+
+  <div class="gl">
+    <div class="gi">
+      <p class="w">log_entries</p>
+      <p class="m">One row is one line of the log file. Written by Stage 1,
+      <code>parse_insert.py</code>. Insert-only.</p>
+    </div>
+    <div class="gi">
+      <p class="w">log_transactions</p>
+      <p class="m">One row is one complete request/response cycle. <b>Computed</b>, not read from the
+      file, by Stage 2, <code>derive_transactions.py</code>.</p>
+    </div>
+    <div class="gi">
+      <p class="w">log_entry_assignment</p>
+      <p class="m">"Entry #47 belongs to transaction X, at position 3." The link table. Written by
+      Stage 2.</p>
+    </div>
+  </div>
+
+  <p>The important part: <b><code>log_transactions</code> is not read out of the file, it is
+  computed.</b> Stage 2 reads entries in timestamp order, works out which lines belong together, and
+  writes the transaction rows.</p>
+
+  <div class="co">
+    <h4>This is the definition of "loss" for the rest of the document</h4>
+    <p>The link between an entry and its transaction lives in <code>log_entry_assignment</code>. If an
+    entry has no row there, it belongs to no transaction. The line is still in the database, and
+    <code>GET /logs/entries</code> still returns it with <code>transaction_id: null</code>
+    (<code>app/api/v1/logs.py:286</code>, <code>:296</code>), but the transaction view cannot see it.</p>
+  </div>
+
+  <p class="note">The split is deliberate and recent. Stage 2 used to write the grouping back onto an
+  indexed <code>log_entries.transaction_id</code> column, so every rebuild rewrote both heap and index.
+  <code>assignments.py:11-14</code> records the production measurement that motivated moving it out:
+  105.8M updates at 0.0% HOT.</p>
+</section>
+
+<!-- ============================================ 2 -->
+<section id="why">
+  <h2>2. Why Stage 2 does its work over and over</h2>
+  <p>Log files rotate. The REQUEST line can be at the end of <code>log.1</code> and its RESPONSE at the
+  start of <code>log.2</code>. When Stage 2 first runs it may only have the REQUEST, so it writes a
+  transaction with <code>status = incomplete</code>.</p>
+  <p>Later the RESPONSE arrives. Now Stage 2 has to throw that incomplete transaction away and rebuild
+  it as a complete one. So Stage 2's normal mode is: <b>delete some transactions, then rebuild them
+  from their entries</b>, repeatedly, on a loop.</p>
+  <p>That is only safe because transaction ids are computed from content rather than generated
+  randomly.</p>
+
+  <div class="snip">
+    <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:445-446</p>
+<pre>445  def _txn_id(entries: list[LogEntry]) -&gt; uuid.UUID:
+446      return uuid.uuid5(_TXN_NS, _anchor(entries))</pre>
+  </div>
+
+  <p><code>_anchor</code> (<code>:433-442</code>) prefers the REQUEST line's <code>entry_hash</code>,
+  which is a sha256 over the raw line including its millisecond timestamp. So the id is a fingerprint
+  of the transaction's opening line. Rebuild the same transaction a thousand times and you get the same
+  UUID, which is why saved or cited ids stay valid across rebuilds.</p>
+</section>
+
+<!-- ============================================ 3 -->
+<section id="sealed">
+  <h2>3. What <code>sealed</code> means</h2>
+  <p>If Stage 2 rebuilt every transaction on every cycle it would re-read the whole table forever, which
+  does not scale. So there is a flag whose meaning is: <b>nothing new can ever join this transaction, so
+  stop reprocessing it.</b></p>
+
+  <div class="snip">
+    <p class="path">app/persistence/models/log_transaction.py:69</p>
+<pre>69  sealed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False, index=True)</pre>
+  </div>
+
+  <p>It arrived in <code>alembic/versions/d4e7a1b9c206_add_sealed_to_log_transactions.py:24-29</code> as
+  <code>NOT NULL DEFAULT false</code> with no explicit backfill, so every row that already existed became
+  unsealed at migration time. The index is recreated after the partitioning rewrite at
+  <code>alembic/versions/a1f6d70b3e92_partition_log_tables_by_utc_day.py:97</code>, so it still exists.</p>
+
+  <h3>The predicate</h3>
+  <div class="snip">
+    <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:541-552</p>
+<pre>541  def _is_sealed(values: dict, seal_cutoff: datetime | None, abandon_cutoff: datetime | None) -&gt; bool:
+547      ended = values.get("ended_at")
+548      if ended is None or seal_cutoff is None:
+549          return False
+550      if values["status"] == LogTransactionStatus.incomplete:
+551          return abandon_cutoff is not None and ended &lt; abandon_cutoff
+552      return ended &lt; seal_cutoff</pre>
+  </div>
+
+  <ol>
+    <li>Line 549: a transaction with no usable timestamp is <b>never</b> sealed.</li>
+    <li>Line 552: a <i>finished</i> transaction, meaning it has a RESPONSE or a hard error, seals once it
+    is older than <code>seal_cutoff</code>.</li>
+    <li>Line 551: an <i>unfinished</i> one waits much longer, until <code>abandon_cutoff</code>. The
+    reasoning is that a slow response might still be coming, so do not close the door early.</li>
+  </ol>
+
+  <p><code>ended_at</code> is the newest timestamp among the transaction's own entries
+  (<code>:106-108</code>). It is pure <b>event time</b>, never ingest or write time. <code>status</code>
+  comes from the same function at <code>:112-131</code>; <code>incomplete</code> means no RESPONSE entry
+  and no ERROR entry.</p>
+
+  <h3>Where the cutoffs come from</h3>
+  <p>This is the part most people get wrong, so read it slowly.</p>
+
+  <div class="snip">
+    <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:529-538</p>
+<pre>534      max_ts = await _max_entry_ts(db, customer_code)
+535      if max_ts is None:
+536          return None, None
+537      return (max_ts - timedelta(seconds=settings.log_seal_window_seconds),
+538              max_ts - timedelta(seconds=settings.log_abandon_window_seconds))</pre>
+  </div>
+
+  <div class="co info">
+    <h4>max_ts is not the wall clock</h4>
+    <p>It is the newest timestamp found inside <i>that customer's</i> log data, which is to say the log's
+    own notion of "now". That is deliberate. If you import a log file from January, then "now" for that
+    customer is January, so January transactions seal correctly instead of all looking brand new. It also
+    means one customer's stale logs still seal while another customer's active stream does not drag them
+    along.</p>
+  </div>
+
+  <p>With the defaults from <code>app/settings.py:80</code> and <code>:84</code>, which are 900 and 3600
+  seconds:</p>
+
+<pre class="flow">  customer's newest log line
+                            |
+  ...-----------------------|
+     ^                 ^    ^
+     |                 |    max_ts
+     |                 max_ts - 15min  = seal_cutoff
+     max_ts - 1 hour           = abandon_cutoff
+
+  finished transaction ending here  -&gt; SEALED
+                    &lt;---------------|
+  unfinished one ending here        -&gt; SEALED (gave up waiting)
+      &lt;-----------|
+  unfinished one ending here        -&gt; still UNSEALED (response may still come)
+                       |-----------&gt;</pre>
+
+  <p class="note"><code>_max_entry_ts</code> (<code>:513-526</code>) tries a bounded probe first, floored
+  at <code>now(UTC) - log_cutoff_lookback_days</code> (7 days, <code>app/settings.py:91</code>) so a
+  partitioned <code>log_entries</code> prunes instead of taking the max of every partition, and falls
+  back to an unbounded <code>MAX</code> when the probe returns NULL. The wall clock enters only as that
+  pruning floor; it cannot change the value, only which query finds it.</p>
+
+  <h3>Where the flag is written</h3>
+  <p>Exactly one place in the entire codebase.</p>
+
+  <div class="snip">
+    <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:644 and :610</p>
+<pre>644          is_sealed = _is_sealed(values, seal_cutoff, abandon_cutoff)
+...
+610      txn = LogTransaction(id=tid, sealed=is_sealed, **values)</pre>
+  </div>
+
+  <div class="co ok">
+    <h4>There is no UPDATE path</h4>
+    <p>Line 610 is an INSERT. There is no <code>UPDATE ... SET sealed</code> anywhere in
+    <code>app/</code>. A transaction never becomes sealed in place: it is deleted and re-inserted, and
+    the flag is recalculated from scratch each time. <code>sealed</code> is also never serialized into
+    any API response, and the transaction dict at <code>app/api/v1/logs.py:317-343</code> has no
+    <code>sealed</code> key.</p>
+  </div>
+</section>
+
+<!-- ============================================ 4 -->
+<section id="path">
+  <h2>4. The live path, step by step</h2>
+  <p>This is what actually runs in production. Five steps.</p>
+
+  <div class="steps">
+
+    <div class="sp"><div class="n">1</div><div class="t">
+      <p><b>A file is ingested, and a "please stitch this" ticket is written.</b></p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/parse_insert.py:133-143</p>
+<pre>133          async def flush(b: list[dict]) -&gt; int:
+134              nonlocal lo, hi
+135              ts_list = await _insert_dedup(db, b)
+136              for ts in ts_list:
+137                  <b>if ts is None:</b>
+138                      <b>continue</b>
+139                  if lo is None or ts &lt; lo:
+140                      lo = ts
+141                  if hi is None or ts &gt; hi:
+142                      hi = ts
+143              return len(ts_list)</pre>
+      </div>
+      <p><code>lo</code> and <code>hi</code> are the earliest and latest timestamp of the rows just
+      inserted. Line 137 skips rows whose timestamp could not be parsed, which matters in leak 1.</p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/parse_insert.py:188-190</p>
+<pre>188          if inserted and lo is not None and hi is not None:
+189              db.add(LogRegroupPending(customer_code=customer_code, job_id=job_id,
+190                                       range_start=lo, range_end=hi))</pre>
+      </div>
+      <p>A row in <code>log_regroup_pending</code> is a <b>ticket</b>: "I added data between
+      <code>lo</code> and <code>hi</code>, somebody please group that range." Nothing else triggers
+      Stage 2. No ticket, no grouping.</p>
+    </div></div>
+
+    <div class="sp"><div class="n">2</div><div class="t">
+      <p><b>A background worker picks up the ticket.</b></p>
+      <div class="snip">
+        <p class="path">app/services/workers/log_stitch_worker.py:90-94</p>
+<pre>90  async def _stitch_customer(cc: str) -&gt; dict:
+93      async with async_session() as db:
+94          return await finalize_pending(db, cc)</pre>
+      </div>
+      <p>This is the only automated Stage 2 driver. Registered at <code>app/background.py:102</code>, and
+      it imports only <code>finalize_pending</code> (<code>log_stitch_worker.py:37</code>).</p>
+    </div></div>
+
+    <div class="sp"><div class="n">3</div><div class="t">
+      <p><b><code>finalize_pending</code> reads the open tickets.</b></p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:978-989</p>
+<pre>978      pend = list((await db.execute(
+979          select(LogRegroupPending).where(
+980              LogRegroupPending.customer_code == customer_code,
+981              LogRegroupPending.consumed_at.is_(None),
+982              LogRegroupPending.abandoned_at.is_(None),
+987              LogRegroupPending.available_at &lt;= func.clock_timestamp(),
+988          ).order_by(LogRegroupPending.range_start.asc())
+989      )).scalars().all())</pre>
+      </div>
+      <p>Note what is <b>not</b> in that WHERE clause: the word <code>sealed</code>. Work selection is
+      driven entirely by the ticket table. Tickets are then coalesced into disjoint runs
+      (<code>:923-935</code>) and split into sub-windows of at most six hours
+      (<code>:938-951</code>, <code>app/settings.py:126</code>).</p>
+    </div></div>
+
+    <div class="sp"><div class="n">4</div><div class="t">
+      <p><b><code>regroup_window</code> does the rebuild.</b> Three parts.</p>
+
+      <p><b>4a. Widen the window by a safety pad.</b> A new entry might belong to a transaction that
+      <i>started</i> before the ticket's range, so look wider on both sides.</p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:837-838</p>
+<pre>837      pad = _regroup_pad()
+838      lo_p, hi_p = lo - pad, hi + pad</pre>
+      </div>
+      <p><code>_regroup_pad()</code> is <code>max(log_regroup_pad_seconds,
+      log_seal_window_seconds)</code>, so <code>max(900, 900) = 900</code> seconds
+      (<code>:809-812</code>).</p>
+
+      <p><b>4b. Delete every transaction anchored in the window.</b></p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:845-851</p>
+<pre>845      freed = list((await db.execute(
+846          select(LogTransaction.id).where(
+847              LogTransaction.customer_code == customer_code,
+848              LogTransaction.started_at &gt;= lo_p,
+849              LogTransaction.started_at &lt;= hi,
+850          )
+851      )).scalars().all())</pre>
+      </div>
+      <div class="co bad">
+        <h4>The single most important fact in this audit</h4>
+        <p>Look hard at lines 847 to 849. <b>There is no <code>sealed</code> condition.</b> This query
+        takes sealed and unsealed transactions alike, and both are deleted along with their assignment
+        rows (<code>:863-865</code>). Section 6 returns to what that means.</p>
+      </div>
+      <p class="note">Before the delete, the current ownership map is captured so ids can be inherited
+      rather than re-minted (<code>:858-861</code>). The ordering matters: reading it after the delete
+      would return an empty map, which would not fail loudly, it would silently revert to minting a
+      fresh id per rebuild.</p>
+
+      <p><b>4c. Re-read the now-unassigned entries.</b></p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:873-884</p>
+<pre>873      rows = list((await db.execute(
+874          select(LogEntry).where(
+875              LogEntry.customer_code == customer_code,
+876              assignments.is_unassigned(),
+877              LogEntry.timestamp &gt;= lo_p,
+878              LogEntry.timestamp &lt;= hi_p,
+879          ).order_by(
+880              LogEntry.timestamp.asc().nullslast(),
+881              LogEntry.source_file.asc(),
+882              LogEntry.line_number.asc(),
+883          )
+884      )).scalars().all())</pre>
+      </div>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/assignments.py:36-38</p>
+<pre>36      return ~select(LogEntryAssignment.entry_id).where(
+37          LogEntryAssignment.entry_id == LogEntry.id
+38      ).exists()</pre>
+      </div>
+      <p>So 4c means: give me every entry in this time range that currently belongs to no transaction.
+      The upper bound is <code>hi_p</code>, not <code>hi</code>, because a freed transaction anchored at
+      <code>hi</code> can own entries up to <code>pad</code> later.</p>
+      <p>The delete in 4b and the read in 4c happen in the <b>same</b> database transaction with no
+      intermediate commit, so the freeing is visible to the read and readers never see a torn state.
+      That part is correct, and worth knowing, because two of the other regroup functions do not do
+      it.</p>
+    </div></div>
+
+    <div class="sp"><div class="n">5</div><div class="t">
+      <p><b>Group them and write.</b> <code>_group</code> (<code>:236-430</code>) runs the
+      REQUEST/RESPONSE state machine and returns a list of builders, one per transaction. It is thread-
+      and user-aware, keying an open transaction by <code>(thread, user)</code> so the .NET async
+      server's interleaved streams do not cross-stitch. It never discards an entry: every leftover open
+      builder and unmatched pending request is emitted at <code>:425-429</code>.</p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:638-650</p>
+<pre>638      for b, tid in zip(builders, ids):
+639          <b>if tid in seen or tid in existing:</b>
+640              <b>skipped += 1</b>
+641              <b>continue</b>
+642          seen.add(tid)
+643          values = _cap_over_length(b.compute(), customer_code)
+644          is_sealed = _is_sealed(values, seal_cutoff, abandon_cutoff)
+645          txn = await _write_transaction(db, tid=tid, values=values, is_sealed=is_sealed,
+646                                         entries=b.entries, customer_code=customer_code)</pre>
+      </div>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:610-614</p>
+<pre>610      txn = LogTransaction(id=tid, sealed=is_sealed, **values)
+611      db.add(txn)
+612      await db.flush()
+613      await assignments.write(db, transaction_id=txn.id, entries=entries,
+614                              customer_code=customer_code)</pre>
+      </div>
+      <p>That is the whole live path. Ticket in, transactions out.</p>
+    </div></div>
+
+  </div>
+</section>
+
+<!-- ============================================ 5 -->
+<section id="diagram">
+  <h2>5. The full live path in one diagram</h2>
+<pre class="flow">  file
+    |
+    v
++---------------------------------------------------+
+| 1. parse_insert -&gt; log_entries                    |
+|    ON CONFLICT DO NOTHING ... RETURNING           |
++---------------------------------------------------+
+    |
+    v
++---------------------------------------------------+
+| 2. log_regroup_pending [range_start, range_end]   |
+|    the ONLY work queue Stage 2 reads              |
++---------------------------------------------------+
+    |
+    v
++---------------------------------------------------+
+| 3. log_stitch_worker -&gt; finalize_pending          |
+|    coalesce tickets, split into &lt;=6h sub-windows  |
++---------------------------------------------------+
+    |
+    v
++---------------------------------------------------+
+| 4. regroup_window                                 |
+|    a. pad the window by 900s                      |
+|    b. DELETE txns anchored in [lo-900, hi]        |
+|       (sealed and unsealed alike)                 |
+|    c. re-read unassigned entries in [lo-900,hi+900]|
++---------------------------------------------------+
+    |
+    v
++---------------------------------------------------+
+| 5. _group -&gt; _persist -&gt; assignments.write        |
+|    sealed is COMPUTED and INSERTED here           |
++---------------------------------------------------+
+    |
+    v
+   log_transactions + log_entry_assignment</pre>
+</section>
+
+<!-- ============================================ 6 -->
+<section id="verdict">
+  <h2>6. Is <code>sealed</code> still used for regroup?</h2>
+
+  <div class="co bad">
+    <h4>No, not by anything the system runs on its own</h4>
+    <p>Nowhere in section 4 did the code <i>read</i> <code>sealed</code>. It computed it at line 644 and
+    wrote it at line 610, but never read it back to decide anything.</p>
+  </div>
+
+  <p>There is exactly one regroup function that reads it, and it is not on the live path.</p>
+
+  <div class="snip">
+    <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:779-780</p>
+<pre>779      unsealed_stmt = select(LogTransaction.id).where(LogTransaction.sealed.is_(False))
+780      free_stmt = delete(LogTransaction).where(LogTransaction.sealed.is_(False))</pre>
+  </div>
+
+  <p>That is <code>regroup_incremental</code>. It says "free only the unsealed ones, leave sealed rows
+  alone", which is exactly what <code>sealed</code> was invented for. But it is reachable from only two
+  places, both manual HTTP endpoints:</p>
+  <ul>
+    <li><code>app/api/v1/logs.py:358</code>, <code>POST /logs/regroup?incremental=true</code>. The
+    endpoint's own default is <code>incremental=False</code>, which routes to <code>regroup_all</code>,
+    and that ignores <code>sealed</code> entirely.</li>
+    <li><code>app/api/v1/logs.py:728</code>, the tail of the date-range delete endpoint.</li>
+  </ul>
+  <p><code>regroup_incremental</code> appears nowhere in <code>app/background.py</code> or
+  <code>app/worker.py</code>. In normal running that branch never executes.</p>
+
+  <h3>What still depends on <code>sealed</code></h3>
+  <p>The notification system, for a completely different reason.</p>
+
+  <div class="snip">
+    <p class="path">app/services/notifications/rules/stability.py:40-52</p>
+<pre>40  def is_alertable(status: LogTransactionStatus | None, *, sealed: bool) -&gt; bool:
+46      if status is None:
+47          return False
+48      if sealed:
+49          return True
+50      if settings.notification_alert_only_sealed:
+51          return False
+52      return status not in UNSTABLE_WHILE_UNSEALED</pre>
+  </div>
+  <div class="snip">
+    <p class="path">app/services/notifications/rules/stability.py:63-68</p>
+<pre>63      if settings.notification_alert_only_sealed:
+64          return LogTransaction.sealed.is_(True)
+65      return or_(
+66          LogTransaction.sealed.is_(True),
+67          LogTransaction.status.notin_(list(UNSTABLE_WHILE_UNSEALED)),
+68      )</pre>
+  </div>
+
+  <p>Consumed at <code>engine.py:114-117</code> as a filter on the engine's window query. The logic: do
+  not alert "transaction incomplete!" while the transaction is unsealed, because minutes later the
+  RESPONSE arrives and it becomes a success. <code>dedup_key</code> is stable per (rule, transaction),
+  so once that alert is out no correction ever follows, and the channel keeps a permanent record of a
+  problem that resolved itself.</p>
+  <p class="note">Pinned by <code>tests/test_notification_seal_gate_chunk29.py</code>: rule assertions at
+  <code>:56-94</code>, WHERE-clause shape at <code>:112</code> and <code>:127-128</code>, a database
+  round trip at <code>:185-204</code>, end-to-end engine tests at <code>:297-331</code>.</p>
+
+  <div class="co ok">
+    <h4>The answer, stated plainly</h4>
+    <p><code>sealed</code> is no longer what protects regroup. It is now a "this status is final, safe to
+    alert on" marker for notifications. Regroup gets its safety from a different mechanism: the ticket
+    table for <i>what</i> to rebuild, and deterministic plus inherited ids for <i>identity</i> across
+    rebuilds.</p>
+    <p>Identity stability is carried by <code>log_entry_assignment</code> and <code>continuity</code>,
+    which is what <code>sealed</code> used to provide by never freeing sealed rows.
+    <code>tests/test_transaction_identity_chunk35.py</code> is the evidence: it asserts id continuity at
+    <code>:113-131</code>, <code>:133-144</code>, <code>:192-205</code> and <code>:377-395</code>, every
+    rebuild goes through <code>regroup_window</code>, and the word <code>sealed</code> appears in that
+    file only in its module docstring.</p>
+    <p><b>But Stage 2 must still keep computing <code>sealed</code> correctly, because notifications read
+    it. It is not dead, it has changed owner.</b></p>
+  </div>
+
+  <h3>Four stale statements that say otherwise</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Location</th><th>What it claims</th><th>Reality</th></tr></thead>
+      <tbody>
+        <tr><td><code>app/api/v1/logs.py:350</code></td>
+            <td>"only regroup the unsealed live tail (fast, what the worker runs)"</td>
+            <td>The worker runs <code>finalize_pending</code> then <code>regroup_window</code>. This text
+            is user-facing OpenAPI.</td></tr>
+        <tr><td><code>derive_transactions.py:11-13</code></td>
+            <td>"regroup_incremental ... This is what the worker runs"</td>
+            <td>Same falsehood.</td></tr>
+        <tr><td><code>log_transaction.py:67-68</code></td>
+            <td>"so incremental Stage 2 never recomputes it"</td>
+            <td><code>regroup_window</code> recomputes sealed rows every cycle.</td></tr>
+        <tr><td><code>derive_transactions.py:652-653</code></td>
+            <td>Warns "skipped N builder(s) with an already-sealed id"</td>
+            <td>The check behind it (<code>:473-482</code>) filters on id existence and
+            <code>started_at</code>, never on <code>sealed</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================ 7 -->
+<section id="leaks">
+  <h2>7. How data goes missing</h2>
+
+  <div class="co ok">
+    <h4>First, the good news</h4>
+    <p><b>Log entries are never deleted by Stage 2.</b> <code>log_entries</code> is insert-only. "Data
+    loss" here does not mean the line disappears; it means the entry has no row in
+    <code>log_entry_assignment</code>, so it belongs to no transaction, so the transaction view cannot
+    show it. The one exception where the raw row really does disappear is leak 8, where retention drops
+    the partition.</p>
+  </div>
+
+  <p>Three leaks are walked slowly below, because once you see the shape the other eight are the same
+  shape.</p>
+
+  <div class="fix">
+    <div class="hd"><span class="id">LEAK 1</span><p class="ti">An entry with no timestamp is never
+    grouped</p></div>
+    <div class="bd">
+      <p>Some log lines have a timestamp the parser cannot read. <code>log_entries.timestamp</code> is
+      then NULL, and the row lives in the DEFAULT partition. Look again at step 4c:</p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:877-878</p>
+<pre>877              LogEntry.timestamp &gt;= lo_p,
+878              LogEntry.timestamp &lt;= hi_p,</pre>
+      </div>
+      <p><span class="lbl d">how it leaks</span></p>
+<pre class="flow">  entry.timestamp = NULL
+     NULL &gt;= lo_p   -&gt;  NULL   -&gt;  row is not returned
+  No error. No warning. The entry is simply not in the result set.</pre>
+      <p>In SQL, <code>NULL &gt;= anything</code> is not TRUE and not FALSE, it is NULL, and a WHERE
+      clause treats NULL as "no". The entry is never read, so it is never grouped, forever.</p>
+      <p><b>The codebase knows about this trap.</b> There is a helper built specifically for it:</p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/time_bounds.py:72-80</p>
+<pre>72      def covers(self, column, *, include_null: bool) -&gt; ColumnElement[bool]:
+79          inside = and_(true(), *self._range_predicates(column))
+80          return or_(inside, column.is_(None)) if include_null else inside</pre>
+      </div>
+      <p><code>include_null=True</code> is used correctly in the neighbouring queries:
+      <code>assignments.py:184</code>, <code>assignments.py:226-229</code>, and
+      <code>derive_transactions.py:481</code>. The live path's own entry read at line 877 is the one
+      place that omits it. A sibling function even gets it right:</p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:755</p>
+<pre>755          stmt = stmt.where(or_(LogEntry.timestamp &gt;= floor, LogEntry.timestamp.is_(None)))</pre>
+      </div>
+      <p>That is <code>_live_tail</code>, used only by <code>regroup_incremental</code>, the manual path
+      nobody runs. It is covered by <code>tests/test_stage2_bounds_chunk24.py:240-250</code>, and there
+      is no equivalent test for the <code>regroup_window</code> path.</p>
+      <p>And it gets worse. If <i>every</i> new entry in a file has a NULL timestamp then <code>lo</code>
+      stays None, so line 188's <code>if inserted and lo is not None</code> is false, and <b>no ticket is
+      written at all</b>. Stage 2 is never even asked.</p>
+      <p><span class="lbl x">see also</span> For the concrete question "when does an entry actually end up
+      with no timestamp?", see <a href="#appendix-a">Appendix A</a>. There are exactly two code paths and
+      six realistic triggers, all verified by running the parser.</p>
+      <p><span class="lbl f">fix</span> Use <code>covers(..., include_null=True)</code> at line 877, and
+      write a ticket at <code>parse_insert.py:188</code> even when <code>lo is None</code>.</p>
+    </div>
+  </div>
+
+  <div class="fix">
+    <div class="hd"><span class="id">LEAK 2</span><p class="ti">A transaction longer than 15 minutes gets
+    cut in half</p></div>
+    <div class="bd">
+      <p>Step 4 assumed that no transaction lasts longer than the 900-second pad. If that holds, then
+      deleting everything that <i>started</i> in <code>[lo-900, hi]</code> and reading everything in
+      <code>[lo-900, hi+900]</code> covers every affected transaction completely. Does it hold? Here is
+      the only thing that closes a transaction on a timeout:</p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:320-328</p>
+<pre>320      gap = timedelta(seconds=settings.log_open_gap_seconds)
+322      def evict_stale(now: datetime) -&gt; None:
+325          horizon = now - gap
+326          for k in [k for k, bd in open_by_key.items()
+327                    <b>if (lt := last_ts(bd)) is not None and lt &lt; horizon]:</b>
+328              builders.append(close(k))</pre>
+      </div>
+      <p>Read line 327 carefully. <code>last_ts(bd)</code> is the timestamp of the builder's <b>most
+      recent</b> entry (<code>:317-318</code>). So the rule is "close this transaction if nothing has
+      been added for <code>log_open_gap_seconds</code>", which is 300 by default
+      (<code>app/settings.py:112</code>).</p>
+      <p>That is a rule about the <b>gap between entries</b>, not about <b>total length</b>. Every new
+      line resets the clock. A transaction that logs one line every 4 minutes stays open
+      indefinitely.</p>
+      <p><span class="lbl d">how it leaks</span></p>
+<pre class="flow">  pad = 900s
+
+  delete transactions started in :  [lo-900 .............. hi]
+  read entries in                :  [lo-900 ..................... hi+900]
+
+  T, actual span 3600s:  |R======================================E|
+                          ^
+                          started_at falls inside the delete range,
+                          so T IS DELETED and its assignments wiped
+                                                  hi+900 ^
+                          |&lt;--- re-read, rebuilt ---&gt;|&lt;-- NOT re-read --&gt;|
+                                                          orphans, and T
+                                                          is rebuilt truncated</pre>
+      <p>Two bad outcomes at once: the entries past <code>hi+900</code> become orphans, and the
+      transaction that gets rebuilt is missing its tail.</p>
+      <div class="co bad">
+        <h4>A docstring stating a guarantee the code does not make</h4>
+        <p><code>derive_transactions.py:828</code> says "Lossless because the system guarantees no
+        transaction spans more than pad". The code does not make that guarantee, nothing does, and no
+        test asserts it. The same claim is repeated at
+        <code>app/services/workers/log_partition_worker.py:44-46</code> to justify the one-day retention
+        lag, and at <code>derive_transactions.py:458-470</code> to claim the clash window is "exact, not
+        an approximation".</p>
+      </div>
+      <p><span class="lbl f">fix</span> Cap a builder's <i>total</i> span at <code>pad</code> in
+      <code>evict_stale</code>, or derive <code>pad</code> from the largest span actually observed.</p>
+    </div>
+  </div>
+
+  <div class="fix">
+    <div class="hd"><span class="id">LEAK 3</span><p class="ti">The skip that silently eats entries</p></div>
+    <div class="bd">
+      <p>Back to step 5, line 639. <code>existing</code> means "a transaction with this id is already in
+      the database" (<code>:485-498</code>). The intent is a safety valve: do not insert a duplicate. But
+      look at what <code>continue</code> skips. It skips line 645, <code>_write_transaction</code>, which
+      is the <i>only</i> thing that writes to <code>log_entry_assignment</code> (line 613).</p>
+      <p><span class="lbl d">how it leaks</span></p>
+<pre class="flow">  builder with 12 entries -&gt; tid = X -&gt; X already exists -&gt; continue
+     |
+     +-- no transaction row written        (fine, one already exists)
+     +-- NO assignment row written         &lt;-- the 12 entries are now orphans
+     |
+  next cycle: same 12 entries are still unassigned
+              -&gt; same anchor line -&gt; same id X -&gt; skipped again
+              -&gt; and again, forever</pre>
+      <p>It is a stable, self-perpetuating loop. The only trace is one log line:</p>
+      <div class="snip">
+        <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:651-653</p>
+<pre>651      if skipped:
+652          logger.warning("Stage 2: skipped %d builder(s) with an already-sealed id (out-of-order/bulk "
+653                         "ingest). Run a full regroup (POST /logs/regroup) to rebuild cleanly.", skipped)</pre>
+      </div>
+      <p>Two problems with that message. It says "already-sealed id", but the check at line 639 never
+      looks at <code>sealed</code>, only at whether the id exists. And it reports a count rather than
+      <i>which</i> entries, so you cannot repair just those.</p>
+      <p><span class="lbl f">fix</span> Record the skipped entry ids, not just a count, and auto-enqueue a
+      repair ticket for their time range.</p>
+    </div>
+  </div>
+
+  <h3>The other eight</h3>
+  <p>Same shape: an entry ends up with no assignment row and nothing notices.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>#</th><th>What happens</th><th>Where</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td class="lk">4</td>
+          <td><code>regroup_window</code>'s <b>delete</b> query also omits the IS NULL branch, so a
+          transaction built entirely from timestamp-less entries can never be freed, rebuilt, or
+          corrected by the live path</td>
+          <td><code>derive_transactions.py:848-849</code></td>
+          <td>add <code>covers(..., include_null=True)</code>, as <code>:481</code> already does</td></tr>
+        <tr><td class="lk">5</td>
+          <td><code>continuity.assign</code> can hand the same id to two groups in one batch, and the
+          loser then hits leak 3. <code>_award</code> guarantees an <i>inherited</i> id goes to one group
+          but never checks it against the other groups' <i>fallbacks</i></td>
+          <td><code>continuity.py:145-147</code>, <code>:129-135</code></td>
+          <td>compare awarded ids against every fallback and re-mint on collision</td></tr>
+        <tr><td class="lk">6</td>
+          <td><code>regroup_incremental</code> deletes unsealed transactions with <b>no time bound</b> and
+          commits, then rebuilds from a read that <b>does</b> have a floor, so anything older is deleted
+          and never rebuilt</td>
+          <td>delete <code>:780</code>, commit <code>:787</code>, floor <code>:750</code></td>
+          <td>bound the delete the same way, and do delete plus rebuild in one transaction</td></tr>
+        <tr><td class="lk">7</td>
+          <td>A <code>ValueError</code>, <code>TypeError</code> or <code>KeyError</code> marks a ticket
+          abandoned on the <b>first</b> attempt, with no retries, because those are classified
+          permanent</td>
+          <td><code>derive_transactions.py:1064-1071</code>,
+          <code>app/services/queueing/retry_policy.py:28-37</code>, <code>:65-69</code></td>
+          <td>give them the normal <code>log_regroup_max_attempts</code> budget</td></tr>
+        <tr><td class="lk">8</td>
+          <td>Abandoned tickets stop protecting their day from retention, so around day 61 the raw
+          entries are genuinely dropped by <code>DROP PARTITION</code></td>
+          <td><code>log_partition_worker.py:107-108</code>, drop at <code>:138-148</code> via
+          <code>:173</code></td>
+          <td>let abandoned tickets keep blocking the drop, and alert instead of reclaiming</td></tr>
+        <tr><td class="lk">9</td>
+          <td>Re-ingesting the file to repair things does nothing, because <code>ON CONFLICT DO NOTHING
+          ... RETURNING</code> returns zero new rows, so <code>inserted == 0</code> and no ticket is
+          written</td>
+          <td><code>parse_insert.py:70-73</code> plus <code>:188</code></td>
+          <td>write a ticket from the file's parsed min/max even when <code>inserted == 0</code></td></tr>
+        <tr><td class="lk">10</td>
+          <td><code>regroup_all</code> deletes <b>every tenant's</b> transactions and commits, then
+          rebuilds in a loop with no try/except and no LIMIT, so if tenant 3 of 20 fails, tenants 3 to 20
+          are left empty</td>
+          <td>delete <code>:676-681</code>, loop <code>:689-701</code></td>
+          <td>per-tenant try/except, per-tenant delete inside the same transaction as its rebuild,
+          bounded read</td></tr>
+        <tr><td class="lk">11</td>
+          <td><b>Nothing anywhere reports orphaned entries.</b> The count is computed and thrown away</td>
+          <td><code>:701</code>, <code>:804</code>, <code>:898-900</code></td>
+          <td>ship an unassigned-entry count per tenant and day</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Leak 11 is why the other ten are hard to see:</p>
+  <div class="snip">
+    <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:898-900</p>
+<pre>898      _merge_stats(stats, {**result, "entries_scanned": len(rows),
+899                           <b>"orphan_entries": len(rows) - result["entries_assigned"]})</b>
+900      <b>logger.info("Stage 2 regroup (window): %s", stats)</b></pre>
+  </div>
+  <p>Line 899 knows exactly how many entries went missing. Line 900 writes it to a log file. No metric,
+  no endpoint, no alert. Grepping <code>app/api/</code> and <code>app/services/workers/</code> for
+  "unassigned" returns nothing, and <code>assignments.is_unassigned()</code> has exactly three call
+  sites (<code>:721</code>, <code>:753</code>, <code>:876</code>), all work-finding queries inside a
+  regroup, none of them reporting.</p>
+
+  <h3>Where each leak sits on the path</h3>
+<pre class="flow">  file
+    |
+    +--X  1   ts IS NULL -&gt; skipped from lo/hi -&gt; no ticket
+    +--X  9   re-ingest -&gt; 0 new rows -&gt; no ticket
+    v
+  log_regroup_pending
+    |
+    +--X  7   permanent-type error -&gt; abandoned on attempt 1
+    v
+  regroup_window
+    |
+    +--X  1   entry read has no include_null branch
+    +--X  4   freed-select has no include_null branch
+    +--X  2   entries beyond hi+pad never re-read
+    v
+  _group -&gt; _persist
+    |
+    +--X  3   id already exists -&gt; continue -&gt; no assignment row
+    +--X  5   continuity.assign emits the same id twice in one batch
+    v
+  log_entry_assignment
+    |
+    +--X  6   regroup_incremental: unbounded DELETE, floored re-read
+    +--X 10   regroup_all: global DELETE committed before rebuild
+    v
+  retention
+    |
+    +--X  8   abandoned tickets do not hold retention -&gt; DROP PARTITION
+    v
+   gone
+
+  11 = no reconciliation anywhere, so every X above is silent</pre>
+
+  <h3>What was checked and found sound</h3>
+  <p>Recorded so nobody re-audits it.</p>
+  <ul>
+    <li><code>_group</code> discards no entry. Every leftover builder and pending request is emitted
+    (<code>:425-429</code>).</li>
+    <li>Assignment writes are an idempotent upsert on <code>(entry_id, entry_ts)</code> with NULLS NOT
+    DISTINCT, so a rebuild replaces rather than duplicates (<code>assignments.py:73-79</code>,
+    <code>log_entry_assignment.py:77-78</code>).</li>
+    <li><code>regroup_window</code>'s delete and re-read are in one transaction, so readers never see a
+    torn state (<code>:863-884</code>).</li>
+    <li>Ticket rows are marked <code>consumed_at</code> only after every sub-window of the run has
+    committed (<code>:1017-1025</code>), which is the safe ordering: a crash re-does idempotent work
+    rather than skipping it.</li>
+    <li>The <code>except Exception</code> in <code>finalize_pending</code> (<code>:1026</code>) advances
+    no cursor. The classic "swallow and advance" bug is not present; the loss in leak 8 comes from the
+    dead-letter policy, not the handler.</li>
+    <li><code>_split_run</code> sub-windows overlap by at least <code>pad</code> at their seams and
+    rebuild identically thanks to deterministic ids (<code>:938-951</code>).</li>
+    <li>Over-length promoted strings are capped rather than raising, so one bad value no longer aborts a
+    batch (<code>:592-604</code>). This was a real outage; see
+    <code>docs/stage2-stitching-stall-postmortem-and-fix.md</code>.</li>
+    <li>Retention drops transactions one day <i>before</i> entries and assignments, so the ordering
+    cannot strand a transaction without its body (<code>log_partition_worker.py:61-76</code>).</li>
+    <li><code>is_transient</code> correctly defaults <i>unrecognised</i> errors to transient
+    (<code>retry_policy.py:99</code>). Only the explicitly named permanent types short-circuit.</li>
+  </ul>
+
+  <h3>One non-loss issue found on the way</h3>
+  <p><code>derive_transactions.py:254-256</code> claims "a response can never be stitched onto another
+  user's request". The fallback 145 lines later contradicts it:</p>
+  <div class="snip">
+    <p class="path">app/services/mnp_log_ingestion/pipeline/derive_transactions.py:400-401</p>
+<pre>400                  if not u_keys and not u_reqs:
+401                      u_keys, u_reqs = keys, pending_reqs</pre>
+  </div>
+  <p>When the per-user filter leaves no candidate, all candidates are restored, so a response can close
+  another user's transaction. That is cross-user contamination, not loss, but worth knowing when reading
+  a suspicious transaction. Separately, <code>_coalesce</code> (<code>:904-920</code>) is dead code: only
+  <code>_coalesce_pending</code> is ever called.</p>
+</section>
+
+<!-- ============================================ 8 -->
+<section id="evidence">
+  <h2>8. Measured evidence from the local dev database</h2>
+  <p>Read-only queries against <code>ragfastapi-postgres-1</code> on 2026-08-20.</p>
+
+  <div class="stats">
+    <div class="stat cool"><span class="n">12,596</span><span class="l">log_entries total</span></div>
+    <div class="stat hot"><span class="n">8,595</span><span class="l">entries with NO assignment</span></div>
+    <div class="stat hot"><span class="n">270</span><span class="l">mnp transactions rendering empty</span></div>
+    <div class="stat good"><span class="n">172.5s</span><span class="l">max transaction span (pad is 900s)</span></div>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td><code>log_entries</code> total</td><td class="num">12,596 (mnp 8,595, VERIFY_REAL 4,001)</td></tr>
+        <tr><td>entries with no assignment</td><td class="num">8,595, every single mnp entry</td></tr>
+        <tr><td><code>log_entry_assignment</code> rows</td><td class="num">4,001, all VERIFY_REAL, zero for mnp</td></tr>
+        <tr><td><code>log_transactions</code></td><td class="num">397 (mnp 270, of which 228 sealed)</td></tr>
+        <tr><td><code>SUM(mnp.entry_count)</code></td><td class="num">6,509</td></tr>
+        <tr><td>open <code>log_regroup_pending</code></td><td class="num">5, none for mnp</td></tr>
+        <tr><td>abandoned <code>log_regroup_pending</code></td><td class="num">0</td></tr>
+        <tr><td>mnp transactions created</td><td class="num">2026-06-22</td></tr>
+        <tr><td>VERIFY_REAL transactions created</td><td class="num">2026-08-08</td></tr>
+        <tr><td>alembic head</td><td class="num">e4b28f5c9107</td></tr>
+        <tr><td>max transaction span</td><td class="num">172.5 seconds</td></tr>
+        <tr><td>transactions spanning &gt; 900s</td><td class="num">0</td></tr>
+        <tr><td>entries with NULL timestamp</td><td class="num">0</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="co bad">
+    <h4>Read that carefully</h4>
+    <p>Tenant <code>mnp</code> has 270 transactions that each claim to contain entries. Zero of those
+    entries are actually linked. <b>All 270 render empty, and all 8,595 entries are orphans.</b></p>
+  </div>
+
+  <p>The cause is a missing backfill. <code>log_entry_assignment</code> was introduced by this migration,
+  and all it does is create the table and two indexes:</p>
+  <div class="snip">
+    <p class="path">alembic/versions/c8f21a06d349_add_log_entry_assignment.py</p>
+<pre>37   op.create_table(...)
+58   op.create_index("ix_log_entry_assignment_txn", ...)
+61   op.create_index("ix_log_entry_assignment_customer", ...)</pre>
+  </div>
+  <p>The old scheme stored the link in a <code>log_entries.transaction_id</code> column. The migration
+  created the new table but never copied the old links across. <code>mnp</code>'s transactions were built
+  2026-06-22, before that cut-over; <code>VERIFY_REAL</code>'s were built 2026-08-08, after it. And
+  because <code>mnp</code> has no open ticket, the live path has no reason to look at it. Nothing reports
+  it. That is leak 11 in practice.</p>
+
+  <div class="co ok">
+    <h4>What did not reproduce</h4>
+    <p>Stated plainly, because an audit that only lists hits is not trustworthy.</p>
+    <p><b>Leak 1 has no live instance.</b> There are zero NULL-timestamp rows in this database. The code
+    path is wrong, but nothing is currently falling through it.</p>
+    <p><b>Leak 2 is not currently breached.</b> The longest transaction is 172.5 seconds against a
+    900-second pad, and nothing exceeds the pad. It is an unenforced invariant, not an active fire.</p>
+    <p><b>Leak 8 has no live instance.</b> There are zero abandoned tickets.</p>
+  </div>
+</section>
+
+<!-- ============================================ 9 -->
+<section id="fixes">
+  <h2>9. Recommended fixes, in priority order</h2>
+  <p>None of these has been done.</p>
+
+  <div class="pri">
+    <div class="pi p1"><div class="rk">1</div><div class="bx">
+      <p><b>Reconciliation first (leak 11).</b> Add an unassigned-entry count per tenant and day, as an
+      endpoint plus a worker metric, reusing <code>assignments.is_unassigned()</code>. It is the smallest
+      change on the list and it is the reason none of the rest is visible. The dev DB shows the failure
+      mode is already live.</p>
+    </div></div>
+    <div class="pi p1"><div class="rk">2</div><div class="bx">
+      <p><b>Fix <code>regroup_window</code>'s two NULL holes (leaks 1 and 4).</b> Use the existing
+      <code>time_bounds.UtcWindow.covers(..., include_null=True)</code> at
+      <code>derive_transactions.py:877-878</code> and <code>:848-849</code>, and write a ticket at
+      <code>parse_insert.py:188</code> even when <code>lo is None</code>. Two-line changes using a helper
+      that already exists.</p>
+    </div></div>
+    <div class="pi p2"><div class="rk">3</div><div class="bx">
+      <p><b>Make the clash-skip loud and recoverable (leaks 3 and 5).</b> Record the skipped entry ids
+      rather than only counting them, auto-enqueue a repair ticket for their range, and add the
+      duplicate-fallback check in <code>continuity.assign</code>.</p>
+    </div></div>
+    <div class="pi p2"><div class="rk">4</div><div class="bx">
+      <p><b>Enforce the span invariant the design already assumes (leak 2).</b> Cap a builder's total span
+      at <code>pad</code> in <code>evict_stale</code>, or derive <code>pad</code> from the largest span
+      actually observed. Cheap to do now, while the observed max is 172.5s.</p>
+    </div></div>
+    <div class="pi p2"><div class="rk">5</div><div class="bx">
+      <p><b>Reclassify the dead letter (leaks 7 and 8).</b> Either give permanent types the normal attempt
+      budget, or keep the classification and stop letting abandoned tickets release their retention
+      hold.</p>
+    </div></div>
+    <div class="pi p3"><div class="rk">6</div><div class="bx">
+      <p><b>Bound and isolate <code>regroup_all</code> (leak 10).</b> Per-tenant try/except and a bounded
+      read instead of <code>.scalars().all()</code>, which also brings it in line with rule 3 of the
+      project <code>CLAUDE.md</code>.</p>
+    </div></div>
+    <div class="pi p3"><div class="rk">7</div><div class="bx">
+      <p><b>Make re-ingest a valid repair (leak 9).</b> Write a ticket from the file's parsed min/max even
+      when nothing new was inserted.</p>
+    </div></div>
+    <div class="pi p3"><div class="rk">8</div><div class="bx">
+      <p><b>Decide what to do about the missing backfill (section 8).</b> Either backfill
+      <code>log_entry_assignment</code> from the pre-migration state if production looks like the dev DB,
+      or accept that those transactions are permanently bodiless and record that decision.</p>
+    </div></div>
+    <div class="pi p3"><div class="rk">9</div><div class="bx">
+      <p><b>Fix the stale narrative</b> in section 6, especially the user-facing OpenAPI description at
+      <code>app/api/v1/logs.py:350</code> and the two docstrings asserting a span guarantee the code does
+      not make.</p>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============================================ 10 -->
+<section id="verify">
+  <h2>10. How to verify any of this</h2>
+  <p>A local Postgres is available (<code>ragfastapi-postgres-1</code>,
+  <code>postgresql+asyncpg://rag:rag@localhost:5432/rag</code>, <code>app/settings.py:36</code>), and
+  <code>tests/conftest.py</code> drives the application's real engine. So each finding is reproducible as
+  a failing test before its fix, which is the right order.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Finding</th><th>Test to write</th></tr></thead>
+      <tbody>
+        <tr><td class="lk">1, 4</td><td>Insert an entry with <code>timestamp=None</code>, enqueue a
+          ticket, run <code>finalize_pending</code>, assert the entry ends up assigned. Mirror
+          <code>tests/test_stage2_bounds_chunk24.py:240-250</code> but against
+          <code>regroup_window</code>.</td></tr>
+        <tr><td class="lk">2</td><td>Build a transaction whose entries are 299 seconds apart across 2,000
+          seconds, run <code>regroup_window</code> over a narrow window, assert no entry is left
+          unassigned and the transaction is not truncated.</td></tr>
+        <tr><td class="lk">3, 5</td><td>Construct the split-with-minority-anchor case, assert
+          <code>transactions_skipped == 0</code>.</td></tr>
+        <tr><td class="lk">6</td><td>Two-phase ingest, an old backfill then live data, call
+          <code>regroup_incremental</code>, assert the old transactions survive or are rebuilt.</td></tr>
+        <tr><td class="lk">7, 8</td><td>Make a window raise <code>KeyError</code>, assert
+          <code>attempts</code> increments rather than <code>abandoned_at</code> being set on the first
+          failure.</td></tr>
+        <tr><td class="lk">9</td><td>Ingest the same file twice, assert a ticket exists after the second
+          ingest.</td></tr>
+        <tr><td class="lk">11</td><td>Assert the new reconciliation query reports the orphan count the dev
+          DB already has.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Related documents</h3>
+  <ul>
+    <li><code>docs/stage2-stitching-stall-postmortem-and-fix.md</code> - the over-length
+    <code>ItemNumber</code> outage that motivated <code>_cap_over_length</code> and the dead-letter
+    design.</li>
+    <li><code>docs/plan/2026-08-05_17-32_append-only-entries-assignment-split.md</code> - why the grouping
+    moved from <code>log_entries.transaction_id</code> to <code>log_entry_assignment</code>.</li>
+    <li><code>docs/plan/2026-08-08_19-43_stable-transaction-identity-by-continuity.md</code> - the identity
+    mechanism that replaced what <code>sealed</code> used to provide.</li>
+    <li><code>docs/plan/2026-08-05_20-32_daily-partitioning.md</code> - the UTC-day partitioning that makes
+    the NULL-partition trap in leaks 1 and 4 possible.</li>
+    <li><code>docs/deletion-and-cleanup-semantics.md</code> - the delete paths referenced in leaks 6 and
+    10.</li>
+    <li><code>docs/database-er-diagram.md</code> - the schema these three tables live in.</li>
+  </ul>
+</section>
+
+<!-- ============================================ Appendix A -->
+<section id="appendix-a">
+  <h2>Appendix A: where NULL timestamps come from</h2>
+  <p>Leak 1 and leak 4 both turn on <code>log_entries.timestamp</code> being NULL. This appendix answers
+  the obvious follow-up: in what scenario does that actually happen?</p>
+  <div class="co info">
+    <h4>Method</h4>
+    <p>Everything below was verified by running <code>M3DotNetLogParser().parse()</code> over crafted
+    inputs, not by reading the regex and reasoning about it.</p>
+  </div>
+
+  <h3>There are exactly two code paths</h3>
+  <p><b>Path 1: the header shape does not match.</b></p>
+  <div class="snip">
+    <p class="path">app/services/mnp_log_ingestion/parsers/m3_dotnet_parser.py:86-89</p>
+<pre>86        m = _HEADER.match(header_line)
+87        <b>if not m:</b>
+88            <i># Unparseable header - keep it as a raw info record so nothing is lost</i>
+89            <b>return LogRecord(line_number=line_no, entry_type="info", message=header_line, raw_body=raw_body)</b></pre>
+  </div>
+  <p>Line 89 builds a <code>LogRecord</code> with no <code>timestamp</code> argument, and the field
+  defaults to None (<code>log_record.py:18</code>). The subtlety is that two <i>different</i> regexes are
+  involved.</p>
+  <div class="snip">
+    <p class="path">app/services/mnp_log_ingestion/parsers/m3_dotnet_parser.py:25 and :28-34</p>
+<pre>25  _TS_START = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} ")
+
+28  _HEADER = re.compile(
+29      r"^(?P&lt;ts&gt;\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) "
+30      r"\((?P&lt;user&gt;.*?)\) "
+31      r"\[(?P&lt;thread&gt;[^\]]*)\] "
+32      r"(?P&lt;level&gt;\w+)\s+"
+33      r"(?P&lt;rest&gt;.*)$"
+34  )</pre>
+  </div>
+  <p>A line becomes a new entry if it passes the <i>loose</i> <code>_TS_START</code> (at <code>:67</code>),
+  and then has its fields read by the <i>strict</i> <code>_HEADER</code>. Anything that passes the first
+  test and fails the second lands on line 89 with a NULL timestamp.</p>
+
+  <p><b>Path 2: the header matches but the date is impossible.</b></p>
+  <div class="snip">
+    <p class="path">app/services/mnp_log_ingestion/parsers/m3_dotnet_parser.py:172-177</p>
+<pre>172      @staticmethod
+173      def _parse_ts(ts: str) -&gt; datetime | None:
+174          try:
+175              return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S,%f")
+176          <b>except ValueError:</b>
+177              <b>return None</b></pre>
+  </div>
+  <p>The regex already guarantees the right <i>number</i> of digits, so the only way to reach line 177 is
+  an out-of-range value.</p>
+
+  <h3>Verified samples</h3>
+  <p>A well-formed line for reference:</p>
+<pre class="flow">2026-05-19 13:42:33,362 (BECWHLO) [94] INFO  M3.Managers.ItemManager MoveNext - REQUEST: /api/Item?ItemNumber=ABC
+|- timestamp --------| |- user -| |th| |lvl| |- logger ------------| |method|   |- message ---------------|</pre>
+
+  <h4>Path 1, shape mismatch. <code>raw_timestamp</code> comes out as None.</h4>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Sample line</th><th>Why it fails</th></tr></thead>
+      <tbody>
+        <tr><td><code>2026-05-19 13:42:33,362 (BECWHLO</code></td>
+            <td>truncated line, the header is cut off mid-field</td></tr>
+        <tr><td><code>2026-05-19 13:42:33,362 is the ShipDate value inside the REQUEST BODY</code></td>
+            <td>a body line that itself begins with a timestamp</td></tr>
+        <tr><td><code>2026-05-19 13:42:33,362 [94] INFO  M3.X Y - hello</code></td>
+            <td>no <code>(user)</code> field</td></tr>
+        <tr><td><code>2026-05-19 13:42:33,362 (BECWHLO) INFO  M3.X Y - hello</code></td>
+            <td>no <code>[thread]</code> field</td></tr>
+        <tr><td><code>2026-05-19 13:42:33,362 (BECWHLO) [94] WARN-2  M3.X Y - hello</code></td>
+            <td>level has a non-word character, and <code>(?P&lt;level&gt;\w+)</code> stops at the
+            hyphen</td></tr>
+        <tr><td><code>2026-05-19 13:42:33,362 (BEC?HLO? [94] INFO  M3.X Y - hello</code></td>
+            <td>a U+FFFD replacement character broke the <code>(user)</code> parentheses</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h4>Path 2, impossible date. <code>raw_timestamp</code> is preserved.</h4>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Sample line</th><th>Why it fails</th></tr></thead>
+      <tbody>
+        <tr><td><code>2026-13-19 13:42:33,362 (BECWHLO) [94] INFO  M3.X Y - hello</code></td>
+            <td>month 13</td></tr>
+        <tr><td><code>2026-05-32 13:42:33,362 ...</code></td><td>day 32</td></tr>
+        <tr><td><code>2026-05-19 25:42:33,362 ...</code></td><td>hour 25</td></tr>
+        <tr><td><code>2026-05-19 13:42:60,362 ...</code></td><td>second 60</td></tr>
+        <tr><td><code>2026-02-30 13:42:33,362 ...</code></td><td>30 February</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Which scenarios realistically occur</h3>
+  <p>Three of the above are plausible in normal operation. The rest are corruption.</p>
+  <div class="steps">
+    <div class="sp"><div class="n">1</div><div class="t">
+      <p><b>A body line that itself starts with a timestamp.</b> The likeliest trigger, and it needs no
+      corruption at all. The parser folds continuation lines into the current entry
+      (<code>m3_dotnet_parser.py:73-76</code>), but a continuation line that <i>looks</i> like a header is
+      torn off as its own entry instead. A <code>REQUEST BODY:</code> JSON blob, an M3 <code>Record:</code>
+      block, or a stored-procedure text containing a <code>YYYY-MM-DD HH:MM:SS,mmm </code> string at the
+      start of a line will do it. Confirmed: the sample produced two records, the correct
+      <code>request</code> plus one NULL-timestamp <code>info</code>.</p>
+    </div></div>
+    <div class="sp"><div class="n">2</div><div class="t">
+      <p><b>A file read while it is still being written.</b> The last line is cut mid-header. The SSH fetch
+      pulls live files, so this is a real exposure. <code>parse_insert.py:92</code> also does
+      <code>data.decode("utf-8", errors="replace")</code>, which is exactly how the U+FFFD case arises on
+      the degraded disk documented in <code>docs/disk-io-resilience.html</code>.</p>
+    </div></div>
+    <div class="sp"><div class="n">3</div><div class="t">
+      <p><b>A server on a different log4net layout.</b> If any customer's <code>log4net.config</code> uses
+      a pattern without <code>(user)</code> or <code>[thread]</code>, or emits a level such as
+      <code>WARN-2</code>, then <b>every line from that server</b> becomes a NULL-timestamp
+      <code>info</code> entry. That is the scenario that would actually hurt: not a few stray rows, but a
+      whole tenant silently never grouping.</p>
+    </div></div>
+  </div>
+
+  <h3>Two side findings from this check</h3>
+  <div class="co">
+    <h4>raw_timestamp is captured but never stored</h4>
+    <p>The parser sets it at <code>m3_dotnet_parser.py:106</code> and the field exists at
+    <code>log_record.py:19</code>, but <code>parse_insert.py:154-175</code> does not include it in the row
+    dict and <code>log_entries</code> has no such column. So from the database you cannot tell path 1 from
+    path 2, and have to read <code>raw_body</code> instead. Worth adding if this is ever investigated,
+    because the two paths have completely different causes and different fixes.</p>
+  </div>
+  <div class="co">
+    <h4>A near-miss that would not show up in a NULL-timestamp count</h4>
+    <p>If the separator after the milliseconds is not a single space, a tab for instance, then
+    <code>_TS_START</code> never matches, so the line is not torn off as its own entry at all. Mid-file it
+    is silently folded into the <i>previous</i> entry's body, so it is preserved but attributed to the
+    wrong entry. At the very top of a file it is dropped outright by
+    <code>m3_dotnet_parser.py:74-76</code>. Neither outcome produces a NULL timestamp, so neither would
+    appear in any count built for leak 1.</p>
+  </div>
+
+  <h3>How to watch for it</h3>
+  <p>The metric already exists and is the right one.</p>
+  <div class="snip">
+    <p class="path">app/api/v1/logs.py:471-473</p>
+<pre>471          <i># Growth here means the parser is silently failing to read timestamps on some log format.</i>
+472          "default_partition_rows": default_rows,
+473          "healthy": _partitions_healthy(days_ahead=days_ahead, default_rows=default_rows),</pre>
+  </div>
+  <p><code>GET /logs/partitions</code> counts rows in the DEFAULT partition, which is exactly where
+  NULL-timestamp entries land. In the dev database that count was <b>0</b> on 2026-08-20, which is why
+  leak 1 has no live instance there.</p>
+  <div class="co">
+    <h4>But it is not a substitute for the leak 11 reconciliation</h4>
+    <p>This metric tells you NULL-timestamp entries <i>exist</i>. It does not tell you whether they were
+    ever grouped, which is the actual damage leak 1 causes.</p>
+  </div>
+
+  <h3>One thing that is sound</h3>
+  <div class="co ok">
+    <p>The dedup constraint at <code>app/persistence/models/log_entry.py:65-66</code> uses
+    <code>postgresql_nulls_not_distinct=True</code>, so NULL timestamps compare as equal. Re-ingesting a
+    file will not insert duplicate copies of these entries.</p>
+  </div>
+</section>
+
+</div>
+</body>
+</html>

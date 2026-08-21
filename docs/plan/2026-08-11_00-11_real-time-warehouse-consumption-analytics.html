@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Real-time warehouse consumption analytics</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body, h1, h2, h3, h4, p, ul, ol, figure, table { margin: 0; padding: 0; }
+  :root {
+    --bg: #f4f5f2; --surface: #ffffff; --surface-2: #e9eeea; --ink: #17201d;
+    --ink-2: #4c5d57; --muted: #71817b; --line: #d5ded9; --line-strong: #acbbb5;
+    --green: #257554; --green-soft: #dcefe5; --blue: #276676; --blue-soft: #dcecf0;
+    --amber: #8a6418; --amber-soft: #f5ead0; --red: #a34836; --red-soft: #f5e1dc;
+    --violet: #60548c; --violet-soft: #e8e3f4; --shadow: 0 8px 28px rgba(22, 40, 33, .07);
+    --sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1513; --surface: #161e1b; --surface-2: #202a26; --ink: #e7edea;
+      --ink-2: #b6c3be; --muted: #899a94; --line: #2b3733; --line-strong: #41524c;
+      --green: #6cc098; --green-soft: #173126; --blue: #71b8c7; --blue-soft: #183238;
+      --amber: #d5ad59; --amber-soft: #332a17; --red: #e08a77; --red-soft: #351e19;
+      --violet: #b1a5df; --violet-soft: #29233e; --shadow: none;
+    }
+  }
+  body { background: var(--bg); color: var(--ink); font: 16px/1.55 var(--sans); }
+  a { color: inherit; }
+  code { font: .86em var(--mono); background: var(--surface-2); padding: .12em .34em; border-radius: 4px; }
+  .page { max-width: 1180px; margin: 0 auto; padding: 34px 22px 80px; }
+  .eyebrow { color: var(--blue); font: 700 .72rem/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+  h1 { max-width: 880px; font-size: clamp(2rem, 5.7vw, 4.1rem); line-height: 1.02; letter-spacing: -.045em; }
+  h2 { font-size: clamp(1.45rem, 3vw, 2.15rem); line-height: 1.15; letter-spacing: -.025em; }
+  h3 { font-size: 1rem; line-height: 1.3; }
+  p { color: var(--ink-2); }
+  .hero { display: grid; gap: 20px; padding: 38px 0 30px; border-bottom: 1px solid var(--line); }
+  .hero-copy { max-width: 790px; font-size: 1.08rem; }
+  .hero-meta { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip { border: 1px solid var(--line); border-radius: 999px; background: var(--surface); padding: 6px 10px; color: var(--ink-2); font: .76rem var(--mono); }
+  .chip.good { background: var(--green-soft); color: var(--green); border-color: transparent; }
+  .chip.warn { background: var(--amber-soft); color: var(--amber); border-color: transparent; }
+  .toc { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 20px 0; position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(10px); }
+  .toc a { min-height: 52px; display: flex; align-items: center; gap: 9px; text-decoration: none; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 9px 11px; font-size: .82rem; }
+  .toc b { color: var(--blue); font: .72rem var(--mono); }
+  .toc a:hover, .toc a:focus-visible { border-color: var(--blue); outline: none; }
+  main { display: grid; gap: 70px; padding-top: 28px; }
+  section { scroll-margin-top: 90px; display: grid; gap: 20px; }
+  .section-head { display: grid; gap: 8px; max-width: 780px; }
+  .section-head p { font-size: 1.02rem; }
+  .metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+  .metric { min-height: 124px; display: flex; flex-direction: column; justify-content: space-between; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 15px; box-shadow: var(--shadow); }
+  .metric .value { font-size: clamp(1.25rem, 2.6vw, 2rem); line-height: 1; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+  .metric .label { color: var(--muted); font-size: .78rem; }
+  .metric .context { color: var(--ink-2); font-size: .76rem; }
+  .callout { border-left: 4px solid var(--amber); border-radius: 8px; background: var(--amber-soft); padding: 16px 18px; }
+  .callout.danger { border-color: var(--red); background: var(--red-soft); }
+  .callout.good { border-color: var(--green); background: var(--green-soft); }
+  .callout h3 { margin-bottom: 4px; }
+  .callout p { color: var(--ink); }
+  .definition { display: grid; grid-template-columns: 1.15fr .85fr; gap: 12px; }
+  .definition > div { border: 1px solid var(--line); border-radius: 10px; padding: 18px; background: var(--surface); }
+  .definition .yes { border-top: 4px solid var(--green); }
+  .definition .no { border-top: 4px solid var(--red); }
+  .checklist { list-style: none; display: grid; gap: 7px; margin-top: 10px; }
+  .checklist li { display: grid; grid-template-columns: 20px 1fr; gap: 7px; color: var(--ink-2); font-size: .9rem; }
+  .yes .checklist li::before { content: "✓"; color: var(--green); font-weight: 700; }
+  .no .checklist li::before { content: "×"; color: var(--red); font-weight: 700; }
+  .pipeline { display: grid; grid-template-columns: 1fr 42px 1fr 42px 1fr 42px 1fr; align-items: stretch; }
+  .node { border: 1px solid var(--line); border-radius: 11px; background: var(--surface); padding: 16px; display: grid; align-content: start; gap: 8px; min-height: 170px; }
+  .node small { color: var(--muted); font: .7rem var(--mono); text-transform: uppercase; letter-spacing: .09em; }
+  .node b { font-size: 1rem; }
+  .node p { font-size: .84rem; }
+  .node.source { border-top: 4px solid var(--blue); }
+  .node.queue { border-top: 4px solid var(--amber); }
+  .node.worker { border-top: 4px solid var(--violet); }
+  .node.store { border-top: 4px solid var(--green); }
+  .arrow { display: grid; place-items: center; color: var(--muted); font-size: 1.4rem; }
+  .subflow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .subflow div { border: 1px solid var(--line); background: var(--surface); border-radius: 9px; padding: 13px; }
+  .subflow b { display: block; margin-bottom: 3px; }
+  .subflow span { color: var(--ink-2); font-size: .82rem; }
+  .tw { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 700px; font-size: .86rem; }
+  th, td { padding: 11px 13px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { color: var(--muted); font: .7rem var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+  tr:last-child td { border-bottom: 0; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .quality-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .quality { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 15px; }
+  .quality h3 { margin-bottom: 6px; }
+  .quality p { font-size: .85rem; }
+  .quality strong { display: inline-block; color: var(--green); margin-top: 8px; font-size: .78rem; }
+  .quality.bad strong { color: var(--red); }
+  .insight-map { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; }
+  .insight { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); }
+  .insight h3 { padding: 12px 14px; background: var(--surface-2); }
+  .insight ul { list-style: none; padding: 12px 14px; display: grid; gap: 8px; }
+  .insight li { color: var(--ink-2); font-size: .84rem; padding-left: 14px; position: relative; }
+  .insight li::before { content: "•"; position: absolute; left: 0; color: var(--blue); }
+  .availability { font: .68rem var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--green); }
+  .availability.future { color: var(--amber); }
+  .failure-flow { display: grid; grid-template-columns: 1fr 60px 1fr; gap: 8px; align-items: center; }
+  .failure-flow > div:not(.arrow) { border: 1px solid var(--line); background: var(--surface); padding: 16px; border-radius: 10px; }
+  .failure-flow h3 { margin-bottom: 5px; }
+  .failure-flow p { font-size: .86rem; }
+  .equation { font: .95rem var(--mono); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 13px; text-align: center; }
+  .bars { display: grid; gap: 12px; }
+  .bar-row { display: grid; grid-template-columns: 170px 1fr 85px; gap: 12px; align-items: center; }
+  .bar-row label { font-size: .84rem; color: var(--ink-2); }
+  .track { height: 18px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+  .fill { height: 100%; min-width: 2px; border-radius: inherit; background: var(--blue); }
+  .bar-row:nth-child(2) .fill { background: var(--green); }
+  .bar-row:nth-child(3) .fill { background: var(--violet); }
+  .bar-row output { text-align: right; font: .78rem var(--mono); color: var(--ink-2); }
+  .timeline { display: grid; gap: 0; counter-reset: phase; }
+  .phase { counter-increment: phase; display: grid; grid-template-columns: 48px 1fr; gap: 14px; position: relative; padding-bottom: 18px; }
+  .phase::before { content: counter(phase); width: 36px; height: 36px; display: grid; place-items: center; border-radius: 50%; background: var(--blue-soft); color: var(--blue); font: .8rem var(--mono); z-index: 1; }
+  .phase::after { content: ""; position: absolute; left: 17px; top: 36px; bottom: 0; width: 2px; background: var(--line); }
+  .phase:last-child::after { display: none; }
+  .phase-card { border: 1px solid var(--line); background: var(--surface); border-radius: 10px; padding: 14px 16px; }
+  .phase-card h3 { margin-bottom: 4px; }
+  .phase-card p { font-size: .84rem; }
+  .phase-card .exit { margin-top: 7px; color: var(--green); font-size: .8rem; }
+  .rejects { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .reject { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 14px; }
+  .reject h3 { margin-bottom: 5px; }
+  .reject p { font-size: .82rem; }
+  .footer { margin-top: 70px; padding-top: 24px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .78rem; }
+  .back { text-decoration: none; color: var(--blue); }
+  @media (max-width: 900px) {
+    .toc { grid-template-columns: repeat(2, 1fr); position: static; }
+    .metrics { grid-template-columns: repeat(2, 1fr); }
+    .pipeline { grid-template-columns: 1fr; }
+    .pipeline .arrow { min-height: 36px; transform: rotate(90deg); }
+    .subflow, .quality-grid, .insight-map, .rejects { grid-template-columns: repeat(2, 1fr); }
+    .definition { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 560px) {
+    .page { padding-inline: 14px; }
+    .toc, .metrics, .subflow, .quality-grid, .insight-map, .rejects { grid-template-columns: 1fr; }
+    .bar-row { grid-template-columns: 1fr 70px; gap: 6px; }
+    .bar-row .track { grid-column: 1 / -1; grid-row: 2; }
+    .failure-flow { grid-template-columns: 1fr; }
+    .failure-flow .arrow { transform: rotate(90deg); min-height: 32px; }
+  }
+  @media print {
+    .toc { position: static; }
+    body { background: #fff; }
+    .page { max-width: none; padding: 12mm; }
+    section { break-inside: avoid; }
+    .metric, .node, .quality, .insight, .phase-card, .reject { box-shadow: none; }
+  }
+</style>
+</head>
+<body>
+<div style="background:#7f1d1d;color:#fff;padding:18px 22px;font:16px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <strong style="display:block;font-size:13px;letter-spacing:.14em;text-transform:uppercase;margin-bottom:6px;">Superseded &middot; 2026-08-17</strong>
+  Do not implement from this document. It is replaced by
+  <a href="2026-08-17_22-32_merged-warehouse-analytics-platform-plan.md" style="color:#fecaca;font-weight:600;">2026-08-17_22-32_merged-warehouse-analytics-platform-plan.md</a>,
+  which keeps this plan's contribution-ledger core and fixes eleven defects found by a code and live-data review, three of them capable of producing silently wrong totals.
+  See the superseded notice in the Markdown twin for the list. Kept for history and for the analysis it contains.
+</div>
+<div class="page">
+  <header class="hero" id="top">
+    <div class="eyebrow">Architecture decision and delivery guide</div>
+    <h1>Real-time warehouse consumption analytics</h1>
+    <p class="hero-copy">How captured successful picks become trustworthy, always-current per-item totals without double-counting transaction rebuilds. This visual guide summarizes the evidence, design, failure guarantees, insights, scale, and delivery sequence.</p>
+    <div class="hero-meta">
+      <span class="chip good">Target freshness under 5 seconds</span>
+      <span class="chip">PostgreSQL 16 on 192.168.0.142</span>
+      <span class="chip">FastAPI + dedicated worker + Next.js</span>
+      <span class="chip warn">Plan only, not implemented</span>
+    </div>
+  </header>
+
+  <nav class="toc" aria-label="Document sections">
+    <a href="#evidence"><b>01</b> Evidence</a>
+    <a href="#definition"><b>02</b> Definition</a>
+    <a href="#architecture"><b>03</b> Architecture</a>
+    <a href="#correctness"><b>04</b> Correctness</a>
+    <a href="#quality"><b>05</b> Data quality</a>
+    <a href="#insights"><b>06</b> Insights</a>
+    <a href="#scale"><b>07</b> Scale</a>
+    <a href="#roadmap"><b>08</b> Roadmap</a>
+  </nav>
+
+  <main>
+    <section id="evidence">
+      <div class="section-head">
+        <div class="eyebrow">01 · Production evidence</div>
+        <h2>The design starts from what is actually present</h2>
+        <p>One consistent, read-only production snapshot captured at 2026-08-11 00:11:34 Europe/London establishes the current source volume and useful business signal.</p>
+      </div>
+      <div class="metrics">
+        <article class="metric"><div class="value">1,100,516</div><div><div class="label">raw log entries</div><div class="context">47 source files, 2 tenants</div></div></article>
+        <article class="metric"><div class="value">63,012</div><div><div class="label">derived transactions</div><div class="context">1,007 populated items</div></div></article>
+        <article class="metric"><div class="value">7,584</div><div><div class="label">successful picks</div><div class="context">692 consumed items</div></div></article>
+        <article class="metric"><div class="value">42,985.268644</div><div><div class="label">picked units</div><div class="context">native item units</div></div></article>
+        <article class="metric"><div class="value">1,795 MB</div><div><div class="label">log pipeline storage</div><div class="context">entries, assignments, transactions</div></div></article>
+      </div>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Dataset</th><th>Rows</th><th>Event-time range</th><th>What it means</th></tr></thead>
+          <tbody>
+            <tr><td><code>log_entries</code></td><td class="num">1,100,516</td><td>29 Jun to 11 Aug 2026</td><td>Append-only parsed log evidence</td></tr>
+            <tr><td><code>log_transactions</code></td><td class="num">63,012</td><td>29 Jun to 11 Aug 2026</td><td>Mutable REQUEST-to-RESPONSE projection</td></tr>
+            <tr><td>Successful <code>002001</code></td><td class="num">7,584</td><td>29 Jun to 11 Aug 2026</td><td>Candidate physical-pick consumption facts</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout danger">
+        <h3>The central correctness trap</h3>
+        <p><code>log_transactions</code> is deleted and rebuilt when late data arrives. Treating every rebuilt row as new and adding its quantity again would silently inflate totals.</p>
+      </div>
+    </section>
+
+    <section id="definition">
+      <div class="section-head">
+        <div class="eyebrow">02 · Business definition</div>
+        <h2>Consumption is successful physical picking, not every stock-related number</h2>
+        <p>The initial metric uses two independent identifiers and a success gate. Quantity is parsed as an exact decimal from <code>attributes.QuantityPicked</code>.</p>
+      </div>
+      <div class="definition">
+        <div class="yes">
+          <h3>Included in consumption</h3>
+          <ul class="checklist">
+            <li><span><code>transaction_type = '002001'</code></span></li>
+            <li><span><code>method = 'ConfirmPickLine'</code></span></li>
+            <li><span><code>status = 'success'</code></span></li>
+            <li><span>Populated item number</span></li>
+            <li><span>Valid non-negative decimal <code>QuantityPicked</code></span></li>
+          </ul>
+        </div>
+        <div class="no">
+          <h3>Kept separate</h3>
+          <ul class="checklist">
+            <li><span>Failed or incomplete pick attempts</span></li>
+            <li><span>Stock moves and reallocations</span></li>
+            <li><span>Receipts, including rejected quantity</span></li>
+            <li><span>Stock counts and adjustments</span></li>
+            <li><span>Placeholder transaction codes</span></li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout">
+        <h3>What the number can honestly claim</h3>
+        <p>It is exact aggregation over captured successful pick transactions. It is not yet an audited warehouse-wide inventory-depletion or financial-consumption ledger.</p>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <div class="section-head">
+        <div class="eyebrow">03 · Proposed architecture</div>
+        <h2>A durable reconciliation loop, not a fragile additive cursor</h2>
+        <p>Stage 2 publishes only a small dirty-window ticket. A singleton worker then rereads the latest projection, compares it with the stored contribution, and applies the exact difference.</p>
+      </div>
+      <div class="pipeline" role="img" aria-label="Stage 2 writes transactions and a dirty-window ticket. An analytics worker reconciles contribution records and updates aggregates. FastAPI serves the result to Next.js.">
+        <article class="node source"><small>Existing source</small><b>Stage 2 projection</b><p>Builds or rebuilds tenant transactions from raw log entries.</p><p><code>log_transactions</code></p></article>
+        <div class="arrow" aria-hidden="true">→</div>
+        <article class="node queue"><small>Durable handoff</small><b>Dirty windows</b><p>Records the exact padded event-time range that may have changed.</p><p>Committed with Stage 2</p></article>
+        <div class="arrow" aria-hidden="true">→</div>
+        <article class="node worker"><small>Every second</small><b>Analytics worker</b><p>Coalesces tenant windows, normalizes facts, detects removals, and calculates old-to-new deltas.</p></article>
+        <div class="arrow" aria-hidden="true">→</div>
+        <article class="node store"><small>Authoritative reads</small><b>Materialized analytics</b><p>Contribution ledger, item totals, hourly buckets, quality issues, and freshness state.</p></article>
+      </div>
+      <div class="subflow">
+        <div><b>1. Publish</b><span>Projection change and dirty-window ticket commit together.</span></div>
+        <div><b>2. Reconcile</b><span>The worker rereads current source rows for that bounded range.</span></div>
+        <div><b>3. Fold</b><span>Subtract the old contribution, then add the new one.</span></div>
+        <div><b>4. Expose</b><span>FastAPI serves bounded aggregates and Next.js polls revision state.</span></div>
+      </div>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Storage</th><th>Grain</th><th>Responsibility</th></tr></thead>
+          <tbody>
+            <tr><td><code>warehouse_analytics_dirty_windows</code></td><td>Tenant + affected time range</td><td>Durable at-least-once work</td></tr>
+            <tr><td><code>warehouse_consumption_contributions</code></td><td>Tenant + source transaction</td><td>Latest explainable accounting contribution</td></tr>
+            <tr><td><code>warehouse_item_consumption_totals</code></td><td>Tenant + item</td><td>Fast headline total</td></tr>
+            <tr><td><code>warehouse_item_consumption_hourly</code></td><td>Tenant + hour + item + warehouse</td><td>Bounded trend queries</td></tr>
+            <tr><td><code>warehouse_analytics_quality_issues</code></td><td>Source version + defect</td><td>No silent drops or coercion</td></tr>
+            <tr><td><code>warehouse_analytics_state</code></td><td>Tenant</td><td>Revision, watermarks, lag, and trust state</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="correctness">
+      <div class="section-head">
+        <div class="eyebrow">04 · Correctness under failure</div>
+        <h2>At-least-once delivery with exactly-once effect</h2>
+        <p>The worker does not trust that a row is new. It stores the last version of each contribution and applies only the accounting difference.</p>
+      </div>
+      <div class="equation">aggregate delta = new contribution − old contribution</div>
+      <div class="failure-flow">
+        <div><h3>Before commit</h3><p>A crash changes neither aggregate nor ticket. The same window remains ready for retry.</p></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div><h3>After commit</h3><p>The ticket is consumed with the aggregate update. An uncertain replay sees the same version and applies delta zero.</p></div>
+      </div>
+      <div class="quality-grid">
+        <article class="quality"><h3>Quantity corrected</h3><p>Old quantity is subtracted and the new quantity is added.</p><strong>Net effect: exact difference</strong></article>
+        <article class="quality"><h3>Item corrected</h3><p>The old item's total decreases and the new item's total increases.</p><strong>Net effect: both items repaired</strong></article>
+        <article class="quality"><h3>Success becomes error</h3><p>The prior successful contribution is removed completely.</p><strong>Net effect: full retraction</strong></article>
+        <article class="quality"><h3>Transaction disappears</h3><p>Window reconciliation finds the stored contribution missing from the current source.</p><strong>Net effect: stale value removed</strong></article>
+        <article class="quality"><h3>Dirty window repeats</h3><p>The same version hash produces no accounting change.</p><strong>Net effect: idempotent replay</strong></article>
+        <article class="quality"><h3>Two workers start</h3><p>A tenant advisory lock allows only one worker to fold that tenant at a time.</p><strong>Net effect: serialized tenant state</strong></article>
+      </div>
+      <div class="callout good">
+        <h3>Why this remains explainable</h3>
+        <p>Every item total can be reconstructed from its contribution rows. The aggregate is a performance structure, while the contribution ledger is the audit trail.</p>
+      </div>
+    </section>
+
+    <section id="quality">
+      <div class="section-head">
+        <div class="eyebrow">05 · Data quality</div>
+        <h2>Bad data is visible, never silently turned into zero</h2>
+        <p>Each candidate becomes a valid contribution, a valid zero contribution, or a named quality issue. The API returns the quality and freshness state beside every metric.</p>
+      </div>
+      <div class="quality-grid">
+        <article class="quality"><h3>Strong fields</h3><p>Successful pick method, code, item, decimal picked quantity, event time, tenant, warehouse, user, device, order, and lot.</p><strong>Use now</strong></article>
+        <article class="quality bad"><h3>Misleading fields</h3><p>Write timestamp, mutable transaction content, request ID uniqueness, placeholder codes, receipt quantity, and count-field names.</p><strong>Guard explicitly</strong></article>
+        <article class="quality bad"><h3>Missing business facts</h3><p>Canonical UOM, cost, authoritative stock balance, complete demand lifecycle, supplier milestones, and reversal semantics.</p><strong>Needs upstream change</strong></article>
+      </div>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Observed signal</th><th class="num">Count</th><th>Interpretation</th></tr></thead>
+          <tbody>
+            <tr><td>Successful picks equal to expected quantity</td><td class="num">6,513</td><td>Exact workflow match</td></tr>
+            <tr><td>Successful picks below expected quantity</td><td class="num">833</td><td>Short-pick candidate, not proven lost demand</td></tr>
+            <tr><td>Successful picks above expected quantity</td><td class="num">226</td><td>Over-pick or field-semantic exception</td></tr>
+            <tr><td>Successful zero picks</td><td class="num">681</td><td>Zero consumption but operationally meaningful</td></tr>
+            <tr><td>Distinct request IDs duplicated</td><td class="num">1</td><td><code>reqid</code> is correlation, not accounting identity</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout danger">
+        <h3>Not derivable today</h3>
+        <p>Inventory valuation, audited on-hand stock, days of supply, shrinkage, supplier performance, lost sales, service level, and true customer demand require additional authoritative data.</p>
+      </div>
+    </section>
+
+    <section id="insights">
+      <div class="section-head">
+        <div class="eyebrow">06 · Insight catalogue</div>
+        <h2>One trusted pick fact supports several real-time views</h2>
+        <p>Each group below stays honest about whether it is available from today's logs or requires a new upstream contract.</p>
+      </div>
+      <div class="insight-map">
+        <article class="insight"><h3>Consumption</h3><ul><li class="availability">Available now</li><li>Total by item</li><li>Hourly, daily, weekly trends</li><li>Rolling rates and change</li><li>Top items and last-pick recency</li></ul></article>
+        <article class="insight"><h3>Pick fulfillment</h3><ul><li class="availability">Available now</li><li>Picked versus expected</li><li>Short, over, and zero picks</li><li>Error quantity at risk</li><li>Repeated item failures</li></ul></article>
+        <article class="insight"><h3>Operations</h3><ul><li class="availability">Available now</li><li>Throughput by warehouse</li><li>Operator and device activity</li><li>Duration and slow transactions</li><li>Peak rate and workload concentration</li></ul></article>
+        <article class="insight"><h3>Lots and traceability</h3><ul><li class="availability">Partly available</li><li>Consumption by item and lot</li><li>Last use of each lot</li><li>Lot spread per item</li><li>Expiry requires upstream data</li></ul></article>
+        <article class="insight"><h3>Pipeline trust</h3><ul><li class="availability">Available now</li><li>Source and processed watermarks</li><li>Regroup and analytics backlog</li><li>Quality issue age</li><li>Reconciliation differences</li></ul></article>
+        <article class="insight"><h3>Forecasting foundation</h3><ul><li class="availability future">Later phase</li><li>Clean item-time contribution history</li><li>Versioned canonical UOM</li><li>Demand and stock features</li><li>Model and forecast version tracking</li></ul></article>
+      </div>
+    </section>
+
+    <section id="scale">
+      <div class="section-head">
+        <div class="eyebrow">07 · Scale and technology choice</div>
+        <h2>Materialize once, read cheaply many times</h2>
+        <p>The current direct dashboard queries scan partitioned history and cast JSON for every request. The proposed read path touches only compact aggregate rows.</p>
+      </div>
+      <div class="bars" aria-label="Measured production rates and query timings">
+        <div class="bar-row"><label>Peak all transactions</label><div class="track"><div class="fill" style="width:100%"></div></div><output>68 / min</output></div>
+        <div class="bar-row"><label>Peak pick transactions</label><div class="track"><div class="fill" style="width:19.1%"></div></div><output>13 / min</output></div>
+        <div class="bar-row"><label>Top-items direct query</label><div class="track"><div class="fill" style="width:63.5%"></div></div><output>43.2 ms</output></div>
+      </div>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Read path</th><th>Current behavior</th><th>Proposed behavior</th></tr></thead>
+          <tbody>
+            <tr><td>Headline item total</td><td>Scan matching transaction history and cast JSON</td><td>One indexed row per tenant and item</td></tr>
+            <tr><td>Top items</td><td>Hash aggregate and sort source rows</td><td>Bounded scan on total-quantity index</td></tr>
+            <tr><td>Time series</td><td>Aggregate raw rows across partitions</td><td>Read pre-aggregated item-hour buckets</td></tr>
+            <tr><td>Correction</td><td>Would require full recompute or risk double count</td><td>Subtract old contribution and add new one</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="rejects">
+        <article class="reject"><h3>No Flink yet</h3><p>The measured peak of 13 picks per minute does not justify a separate distributed stateful-processing cluster.</p></article>
+        <article class="reject"><h3>No Kafka yet</h3><p>PostgreSQL already owns the atomic source-change and durable-work transaction boundary.</p></article>
+        <article class="reject"><h3>No WebSocket first</h3><p>Two-second revision polling is authoritative, cross-process safe, and meets the selected freshness target.</p></article>
+      </div>
+    </section>
+
+    <section id="roadmap">
+      <div class="section-head">
+        <div class="eyebrow">08 · Delivery roadmap</div>
+        <h2>Prove semantics and correctness before building the dashboard</h2>
+        <p>The sequence places the most dangerous plausible-wrong-total failures ahead of UI work.</p>
+      </div>
+      <div class="timeline">
+        <div class="phase"><div class="phase-card"><h3>Semantic contract and E2E fixture</h3><p>Confirm known successful, zero, short, failed, incomplete, late, and rebuilt transactions through the end-user path.</p><div class="exit">Exit: signed-off fixture totals and a failing E2E test.</div></div></div>
+        <div class="phase"><div class="phase-card"><h3>Schema, models, migration, and ER diagram</h3><p>Add dirty windows, contributions, totals, hourly buckets, quality issues, and tenant state.</p><div class="exit">Exit: constraints and Mermaid diagrams validate.</div></div></div>
+        <div class="phase"><div class="phase-card"><h3>Transactional dirty-window publication</h3><p>Cover live-tail regroup and historical window repair with an atomic ticket.</p><div class="exit">Exit: every committed projection change has durable work.</div></div></div>
+        <div class="phase"><div class="phase-card"><h3>Normalizer, delta fold, and worker</h3><p>Implement strict parsing, quality quarantine, old-to-new diff, retry, and tenant serialization.</p><div class="exit">Exit: replay, correction, deletion, and crash tests reconcile exactly.</div></div></div>
+        <div class="phase"><div class="phase-card"><h3>Backfill and reconciliation</h3><p>Run bounded tracked jobs and compare materialized totals with a full source recomputation.</p><div class="exit">Exit: all production differences are zero or explicitly quarantined.</div></div></div>
+        <div class="phase"><div class="phase-card"><h3>Bounded read APIs</h3><p>Add status, item list, detail, time series, quality, keyset pagination, and ETags.</p><div class="exit">Exit: tenant-safe measured index-backed query plans.</div></div></div>
+        <div class="phase"><div class="phase-card"><h3>Next.js analytics experience</h3><p>Add revision polling, stale-state preservation, race prevention, tenant switching, accessibility, and responsive visual review.</p><div class="exit">Exit: a correct total is visible within 5 seconds and never appears fresh when stale.</div></div></div>
+        <div class="phase"><div class="phase-card"><h3>Controlled production rollout</h3><p>Deploy schema, backfill, enable one tenant, reconcile continuously, then expose the UI behind a feature flag.</p><div class="exit">Exit: freshness, correctness, database load, and web health remain within thresholds.</div></div></div>
+      </div>
+      <div class="callout good">
+        <h3>Definition of done</h3>
+        <p>Replays and rebuilds have exactly-once effect, corrections retract old values, full recomputation matches, invalid data is visible, queries are bounded, and the browser shows both the number and whether it can be trusted.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Generated from the evidence-backed plan captured 11 August 2026.</span>
+    <a class="back" href="#top">Back to top ↑</a>
+  </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,697 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body, h1, h2, h3, h4, p, ul, ol, table { margin: 0; padding: 0; }
+  body { margin: 0; }
+  img { max-width: 100%; }
+</style>
+<title>Warehouse Analytics Platform - Implementation Plan</title>
+<style>
+  :root{
+    --paper:#F7F6F3; --card:#FFFFFF; --sunk:#EFEDE8; --code:#F1EFEA;
+    --ink:#191714; --ink-2:#4E4840; --ink-3:#847C71;
+    --rule:#DEDAD2; --rule-2:#EAE7E0;
+    --navy:#1B4A6F; --navy-bg:#E4EDF3;
+    --green:#2C6B4A; --green-bg:#E2EFE7;
+    --amber:#8C5407; --amber-bg:#F8EEDA;
+    --red:#9B2033; --red-bg:#FAE5E7;
+    --violet:#5B3B7A; --violet-bg:#EDE6F3;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--paper:#0F0E0D;--card:#191817;--sunk:#141312;--code:#121110;
+      --ink:#EFEBE6;--ink-2:#B9B1A8;--ink-3:#8B837A;--rule:#302D2A;--rule-2:#232120;
+      --navy:#7BAED5;--navy-bg:#12212B;--green:#6BC094;--green-bg:#122419;
+      --amber:#DFA357;--amber-bg:#281D0C;--red:#EE7484;--red-bg:#2A1114;
+      --violet:#B394D4;--violet-bg:#1E1628;}
+  }
+  :root[data-theme="dark"]{--paper:#0F0E0D;--card:#191817;--sunk:#141312;--code:#121110;
+    --ink:#EFEBE6;--ink-2:#B9B1A8;--ink-3:#8B837A;--rule:#302D2A;--rule-2:#232120;
+    --navy:#7BAED5;--navy-bg:#12212B;--green:#6BC094;--green-bg:#122419;
+    --amber:#DFA357;--amber-bg:#281D0C;--red:#EE7484;--red-bg:#2A1114;
+    --violet:#B394D4;--violet-bg:#1E1628;}
+  :root[data-theme="light"]{--paper:#F7F6F3;--card:#FFFFFF;--sunk:#EFEDE8;--code:#F1EFEA;
+    --ink:#191714;--ink-2:#4E4840;--ink-3:#847C71;--rule:#DEDAD2;--rule-2:#EAE7E0;
+    --navy:#1B4A6F;--navy-bg:#E4EDF3;--green:#2C6B4A;--green-bg:#E2EFE7;
+    --amber:#8C5407;--amber-bg:#F8EEDA;--red:#9B2033;--red-bg:#FAE5E7;
+    --violet:#5B3B7A;--violet-bg:#EDE6F3;}
+
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.62;
+       -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:880px;margin:0 auto;padding:44px 22px 110px;display:flex;flex-direction:column;gap:50px;}
+  h1{font-size:clamp(27px,4.3vw,39px);line-height:1.05;letter-spacing:-.032em;font-weight:800;margin:0 0 12px;}
+  .kicker{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+          color:var(--ink-3);margin:0 0 9px;}
+  .sub{font-size:16.5px;color:var(--ink-2);margin:0;max-width:60ch;}
+  h2{font-size:clamp(20px,2.6vw,25px);line-height:1.15;letter-spacing:-.022em;font-weight:760;
+     margin:0 0 8px;padding-bottom:9px;border-bottom:2px solid var(--rule);}
+  h3{font-size:16px;font-weight:720;margin:24px 0 8px;letter-spacing:-.01em;}
+  h4{font-size:14px;font-weight:700;margin:18px 0 6px;}
+  p{margin:0 0 13px;color:var(--ink-2);max-width:68ch;font-size:14.5px;}
+  ul,ol{margin:0 0 13px;padding-left:21px;}
+  li{color:var(--ink-2);margin-bottom:6px;font-size:14.5px;}
+  .lede{font-size:15px;color:var(--ink-2);margin:12px 0 20px;max-width:66ch;}
+  code,.c{font-family:var(--mono);font-size:.87em;background:var(--sunk);padding:1.5px 5px;
+          border-radius:3px;color:var(--ink);}
+  .note{font-size:13px;color:var(--ink-3);margin:13px 0 0;max-width:68ch;}
+
+  /* jargon */
+  .j{border-bottom:1.5px dotted var(--navy);cursor:help;color:var(--ink);font-weight:550;}
+
+  /* TOC */
+  .toc{background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:18px 22px;}
+  .toc ol{margin:0;padding-left:20px;columns:2;column-gap:30px;}
+  @media (max-width:640px){.toc ol{columns:1;}}
+  .toc li{font-size:13.5px;margin-bottom:5px;}
+  .toc a{color:var(--navy);text-decoration:none;border-bottom:1px solid transparent;}
+  .toc a:hover,.toc a:focus{border-bottom-color:var(--navy);}
+
+  /* status banner */
+  .status{background:var(--green-bg);border-left:3px solid var(--green);border-radius:0 9px 9px 0;
+          padding:15px 19px;}
+  .status p{margin:0 0 7px;font-size:13.5px;} .status p:last-child{margin:0;}
+  .status b{color:var(--ink);}
+
+  /* stat row */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;}
+  @media (max-width:700px){.stats{grid-template-columns:repeat(2,1fr);}}
+  .stat{background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:15px 14px;text-align:center;}
+  .stat .n{font-size:25px;font-weight:800;letter-spacing:-.025em;line-height:1.05;display:block;
+           font-variant-numeric:tabular-nums;}
+  .stat .l{font-size:11.5px;color:var(--ink-3);display:block;margin-top:6px;line-height:1.35;}
+  .stat.hot .n{color:var(--red);} .stat.warm .n{color:var(--amber);} .stat.cool .n{color:var(--navy);}
+  .stat.good .n{color:var(--green);}
+
+  /* fact cards */
+  .facts{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  @media (max-width:700px){.facts{grid-template-columns:1fr;}}
+  .fc{background:var(--card);border:1px solid var(--rule);border-radius:9px;padding:14px 16px;}
+  .fc .h{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+         color:var(--navy);margin:0 0 6px;font-weight:700;}
+  .fc p{margin:0;font-size:13.5px;}
+
+  /* fix cards */
+  .fix{background:var(--card);border:1px solid var(--rule);border-radius:11px;overflow:hidden;}
+  .fix + .fix{margin-top:14px;}
+  .fix > .hd{display:flex;gap:10px;align-items:baseline;padding:13px 17px;border-bottom:1px solid var(--rule);
+             background:var(--sunk);}
+  .fix .id{font-family:var(--mono);font-size:12px;font-weight:800;flex-shrink:0;}
+  .fix.p1 .id{color:var(--red);} .fix.p2 .id{color:var(--amber);} .fix.p3 .id{color:var(--navy);}
+  .fix .ti{font-size:15px;font-weight:700;letter-spacing:-.01em;margin:0;}
+  .fix > .bd{padding:15px 17px;}
+  .fix .bd > :last-child{margin-bottom:0;}
+  .lbl{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.09em;
+       text-transform:uppercase;padding:2px 7px;border-radius:3px;margin-bottom:5px;font-weight:700;}
+  .lbl.d{background:var(--red-bg);color:var(--red);}
+  .lbl.f{background:var(--green-bg);color:var(--green);}
+  .lbl.x{background:var(--amber-bg);color:var(--amber);}
+
+  /* tables */
+  .scroll{overflow-x:auto;border:1px solid var(--rule);border-radius:9px;background:var(--card);margin:0 0 13px;}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:520px;}
+  th{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+     color:var(--ink-3);font-weight:600;padding:10px 14px;border-bottom:1px solid var(--rule);vertical-align:bottom;}
+  td{padding:10px 14px;border-bottom:1px solid var(--rule-2);color:var(--ink-2);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  td code{font-size:11.8px;}
+  td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right;}
+  .y{color:var(--green);font-weight:700;} .n2{color:var(--red);font-weight:700;}
+
+  /* grain bars */
+  .gr{display:flex;flex-direction:column;gap:9px;}
+  .gw{display:grid;grid-template-columns:74px 1fr 92px;gap:13px;align-items:center;}
+  .gw .g{font-family:var(--mono);font-size:12.5px;text-align:right;}
+  .gw .tk{position:relative;height:27px;background:var(--sunk);border-radius:5px;border:1px solid var(--rule-2);}
+  .gw .fi{position:absolute;left:0;top:-1px;bottom:-1px;border-radius:5px;display:flex;align-items:center;
+          padding-left:11px;font-family:var(--mono);font-size:11.5px;font-weight:700;white-space:nowrap;}
+  .fi.a{background:var(--red-bg);border:1.5px solid var(--red);color:var(--red);}
+  .fi.b{background:var(--amber-bg);border:1.5px solid var(--amber);color:var(--amber);}
+  .fi.c{background:var(--navy-bg);border:1.5px solid var(--navy);color:var(--navy);}
+  .fi.d{background:var(--green-bg);border:1.5px solid var(--green);color:var(--green);}
+  .gw .rr{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);}
+
+  /* steps */
+  .steps{display:flex;flex-direction:column;}
+  .sp{display:grid;grid-template-columns:27px 1fr;gap:14px;position:relative;padding-bottom:14px;}
+  .sp:last-child{padding-bottom:0;}
+  .sp::before{content:"";position:absolute;left:13px;top:27px;bottom:0;width:2px;background:var(--rule);}
+  .sp:last-child::before{display:none;}
+  .sp .n{width:27px;height:27px;border-radius:7px;background:var(--navy-bg);border:1.5px solid var(--navy);
+         color:var(--navy);display:grid;place-items:center;font-family:var(--mono);font-size:11.5px;
+         font-weight:700;position:relative;z-index:1;}
+  .sp .t{padding-top:2px;font-size:14px;color:var(--ink-2);}
+  .sp .t b{color:var(--ink);}
+
+  /* phases */
+  .phz{display:grid;grid-template-columns:auto 1fr;gap:10px 15px;font-size:14px;}
+  .phz .k{font-family:var(--mono);font-size:11.5px;color:var(--navy);font-weight:700;white-space:nowrap;padding-top:3px;}
+  .phz .v{color:var(--ink-2);} .phz .v b{color:var(--ink);font-weight:650;}
+
+  /* callouts */
+  .co{border-left:3px solid var(--amber);background:var(--amber-bg);border-radius:0 9px 9px 0;
+      padding:14px 18px;margin:0 0 13px;}
+  .co.bad{border-left-color:var(--red);background:var(--red-bg);}
+  .co.ok{border-left-color:var(--green);background:var(--green-bg);}
+  .co.info{border-left-color:var(--navy);background:var(--navy-bg);}
+  .co h4{margin:0 0 5px;font-size:14px;color:var(--amber);}
+  .co.bad h4{color:var(--red);} .co.ok h4{color:var(--green);} .co.info h4{color:var(--navy);}
+  .co p{margin:0;font-size:13.5px;} .co p + p{margin-top:8px;}
+
+  /* glossary */
+  .gl{display:grid;grid-template-columns:1fr 1fr;gap:11px;}
+  @media (max-width:700px){.gl{grid-template-columns:1fr;}}
+  .gi{background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:12px 15px;}
+  .gi .w{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--violet);margin:0 0 4px;}
+  .gi .m{font-size:13px;color:var(--ink-2);margin:0;}
+
+  /* test groups */
+  .tg{background:var(--card);border:1px solid var(--rule);border-radius:9px;padding:14px 18px;margin-bottom:12px;}
+  .tg h4{margin:0 0 8px;font-size:13px;font-family:var(--mono);letter-spacing:.06em;text-transform:uppercase;
+         color:var(--navy);}
+  .tg ol{margin:0;padding-left:20px;} .tg li{font-size:13.5px;margin-bottom:5px;}
+</style>
+
+</head>
+<body>
+<div style="max-width:880px;margin:0 auto;padding:26px 22px 0;">
+  <div style="background:var(--navy-bg);border-left:3px solid var(--navy);border-radius:0 9px 9px 0;padding:13px 17px;font:13.5px/1.55 var(--sans);color:var(--ink-2);">
+    <strong style="color:var(--ink);">Rendered companion document.</strong>
+    The authoritative source is
+    <code style="font-family:var(--mono);font-size:12.5px;">docs/plan/2026-08-17_22-32_merged-warehouse-analytics-platform-plan.md</code>,
+    which is what Alembic migrations should cite. This file is for reading; if the two disagree, the Markdown wins.
+  </div>
+</div>
+<div class="wrap">
+
+<header>
+  <p class="kicker">Implementation plan · 2026-08-17, revised 2026-08-18</p>
+  <h1>Warehouse analytics platform</h1>
+  <p class="sub">A real-time running total per item, daily to monthly aggregation across user-chosen
+  metrics, and a second pipeline for machine learning. Every number below was measured, not estimated.</p>
+</header>
+
+<div class="status">
+  <p><b>Supersedes</b> the 2026-08-11 consumption plan, whose core mechanism is adopted here, and two
+  earlier working documents.</p>
+  <p><b>Migration base, checked 2026-08-18:</b> deployed Alembic head is <code>e4b28f5c9107</code>, also
+  the repo head across 43 revisions, so <b>there are no pending migrations</b>. Phase 1 lands clean.</p>
+  <p><b>Still outstanding:</b> the plan files are not committed to git, so migrations cannot durably cite them.</p>
+</div>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#jargon">Words used here</a></li>
+    <li><a href="#unusual">Why the design looks unusual</a></li>
+    <li><a href="#truth">Verified ground truth</a></li>
+    <li><a href="#kept">Adopted unchanged</a></li>
+    <li><a href="#fixes">The eleven fixes</a></li>
+    <li><a href="#hardening">Additional hardening</a></li>
+    <li><a href="#registry">Metric registry</a></li>
+    <li><a href="#grains">Grains and additivity</a></li>
+    <li><a href="#ml">ML and agentic pipeline</a></li>
+    <li><a href="#api">Read API and frontend</a></li>
+    <li><a href="#phases">Delivery sequence</a></li>
+    <li><a href="#verify">Verification</a></li>
+    <li><a href="#inputs">Inputs still needed</a></li>
+  </ol>
+</nav>
+
+<!-- GLOSSARY -->
+<section id="jargon">
+  <h2>Words used here</h2>
+  <p class="lede">Every term that could be mistaken for jargon. Terms marked with a dotted underline in
+  the body are defined here.</p>
+  <div class="gl">
+    <div class="gi"><p class="w">projection</p><p class="m">A table built <em>from</em> other data rather than written directly. <code>log_transactions</code> is one: it is assembled from raw log lines and can be rebuilt.</p></div>
+    <div class="gi"><p class="w">append-only</p><p class="m">Rows are only ever added, never changed or removed. <code>log_entries</code> is append-only. <code>log_transactions</code> is <em>not</em>.</p></div>
+    <div class="gi"><p class="w">sealed / unsealed</p><p class="m">Sealed means the system considers a record final. Unsealed means it may still be rebuilt.</p></div>
+    <div class="gi"><p class="w">ledger / contribution</p><p class="m">One row per record saying what it added to the totals. Keeping it lets a record be undone precisely.</p></div>
+    <div class="gi"><p class="w">version hash / fingerprint</p><p class="m">A short signature of the values that affect a total. Same fingerprint means nothing changed, so no work is needed.</p></div>
+    <div class="gi"><p class="w">delta application</p><p class="m">Adjust a total by the <em>difference</em>: subtract the old contribution, add the new one.</p></div>
+    <div class="gi"><p class="w">ticket / dirty window</p><p class="m">A durable note saying "records in this time range changed, go and recheck them".</p></div>
+    <div class="gi"><p class="w">idempotent</p><p class="m">Running it twice has the same effect as running it once. What makes retries safe.</p></div>
+    <div class="gi"><p class="w">at-least-once</p><p class="m">Work may be delivered more than once but never lost. Combined with idempotence, the <em>effect</em> is exactly once.</p></div>
+    <div class="gi"><p class="w">reconciliation</p><p class="m">Recount from scratch and compare against the running totals, to prove they have not drifted.</p></div>
+    <div class="gi"><p class="w">grain</p><p class="m">How coarse a saved total is: hourly, daily, weekly, monthly. Coarser means fewer rows to read.</p></div>
+    <div class="gi"><p class="w">additive</p><p class="m">Can be summed across periods. Counts and sums are. Averages, percentiles and distinct counts are not.</p></div>
+    <div class="gi"><p class="w">cursor / bookmark</p><p class="m">A stored marker saying how far a reader has got, so old data is not deleted before it is read.</p></div>
+    <div class="gi"><p class="w">partition</p><p class="m">One physical slice of a big table, here one per day. Old slices are dropped whole, which is cheap.</p></div>
+    <div class="gi"><p class="w">event time vs write time</p><p class="m">When the pick happened, versus when the row was written. Here they differ by hours.</p></div>
+    <div class="gi"><p class="w">advisory lock</p><p class="m">A named lock two jobs can share to avoid working on the same thing at once.</p></div>
+    <div class="gi"><p class="w">point-in-time correctness</p><p class="m">Being able to rebuild exactly the data a model was trained on, months later.</p></div>
+    <div class="gi"><p class="w">merge / split</p><p class="m">When rebuilt, two records may combine into one, or one may divide into two. Ids appear and disappear.</p></div>
+    <div class="gi"><p class="w">backfill</p><p class="m">Computing history for something newly defined, rather than only going forward from now.</p></div>
+  </div>
+</section>
+
+<!-- WHY UNUSUAL -->
+<section id="unusual">
+  <h2>Why the design looks unusual</h2>
+  <p><code>log_transactions</code> is not an <span class="j" title="Rows are only added, never changed">append-only</span>
+  table and not a time series. It is a <span class="j" title="A table built from other data, and rebuildable">mutable
+  projection</span>: each record is stitched from roughly 15 raw log lines, and when a late line arrives
+  the row is <strong>deleted and rebuilt</strong>, possibly with different values.</p>
+
+  <div class="stats">
+    <div class="stat hot"><span class="n">98.7%</span><span class="l">of rows written more than 5 min after their own log lines</span></div>
+    <div class="stat warm"><span class="n">1.7 h</span><span class="l">average gap for sealed rows</span></div>
+    <div class="stat warm"><span class="n">5.4 h</span><span class="l">worst observed gap</span></div>
+    <div class="stat cool"><span class="n">0.6%</span><span class="l">built promptly, within 60 s</span></div>
+  </div>
+
+  <p style="margin-top:18px;">So rebuilding is the norm, and a row is not final until hours after the
+  event. Two conclusions follow, and they rule out the two obvious designs.</p>
+  <ul>
+    <li><strong>Simply adding numbers up is wrong.</strong> A rebuilt row would be counted twice, producing plausible-looking wrong totals with no error.</li>
+    <li><strong>Waiting for rows to settle is also wrong.</strong> Sealing is measured against the newest log timestamp, not the clock (<code>derive_transactions.py:535-538</code>), so the wait has no bound and stops entirely whenever ingestion pauses.</li>
+  </ul>
+
+  <div class="co info">
+    <h4>Consequence for implementation</h4>
+    <p>The <span class="j" title="A signature of the values that affect a total">version hash</span> on each
+    contribution is <b>load-bearing, not an optimisation</b>. At a 98.7% rebuild rate almost every recheck
+    must be absorbed as a no-op by a matching fingerprint, or the system produces a constant stream of
+    pointless aggregate writes.</p>
+  </div>
+</section>
+
+<!-- GROUND TRUTH -->
+<section id="truth">
+  <h2>Verified ground truth</h2>
+  <p class="lede">Read from the live server and from code. Do not re-derive.</p>
+
+  <div class="facts">
+    <div class="fc"><p class="h">Volume and shape</p><p>72,682 transactions. ~1,100,516 raw log entries. 1,474,393 parsed M3 records inside <code>log_entries.fields</code>. Peak 68 transactions/minute, 13 picks/minute.</p></div>
+    <div class="fc"><p class="h">Cardinality grows slowly</p><p>692 distinct items with consumption, 395 on the busiest day, against 25,008 in the item master. More picks does not mean more items.</p></div>
+    <div class="fc"><p class="h">Scan cost</p><p><b>~2.5 µs per row.</b> 1.04 M rows took 2,541 ms. Planning cost tracks <span class="j" title="One physical slice of a big table, here one per day">partition</span> count, not data volume: 7 ms for one partition versus ~85 ms for 21.</p></div>
+    <div class="fc"><p class="h">Filter on <code>method</code></p><p>Never <code>transaction_type</code>, which holds placeholders like <code>xxxxxx</code>. <code>AddStockCountLine</code> carries real quantities under a placeholder, so a type filter drops real data.</p></div>
+    <div class="fc"><p class="h">Quantity fields</p><p><code>QuantityPicked</code> and <code>ExpectedQuantity</code> are 100% clean. <code>QuantityToBePicked</code> is 91% empty and <code>Weight</code> is 100% empty. Values are fractional, so <code>NUMERIC</code> throughout, never float.</p></div>
+    <div class="fc"><p class="h">Identity</p><p>A <b>new</b> record's id is <code>uuid5</code> of an anchor line's hash. A <b>rebuilt</b> record <b>inherits</b> its id. Source uniqueness is <code>(id, started_at)</code>, <b>not</b> unique on id alone. See the correction below.</p></div>
+    <div class="fc"><p class="h">Live checks, 2026-08-17</p><p>NULL <code>started_at</code>: 0. Duplicate ids: 0. NULL <code>ended_at</code>: 0. Unsealed at any moment: 1,638. Regroup tickets: 7,407 with 0 pending, 0 abandoned, 0 retries.</p></div>
+    <div class="fc"><p class="h">Real data loss, today</p><p><b>847 to 1,079 orphaned log lines</b> belong to no record, all past the abandon window, from two files. Only 7 are pick-related.</p></div>
+    <div class="fc"><p class="h">Infrastructure limits</p><p>Stock PostgreSQL 16. <b>No TimescaleDB, Citus, columnar, hll, tdigest or pg_partman.</b> <code>work_mem</code> is 4 MB. Partitioning helper supports <b>daily bounds only</b>.</p></div>
+    <div class="fc"><p class="h">Frontend limits</p><p><b>No chart library</b>, so charts are hand-built. <code>next.config.mjs</code> needs a rewrite entry or <code>/api/v1/analytics/*</code> returns 404.</p></div>
+  </div>
+
+  <h3>Identity, re-verified 2026-08-18</h3>
+  <div class="co bad">
+    <h4>An earlier version of this plan had this backwards</h4>
+    <p>It said "1.3% are exposed to id change on backfill". <b>Backfill is the one path that is
+    protected.</b> The 1.3% figure is the measurement that <em>motivated</em> the fix, not a live
+    exposure.</p>
+  </div>
+
+  <p>A <strong>new</strong> group's id is <code>uuid5</code> of its anchor line's hash, the anchor being
+  the REQUEST line if there is one and the earliest line otherwise. A <strong>rebuilt</strong> group
+  <strong>inherits</strong> its id from whichever record owned the plurality of its lines, via
+  <code>continuity.assign(...)</code> in <code>_resolve_ids</code>.</p>
+
+  <p><strong>But that inheritance is wired into only one of the three rebuild paths.</strong> Traced
+  through every call site:</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Path</th><th>What it deletes</th><th>Inherits ids?</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td><code>regroup_window</code><br><span style="font-family:var(--mono);font-size:11px;color:var(--ink-3)">:858, :895</span></td>
+          <td>all records in the padded range, <b>sealed included</b></td><td class="y">yes</td><td>id preserved</td></tr>
+      <tr><td><code>regroup_incremental</code><br><span style="font-family:var(--mono);font-size:11px;color:var(--ink-3)">:780, :801</span></td>
+          <td>unsealed only, no time bound</td><td class="n2">no</td><td>id recomputed, so it can change</td></tr>
+      <tr><td><code>regroup_all</code><br><span style="font-family:var(--mono);font-size:11px;color:var(--ink-3)">:677, :698</span></td>
+          <td>everything</td><td class="n2">no</td><td>id recomputed, so it can change</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>So stability holds for <strong>backfill and repair</strong>, which is the case the 1.3% was about.
+  It does <strong>not</strong> hold on the live path, where an unsealed record gaining a late REQUEST
+  line will change id.</p>
+
+  <div class="co">
+    <h4>A documentation bug worth reporting upstream</h4>
+    <p>The docstring at <code>derive_transactions.py:575-576</code> states "Only
+    <code>regroup_window</code> can supply one, because only it frees transactions." That is
+    <b>inaccurate</b>: <code>regroup_incremental:780</code> and <code>regroup_all:677</code> both delete
+    records. The comment would lead the next reader to believe the live path is protected when it is not.</p>
+  </div>
+
+  <div class="co ok">
+    <h4>Impact on this design: none, and that is the point</h4>
+    <p>The range diff reverses a vanished id and applies a new one, so an id change is handled exactly
+    like a <span class="j" title="Two records combining into one on rebuild">merge</span> or
+    <span class="j" title="One record dividing into two on rebuild">split</span>. This is further evidence
+    that the range diff is mandatory and a per-record update would be wrong. It does mean the ledger sees
+    more identity churn than reading <code>continuity.py</code> alone suggests.</p>
+  </div>
+</section>
+
+<!-- KEPT -->
+<section id="kept">
+  <h2>Adopted unchanged</h2>
+  <p>From the 2026-08-11 plan, correct and preserved: the contribution
+  <span class="j" title="One row per record saying what it added to the totals">ledger</span> with
+  <span class="j" title="Adjust a total by the difference: subtract old, add new">delta application</span>;
+  the transactional <span class="j" title="A durable note saying which time range changed">ticket</span>;
+  <code>NUMERIC(38, 9)</code> quantities; refusing Flink and Kafka with measurements rather than opinion;
+  rejecting a write-time cursor, database triggers, in-memory totals, per-request aggregate queries and
+  WebSocket-first delivery; revision polling before server-sent events; read-only web workers with the
+  loop in the singleton worker process; deploying schema first, then tickets with the worker disabled,
+  then one tenant; freshness shown beside business numbers; and query plan evidence before fixing index
+  order.</p>
+</section>
+
+<!-- FIXES -->
+<section id="fixes">
+  <h2>The eleven fixes</h2>
+  <p class="lede">Each is a defect found in the earlier plan by code reading and live measurement. Red is
+  blocking, amber serious, blue smaller.</p>
+
+  <div class="fix p1"><div class="hd"><span class="id">F1</span><p class="ti">Ticket bounds must come from the delete, not the new lines</p></div><div class="bd">
+    <p><span class="lbl d">defect</span><br><code>regroup_window</code> has explicit bounds, but the live path <code>regroup_incremental</code> deletes <code>WHERE sealed IS FALSE</code> with <strong>no time predicate</strong>. Bounds taken from incoming lines would miss an older unsealed row caught in the same delete, which then drifts permanently. This path runs every ~70 seconds.</p>
+    <p><span class="lbl f">fix</span><br>Every publisher computes bounds from <strong>the set actually freed</strong>. The unsealed ids are already selected before the delete, so take min and max <code>started_at</code> over that same set and publish it padded. Empty set means no ticket.</p>
+    <p><span class="lbl x">invariant</span><br>No record may be deleted by any path without a committed ticket whose range contains its <code>started_at</code>.</p>
+  </div></div>
+
+  <div class="fix p1"><div class="hd"><span class="id">F2</span><p class="ti">Reconciliation must also check completeness against <code>log_entries</code></p></div><div class="bd">
+    <p><span class="lbl d">defect</span><br>The proof of correctness recomputes from <code>log_transactions</code>. Both sides read the same projection, which is currently missing ~1,000 orphaned lines, so <strong>reconciliation passes while under-counting</strong>.</p>
+    <p><span class="lbl f">fix</span><br>Two independent scheduled checks. First, totals against a recount. Second, a count of <code>log_entries</code> rows past the abandon window with <strong>no row in <code>log_entry_assignment</code></strong>, grouped by source file and program. Surface both in the state row and on the dashboard.</p>
+    <p><span class="lbl x">act now</span><br>Run a scoped regroup over 2026-08-15 to 2026-08-17 for the two named files, and find the cause before assuming a regroup fixes it, because whatever caused it will recur.</p>
+  </div></div>
+
+  <div class="fix p1"><div class="hd"><span class="id">F3</span><p class="ti">Ledger identity must mirror the source constraint</p></div><div class="bd">
+    <p><span class="lbl d">defect</span><br>Keying contributions on the record id alone. Source uniqueness is <code>(id, started_at)</code>, and two rows can share an id in different partitions "silently and undetectably". A ledger keyed on id alone would collapse them and under-count.</p>
+    <p><span class="lbl f">fix</span><br>Key on <code>(customer_code, source_transaction_id, source_started_at)</code>. Zero duplicate pairs exist today; the extra column costs nothing and removes the failure mode.</p>
+  </div></div>
+
+  <div class="fix p2"><div class="hd"><span class="id">F4</span><p class="ti">Freshness needs two numbers, not one</p></div><div class="bd">
+    <p><span class="lbl d">defect</span><br>The 5-second target measures how far analytics lags the projection. But records are not final for 1.7 h on average. The screen could truthfully say "updated 2 seconds ago" about a number still due to move, which manufactures false confidence.</p>
+    <p><span class="lbl f">fix</span><br><b>Copy freshness</b>: seconds between the analytics watermark and the source watermark. <b>Settledness</b>: the share of contributing records still unsealed, and the age of the oldest. A window with unsealed contributors reads as <em>provisional</em>, not <em>stale</em>, because those mean different things to an operator.</p>
+  </div></div>
+
+  <div class="fix p2"><div class="hd"><span class="id">F5</span><p class="ti">The status endpoint must read exactly one row</p></div><div class="bd">
+    <p><span class="lbl d">defect</span><br>The browser polls status every 2 seconds per tab across four web workers, and the response includes counts over other tables. The cheapest request becomes the most frequent expensive one.</p>
+    <p><span class="lbl f">fix</span><br>The worker writes every status field into the single <code>warehouse_analytics_state</code> row each cycle. The endpoint is one key read plus an <code>ETag</code>. A test asserts it issues exactly one query.</p>
+  </div></div>
+
+  <div class="fix p2"><div class="hd"><span class="id">F6</span><p class="ti">The retention bookmark must publish a write-time position</p></div><div class="bd">
+    <p><span class="lbl d">defect</span><br>Retention gating uses a <span class="j" title="A marker saying how far a reader has got">cursor</span> measured in <span class="j" title="When the row was written, as opposed to when the pick happened">write time</span>, but the worker is driven by event-time ranges and has no natural write-time position. Unresolved, it either publishes nonsense or gates nothing, and the second loses data during the backlog that caused it.</p>
+    <p><span class="lbl f">fix</span><br>Track the maximum <code>created_at</code> seen among fully processed rows and publish the minimum across tenants under <code>analytics:warehouse-v1</code>. A ticket is only acknowledged once its whole range is diffed, so every row inside it has been read.</p>
+    <p><span class="lbl x">watch</span><br>A deferred team change would switch the delete-and-reinsert to an <code>UPDATE</code>. Then <code>created_at</code> stops moving and <strong>this fix breaks silently</strong>. Keep the cursor field a single named constant so the switch to <code>updated_at</code> is one edit. That change would also collapse the 98.7% figure this plan is sized against.</p>
+  </div></div>
+
+  <div class="fix p2"><div class="hd"><span class="id">F7</span><p class="ti">Copy the existing ticket table; do not share it</p></div><div class="bd">
+    <p><span class="lbl f">resolved</span><br><code>log_regroup_pending</code> already has exactly the needed columns and is healthy in production. Copy its shape, but analytics gets <strong>its own table</strong>, for two reasons.</p>
+    <ol>
+      <li><code>consumed_at</code> is a <strong>single-consumer</strong> field. A second consumer stamping it means whichever runs second finds the window closed and skips work it never did.</li>
+      <li>The existing tickets are written in <strong>Stage 1, per ingested file</strong>, so they describe ingest ranges and only ever drive <code>regroup_window</code>. They never describe the live path.</li>
+    </ol>
+    <div class="scroll"><table>
+      <thead><tr><th></th><th><code>log_regroup_pending</code></th><th>new analytics table</th></tr></thead>
+      <tbody>
+        <tr><td>Written by</td><td>Stage 1, per file</td><td>Stage 2, per re-assembly</td></tr>
+        <tr><td>Bounds from</td><td><code>log_entries.timestamp</code></td><td><code>log_transactions.started_at</code> of freed rows</td></tr>
+        <tr><td>Covers the live path</td><td class="n2">no</td><td class="y">yes</td></tr>
+      </tbody>
+    </table></div>
+  </div></div>
+
+  <div class="fix p2"><div class="hd"><span class="id">F8</span><p class="ti">Zero-quantity picks are attempts, not consumption</p></div><div class="bd">
+    <p><span class="lbl d">defect</span><br><b>9.2%</b> of pick confirmations record zero units and still say success, typically an empty location. Counting them as picks inflates productivity by about a tenth.</p>
+    <p><span class="lbl f">fix</span><br>Three counters, all stored in every rollup: <code>quantity</code> (sum of units), <code>pick_count</code> (confirmations above zero), <code>attempt_count</code> (all confirmations). The zero-pick rate derives from the last two and is a first-class metric, because it names specific empty locations and replaces the fill rate this data cannot support.</p>
+  </div></div>
+
+  <div class="fix p2"><div class="hd"><span class="id">F9</span><p class="ti">Add daily and monthly grains; derive weekly</p></div><div class="bd">
+    <p><span class="lbl d">defect</span><br>Hourly and lifetime totals only. A month-to-date question means summing about 1.08 M hourly rows, roughly 2.7 seconds and growing.</p>
+    <p><span class="lbl f">fix</span><br>See <a href="#grains" style="color:var(--navy);">Grains and additivity</a> below.</p>
+  </div></div>
+
+  <div class="fix p1"><div class="hd"><span class="id">F10</span><p class="ti">Keep contribution history, or machine learning is impossible later</p></div><div class="bd">
+    <p><span class="lbl d">defect</span><br>The ledger keeps only the latest value per record, so a rebuild overwrites the previous one. A training set built from it is not reproducible: the same query returns different data next week, no experiment can be replayed, and nobody can explain an old forecast. <strong>Discarded versions cannot be recovered.</strong></p>
+    <p><span class="lbl f">fix</span><br>Two tables. <code>warehouse_consumption_contributions</code> holds the latest value and serves the delta computation. <code>warehouse_consumption_contribution_history</code> is <strong>append-only</strong>, one row per version with its <code>revision</code>, retained longer than raw data. Training sets pin a revision and become reproducible exactly.</p>
+  </div></div>
+
+  <div class="fix p3"><div class="hd"><span class="id">F11</span><p class="ti">Load testing needs a synthetic tenant</p></div><div class="bd">
+    <p><span class="lbl d">defect</span><br>The exit criterion requires holding at 100× the measured rate, roughly 78,000 records an hour, with no way described to generate that without polluting real data.</p>
+    <p><span class="lbl f">fix</span><br>A dedicated <code>synthetic-load</code> tenant whose generator produces realistic lines and drives Stage 2 normally, so tickets and rebuilds are genuinely exercised. Excluded from every production read path and from alerting. It also produces the defect fixtures, so correctness and load share one harness.</p>
+  </div></div>
+</section>
+
+<!-- HARDENING -->
+<section id="hardening">
+  <h2>Additional hardening</h2>
+  <p class="lede">Ten further findings the headline eleven do not cover.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>Item</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td><b>A1</b></td><td>Quarantine must never halt a tenant</td><td>Halting on one bad row freezes every metric until a human intervenes. The codebase already chose the opposite: "the survivable failure, made loud".</td></tr>
+      <tr><td><b>A2</b></td><td>Do not reuse the stitcher's lock key</td><td>The stitcher holds <code>hashtext(customer_code)</code>. Sharing it means a slow analytics run <b>stalls log stitching</b>. Analytics lagging is survivable; ingestion stopping is not.</td></tr>
+      <tr><td><b>A3</b></td><td>Ticket table provably constraint-free</td><td>It is written inside the ingestion transaction, so any failed insert fails ingestion. No foreign key, no unique constraint a retry could violate, no trigger.</td></tr>
+      <tr><td><b>A4</b></td><td>Routine reconciliation must be windowed</td><td>Full recount grows with all retained history, becoming a multi-hour job that quietly stops being run.</td></tr>
+      <tr><td><b>A5</b></td><td>One authoritative revision</td><td>Two revision counters exist. The tenant one governs cache validation and must bump in the same commit, or a valid cache tag returns stale data.</td></tr>
+      <tr><td><b>A6</b></td><td>Normalise the missing-warehouse value once</td><td>Mapping null to a sentinel in two code paths lets one item's total silently split across two keys.</td></tr>
+      <tr><td><b>A7</b></td><td>Every source read carries the window predicate</td><td>Including <code>include_null=True</code>, because a range test is false for null and null <code>started_at</code> is documented as possible.</td></tr>
+      <tr><td><b>A8</b></td><td>Align the worker cadence</td><td>Polling every second against 68 records/minute mostly finds nothing. Tickets are durable, so latency is bounded by ticket availability.</td></tr>
+      <tr><td><b>A9</b></td><td><code>SET LOCAL work_mem = '64MB'</code></td><td>The global 4 MB spills grouping to disk over thousands of items, and the global value is shared with ingestion.</td></tr>
+      <tr><td><b>A10</b></td><td>Enable <code>pg_stat_statements</code></td><td>Available, not installed. Without it, slow queries are guesswork.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- REGISTRY -->
+<section id="registry">
+  <h2>Metric registry</h2>
+  <div class="co info">
+    <h4>Decided 2026-08-18: this is the centre of the design</h4>
+    <p>The user chooses what is measured and how it is sliced, from the interface, and the measure list is
+    not fixed now. So nothing about dimensions or measures may be hardcoded into a rollup schema.</p>
+  </div>
+
+  <h3>The consequence that cannot be deferred</h3>
+  <p>If measures are chosen later, the fact row must capture <strong>every potentially useful field
+  now</strong>. Raw data is dropped at 60 days, so a measure invented next year can only be
+  <span class="j" title="Computing history for something newly defined">backfilled</span> across history
+  if its fields were already being written. A consumption-only ledger would make "average duration by
+  device" permanently impossible beyond 60 days.</p>
+
+  <p><strong>So the ledger widens into a full fact row:</strong></p>
+  <div class="scroll"><table>
+    <thead><tr><th>Group</th><th>Fields</th></tr></thead>
+    <tbody>
+      <tr><td>Identity</td><td><code>source_transaction_id</code>, <code>source_started_at</code>, <code>source_version_hash</code>, <code>revision</code></td></tr>
+      <tr><td>Time</td><td><code>event_time</code>, <code>business_date</code> (tenant-local), <code>duration_ms</code></td></tr>
+      <tr><td>Operation</td><td><code>method</code> (49 values), <code>transaction_name</code> (22), <code>transaction_type</code>, <code>status</code></td></tr>
+      <tr><td>Subject</td><td><code>item_number</code>, <code>lot_number</code>, <code>order_number</code>, <code>delivery_number</code></td></tr>
+      <tr><td>Place</td><td><code>warehouse</code>, <code>warehouse_id</code>, <code>from_location</code>, <code>to_location</code></td></tr>
+      <tr><td>Actor</td><td><code>user_name</code>, <code>device_id</code>, <code>device_name</code></td></tr>
+      <tr><td>Measures</td><td><code>quantity</code> where present, attempt and pick classification, plus a typed slot per registered measure</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Wider than the earlier plan specified, deliberately. The fact table is the only durable
+  record, so anything not written here is lost at 60 days.</p>
+
+  <h3>Dimensions confirmed</h3>
+  <p>Aggregate by <strong>both</strong> <code>method</code> (49 values, API level) and
+  <code>transaction_name</code> (22 values, the operator's screen). Both are low cardinality, so together
+  they stay under roughly 1,700 hourly rows per day.</p>
+  <div class="co bad">
+    <h4>Only 2 of the 49 methods carry quantities</h4>
+    <p><code>ConfirmPickLine</code> (14,654 rows) and <code>ReportCount</code> (9,076). For the other 47
+    the meaningful measures are volume, duration, status and actor. <b>The interface must not offer a
+    quantity measure for a method that has none.</b></p>
+  </div>
+
+  <h3>How a user-defined metric works</h3>
+  <div class="steps">
+    <div class="sp"><div class="n">1</div><div class="t">The user picks a dimension set, a measure, a filter and a grain in the interface.</div></div>
+    <div class="sp"><div class="n">2</div><div class="t">That writes a <b>definition row</b>: identifier, dimensions, measure, filter, grains, and a draft/active/inactive lifecycle.</div></div>
+    <div class="sp"><div class="n">3</div><div class="t">The worker begins maintaining its rollups on the next cycle.</div></div>
+    <div class="sp"><div class="n">4</div><div class="t"><b>A backfill populates its history from the fact table</b>, which is only possible because the fact row is wide and retained. This is the payoff for the widening above.</div></div>
+  </div>
+  <p style="margin-top:14px;">Rollups are stored generically: a definition identifier, a fixed number of
+  dimension slots and additive measure slots, rather than a bespoke table per metric. Adding a metric is
+  a row plus a backfill, never a migration.</p>
+
+  <div class="co">
+    <h4>The honest limit</h4>
+    <p>Fully arbitrary slicing over years cannot be pre-aggregated, because the combinations explode.
+    Registered definitions are fast at any range. Genuinely ad-hoc exploration falls back to a bounded
+    scan of the fact table, and the interface must show that distinction rather than silently running a
+    slow query.</p>
+    <p>Also: a newly defined metric has <b>no history until its backfill runs</b>. That is a fact of the
+    design, not a bug, and it should be visible in the interface.</p>
+  </div>
+
+  <h3>Selection</h3>
+  <p><strong>Toggleable.</strong> A chosen set of types renders either as one series per type or as one
+  combined total. Both are valid from the same rollup because counts and sums are
+  <span class="j" title="Can be summed across periods">additive</span>. Percentiles across a selection
+  need merged histograms, never averaged percentiles.</p>
+</section>
+
+<!-- GRAINS -->
+<section id="grains">
+  <h2>Grains and additivity</h2>
+  <p class="lede">Bar length is rows read to answer "top items this month". Each grain is built from the
+  one above it, so the ledger is read once.</p>
+
+  <div class="gr">
+    <div class="gw"><span class="g">raw</span><div class="tk"><div class="fi a" style="width:100%">1,500,000 · minutes</div></div><span class="rr">never used</span></div>
+    <div class="gw"><span class="g">hourly</span><div class="tk"><div class="fi b" style="width:72%">1,080,000 · ~3 s</div></div><span class="rr">too slow</span></div>
+    <div class="gw"><span class="g">daily</span><div class="tk"><div class="fi c" style="width:11%">150,000</div></div><span class="rr">~370 ms</span></div>
+    <div class="gw"><span class="g">monthly</span><div class="tk"><div class="fi d" style="width:3.5%">5,000</div></div><span class="rr">~150 ms</span></div>
+  </div>
+
+  <p style="margin-top:18px;">Weekly derives from daily and needs no table, using <strong>ISO Monday-start
+  weeks on the tenant-local business date</strong>. Daily and above group on the local date because the
+  pipeline computes it locally while <code>started_at</code> is UTC, and for a UK warehouse those diverge
+  by an hour for half the year. Every query still carries a <code>started_at</code> predicate, because the
+  local date is not the partition key.</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Grain</th><th>Retention</th><th class="num">Rows at 5 years</th></tr></thead>
+    <tbody>
+      <tr><td>Hourly</td><td>90 days</td><td class="num">3.2 M</td></tr>
+      <tr><td>Daily</td><td>forever</td><td class="num">9.1 M</td></tr>
+      <tr><td>Monthly</td><td>forever</td><td class="num">300 K</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Sized at 50,000 picks/day and 5,000 active items. Read-layer rule: choose the coarsest
+  grain covering the window, targeting under 100,000 rows scanned.</p>
+
+  <h3>Additivity is a schema rule, not advice</h3>
+  <p>A rollup stores <strong>components, never finished answers</strong>. Averaging twelve monthly
+  averages is not the yearly average.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Measure</th><th>Sums?</th><th>Stored as</th></tr></thead>
+    <tbody>
+      <tr><td>Quantity, pick count, attempt count</td><td class="y">yes</td><td>directly</td></tr>
+      <tr><td>First and last event</td><td class="y">yes</td><td><code>min</code>, <code>max</code></td></tr>
+      <tr><td>Average, rate</td><td class="n2">no</td><td><code>sum</code> + <code>count</code></td></tr>
+      <tr><td>Std dev, coefficient of variation</td><td class="n2">no</td><td><code>sum</code>, <code>sum_sq</code>, <code>count</code></td></tr>
+      <tr><td>Median, p95</td><td class="n2">no</td><td>20-bucket log histogram; bucket counts are additive</td></tr>
+      <tr><td>Distinct items, operators, orders</td><td class="n2">no</td><td>computed per period from the ledger, never cascaded</td></tr>
+      <tr><td>Top-N</td><td class="n2">no</td><td>the full item set for the window</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">No <code>hll</code> or <code>tdigest</code> is available, so distinct counts have no
+  approximation to fall back on. They are computed per period from the ledger, which is cheap because the
+  ledger and the monthly grain share a partition boundary.</p>
+</section>
+
+<!-- ML -->
+<section id="ml">
+  <h2>ML and agentic pipeline</h2>
+  <div class="facts">
+    <div class="fc"><p class="h">Now, cannot be added later</p><p>The append-only contribution history from F10, with its own retention and a <code>revision</code> that training sets pin.</p></div>
+    <div class="fc"><p class="h">Cheap and early</p><p>Analytics tools added to the existing Claude agent at <code>POST /api/v1/logs/debug/ask</code>. Tenant is injected server-side and never model-exposed. The registry is what makes those tools generic rather than one per metric.</p></div>
+    <div class="fc"><p class="h">Deferred, seam ready</p><p>Forecasting and anomaly detection. No data-science dependency is installed. Anomaly alerts reuse the existing notification rules, channels and delivery tracking.</p></div>
+    <div class="fc"><p class="h">Unrelated live bugs</p><p>A worker retries <code>CREATE EXTENSION vector</code> forever on a server without pgvector, every ~4 s on both processes. And hybrid search raises <code>TypeError</code> on the default backend.</p></div>
+  </div>
+</section>
+
+<!-- API -->
+<section id="api">
+  <h2>Read API and frontend</h2>
+  <p>Endpoints in <code>app/api/v1/analytics.py</code>, registered in the existing router, every one
+  tenant-scoped. Keyset pagination with default and hard maximum limits, no default row count, cache tags
+  honouring conditional requests, and <code>202 Accepted</code> for backfill and reconcile.</p>
+  <p><strong>Added by this merge:</strong> status is a single-row read (F5); responses carry both freshness
+  numbers (F4) and the completeness count (F2); grain selection happens server-side in one method so no
+  caller can scan a fine grain over a wide window (F9).</p>
+  <p><strong>Three frontend facts to design around.</strong> There is no chart library and adding one
+  would be the repo's first in two years, so hand-rolled inline SVG matches convention. Styling is one
+  global CSS file with tokens and an <code>nx-</code> prefix for new work, and the notifications activity
+  tab is the only existing table-plus-tiles-plus-polling page to copy. And
+  <code>next.config.mjs</code> needs a rewrite entry or every request 404s.</p>
+</section>
+
+<!-- PHASES -->
+<section id="phases">
+  <h2>Delivery sequence</h2>
+  <div class="phz">
+    <span class="k">Phase 0</span><span class="v"><b>Contract and fixtures.</b> The consumption definition with the three counters. Fixtures for zero pick, short pick, error, incomplete, late backfill, rebuild, <b>merge</b>, <b>split</b>, and a multi-confirmation line whose expected quantity changes. Build the synthetic tenant generator here so it serves both correctness and load.</span>
+    <span class="k">Phase 1</span><span class="v"><b>Schema.</b> Wide fact ledger, history table, generic per-definition grains, the definition table, quality, the state row, and the ticket table. Register each partitioned table and give each its own retention lag. Update the ER diagram in the same change. <b>The width of the fact row is the load-bearing decision here</b>, since omissions cannot be backfilled after 60 days.</span>
+    <span class="k">Phase 2</span><span class="v"><b>Ticket publication</b> from every path that creates, deletes or rebuilds, with bounds from the freed set. Deployed with the worker disabled, so coverage is proven against real traffic while the only cost is a growing table.</span>
+    <span class="k">Phase 3</span><span class="v"><b>Normalizer, diff, worker.</b> Range diff, never per-record update. Quarantine without halting. Own lock namespace. Write-time cursor.</span>
+    <span class="k">Phase 4</span><span class="v"><b>Backfill and checks.</b> Windowed routine reconciliation plus explicit full runs, and the completeness check against raw lines. Gate retention on healthy state.</span>
+    <span class="k">Phase 5</span><span class="v"><b>Read APIs.</b> Grain selection, both freshness numbers, single-query status.</span>
+    <span class="k">Phase 6</span><span class="v"><b>Frontend.</b> Provisional versus stale, hand-built charts, and the rewrite entry.</span>
+    <span class="k">Phase 7</span><span class="v"><b>Rollout.</b> Schema, then tickets with the worker off, then backfill and report-only reconciliation, then one tenant, then the interface behind a flag.</span>
+  </div>
+</section>
+
+<!-- VERIFY -->
+<section id="verify">
+  <h2>Verification</h2>
+  <p class="lede">Grouped by consequence. Every item is a failure that produces a plausible wrong number
+  rather than an error.</p>
+
+  <div class="tg"><h4>Correctness of the total</h4><ol>
+    <li>Reconciliation: ledger totals equal a direct recount for the window.</li>
+    <li><b>Completeness</b>: lines past the abandon window with no assignment, by file and program. Currently non-zero, so <b>this test starts red and that is correct</b>.</li>
+    <li>Restatement: rebuild an already-folded window and assert totals unchanged; change a quantity and assert the old contribution reverses exactly once.</li>
+    <li><b>Merge and split</b>: a merged record's vanished id reverses, a split's new id applies. A per-record update passes test 3 and fails this one.</li>
+    <li>Ticket coverage: rebuild an old unsealed row via the live path and assert a committed ticket contains it.</li>
+    <li>Identity: the ledger key includes <code>source_started_at</code>, and two rows sharing an id produce two receipts.</li>
+    <li>Idempotence: the same fold twice leaves values unchanged.</li>
+    <li>Crash safety: kill the worker mid-batch; no gap, no duplicate.</li>
+  </ol></div>
+
+  <div class="tg"><h4>Data that cannot be recovered</h4><ol start="9">
+    <li>Retention independence: drop a 61-day-old raw partition; ledger, history and grains survive.</li>
+    <li>Cursor gating: the position blocks retention while behind; a stalled worker is logged critical then stops blocking.</li>
+    <li>Reproducibility: build a training set at a revision, restate a contribution, rebuild at the same revision, assert identical output.</li>
+    <li>Rebuildability: delete a grain entirely and rebuild it from the ledger to identical values.</li>
+  </ol></div>
+
+  <div class="tg"><h4>Traps specific to this data</h4><ol start="13">
+    <li>Attempts versus picks: zeros excluded from pick count, included in attempts and the zero-pick rate.</li>
+    <li>Additivity: monthly-grain metrics equal ledger-computed ones, including distinct count, p95 and average.</li>
+    <li>Top-N is not composable.</li>
+    <li>Local business date at 00:30 during BST lands on the right local day.</li>
+    <li>Numeric fidelity end to end; comparisons numeric, never string.</li>
+    <li>Placeholder rejection: quarantined with a reason, never dropped silently.</li>
+  </ol></div>
+
+  <div class="tg"><h4>Registry and user-defined metrics</h4><ol>
+    <li><b>Fact-row completeness</b>: every listed field is populated wherever the source has it. This guards the one irreversible schema decision.</li>
+    <li><b>A newly defined metric backfills correctly</b>: define one for a combination never registered before, backfill, and assert it equals a direct aggregate. This proves user-defined metrics are real rather than forward-only.</li>
+    <li>Selection is additive both ways, and percentiles come from merged histograms.</li>
+    <li>Quantity measures are refused where the field does not exist, since 47 of 49 methods have none.</li>
+    <li>ISO week boundaries during BST.</li>
+  </ol></div>
+
+  <div class="tg"><h4>Performance and end to end</h4><ol>
+    <li>Status is one query. Queries are prepared, worth ~100 ms each.</li>
+    <li>A 12-month request resolves to monthly, never daily. Grain reads plan as index-only scans, with query-plan proof.</li>
+    <li>Load: synthetic tenant at 100× the measured rate, worker lag inside target.</li>
+    <li>In the real interface: a live pick updates within target; a window with unsealed contributors reads as provisional; empty and loading states, fractional formatting, light and dark all checked.</li>
+  </ol></div>
+</section>
+
+<!-- INPUTS -->
+<section id="inputs">
+  <h2>Inputs still needed</h2>
+  <div class="co bad">
+    <h4>1 and 2 block correct sizing</h4>
+    <p><b>Expected production volume</b>: picks per day at full rollout, and distinct active items per
+    day. Every grain, retention and index above is sized from an assumption of 50,000 picks and 5,000
+    items, against today's ~1,300 and 692. An order of magnitude either way means re-cutting the cascade
+    before building rather than after.</p>
+    <p><b>Tenants at full rollout.</b> Everything keys on the customer code and there are two. Ten busy
+    tenants multiplies every row count tenfold and may justify per-tenant partitioning.</p>
+  </div>
+  <div class="co">
+    <h4>3 and 4 can run in parallel</h4>
+    <p><b>Cause of the two orphaned files</b>, before treating a regroup as the fix.</p>
+    <p><b>Chart approach</b>: hand-rolled SVG consistent with the repo's zero-dependency history, or
+    accept the first chart dependency.</p>
+  </div>
+</section>
+
+</div>
+</body>
+</html>

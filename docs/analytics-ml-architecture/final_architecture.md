@@ -1,0 +1,1066 @@
+# Warehouse analytics and ML platform: final architecture
+
+**This is the single canonical document for this work.**
+It merges the implementation plan and the low-level architecture into one place.
+Everything else on this subject is superseded and should not be implemented from.
+
+Last revised 2026-08-21.
+
+**Revision note, 2026-08-21.**
+Two changes, both from re-reading the code. Neither alters the design.
+
+**1. A factual error corrected throughout.**
+`regroup_incremental` was described as the live path running every 70 seconds, and it is neither.
+The automated Stage 2 path is `log_stitch_worker` -> `finalize_pending` -> `regroup_window`.
+Marked inline everywhere it changes a conclusion, in section 3 and in F1.
+It moves the ledger sizing down and F1's priority down.
+Source of the error: three stale comments in `derive_transactions.py`, tabulated in section 3.
+
+**2. Two more ticket publish sites found (F12).**
+N1 listed three; there are five.
+Both halves of `DELETE /logs/data` remove `log_transactions` rows, and one of them does so through a `jobs` cascade with no statement to hook.
+Recorded in N1, F12, invariant 2, Phase 2 and verification item 5.
+This is the only defect in the design that erases its own evidence, so it is the one item worth treating as blocking for Phase 2.
+
+**3. A third removal path, needing the opposite fix (F13).**
+The tenant purge also removes `log_transactions`, through the same `jobs` cascade.
+Section 6 previously asserted that it does not; that sentence is corrected.
+Because the tenant itself is going away, the fix is to delete its `analytics_*` rows rather than publish a ticket.
+Recorded in section 6, F13, invariant 15, Phase 1 and verification item 12b.
+
+**The general lesson from 2 and 3**, worth more than either finding: the list of places to hook was built by asking "where does Stage 2 rebuild".
+The question that produces a complete list is **"where does a row leave `log_transactions`"**, answered by grep rather than by reasoning.
+There are seven answers: three rebuild paths, two API deletes, one tenant purge, and retention's partition drop, which is the one deliberate exception.
+
+## What this replaces
+
+| Document | Status |
+|---|---|
+| `docs/plan/2026-08-17_22-32_merged-warehouse-analytics-platform-plan.md` and `.html` | merged into this document |
+| `docs/warehouse-analytics-architecture.md` and `.html` | merged into this document |
+| `docs/plan/2026-08-11_00-11_real-time-warehouse-consumption-analytics.md` and `.html` | superseded; core mechanism adopted here |
+| `docs/data-architecture-scale-ml.md` and `.html` | earlier sketch; the Parquet and DuckDB proposal is not adopted |
+
+Alembic migrations for this work should cite **`docs/analytics-ml-architecture/final_architecture.md`**.
+
+## How to read this
+
+1. **Context** and **Why the design is unusual** explain the one problem everything else exists to solve.
+2. **Verified ground truth** is the evidence base.
+   Do not re-derive it.
+3. **Architecture** is the structure: components, which tables each owns, and the flows.
+4. **Decisions** covers the thirteen corrections, the metric registry, and the grain cascade.
+5. **Build** covers phases, verification and invariants.
+6. **Open questions** lists what is still blocking.
+
+---
+
+# 1. Context
+
+The goal is an analytics platform over the live WMS log data on the Matrix host, delivering three things.
+
+A real-time running total per item, folded as each record arrives.
+Easy daily, weekly and monthly aggregation across user-chosen metrics, scalable to millions of rows.
+A second pipeline for machine learning and agentic AI on the same foundation.
+
+**Migration base, checked 2026-08-18.** Deployed Alembic head is `e4b28f5c9107`, which is also the repo head across 43 revisions, so there are no pending migrations.
+Phase 1 lands on a clean head using `deploy.sh`'s ordinary pull, migrate, restart order.
+
+# 2. Why the design is unusual
+
+`log_transactions` is not append-only and not a time series.
+It is a **mutable derived projection**: each transaction is stitched from roughly 15 raw log lines, and when a late line arrives the row is deleted and rebuilt, possibly with different values.
+
+Measured on the live server:
+
+| Measurement | Value |
+|---|---|
+| Rows written more than 5 min after their own entries | **22,183 of 22,465 (98.7%)** |
+| Sealed rows, average gap from newest entry to row write | **6,098 s (1.7 h)** |
+| Sealed rows, worst gap | **19,312 s (5.4 h)** |
+| Rows built promptly, within 60 s | 126 (0.6%) |
+
+Two designs are therefore ruled out.
+
+**Simply adding numbers up is wrong.**
+A rebuilt row would be counted twice, producing plausible-looking wrong totals with no error.
+
+**Waiting for rows to settle is also wrong.**
+Sealing is computed against the newest log timestamp rather than the wall clock (`derive_transactions.py:535-538`), so the wait has no clock-based bound and stalls entirely when ingestion pauses.
+
+**Consequence for implementation.**
+The version fingerprint on each fact row is load-bearing, not an optimisation.
+At a 98.7% rebuild rate almost every recheck must be absorbed as a no-op by a matching fingerprint, or the system produces a constant stream of pointless aggregate writes.
+
+# 3. Verified ground truth
+
+Read from the live server and from code.
+Do not re-derive.
+
+**Volume and shape.**
+72,682 transactions, roughly 1,100,516 raw log entries, 1,474,393 parsed M3 records inside `log_entries.fields`.
+Peak 68 derived transactions per minute, 13 pick transactions per minute.
+Tenants `tmp-live` and `tmp-test`.
+
+**Cardinality grows far more slowly than volume.**
+692 distinct items with consumption, 395 on the busiest day, against 25,008 in the item master.
+More picks does not mean more items, and this is what makes the grain cascade viable.
+
+**Scan cost on this hardware is roughly 2.5 microseconds per row.**
+1.04 M rows took 2,541 ms.
+Planning cost tracks partition count rather than data volume: 7 ms against one partition versus about 85 ms against 21.
+Prepared statements amortise it to about 9 ms, and asyncpg prepares by default.
+
+**Filter on `method`, never `transaction_type`.**
+`ConfirmPickLine` is 1:1 with `attributes->>'QuantityPicked'`.
+`transaction_type` contains WMS-supplied placeholders (`xxxxxx`, `XXXXX`, `00xxxx`, `0050XX`), and `AddStockCountLine` carries real `CountedQuantity` under a placeholder, so a type filter silently drops real data.
+
+**Only 2 of 49 methods carry quantities.**
+`ConfirmPickLine` (14,654 rows) and `ReportCount` (9,076).
+For the other 47 the meaningful measures are volume, duration, status and actor.
+
+**Quantity fields.**
+`QuantityPicked` and `ExpectedQuantity` are 100% clean.
+`QuantityToBePicked` is 91% empty strings and `attributes.Weight` is 100% empty.
+Quantities are fractional, so `NUMERIC` throughout, never float.
+`ExpectedQuantity` arrives as `30.000000` while `QuantityPicked` arrives as `30.0`, so comparisons must be numeric, never string.
+
+**`ExpectedQuantity` is mutable per instruction, not an order-line total.**
+Fill rate is not derivable from it.
+Use `OIS100MI/LstLine.ORQA` from the M3 layer instead.
+
+**Identity, re-verified 2026-08-18.**
+A new group's id is `uuid5(fixed_namespace, anchor_entry_hash)` (`derive_transactions.py:445`).
+A rebuilt group **inherits** its id via `continuity.assign(...)` in `_resolve_ids`.
+The 1.3% figure in `continuity.py` is the measurement that motivated that fix, not a live exposure.
+
+**But inheritance is wired into only one of three rebuild paths, and that one is the path that actually runs:**
+
+| Path | Deletes | Inherits ids | Result | How it is reached |
+|---|---|---|---|---|
+| `regroup_window` (`:858`, `:895`) | all in the padded range, sealed included | **yes** | id preserved | **the automated path**: `log_stitch_worker` -> `finalize_pending` -> `regroup_window` |
+| `regroup_incremental` (`:780`, `:801`) | unsealed only, no time bound | no | id recomputed, can change | manual only: `POST /logs/regroup?incremental=true` (`logs.py:358`) and the tail of the date-range delete (`logs.py:728`) |
+| `regroup_all` (`:677`, `:698`) | everything | no | id recomputed, can change | manual only: `POST /logs/regroup` (the default) and two scripts |
+
+**Corrected 2026-08-21.**
+An earlier revision of this document described `regroup_incremental` as the live path running every 70 seconds.
+That is wrong.
+`app/background.py:84-164` registers eight background loops and `regroup_incremental` is in none of them; the only automated Stage 2 driver is `log_stitch_worker`, which imports `finalize_pending` alone (`log_stitch_worker.py:37`).
+The error was inherited from three stale comments in the source, which are listed in the next section.
+The practical effect of the correction is recorded under "Why an id change costs this design nothing" and in F1.
+
+### A documentation bug worth reporting upstream
+
+`_resolve_ids` takes an optional continuity map, defaulting to empty:
+
+```python
+async def _resolve_ids(db, builders, customer_code,
+                       cont: continuity.Continuity = continuity.EMPTY):
+```
+
+Its docstring then says, at `derive_transactions.py:572-573`:
+
+> `cont` defaults to no predecessors, which reduces this to the previous behaviour.
+> Only `regroup_window` can supply one, **because only it frees transactions.**
+
+"Frees transactions" means deletes rows from `log_transactions`.
+**That claim is false.**
+Two other functions delete from the same table:
+
+```python
+# regroup_all, line 677
+del_stmt = delete(LogTransaction)                                           # everything
+
+# regroup_incremental, line 780
+free_stmt = delete(LogTransaction).where(LogTransaction.sealed.is_(False))   # all unsealed
+```
+
+**And the same file contains three further comments that wrongly present `regroup_incremental` as the automated path.**
+These are what an earlier revision of this document believed, so they are worth reporting upstream together:
+
+| Location | What it says | Reality |
+|---|---|---|
+| `derive_transactions.py:11-13` | "regroup_incremental(db) LIVE path ... This is what the worker runs" | no worker calls it |
+| `derive_transactions.py:775-776` | "None processes every customer with unassigned entries (what the background worker runs)" | the background worker calls `finalize_pending`, never this |
+| `derive_transactions.py:778` | "this runs on the live path every cycle" | it runs when someone calls the endpoint |
+
+**Why it matters.**
+Because `regroup_all` and `regroup_incremental` never pass `cont`, they receive `EMPTY` and recompute ids from the anchor entry.
+The `_resolve_ids` docstring implies that is safe on the grounds that they do not free transactions, which is untrue: both delete from `log_transactions`.
+
+This is a comment defect, not a code defect.
+Recomputing ids for unsealed rows may be a deliberate scoping choice, since an unsealed record has arguably not established an identity worth preserving.
+But the comment gives a false reason, which is worse than giving none.
+
+The two defects compound in opposite directions, which is why both are listed.
+The `_resolve_ids` docstring understates how many paths delete, so a reader thinks id stability is protected everywhere.
+The three "live path" comments overstate which path runs, so a reader thinks the unprotected path is the hot one.
+Together they produce exactly the wrong mental model: id churn everywhere, on the busiest path. The truth is the opposite.
+
+### Why an id change costs this design nothing
+
+This is the part worth internalising, because it is the strongest argument for the range diff.
+
+Picture a shop where every sale gets a numbered receipt.
+Numbers are normally stable, but occasionally, when the books are redone, a sale is renumbered: its old number vanishes and a new one appears.
+
+If the method were "look up receipt 47 and update it", a renumbering is unrecoverable.
+Receipt 47 no longer exists, so nothing corrects it, and its old amount stays in the total forever.
+
+Our method is "take every receipt in the 10:00 to 10:30 window, compare against what the books now say for that window, and apply the difference".
+Under that method a renumbering is invisible.
+The old number is absent from the source so it is reversed, the new number is absent from our records so it is applied, and the net effect is zero without anyone writing special handling for it.
+
+An id change is simply two rows of the diff table firing together:
+
+| Situation | Action | On an id change |
+|---|---|---|
+| id in both, fingerprint equal | skip | |
+| id in both, fingerprint differs | reverse old, apply new | |
+| **id in our facts, absent from source** | **reverse** | the departed id |
+| **id in source, absent from our facts** | **apply** | the arrived id |
+
+Identical handling to a **merge**, where two records combine so an id disappears, and to a **split**, where one divides so an id appears.
+
+**The failure mode this avoids.**
+A per-id update, `UPDATE ... WHERE source_id = ?`, passes a test where a quantity changes and **fails silently** when an id vanishes.
+Nothing looks for the departed id, so its contribution stays in the total permanently and no error is raised.
+That is why the range diff is a hard requirement rather than an implementation preference, and why verification item 4 exists separately from item 3.
+
+**The one real consequence, corrected 2026-08-21.**
+`continuity.py` reads as though ids are now stable, and on the automated path they are.
+The path that runs unattended is `regroup_window`, and it does pass `cont` (`:858-861`, `:895`), so ids are preserved through every ordinary rebuild.
+
+An earlier revision of this section said the opposite: that ids were "stable on backfill only" and therefore `analytics_fact_ledger` would churn more than `continuity.py` suggests.
+That followed from believing `regroup_incremental` was the live path, and it is wrong in the safe direction.
+Expect **less** ledger churn than the earlier estimate, not more.
+
+Id churn is still possible, but only when someone invokes `POST /logs/regroup` or the date-range delete, so it is operator-driven and occasional rather than continuous.
+The range diff absorbs it either way, which is the whole point of the section above.
+Nothing about the design changes; only the volume estimate moves, and it moves down.
+
+If the deferred update-in-place change ever ships, DELETE and INSERT becomes UPDATE, ids stop churning, and most of this churn disappears.
+That is the same upstream change that would break the retention cursor described in F6.
+One decision, two effects on us, which is why it is tracked as a dependency rather than a footnote.
+
+**Source uniqueness is `UNIQUE NULLS NOT DISTINCT (id, started_at)`, not unique on id.**
+Confirmed in `log_transaction.py:43-44` and migration `a1f6d70b3e92:126`.
+`started_at` is the partition key and nullable, and a primary key would force it `NOT NULL`, making timestamp-less rows un-insertable.
+
+**Live checks, 2026-08-17.**
+NULL `started_at`: 0.
+Duplicate id pairs: 0.
+NULL `ended_at`: 0.
+Unsealed at any moment: 1,638.
+`log_regroup_pending`: 7,407 tickets with 0 pending, 0 abandoned, 0 retries, roughly one every 70 seconds.
+
+**Real data loss, present today.**
+847 to 1,079 `log_entries` rows have no row in `log_entry_assignment`, all past the abandon window, from two files (`TMP-AZ-BEC02/eSmartServerLog.txt`, `TMP-AZ-BEC01/eSmartServerLog.txt`).
+Only 7 are pick-related.
+
+**Infrastructure.**
+Stock PostgreSQL 16, 48 available extensions, with **no TimescaleDB, Citus, columnar, hll, tdigest or pg_partman**.
+`work_mem` is 4 MB, `shared_buffers` 8 GB.
+`partitioning.py` supports daily bounds only.
+The frontend has no chart library, and `next.config.mjs` needs a rewrite entry or `/api/v1/analytics/*` returns 404.
+
+---
+
+# 4. Naming
+
+Final scheme, after two rejected attempts.
+
+| Plan name | Final name |
+|---|---|
+| `warehouse_analytics_dirty_window` | `analytics_pending_windows` |
+| `warehouse_consumption_contributions` | `analytics_facts` |
+| `warehouse_consumption_contribution_history` | `analytics_fact_ledger` |
+| `warehouse_item_consumption_hourly` | `analytics_hourly_rollups` |
+| `warehouse_item_consumption_daily` | `analytics_daily_rollups` |
+| `warehouse_item_consumption_monthly` | `analytics_monthly_rollups` |
+| (new) | `analytics_metrics` |
+| `warehouse_analytics_state` | `analytics_tenant_state` |
+| `warehouse_analytics_quality_issues` | `analytics_quality_issues` |
+| (new, ML) | `analytics_feature_sets`, `analytics_predictions` |
+
+**The prefix is `analytics_`, not `warehouse_analytics_`.**
+A 20-character prefix breaks PostgreSQL's 63-character identifier limit once `partitioning.py` appends a date and the concurrent-index recipe appends columns.
+`partition_name` raises past the limit, so this fails at partition creation rather than quietly.
+
+```
+80  OVER  warehouse_analytics_rollup_hourly_2026_08_18_customer_code_bucket_start_item_idx
+64  OVER  warehouse_analytics_rollup_hourly_2026_08_18_customer_bucket_idx
+55  ok    analytics_hourly_rollups_2026_08_18_customer_bucket_idx
+```
+
+`analytics_` also matches the form of the existing `notification_` and `log_` prefixes, which use a single domain noun.
+
+**Names are plural**, because the repo is predominantly plural: `log_entries`, `notification_rules`, `consumer_cursors`, `log_regroup_runs`, `saved_views`, `jobs`, `customers`, against only `log_entry_assignment`, `log_regroup_pending` and `logspace_presence`.
+
+**`analytics_pending_windows`, not `dirty_window`.**
+"Dirty window" is imported data-engineering jargon.
+The repo's equivalent is `log_regroup_pending`, named for what is pending rather than for a term of art.
+
+**`facts` and `fact_ledger`, not `contributions`.**
+These are not synonyms and the distinction is load-bearing.
+
+- `contributions` means "what this row contributed to a total", which is too narrow now that 47 of 49 methods carry no quantity.
+- `ledger` implies entries and their reversals side by side, but `analytics_facts` holds one current row per transaction; the reversal is a computation, not a stored row.
+- `facts` means one row per event with dimensions and measures, accurate for all 49 methods.
+
+"Ledger" **is** right for the history table, which is genuinely append-only with one row per version.
+Hence `analytics_fact_ledger`.
+
+**Module names follow the tables.**
+The repo pairs `services/notifications/` with `notification_*` tables and `notification_worker.py`.
+The parallel is `services/analytics/` with `analytics_*` tables and `analytics_worker.py`.
+
+**Still reversible.**
+Renaming before Phase 1 costs nothing; renaming after the first migration costs a migration.
+
+---
+
+# 5. Component map
+
+Fifteen components.
+Eight already exist and are reused unchanged, six are new, one is a later phase.
+The document-RAG side of this codebase (embedding worker, `chunks`, `embedding_queue`) is out of scope and not shown.
+
+| # | Component | Status | Module |
+|---|---|---|---|
+| E1 | SSH log fetcher | exists | `workers/ssh_log_fetcher.py`, `mnp_log_ingestion/remote/remote_fetcher.py` |
+| E2 | Parse worker, Stage 1 | exists | `workers/log_parse_worker.py`, `pipeline/parse_insert.py` |
+| E3 | Stitch worker, Stage 2 | exists | `workers/log_stitch_worker.py`, `pipeline/derive_transactions.py` |
+| E4 | Partition manager | exists | `persistence/partitioning.py`, `workers/log_partition_worker.py` |
+| E5 | Alerting engine | exists | `services/notifications/` |
+| E6 | Logspace cleanup | exists | `workers/logspace_cleanup_worker.py`, `services/logspace_cleanup.py` |
+| E7 | Retention cursor registry | exists | `services/consumer_cursors.py` |
+| E8 | Log watcher, local-directory input | exists | `workers/log_watcher.py` |
+| N1 | Ticket publisher | new | `services/analytics/pending_windows.py` |
+| N2 | Fact normaliser | new | `services/analytics/normalizer.py` |
+| N3 | Analytics worker | new | `services/workers/analytics_worker.py` |
+| N4 | Metric registry | new | `services/analytics/registry.py` |
+| N5 | Rollup folder | new | `services/analytics/fold.py` |
+| N6 | Read layer | new | `persistence/repositories/analytics_repository.py` |
+| N7 | API and agent tools | new | `api/v1/analytics.py`, additions to `services/log_agent/tools.py` |
+| M1 | ML pipeline | later | `services/analytics_ml/` |
+
+# 6. Table ownership
+
+**For every analytics table the rule is absolute: exactly one component may write it.**
+Two writers to one aggregate is how totals silently diverge, and it is not recoverable without a full rebuild.
+The `Also written by` column is empty for all eleven analytics tables, and that is a constraint to enforce in review, not an observation.
+
+**The existing log tables do not follow that rule, and pretending otherwise would be misleading.**
+Each has a primary writer, but E6 logspace cleanup deletes from eight of them and the API offers purge endpoints.
+The one-writer rule is what the new work commits to, not a property inherited from the pipeline.
+
+**Corrected 2026-08-21.**
+An earlier revision said "E6 deletes from every non-partitioned log table but touches neither `log_entries` nor `log_transactions`."
+That is false.
+`logspace_cleanup.py:114` deletes the tenant's `jobs`, and `log_entries` and `log_transactions` go with them via `ON DELETE CASCADE`.
+The file's own cascade map states this at `logspace_cleanup.py:7-9`.
+See F13.
+
+E4 dropping whole partitions is how those two tables are reclaimed *on the retention path*, which is why retention differs between the two groups.
+A tenant purge is a different thing and removes them outright.
+
+| Table | Primary writer | Also written by | Read by | Partitioned | Retention |
+|---|---|---|---|---|---|
+| `log_ssh_sources` | E1 fetcher, status | log-sources API, E6 delete | E1 | no | until deleted |
+| `log_ssh_file_checkpoints` | **E1 fetcher**, upsert | E6 delete | E1 | no | 30 days per `ssh_checkpoint_retention_days` |
+| `log_source_objects` | **E1 fetcher**, insert | E2 lease and status, API and E6 delete | E1, E2 | no | until cleaned |
+| `log_ssh_fetch_runs` | E1 fetcher, run status | E6 delete | API | no | until cleaned |
+| `jobs` | E2 parse worker | document pipeline, embedding worker, API and E6 delete | API | no | until cleaned |
+| `log_entries` | **E2 parse worker** | API purge, **and E6 tenant purge via the `jobs` cascade** (F13) | E3, N3 | daily on `timestamp` | 60 days, partition drop |
+| `log_regroup_pending` | **E2 parse worker**, insert | E3 stamps `consumed_at`, E6 delete | E3 | no | until cleaned |
+| `log_entry_assignment` | **E3 stitcher** | E6 delete | E3, N3 | daily on `entry_ts` | 60 days, partition drop |
+| `log_transactions` | **E3 stitcher**, delete and insert | API purge, **and E6 tenant purge via the `jobs` cascade** (F13) | E3, N3, N6 | daily on `started_at` | 60 days, partition drop |
+| `log_regroup_runs` | E3 stitcher, run status | E6 delete | API | no | until cleaned |
+| `consumer_cursors` | E5, N3, M1, one row each | none | E4 | no | forever |
+| `analytics_pending_windows` | **N1 only** | none | N3 | no | pruned after consume |
+| `analytics_facts` | **N3 only** | none | N5, N6, M1 | monthly on `event_time` | **forever** |
+| `analytics_fact_ledger` | **N3 only** | none | M1 | monthly on `recorded_at` | **forever** |
+| `analytics_metrics` | **N7 only** | none | N3, N5, N6 | no | forever |
+| `analytics_hourly_rollups` | **N5 only** | none | N5, N6 | daily on `bucket_start` | 90 days |
+| `analytics_daily_rollups` | **N5 only** | none | N5, N6 | yearly on `business_date` | **forever** |
+| `analytics_monthly_rollups` | **N5 only** | none | N6 | none needed | **forever** |
+| `analytics_tenant_state` | **N3 only** | none | N6, N7 | no | forever |
+| `analytics_quality_issues` | **N3 only** | none | N6, N7 | monthly | 1 year |
+| `analytics_feature_sets` | **M1 only** | none | M1 | monthly | forever |
+| `analytics_predictions` | **M1 only** | none | N6, M1 | monthly | forever |
+
+`consumer_cursors` has three writers, but each owns a distinct row keyed by consumer name (`analytics:warehouse-v1`, `ml:features-v1`, `notifications`), so there is no contention.
+That pattern is already established in the codebase.
+
+**No component writes to any `log_*` table.**
+The analytics platform is strictly a reader of the ingestion pipeline, with the single exception of N1 inserting a ticket inside E3's own transaction.
+
+## Four position-tracking mechanisms, easily confused
+
+The pipeline has **four** independent ways of remembering "how far have I got", and they answer different questions.
+Assuming `consumer_cursors` covers ingestion is a natural mistake and a wrong one.
+
+| Mechanism | Question it answers | Keyed by | Owner | If lost |
+|---|---|---|---|---|
+| `log_ssh_file_checkpoints` | how many **bytes** of this remote file have I pulled | `(source_id, remote_path)` | E1 | re-reads the file; costs bandwidth, not data |
+| `log_source_objects` lease | who is **currently parsing** this downloaded byte range | `status`, `lease_owner`, `lease_expires_at` | E2 | the row returns to `pending` and is retried |
+| `log_regroup_pending` | which **time windows** still need stitching | ticket rows, `consumed_at` | E2 writes, E3 consumes | that window is never re-stitched |
+| `consumer_cursors` | how far each **reader of `log_transactions`** has got | consumer name | E5, N3, M1 | retention drops data the reader still needs |
+
+Three properties worth carrying into the analytics design.
+
+**The byte checkpoint is an optimisation, not a correctness mechanism.**
+`log_ssh_file_checkpoint.py` says so directly: correctness comes from `entry_hash` content dedup in Stage 1 regardless.
+It also trims each read to the last newline so a partial trailing line is never ingested, and resets to zero when a file shrinks, which is how rotation is handled.
+
+**The checkpoint alone would lose data, and the fix is the pattern we reuse.**
+From `log_source_object.py`: the fetcher inserts the source-object row and advances the checkpoint in **one transaction**, because "a crash between checkpoint advanced and entries inserted would skip those bytes forever".
+That is the same reasoning as writing the analytics ticket inside the stitcher's transaction.
+The problem has already been solved once here; N1 is applying the established pattern rather than inventing one.
+
+**The checkpoint is overwritten as a file advances**, so it cannot answer which file version and byte range produced a given entry.
+`log_source_objects` exists partly to preserve that provenance, with path, offsets, size, mtime and fingerprint.
+
+The analytics module adds a **fifth** of its own, `analytics_pending_windows`, deliberately shaped like `log_regroup_pending` and explained under N1.
+
+# 7. Component detail
+
+## N1. Ticket publisher
+
+Records that a bounded event-time range of a tenant's transactions changed.
+Runs in the **same database transaction as the change**, not as a separate process.
+
+**Publishes from five sites, corrected 2026-08-21.**
+An earlier revision listed three, all in `derive_transactions.py`.
+Two more exist in the API, and both remove `log_transactions` rows.
+The rule that decides the list is not "where does Stage 2 rebuild" but "where does a row leave `log_transactions`", and a grep for that (`delete(LogTransaction)`, plus the `jobs` cascade) returns five.
+
+| # | Site | Bounds | Notes |
+|---|---|---|---|
+| 1 | `regroup_window` (`derive_transactions.py:864`) | the padded window it already computes at `:837-838` | the automated path; bounds are free |
+| 2 | `regroup_incremental` (`:780`) | min and max `started_at` over the **freed unsealed set**, padded | the select at `:779` returns ids only, so add `started_at`; insert the ticket before the commit at `:787` (F1) |
+| 3 | `regroup_all` (`:677`) | min and max over everything freed, padded, or one ticket per day of the span | insert before the commit at `:681` |
+| 4 | **date-range delete** (`api/v1/logs.py:723`) | min and max `started_at` over the rows `txn_conds` selects, padded | see below |
+| 5 | **full wipe, via cascade** (`api/v1/logs.py:681-682`) | the tenant's whole `started_at` span, or one ticket per day | see below; **this one has no delete statement to hook** |
+
+### The two API sites, and why site 5 is the awkward one
+
+Both live in `DELETE /logs/data`.
+
+**Site 4, the date-range delete**, is an ordinary `delete(LogTransaction)` and needs nothing unusual: select the affected `started_at` range first, publish, then delete, all in the transaction that already exists there.
+Note it does call `regroup_incremental` afterwards (`logs.py:728`), and that does **not** cover it: site 2's bounds come from the freed unsealed set, and these rows are already gone, so they are not in it.
+
+**Site 5, the full wipe**, deletes `jobs` and lets the database remove the transactions:
+
+```python
+# api/v1/logs.py:681-682
+res = await db.execute(delete(Job).where(
+    Job.customer_code == customer, Job.document_type == DOCUMENT_TYPE))
+```
+
+They disappear because of `log_transaction.py:64`:
+
+```python
+job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+```
+
+So there is **no `log_transactions` statement to attach a ticket to**: the removal happens inside PostgreSQL.
+The ticket must therefore be published **before** the `delete(Job)`, while the rows are still readable, and it must cover the tenant's whole span rather than a computed window.
+The endpoint already counts the transactions first (`logs.py:675-676`), so the span is one extra aggregate beside a query that is already being run.
+
+**Why this cannot be deferred.**
+`analytics_facts` is retained **forever** and raw data is dropped at 60 days.
+A purge with no ticket leaves the purged contribution in every total permanently, with no error and, after 60 days, nothing left to recount against.
+It is the only defect in this design that erases its own evidence.
+
+Insert-only.
+No foreign key, no unique constraint a retry could violate, no trigger, because a failure here fails ingestion.
+
+Table shape mirrors `log_regroup_pending` field for field: `id`, `customer_code`, `range_start`, `range_end`, `created_at`, `consumed_at`, `attempts`, `last_error`, `last_attempt_at`, `abandoned_at`, `available_at`, with index `(customer_code, consumed_at)`.
+
+It is a **separate table**, not a shared one, for two reasons.
+`consumed_at` is single-consumer, so a second consumer stamping it means whichever runs second finds the window closed and skips work it never did.
+And `log_regroup_pending` rows are written in Stage 1 per ingested file (`parse_insert.py:188-190`) from `log_entries.timestamp`, so they describe ingest ranges and never cover `regroup_incremental`.
+
+## N2. Fact normaliser
+
+One `log_transactions` row plus its `attributes` JSONB to one typed fact row, or a quarantine record with a reason.
+
+**Pure: no database, no clock, no configuration.**
+This is where correctness is won, which is why the module has no I/O.
+
+- Reject placeholder `transaction_type` values.
+- Cast quantities to `NUMERIC`, never float, treating empty string as **absent** rather than zero.
+- Classify as `pick` (quantity above zero), `attempt` (quantity zero), or non-quantity.
+- Compute `business_date` in the tenant timezone.
+- Compute the version fingerprint over every field affecting a measure.
+
+**Absent is never zero.**
+A missing field means "not supplied", a different fact from zero, and it must survive as such.
+
+## N3. Analytics worker
+
+Turns tickets into fact rows and aggregate deltas, exactly once in effect.
+Runs inside the existing singleton `python -m app.worker`, never in the four web workers, which stay read-only for analytics.
+
+One cycle, all in a single transaction per tenant:
+
+1. Claim available tickets: `consumed_at IS NULL AND abandoned_at IS NULL AND available_at <= clock_timestamp()`.
+   **Not `now()`**, which is fixed at transaction start and would make a fresh row look permanently not-yet-due.
+2. Coalesce ranges into disjoint runs.
+3. Take `pg_advisory_xact_lock(hashtext('analytics:' || customer_code))`.
+   **Distinct from the stitcher's `hashtext(customer_code)`**, or a slow fold would stall log stitching.
+4. `SET LOCAL work_mem = '64MB'`.
+5. Read current `log_transactions` in range, carrying `UtcWindow.covers(..., include_null=True)`.
+6. Normalise via N2.
+7. Read existing `analytics_facts` rows in the **same** range.
+8. **Range diff**, never per-row upsert.
+9. Apply outcomes, append changed versions to `analytics_fact_ledger`, hand deltas to N5, write quarantine rows.
+10. Update `analytics_tenant_state`, publish the retention position, stamp tickets consumed.
+
+The diff:
+
+| Condition | Action | Total |
+|---|---|---|
+| in both, fingerprint equal | skip | unchanged |
+| in both, fingerprint differs | reverse old, apply new | moves by the difference |
+| **in facts, absent from source** | **reverse** | decreases |
+| in source, absent from facts | apply | increases |
+
+The third row is why the diff must span a range.
+A merge makes one id disappear, and a per-id update would never look for it, leaving its contribution stranded permanently.
+Splits are the mirror image.
+
+**Failure policy.**
+A poisoned row is quarantined and the tenant continues.
+A failed run leaves its tickets open, bumps `attempts`, and dead-letters at the configured maximum.
+One bad row never halts a tenant, following the precedent in `consumer_cursors.py`.
+
+**Retention position.**
+The maximum `created_at` observed among fully processed rows, published under `analytics:warehouse-v1`.
+Held in a **single named constant**, because a deferred upstream change to update-in-place would require switching to `updated_at`.
+
+## N4. Metric registry
+
+Holds what is measured, as data rather than code.
+
+Definition row: `id`, `customer_code`, `name`, `dimensions`, `measure`, `filter`, `grains`, `status` in `draft`/`active`/`inactive`, `created_by`, `backfilled_through`.
+Shape follows `NotificationRule`, which already proved the pattern here.
+Dispatch must be a **registry, not an if-chain**, unlike `build_evaluator` today.
+
+Validation the registry enforces:
+
+- A quantity measure may only be registered where the methods actually carry quantities, and only 2 of 49 do.
+- Dimensions must exist on the fact row.
+- A definition cannot go active until its backfill has run, or its chart shows a false start date.
+
+## N5. Rollup folder
+
+Maintains the grain cascade per active definition: `facts → hourly → daily → monthly`.
+Each level reads only the level below, so the fact table is read once per cycle.
+
+**Every write is recompute-and-replace, never increment.**
+An additive upsert double-counts on the first retry.
+
+**Additive components only.**
+Sums and counts direct.
+Averages as `sum` plus `count`.
+Variance as `sum`, `sum_sq`, `count`.
+Percentiles as a 20-bucket log histogram, because bucket counts add and percentiles do not.
+Distinct counts are **not cascaded**; they are computed per period from the fact table, cheap because the fact table and the monthly grain share a partition boundary.
+
+**Weekly has no table.**
+ISO Monday weeks derive from daily at read time.
+
+## N6. Read layer
+
+Answers every question, and is the only component that does.
+
+**Grain selection.**
+The coarsest grain covering the window, targeting under 100,000 rows scanned.
+A twelve-month request resolves to monthly, never daily.
+
+**Two-tier read.**
+Pre-aggregated rollups for settled ranges, unioned with a bounded live scan of the recent tail.
+Both halves use **one boundary value read from the persisted cursor**, never a freshly computed one, or a lagging worker produces double counts or gaps.
+
+**Ad-hoc fallback.**
+A query no definition covers falls back to a bounded fact-table scan, and the response marks itself as such so the interface can show it rather than silently running slow.
+
+All queries parameterised so asyncpg prepares them, worth roughly 100 ms per call.
+
+## N7. API and agent tools
+
+| Endpoint | Notes |
+|---|---|
+| `GET /analytics/status` | **exactly one row read** plus `ETag`, because the browser polls every 2 s per tab |
+| `GET /analytics/metrics` | list and manage definitions |
+| `POST /analytics/metrics` | create a definition, returns `202` with a backfill job |
+| `GET /analytics/series` | one series per selected type, or one combined total, toggleable |
+| `GET /analytics/breakdown` | top-N by dimension for a window |
+| `POST /analytics/backfill`, `/reconcile` | `202 Accepted`, tracked |
+
+Every endpoint uses `Depends(get_current_customer)` and `Depends(get_session)`.
+Keyset pagination with default and hard maximum limits, no default `COUNT(*)`.
+
+**Agent tools** added to `TOOLS` and `_DISPATCH` in `services/log_agent/tools.py`.
+The agent already exists as a Claude tool-use loop at `POST /api/v1/logs/debug/ask`, with `customer_code` injected server-side and never model-exposed.
+Because metrics are registry rows, the tools are generic: `list_metrics`, `query_metric`, `explain_freshness`.
+No new tool per metric.
+
+**Frontend** needs a `next.config.mjs` rewrite for `/api/v1/analytics/*`.
+Charts are hand-built inline SVG; the repo has no chart library and adding one would be its first in two years.
+`src/components/notifications/ActivityTab.tsx` is the only existing table-plus-tiles-plus-polling page and is the template.
+
+## M1. ML pipeline
+
+Reads `analytics_fact_ledger` at a **pinned revision**, not the current fact table.
+That is what makes a training run repeatable months later, and it is why the ledger must exist from day one rather than being added when ML starts.
+
+Writes `analytics_feature_sets` (features plus the pinned revision and a code version) and `analytics_predictions` (output keyed by subject, horizon and model version).
+Registers its own cursor `ml:features-v1`.
+
+Predictions are served by N6 through the same read layer, so a forecast and an actual are never fetched by two code paths that could disagree.
+Anomaly detection reuses E5 rather than a parallel alerting path.
+
+# 8. Data flows
+
+## Flow A: change to ticket
+
+```
+log_ssh_sources ─► E1 fetcher
+                     │   ONE transaction
+                     ├─► log_ssh_file_checkpoints    byte offset advanced
+                     └─► log_source_objects          durable handoff, work queue
+                              │  E2 leases the row
+                              ▼
+                         E2 parse ──► log_entries
+                                  ├─► jobs
+                                  └─► log_regroup_pending      Stage 1 ticket
+                                             │  E3 consumes
+                                             ▼
+     E8 watcher ──► log_entries          E3 stitch ──► log_transactions
+     (staging dir, second                          ├─► log_entry_assignment
+      Stage 1 path)                                └─► N1 ─► analytics_pending_windows
+                                                        ONE transaction with the change
+```
+
+The ticket and the change commit together or neither commits.
+That single property is what makes the coverage argument hold.
+
+## Flow B: ticket to fact
+
+```
+pending_windows ─► N3 claim + coalesce + lock
+                     ├─read─► log_transactions      (current truth for the range)
+                     ├─read─► analytics_facts       (existing rows, same range)
+                     ├─► N2 normalise
+                     ├─► range diff
+                     ├─write─► analytics_facts          (upsert)
+                     ├─write─► analytics_fact_ledger    (append)
+                     ├─write─► analytics_quality_issues
+                     ├─► N5 apply deltas
+                     ├─write─► analytics_tenant_state
+                     ├─write─► consumer_cursors
+                     └─write─► pending_windows.consumed_at
+                     ────────── one transaction ──────────
+```
+
+## Flow C: fact to rollups
+
+```
+analytics_facts
+        │  per active definition in analytics_metrics
+        ▼
+  hourly_rollups ──► daily_rollups ──► monthly_rollups
+                          │
+                     weekly derived at read time, no table
+```
+
+Any level can be deleted and rebuilt from the fact table, which is what makes rollups safe to treat as disposable.
+
+## Flow D: read
+
+```
+request ─► N7 ─► N6
+                  ├─ pick coarsest grain covering the window
+                  ├─read─► monthly | daily | hourly rollups   (settled)
+                  ├─read─► log_transactions tail              (live, bounded)
+                  ├─ union on ONE boundary from consumer_cursors
+                  └─read─► analytics_tenant_state             (freshness)
+                                    │
+                        ┌───────────┴───────────┐
+                     Frontend                Agent tools
+```
+
+## Flow E: ML training
+
+```
+analytics_fact_ledger @ pinned revision
+        ├─► M1 build features ─► analytics_feature_sets
+        ├─► M1 train ─────────► model artifact on disk
+        └─► M1 infer ─────────► analytics_predictions ─► N6 ─► N7
+```
+
+## Flow F: retention safety
+
+```
+N3 ─► consumer_cursors('analytics:warehouse-v1')  ┐
+M1 ─► consumer_cursors('ml:features-v1')          ├─► E4 min position
+E5 ─► consumer_cursors('notifications')           ┘        │
+                                                           ▼
+                                       drop partitions older than min
+```
+
+A component that stops reporting is excluded and logged critical rather than blocking retention forever.
+That trade is already decided in `consumer_cursors.py`.
+
+---
+
+# 9. The thirteen corrections
+
+F1 to F11 were defects found in the 2026-08-11 plan by code reading and live measurement.
+F12 and F13 were found on 2026-08-21, after this document was written, by grepping for every statement that removes a `log_transactions` row rather than reasoning from the rebuild paths.
+Both are coverage gaps of the same kind, but they need different fixes, which is why they are separate entries.
+
+**F1. Ticket bounds must come from the delete, not the new entries.**
+`regroup_incremental` deletes `WHERE sealed IS FALSE` with no time predicate (`:779-780`).
+Bounds inferred from incoming entries would miss an older unsealed row caught in the same delete, which then drifts permanently.
+Fix: compute bounds from the set actually freed, which is already selected before the delete.
+Note the select at `:779` returns ids only, so it needs `started_at` added to derive the bounds, and the ticket must be inserted before the commit at `:787`.
+
+**Priority corrected 2026-08-21.**
+An earlier revision said "this path runs every 70 seconds", which is wrong: `regroup_incremental` is reachable only from `POST /logs/regroup?incremental=true` and the tail of the date-range delete.
+It is an operator action, not a cadence, so F1 is no longer urgent.
+It still has to be done, because the endpoint exists and deletes without a time bound, but it can follow the automated path rather than lead it.
+The `regroup_window` publish site is the one that matters for continuous correctness, and its bounds are already computed at `:837-838`.
+
+**F2. Reconciliation must also check completeness against `log_entries`.**
+Recomputing from `log_transactions` cannot detect the roughly 1,000 orphaned entries, because both sides read the same incomplete projection and agree.
+Fix: two scheduled checks.
+Totals against a recount, plus a count of `log_entries` past the abandon window with no assignment row, grouped by source file and program.
+**Immediate action:** run a scoped regroup over 2026-08-15 to 2026-08-17 for the two named files, and find the cause first, because whatever caused it will recur.
+
+**F3. Ledger identity must mirror the source constraint.**
+Source uniqueness is `(id, started_at)`, and two rows can share an id in different partitions silently.
+Fix: key on `(customer_code, source_transaction_id, source_started_at)`.
+Zero duplicate pairs exist today; the extra column costs nothing.
+
+**F4. Freshness needs two numbers.**
+The 5-second target measures analytics lag behind the projection, but records are not final for 1.7 h on average.
+The screen could truthfully say "updated 2 seconds ago" about a number still due to move.
+Fix: **copy freshness** (analytics watermark versus source watermark) and **settledness** (share of contributing records still unsealed, and the age of the oldest).
+A window with unsealed contributors reads as *provisional*, not *stale*.
+
+**F5. The status endpoint must read exactly one row.**
+The browser polls every 2 s per tab across four web workers, and the response includes counts over other tables.
+Fix: the worker writes every status field into the single `analytics_tenant_state` row each cycle.
+A test asserts the endpoint issues exactly one query.
+
+**F6. The retention cursor must publish a write-time position.**
+Retention gating uses a write-time cursor, but the worker is driven by event-time ranges.
+Fix: track the maximum `created_at` among fully processed rows and publish the minimum across tenants.
+**Watch:** a deferred change to update-in-place would stop `created_at` moving and break this silently, so keep the field a single named constant.
+That change would also collapse the 98.7% figure this plan is sized against.
+
+**F7. Copy the existing ticket table, do not share it.**
+Resolved in favour of a separate table with an identical shape.
+See N1 for the two reasons.
+
+**F8. Zero-quantity picks are attempts, not consumption.**
+9.2% of pick confirmations record zero units and still say success, typically an empty location.
+Fix: three counters in every rollup.
+`quantity` (sum of units), `pick_count` (confirmations above zero), `attempt_count` (all confirmations).
+The zero-pick rate derives from the last two and is a first-class metric, because it names specific empty locations and replaces the fill rate this data cannot support.
+
+**F9. Add daily and monthly grains, derive weekly.**
+Hourly and lifetime only means a month-to-date question sums roughly 1.08 M rows.
+See N5 and the sizing table below.
+
+**F10. Keep the fact ledger, or machine learning is impossible later.**
+A rebuild overwrites the previous value, so a training set is not reproducible and discarded versions cannot be recovered.
+Fix: `analytics_facts` for the latest value, `analytics_fact_ledger` append-only for every version, retained longer than raw data.
+
+**F11. Load testing needs a synthetic tenant.**
+The exit criterion requires 100 times the measured rate, roughly 78,000 records an hour, with no described way to generate it.
+Fix: a dedicated `synthetic-load` tenant whose generator drives Stage 2 normally, so tickets and rebuilds are genuinely exercised.
+Excluded from every production read path and from alerting.
+It also produces the defect fixtures, so correctness and load share one harness.
+
+**F12. Two API delete paths also remove transactions, and both must publish a ticket.**
+Added 2026-08-21.
+N1 originally listed three publish sites, all in `derive_transactions.py`, derived from "where does Stage 2 rebuild".
+The correct question is "where does a row leave `log_transactions`", and that has five answers: the three rebuild paths plus both halves of `DELETE /logs/data`.
+
+- **Date-range delete** (`api/v1/logs.py:723`) issues an ordinary `delete(LogTransaction)`. The `regroup_incremental` call that follows at `:728` does not cover it, because those bounds come from the freed unsealed set and these rows are already gone.
+- **Full wipe** (`api/v1/logs.py:681-682`) deletes `jobs` and the rows go via `ON DELETE CASCADE` (`log_transaction.py:64`). There is no `log_transactions` statement to hook, so the ticket must be published before the `delete(Job)`, covering the tenant's whole span.
+
+Fix: publish from both, per the table in N1.
+**Severity: this is the only defect in the design that erases its own evidence.**
+A purge with no ticket leaves the purged contribution in every total permanently; `analytics_facts` is kept forever while raw data is dropped at 60 days, so after 60 days there is nothing left to recount against and no error was ever raised.
+Retention's own partition drops (`log_partition_worker.py:146`) are deliberately NOT in this list: analytics keeps its history after raw data expires, which is the point of verification item 9.
+
+**F13. A tenant purge must remove that tenant's analytics rows, not correct them.**
+Added 2026-08-21.
+`logspace_cleanup.purge_logspace` deletes the tenant's `jobs` (`logspace_cleanup.py:114`), and `log_entries` and `log_transactions` go with them via `ON DELETE CASCADE`.
+It is reached two ways: `DELETE /api/v1/customers/{code}`, always available, and the E6 auto-expiry worker, which is **off by default** (`logspace_cleanup_worker_enabled: bool = False`).
+
+**The fix is different in kind from F12, which is why it is a separate entry.**
+F12 is about a window whose contents changed, so the answer is a ticket and a range diff.
+Here the tenant itself is going away, so correcting its totals is meaningless: the right action is to delete its analytics rows outright.
+Publishing a ticket would be actively wrong, since the worker would try to fold a tenant that no longer exists.
+
+Fix: add every `analytics_*` table to the purge's cascade map.
+That file already maintains the map explicitly and says why, at `logspace_cleanup.py:7-19`: "so this stays correct as the schema grows".
+Note none of the analytics tables can rely on a cascade: they key on `customer_code`, which is a soft tenant key with no foreign key, exactly like `log_entry_assignment`, which that file already deletes explicitly at `:110-111` for the same reason.
+
+**Severity: lower than F12, but it is a leak that grows.**
+Nothing produces a wrong number; a purged tenant simply leaves its facts, ledger, rollups, tickets, state and quality rows behind forever, since every one of those is retained forever or pruned only on consume.
+Disposable log spaces are created per trial, so the orphan count grows with tenant churn rather than with data volume.
+It is also the one place where forgetting is invisible: the tenant is gone, so nobody looks at its rows again.
+
+# 10. Additional hardening
+
+| # | Item | Why |
+|---|---|---|
+| A1 | Quarantine must never halt a tenant | Halting on one bad row freezes every metric until a human intervenes |
+| A2 | Do not reuse the stitcher's lock key | Sharing `hashtext(customer_code)` means a slow fold **stalls log stitching**. Note `pg_try_advisory_lock(0x7A9B, 1)` in `app/worker.py` is a two-argument lock in a separate space and cannot collide |
+| A3 | Ticket table provably constraint-free | It is written inside the ingestion transaction, so a failed insert fails ingestion |
+| A4 | Routine reconciliation must be windowed | Full recount grows with all retained history, becoming a job nobody runs |
+| A5 | One authoritative revision | The tenant revision governs cache validation and must bump in the same commit |
+| A6 | Normalise the missing-warehouse value once | Mapping null to a sentinel in two code paths lets one item's total split across two keys |
+| A7 | Every source read carries the window predicate | Including `include_null=True`, because a range test is false for null |
+| A8 | Align the worker cadence | Polling every second against 68 records per minute mostly finds nothing |
+| A9 | `SET LOCAL work_mem = '64MB'` | The global 4 MB spills grouping to disk, and is shared with ingestion |
+| A10 | Enable `pg_stat_statements` | Available, not installed. Without it, slow queries are guesswork |
+
+# 11. Metric registry and grains
+
+**The registry is the centre of the design, not an extension.**
+The user chooses what is measured and how it is sliced, from the interface, and the measure list is not fixed now.
+So nothing about dimensions or measures may be hardcoded into a rollup schema.
+
+## The consequence that cannot be deferred
+
+If measures are chosen later, the fact row must capture **every potentially useful field now**.
+Raw data is dropped at 60 days, so a measure invented next year can only be backfilled across history if its fields were already being written.
+
+**So the fact row is wide:**
+
+| Group | Fields |
+|---|---|
+| Identity | `source_transaction_id`, `source_started_at`, `source_version_hash`, `revision` |
+| Time | `event_time`, `business_date` (tenant-local), `duration_ms` |
+| Operation | `method` (49 values), `transaction_name` (22), `transaction_type`, `status` |
+| Subject | `item_number`, `lot_number`, `order_number`, `delivery_number` |
+| Place | `warehouse`, `warehouse_id`, `from_location`, `to_location` |
+| Actor | `user_name`, `device_id`, `device_name` |
+| Measures | `quantity` where present, attempt and pick classification, plus a typed slot per registered measure |
+
+Anything not written here is lost at 60 days.
+
+## Dimensions
+
+Aggregate by **both** `method` (49 values, API level) and `transaction_name` (22 values, the operator's screen).
+Both are low cardinality, so together they stay under roughly 1,700 hourly rows per day.
+
+## How a user-defined metric works
+
+1. The user picks a dimension set, a measure, a filter and a grain in the interface.
+2. That writes a definition row with a `draft`/`active`/`inactive` lifecycle.
+3. The worker begins maintaining its rollups on the next cycle.
+4. A backfill populates its history from the fact table, possible only because the fact row is wide and retained.
+
+Rollups are stored generically: a definition identifier, a fixed number of dimension slots and additive measure slots, rather than a bespoke table per metric.
+Adding a metric is a row plus a backfill, never a migration.
+
+**The honest limit.**
+Fully arbitrary slicing over years cannot be pre-aggregated, because the combinations explode.
+Registered definitions are fast at any range; genuinely ad-hoc exploration falls back to a bounded fact-table scan, and the interface must show that distinction.
+A newly defined metric has **no history until its backfill runs**, which should be visible in the interface.
+
+## Grains
+
+Grains are hourly, daily, weekly and monthly.
+Weekly and monthly group on the **tenant-local business date with ISO Monday-start weeks**, because `date` is computed as `to_display(started).date()` (`derive_transactions.py:172`) while `started_at` is UTC, and for a UK warehouse those diverge by an hour for half the year.
+Every query still carries a `started_at` predicate for partition pruning, because the local date is not the partition key (`logs.py:711-713`).
+
+Sizing at 50,000 picks per day and 5,000 active items:
+
+| Grain | Retention | Rows at 5 years |
+|---|---|---|
+| Hourly | 90 days | 3.2 M |
+| Daily | forever | 9.1 M |
+| Monthly | forever | 300 K |
+
+Rows scanned for "top items this month": 1,500,000 raw, 1,080,000 hourly, 150,000 daily, **5,000 monthly**.
+
+**Selection is toggleable.**
+A chosen set of types renders either as one series per type or as one combined total, both valid from the same rollup because counts and sums are additive.
+Percentiles across a selection need merged histograms, never averaged percentiles.
+
+## Additivity is a schema rule
+
+A rollup stores **components, never finished answers**.
+Averaging twelve monthly averages is not the yearly average.
+
+| Measure | Composes | Stored as |
+|---|---|---|
+| Quantity, pick count, attempt count | yes | directly |
+| First and last event | yes | `min`, `max` |
+| Average, rate | no | `sum` + `count` |
+| Std dev, coefficient of variation | no | `sum`, `sum_sq`, `count` |
+| Median, p95 | no | 20-bucket log histogram |
+| Distinct items, operators, orders | no | computed per period from the fact table |
+| Top-N | no | the full item set for the window |
+
+No `hll` or `tdigest` is available, so distinct counts have no approximation to fall back on.
+
+---
+
+# 12. Delivery sequence
+
+**Phase 0. Contract and fixtures.**
+The consumption definition with the three counters.
+Fixtures for zero pick, short pick, error, incomplete, late backfill, rebuild, **merge**, **split**, and a multi-confirmation line whose `ExpectedQuantity` changes.
+Build the synthetic tenant generator here so it serves both correctness and load.
+
+**Phase 1. Schema, models, ER diagram.**
+Wide fact table with the F3 key, the ledger, generic per-definition grains, the definition table, quality, state, and the ticket table.
+Register each partitioned table in `partitioning.py` and give each its own retention lag in `log_partition_worker.droppable_days`.
+**Add every new table to the purge cascade map in `logspace_cleanup.py` in the same change** (F13); a table created without deciding how it gets purged is a table that never does.
+**Update `docs/database-er-diagram.md` in the same change**, per repo `CLAUDE.md`: the per-subsystem `erDiagram` block, the master overview, the tenant-partitioning diagram, and the relationship reference tables.
+The width of the fact row is the load-bearing decision here, since omissions cannot be backfilled after 60 days.
+
+**Phase 2. Ticket publication.**
+From every path that creates, deletes or rebuilds, with bounds from the freed set.
+**All five sites in the N1 table, including both halves of `DELETE /logs/data`** (F12), not only the three in `derive_transactions.py`.
+Deployed with the worker disabled, so coverage is proven against real traffic while the only cost is a growing table.
+Prove coverage by grepping for every statement that removes a `log_transactions` row and checking each against the N1 table, rather than by reasoning about which paths rebuild.
+
+**Phase 3. Normaliser, diff, worker.**
+Range diff, never per-record update.
+Quarantine without halting, own lock namespace, write-time cursor, `work_mem` per transaction.
+
+**Phase 4. Backfill and checks.**
+Windowed routine reconciliation plus explicit full runs, and the completeness check against `log_entries`.
+Gate source retention on healthy state.
+
+**Phase 5. Read APIs.**
+Grain selection, both freshness numbers, single-query status.
+
+**Phase 6. Frontend.**
+Provisional versus stale, hand-built charts, and the `next.config.mjs` rewrite.
+
+**Phase 7. Rollout.**
+Schema, then tickets with the worker off, then backfill and report-only reconciliation, then one tenant, then the interface behind a feature flag.
+
+# 13. Invariants
+
+Each fails **silently**, producing a plausible wrong number rather than an error.
+
+1. Exactly one component writes each table.
+2. No transaction is deleted by any path without a committed ticket whose range contains its `started_at`. **Including deletes the code does not issue directly**, such as the `jobs` cascade behind the full wipe (F12); retention's partition drops are the one deliberate exception.
+3. Ticket and change commit in the same transaction.
+4. A ticket is stamped consumed only after its entire range is diffed.
+5. The diff spans a range, so a vanished id is reversed.
+6. A matching fingerprint writes nothing, which is what makes retries free.
+7. Rollup writes are recompute-and-replace, never increment.
+8. Rollups store additive components, never finished answers.
+9. Both halves of a read use one boundary value from the persisted cursor.
+10. A missing source field is recorded as absent, never as zero.
+11. The fact row is written wide, because omissions cannot be backfilled after 60 days.
+12. Analytics uses its own advisory lock namespace, so it can never stall ingestion.
+13. Quarantine never halts a tenant.
+14. The analytics cursor field is one named constant.
+15. A tenant purge removes that tenant's `analytics_*` rows outright, and does not publish a ticket (F13). Every analytics table keys on `customer_code` with no foreign key, so nothing cascades on its behalf.
+
+# 14. Verification
+
+**Correctness of the total**
+
+1. Reconciliation: ledger totals equal a direct recount for the window, scheduled not one-off.
+2. **Completeness**: entries past the abandon window with no assignment row, by file and program.
+   Currently non-zero, so **this test starts red and that is correct**.
+3. Restatement: rebuild an already-folded window and assert totals unchanged; change a quantity and assert the old contribution reverses exactly once.
+4. **Merge and split**: a merged record's vanished id reverses, a split's new id applies.
+   A per-record update passes test 3 and fails this one.
+5. Ticket coverage: rebuild an old unsealed row through the automated path (`finalize_pending` -> `regroup_window`) and assert a committed ticket contains it.
+   Repeat through `regroup_incremental`, since that path derives its bounds differently (F1).
+   Then **once per site in the N1 table, all five** (F12): fold a window, remove its transactions by that route, and assert the total returns to zero rather than staying at its pre-delete value.
+   The two API routes are the ones that fail today, and the full wipe is the one a per-statement hook cannot catch.
+6. Identity: the key includes `source_started_at`, and two rows sharing an id produce two facts.
+7. Idempotence: the same fold twice leaves values unchanged.
+8. Crash safety: kill the worker mid-batch; no gap, no duplicate.
+
+**Data that cannot be recovered**
+
+9. Retention independence: drop a 61-day-old raw partition; facts, ledger and grains survive.
+10. Cursor gating: the position blocks retention while behind; a stalled worker is logged critical then stops blocking.
+11. Reproducibility: build a training set at a revision, restate a fact, rebuild at the same revision, assert identical output.
+12. Rebuildability: delete a grain entirely and rebuild it from the fact table to identical values.
+12b. Tenant purge completeness (F13): fold a window for a throwaway tenant, purge the tenant, and assert every `analytics_*` table has zero rows for it. Assert no ticket was published, since the fold target no longer exists.
+
+**Traps specific to this data**
+
+13. Attempts versus picks: zeros excluded from `pick_count`, included in `attempt_count` and the zero-pick rate.
+14. Additivity: monthly-grain metrics equal fact-computed ones, including distinct count, p95 and average.
+15. Top-N is not composable.
+16. Local business date at 00:30 during BST lands on the right local day and ISO week.
+17. Numeric fidelity end to end; comparisons numeric, never string.
+18. Placeholder rejection: quarantined with a reason, never dropped silently.
+
+**Registry and user-defined metrics**
+
+19. **Fact-row completeness**: every listed field is populated wherever the source has it.
+    This guards the one irreversible schema decision.
+20. **A newly defined metric backfills correctly**: define one for a combination never registered before, backfill, and assert it equals a direct aggregate.
+21. Selection is additive both ways, and percentiles come from merged histograms.
+22. Quantity measures are refused where the field does not exist, since 47 of 49 methods have none.
+
+**Performance and end to end**
+
+23. Status is one query.
+    Queries are prepared, worth roughly 100 ms each.
+24. A 12-month request resolves to monthly, never daily.
+    Grain reads plan as index-only scans, with `EXPLAIN (ANALYZE, BUFFERS)` proof.
+25. Load: synthetic tenant at 100 times the measured rate, worker lag inside target.
+26. In the real interface: a live pick updates within target; a window with unsealed contributors reads as provisional; empty and loading states, fractional formatting, light and dark all checked.
+
+# 15. Open questions
+
+**Blocking correct sizing**
+
+1. **Expected production volume**: picks per day at full rollout, and distinct active items per day.
+   Every grain, retention and index above is sized from an assumption of 50,000 picks and 5,000 items, against today's roughly 1,300 and 692.
+   An order of magnitude either way means re-cutting the cascade before building.
+2. **Tenants at full rollout.**
+   Everything keys on `customer_code` and there are two.
+   Ten busy tenants multiplies every row count tenfold and may justify per-tenant partitioning.
+
+**Blocking Phase 1**
+
+3. **Confirm the table naming scheme**, since renaming after the first migration costs a migration.
+
+**Blocking N7**
+
+4. **Definition scope**: are metric definitions per tenant, or global templates a tenant enables?
+   Per tenant is assumed above.
+5. **Who may create metrics.**
+   There is no authentication in this codebase yet; `api/deps.py:34-42` is a permit-all placeholder with a `TODO(auth)`.
+   A self-service metric builder is exactly the surface where that starts to matter.
+
+**Can run in parallel**
+
+6. **Cause of the two orphaned files**, before treating a regroup as the fix.
+7. **Chart approach**: hand-rolled SVG consistent with the repo's zero-dependency history, or accept the first chart dependency.
+
+# 16. Out of scope, but should be fixed
+
+Two live defects found during this work, unrelated to analytics.
+
+`PgVectorStore.ensure_collection()` runs `CREATE EXTENSION IF NOT EXISTS vector` from an always-on worker (`app/background.py:82-86` to `embedding_worker.py:173-180`).
+The server has no pgvector, so it retries forever roughly every 4 seconds on both the web and worker processes, masking real errors.
+
+`PgVectorStore.query()` lacks the `text_match` parameter that `search_service.py:167-172` passes, so hybrid search raises `TypeError` on the default backend.

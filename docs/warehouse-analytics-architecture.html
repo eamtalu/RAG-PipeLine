@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body, h1, h2, h3, h4, p, ul, ol, table { margin: 0; padding: 0; }
+  body { margin: 0; }
+</style>
+<title>Warehouse Analytics - Low-Level Architecture</title>
+<style>
+  :root{
+    --paper:#F6F7F9; --card:#FFFFFF; --sunk:#EBEFF4; --code:#EEF2F6;
+    --ink:#0F151C; --ink-2:#43505E; --ink-3:#74818E;
+    --rule:#D4DDE5; --rule-2:#E6ECF1;
+    --blue:#14548F; --blue-bg:#E2EDF7;
+    --teal:#0A6558; --teal-bg:#D7EDE9;
+    --amber:#8E5206; --amber-bg:#F8EDD7;
+    --red:#98162F; --red-bg:#F9E1E6;
+    --violet:#57327A; --violet-bg:#EDE4F4;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--paper:#090D12;--card:#121820;--sunk:#0E1319;--code:#0B1015;
+      --ink:#E7EDF4;--ink-2:#A6B3C1;--ink-3:#73808D;--rule:#242D37;--rule-2:#191F26;
+      --blue:#6CA6E3;--blue-bg:#112031;--teal:#48C6B4;--teal-bg:#0A231E;
+      --amber:#DE9F53;--amber-bg:#261B0B;--red:#ED7186;--red-bg:#280F15;
+      --violet:#B08FD2;--violet-bg:#1C1327;}
+  }
+  :root[data-theme="dark"]{--paper:#090D12;--card:#121820;--sunk:#0E1319;--code:#0B1015;
+    --ink:#E7EDF4;--ink-2:#A6B3C1;--ink-3:#73808D;--rule:#242D37;--rule-2:#191F26;
+    --blue:#6CA6E3;--blue-bg:#112031;--teal:#48C6B4;--teal-bg:#0A231E;
+    --amber:#DE9F53;--amber-bg:#261B0B;--red:#ED7186;--red-bg:#280F15;
+    --violet:#B08FD2;--violet-bg:#1C1327;}
+  :root[data-theme="light"]{--paper:#F6F7F9;--card:#FFFFFF;--sunk:#EBEFF4;--code:#EEF2F6;
+    --ink:#0F151C;--ink-2:#43505E;--ink-3:#74818E;--rule:#D4DDE5;--rule-2:#E6ECF1;
+    --blue:#14548F;--blue-bg:#E2EDF7;--teal:#0A6558;--teal-bg:#D7EDE9;
+    --amber:#8E5206;--amber-bg:#F8EDD7;--red:#98162F;--red-bg:#F9E1E6;
+    --violet:#57327A;--violet-bg:#EDE4F4;}
+
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.6;
+       -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:920px;margin:0 auto;padding:44px 22px 110px;display:flex;flex-direction:column;gap:52px;}
+  h1{font-size:clamp(26px,4.2vw,37px);line-height:1.06;letter-spacing:-.032em;font-weight:800;margin:0 0 11px;}
+  .kick{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);margin:0 0 9px;}
+  .sub{font-size:16.5px;color:var(--ink-2);margin:0;max-width:62ch;}
+  h2{font-size:clamp(19px,2.5vw,24px);line-height:1.15;letter-spacing:-.022em;font-weight:760;
+     margin:0 0 8px;padding-bottom:9px;border-bottom:2px solid var(--rule);}
+  h3{font-size:15.5px;font-weight:730;margin:24px 0 8px;letter-spacing:-.01em;}
+  h3 .cid{font-family:var(--mono);font-size:12px;color:var(--blue);margin-right:8px;}
+  p{margin:0 0 12px;color:var(--ink-2);max-width:70ch;font-size:14.5px;}
+  ul,ol{margin:0 0 12px;padding-left:21px;} li{color:var(--ink-2);margin-bottom:6px;font-size:14.5px;}
+  .lede{font-size:15px;color:var(--ink-2);margin:10px 0 20px;max-width:68ch;}
+  code{font-family:var(--mono);font-size:.87em;background:var(--sunk);padding:1.5px 5px;border-radius:3px;color:var(--ink);}
+  .note{font-size:13px;color:var(--ink-3);margin:12px 0 0;max-width:70ch;}
+
+  .toc{background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:17px 21px;}
+  .toc ol{margin:0;padding-left:20px;columns:2;column-gap:28px;}
+  @media (max-width:640px){.toc ol{columns:1;}}
+  .toc li{font-size:13.5px;margin-bottom:4px;}
+  .toc a{color:var(--blue);text-decoration:none;border-bottom:1px solid transparent;}
+  .toc a:hover,.toc a:focus{border-bottom-color:var(--blue);}
+
+  .dg{background:var(--card);border:1px solid var(--rule);border-radius:11px;padding:24px 15px;overflow-x:auto;}
+  .dg pre.mermaid{margin:0;text-align:center;background:transparent;}
+
+  pre.flow{background:var(--code);border:1px solid var(--rule);border-radius:9px;padding:16px 18px;
+           overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.62;margin:0 0 13px;color:var(--ink);}
+
+  .scroll{overflow-x:auto;border:1px solid var(--rule);border-radius:9px;background:var(--card);margin:0 0 13px;}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:600px;}
+  th{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+     color:var(--ink-3);font-weight:600;padding:10px 13px;border-bottom:1px solid var(--rule);vertical-align:bottom;}
+  td{padding:10px 13px;border-bottom:1px solid var(--rule-2);color:var(--ink-2);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  td code{font-size:11.7px;}
+  .own{color:var(--red);font-weight:700;} .fv{color:var(--teal);font-weight:700;}
+  .ex{color:var(--teal);font-weight:600;} .nw{color:var(--blue);font-weight:600;} .lt{color:var(--violet);font-weight:600;}
+
+  .co{border-left:3px solid var(--amber);background:var(--amber-bg);border-radius:0 9px 9px 0;padding:14px 18px;margin:0 0 13px;}
+  .co.bad{border-left-color:var(--red);background:var(--red-bg);}
+  .co.ok{border-left-color:var(--teal);background:var(--teal-bg);}
+  .co.info{border-left-color:var(--blue);background:var(--blue-bg);}
+  .co h4{margin:0 0 5px;font-size:14px;color:var(--amber);}
+  .co.bad h4{color:var(--red);} .co.ok h4{color:var(--teal);} .co.info h4{color:var(--blue);}
+  .co p{margin:0;font-size:13.5px;} .co p + p{margin-top:8px;}
+
+  .comp{background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:15px 18px;margin:0 0 13px;}
+  .comp.new{border-left:3px solid var(--blue);}
+  .comp.later{border-left:3px solid var(--violet);}
+  .comp .hd{display:flex;gap:9px;align-items:baseline;margin:0 0 8px;flex-wrap:wrap;}
+  .comp .cid{font-family:var(--mono);font-size:12.5px;font-weight:800;color:var(--blue);}
+  .comp.later .cid{color:var(--violet);}
+  .comp .nm{font-size:15.5px;font-weight:720;margin:0;}
+  .comp .path{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);}
+  .comp p{font-size:13.5px;} .comp li{font-size:13.5px;}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:5px 13px;font-size:13.5px;margin:0 0 10px;}
+  .kv .k{font-family:var(--mono);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;
+         color:var(--ink-3);padding-top:3px;white-space:nowrap;}
+  .kv .v{color:var(--ink-2);}
+
+  .steps{display:flex;flex-direction:column;}
+  .st{display:grid;grid-template-columns:26px 1fr;gap:13px;position:relative;padding-bottom:10px;}
+  .st:last-child{padding-bottom:0;}
+  .st::before{content:"";position:absolute;left:12px;top:26px;bottom:0;width:2px;background:var(--rule);}
+  .st:last-child::before{display:none;}
+  .st .n{width:26px;height:26px;border-radius:6px;background:var(--blue-bg);border:1.5px solid var(--blue);
+         color:var(--blue);display:grid;place-items:center;font-family:var(--mono);font-size:11px;font-weight:700;
+         position:relative;z-index:1;}
+  .st .t{padding-top:2px;font-size:13.5px;color:var(--ink-2);}
+  .st .t b{color:var(--ink);}
+
+  .inv{display:grid;grid-template-columns:30px 1fr;gap:10px 13px;}
+  .inv .n{font-family:var(--mono);font-size:11.5px;font-weight:700;color:var(--red);text-align:right;padding-top:2px;}
+  .inv .t{font-size:14px;color:var(--ink-2);}
+  .inv .t b{color:var(--ink);}
+</style>
+
+</head>
+<body>
+<div style="max-width:920px;margin:0 auto;padding:26px 22px 0;">
+  <div style="background:var(--blue-bg);border-left:3px solid var(--blue);border-radius:0 9px 9px 0;padding:13px 17px;font:13.5px/1.55 var(--sans);color:var(--ink-2);">
+    <strong style="color:var(--ink);">Rendered companion document.</strong>
+    The authoritative source is
+    <code style="font-family:var(--mono);font-size:12.5px;">docs/warehouse-analytics-architecture.md</code>.
+    This file is for reading; if the two disagree, the Markdown wins. Implementation plan:
+    <code style="font-family:var(--mono);font-size:12.5px;">docs/plan/2026-08-17_22-32_merged-warehouse-analytics-platform-plan.md</code>.
+  </div>
+</div>
+<div class="wrap">
+
+<header>
+  <p class="kick">Low-level architecture · 2026-08-18</p>
+  <h1>Warehouse analytics and ML platform</h1>
+  <p class="sub">Companion to the implementation plan. The plan says what to build and why. This says how
+  it is structured: components, the tables each one owns, who may write to what, and the flows between
+  them.</p>
+</header>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#naming">Naming decision</a></li>
+    <li><a href="#map">Component map</a></li>
+    <li><a href="#own">Table ownership</a></li>
+    <li><a href="#detail">Component detail</a></li>
+    <li><a href="#flows">Data flows</a></li>
+    <li><a href="#inv">Invariants</a></li>
+    <li><a href="#open">Open questions</a></li>
+  </ol>
+</nav>
+
+<!-- NAMING -->
+<section id="naming">
+  <h2>Naming</h2>
+  <p>The plan inherited names from an earlier consumption-only design. The design has since widened: the
+  store is a general transaction fact row, and rollups are generic per metric definition rather than per
+  item. So the names are re-cut. Final scheme, after two rejected attempts:</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Plan name</th><th>Final name</th></tr></thead>
+    <tbody>
+      <tr><td><code>warehouse_analytics_dirty_window</code></td><td><code>analytics_pending_windows</code></td></tr>
+      <tr><td><code>warehouse_consumption_contributions</code></td><td><code>analytics_facts</code></td></tr>
+      <tr><td><code>warehouse_consumption_contribution_history</code></td><td><code>analytics_fact_ledger</code></td></tr>
+      <tr><td><code>warehouse_item_consumption_hourly</code></td><td><code>analytics_hourly_rollups</code></td></tr>
+      <tr><td><code>warehouse_item_consumption_daily</code></td><td><code>analytics_daily_rollups</code></td></tr>
+      <tr><td><code>warehouse_item_consumption_monthly</code></td><td><code>analytics_monthly_rollups</code></td></tr>
+      <tr><td>new</td><td><code>analytics_metrics</code></td></tr>
+      <tr><td><code>warehouse_analytics_state</code></td><td><code>analytics_tenant_state</code></td></tr>
+      <tr><td><code>warehouse_analytics_quality_issues</code></td><td><code>analytics_quality_issues</code></td></tr>
+      <tr><td>new, ML</td><td><code>analytics_feature_sets</code>, <code>analytics_predictions</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Why this scheme and not the obvious ones</h3>
+
+  <div class="co bad">
+    <h4>A 20-character prefix would break PostgreSQL</h4>
+    <p>Once <code>partitioning.py</code> appends a date and the concurrent-index recipe appends columns,
+    the 63-character identifier limit is exceeded. <code>partition_name</code> raises past the limit, so
+    this fails at partition creation rather than quietly. Measured:</p>
+  </div>
+<pre class="flow"> 80  OVER  warehouse_analytics_rollup_hourly_2026_08_18_customer_code_bucket_start_item_idx
+ 64  OVER  warehouse_analytics_rollup_hourly_2026_08_18_customer_bucket_idx
+ 55  ok    analytics_hourly_rollups_2026_08_18_customer_bucket_idx</pre>
+
+  <p><code>analytics_</code> also matches the form of the existing <code>notification_</code> and
+  <code>log_</code> prefixes, where the repo uses a single domain noun.</p>
+
+  <p><strong>Names are plural</strong>, because the repo is predominantly plural:
+  <code>log_entries</code>, <code>notification_rules</code>, <code>consumer_cursors</code>,
+  <code>log_regroup_runs</code>, <code>saved_views</code>, <code>jobs</code>, <code>customers</code>,
+  against only <code>log_entry_assignment</code>, <code>log_regroup_pending</code> and
+  <code>logspace_presence</code>.</p>
+
+  <p><strong><code>analytics_pending_windows</code>, not <code>dirty_window</code>.</strong> "Dirty
+  window" is imported data-engineering jargon. The repo's equivalent table is
+  <code>log_regroup_pending</code>, named for what is pending rather than for a term of art.</p>
+
+  <h3>Why <code>facts</code> and not <code>contributions</code></h3>
+  <p>These are not synonyms, and the distinction is load-bearing.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Candidate</th><th>What it implies</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr><td><code>contributions</code></td><td>"what this row contributed to a total"</td>
+          <td class="own">too narrow: <b>47 of 49 methods carry no quantity</b>. A <code>GetAccessToken</code> row contributes to no sum but still has a duration, status and operator.</td></tr>
+      <tr><td><code>ledger</code></td><td>entries and their reversals sitting side by side</td>
+          <td class="own">misleading here: the table holds one <b>current</b> row per transaction. The reversal is a computation the worker performs, not a row it stores.</td></tr>
+      <tr><td><code>facts</code></td><td>one row per event, dimensions plus measures</td>
+          <td class="fv">accurate for all 49 methods</td></tr>
+    </tbody>
+  </table></div>
+  <div class="co ok">
+    <h4>But "ledger" is the right word for the other table</h4>
+    <p><code>analytics_fact_ledger</code> genuinely is append-only, one row per version, showing how each
+    fact changed over time. That is what a ledger is. It also tells a reader what the table is for in a
+    way that <code>_history</code> did not.</p>
+  </div>
+  <p>The plan's prose about "the contribution ledger with delta application" stays as it is. That phrase
+  describes what the worker <em>does</em>; a table name should describe what the table
+  <em>contains</em>.</p>
+
+  <p><strong>Module names follow the tables.</strong> The repo pairs <code>services/notifications/</code>
+  with <code>notification_*</code> tables and <code>notification_worker.py</code>. The exact parallel is
+  <code>services/analytics/</code> with <code>analytics_*</code> tables and
+  <code>analytics_worker.py</code>.</p>
+
+  <div class="co"><h4>Still reversible</h4>
+    <p>Renaming before Phase 1 costs nothing. Renaming after the first migration costs a migration.
+    Confirm before any schema work begins.</p></div>
+</section>
+
+<!-- MAP -->
+<section id="map">
+  <h2>Component map</h2>
+  <p class="lede">Twelve components. Teal already exists and is reused unchanged, blue is new, violet is
+  a later phase.</p>
+
+  <div class="dg">
+<pre class="mermaid">
+flowchart TD
+    subgraph ING["Ingestion - exists"]
+        E1["E1 parse"] --> LE[("log_entries")]
+        LE --> E2["E2 stitcher"]
+        E2 --> LT[("log_transactions")]
+    end
+
+    E2 --> N1["N1 ticket publisher"]
+    N1 --> DW[("pending_windows")]
+
+    subgraph ANA["Analytics - new"]
+        DW --> N3["N3 worker"]
+        N3 --> N2["N2 normaliser<br/><i>pure</i>"]
+        N3 --> FACT[("fact")]
+        N3 --> HIST[("fact_ledger")]
+        N3 --> QUAL[("quality_issues")]
+        N3 --> STATE[("state")]
+        FACT --> N5["N5 rollup folder"]
+        N5 --> RH[("hourly_rollups")]
+        RH --> RD[("daily_rollups")]
+        RD --> RM[("monthly_rollups")]
+        MET[("metric")] --> N5
+        MET --> N3
+    end
+
+    LT -. "reread range" .-> N3
+
+    RH --> N6["N6 read layer"]
+    RD --> N6
+    RM --> N6
+    STATE --> N6
+    FACT -. "ad-hoc" .-> N6
+    N6 --> N7["N7 API + agent tools"]
+    MET --> N6
+
+    subgraph MLP["ML - later"]
+        HIST --> M1["M1 ML pipeline"]
+        M1 --> FS[("feature_set")]
+        M1 --> PRED[("prediction")]
+    end
+    PRED --> N6
+
+    N3 --> CC[("consumer_cursors")]
+    M1 --> CC
+    CC --> E4["E4 partition manager"]
+
+    classDef ex fill:#0A6558,stroke:#0A6558,color:#ffffff
+    classDef nw fill:#14548F,stroke:#14548F,color:#ffffff
+    classDef lt fill:#57327A,stroke:#57327A,color:#ffffff
+    classDef tb fill:#8E5206,stroke:#8E5206,color:#ffffff
+    class E1,E2,E4 ex
+    class N1,N2,N3,N5,N6,N7 nw
+    class M1 lt
+    class LE,LT,CC ex
+    class DW,FACT,HIST,QUAL,STATE,RH,RD,RM,MET tb
+    class FS,PRED lt
+</pre>
+  </div>
+
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>Component</th><th>Status</th><th>Module</th></tr></thead>
+    <tbody>
+      <tr><td>E1</td><td>Log fetch and parse (Stage 1)</td><td class="ex">exists</td><td><code>pipeline/parse_insert.py</code></td></tr>
+      <tr><td>E2</td><td>Transaction stitcher (Stage 2)</td><td class="ex">exists</td><td><code>pipeline/derive_transactions.py</code></td></tr>
+      <tr><td>E3</td><td>Retention cursor registry</td><td class="ex">exists</td><td><code>services/consumer_cursors.py</code></td></tr>
+      <tr><td>E4</td><td>Partition manager</td><td class="ex">exists</td><td><code>persistence/partitioning.py</code></td></tr>
+      <tr><td>E5</td><td>Alerting engine</td><td class="ex">exists</td><td><code>services/notifications/</code></td></tr>
+      <tr><td>N1</td><td>Ticket publisher</td><td class="nw">new</td><td><code>analytics/pending_windows.py</code></td></tr>
+      <tr><td>N2</td><td>Fact normaliser</td><td class="nw">new</td><td><code>analytics/normalizer.py</code></td></tr>
+      <tr><td>N3</td><td>Analytics worker</td><td class="nw">new</td><td><code>workers/analytics_worker.py</code></td></tr>
+      <tr><td>N4</td><td>Metric registry</td><td class="nw">new</td><td><code>analytics/registry.py</code></td></tr>
+      <tr><td>N5</td><td>Rollup folder</td><td class="nw">new</td><td><code>analytics/fold.py</code></td></tr>
+      <tr><td>N6</td><td>Read layer</td><td class="nw">new</td><td><code>repositories/analytics_repository.py</code></td></tr>
+      <tr><td>N7</td><td>API and agent tools</td><td class="nw">new</td><td><code>api/v1/analytics.py</code>, <code>log_agent/tools.py</code></td></tr>
+      <tr><td>M1</td><td>ML pipeline</td><td class="lt">later</td><td><code>services/analytics_ml/</code></td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- OWNERSHIP -->
+<section id="own">
+  <h2>Table ownership</h2>
+  <div class="co bad">
+    <h4>The single most important rule here</h4>
+    <p><b>Exactly one component may write each table.</b> Two writers to one table is how aggregates
+    silently diverge, and it is not recoverable without a full rebuild.</p>
+  </div>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Table</th><th>Written by</th><th>Read by</th><th>Partitioned</th><th>Retention</th></tr></thead>
+    <tbody>
+      <tr><td><code>log_entries</code></td><td>E1</td><td>E2, N3</td><td>daily on <code>timestamp</code></td><td>60 days</td></tr>
+      <tr><td><code>log_entry_assignment</code></td><td>E2</td><td>E2, N3</td><td>daily on <code>entry_ts</code></td><td>60 days</td></tr>
+      <tr><td><code>log_transactions</code></td><td>E2</td><td>E2, N3, N6</td><td>daily on <code>started_at</code></td><td>60 days</td></tr>
+      <tr><td><code>log_regroup_pending</code></td><td>E1</td><td>E2</td><td>no</td><td>pruned</td></tr>
+      <tr><td><code>consumer_cursors</code></td><td>N3, M1, E5</td><td>E4</td><td>no</td><td>forever</td></tr>
+      <tr><td><code>analytics_pending_windows</code></td><td class="own">N1 only</td><td>N3</td><td>no</td><td>pruned</td></tr>
+      <tr><td><code>analytics_facts</code></td><td class="own">N3 only</td><td>N5, N6, M1</td><td>monthly</td><td class="fv">forever</td></tr>
+      <tr><td><code>analytics_fact_ledger</code></td><td class="own">N3 only</td><td>M1</td><td>monthly</td><td class="fv">forever</td></tr>
+      <tr><td><code>analytics_metrics</code></td><td class="own">N7 only</td><td>N3, N5, N6</td><td>no</td><td>forever</td></tr>
+      <tr><td><code>analytics_hourly_rollups</code></td><td class="own">N5 only</td><td>N5, N6</td><td>daily</td><td>90 days</td></tr>
+      <tr><td><code>analytics_daily_rollups</code></td><td class="own">N5 only</td><td>N5, N6</td><td>yearly</td><td class="fv">forever</td></tr>
+      <tr><td><code>analytics_monthly_rollups</code></td><td class="own">N5 only</td><td>N6</td><td>none needed</td><td class="fv">forever</td></tr>
+      <tr><td><code>analytics_tenant_state</code></td><td class="own">N3 only</td><td>N6, N7</td><td>no</td><td>forever</td></tr>
+      <tr><td><code>analytics_quality_issues</code></td><td class="own">N3 only</td><td>N6, N7</td><td>monthly</td><td>1 year</td></tr>
+      <tr><td><code>analytics_feature_sets</code></td><td class="own">M1 only</td><td>M1</td><td>monthly</td><td>forever</td></tr>
+      <tr><td><code>analytics_predictions</code></td><td class="own">M1 only</td><td>N6, M1</td><td>monthly</td><td>forever</td></tr>
+    </tbody>
+  </table></div>
+
+  <p><code>consumer_cursors</code> has three writers, but each owns a distinct row keyed by consumer name
+  (<code>analytics:warehouse-v1</code>, <code>ml:features-v1</code>, <code>notifications</code>), so there
+  is no contention. That pattern is already established in the codebase.</p>
+
+  <div class="co ok"><h4>No component writes to any <code>log_*</code> table</h4>
+    <p>The analytics platform is strictly a reader of the ingestion pipeline. The single exception is N1
+    inserting a ticket, and that lives inside E2's own transaction by design.</p></div>
+</section>
+
+<!-- DETAIL -->
+<section id="detail">
+  <h2>Component detail</h2>
+
+  <div class="comp new">
+    <div class="hd"><span class="cid">N1</span><p class="nm">Ticket publisher</p><span class="path">analytics/pending_windows.py</span></div>
+    <div class="kv">
+      <span class="k">job</span><span class="v">Record that a bounded event-time range of a tenant's transactions changed.</span>
+      <span class="k">runs in</span><span class="v">Inside E2, in the <b>same database transaction as the change</b>. Not a separate process.</span>
+      <span class="k">owns</span><span class="v"><code>analytics_pending_windows</code></span>
+    </div>
+    <div class="scroll"><table>
+      <thead><tr><th>Publish site</th><th>Bounds taken from</th></tr></thead>
+      <tbody>
+        <tr><td><code>regroup_window</code></td><td>the padded window it already computes</td></tr>
+        <tr><td><code>regroup_incremental</code></td><td>min and max <code>started_at</code> over the <b>freed unsealed set</b>, padded</td></tr>
+        <tr><td><code>regroup_all</code></td><td>min and max over everything freed, padded, or one ticket per day of the span</td></tr>
+      </tbody>
+    </table></div>
+    <p>Insert-only. No foreign key, no unique constraint a retry could violate, no trigger, because a
+    failure here fails ingestion. Table shape mirrors <code>log_regroup_pending</code> field for field.
+    It is a <b>separate</b> table, because <code>consumed_at</code> is single-consumer and Stage 1's
+    tickets never cover <code>regroup_incremental</code>.</p>
+  </div>
+
+  <div class="comp new">
+    <div class="hd"><span class="cid">N2</span><p class="nm">Fact normaliser</p><span class="path">analytics/normalizer.py</span></div>
+    <div class="kv">
+      <span class="k">job</span><span class="v">One transaction row plus its JSONB to one typed fact row, or a quarantine record with a reason.</span>
+      <span class="k">purity</span><span class="v"><b>No database, no clock, no configuration.</b> This is where correctness is won.</span>
+      <span class="k">owns</span><span class="v">no tables</span>
+    </div>
+    <ul>
+      <li>Reject placeholder <code>transaction_type</code> values (<code>xxxxxx</code>, <code>XXXXX</code>, <code>0050XX</code>).</li>
+      <li>Cast quantities to <code>NUMERIC</code>, never float, treating empty string as <b>absent</b> rather than zero.</li>
+      <li>Classify as <b>pick</b> (quantity above zero), <b>attempt</b> (quantity zero), or non-quantity.</li>
+      <li>Compute <code>business_date</code> in the tenant timezone.</li>
+      <li>Compute the version fingerprint over every field affecting a measure.</li>
+    </ul>
+    <div class="co bad" style="margin-bottom:0;"><h4>Absent is never zero</h4>
+      <p>A missing field means "not supplied", which is a different fact from zero and must survive as
+      such. Coalescing to zero corrupts every aggregate downstream.</p></div>
+  </div>
+
+  <div class="comp new">
+    <div class="hd"><span class="cid">N3</span><p class="nm">Analytics worker</p><span class="path">workers/analytics_worker.py</span></div>
+    <div class="kv">
+      <span class="k">job</span><span class="v">Turn tickets into fact rows and aggregate deltas, exactly once in effect.</span>
+      <span class="k">runs in</span><span class="v">The existing singleton <code>python -m app.worker</code>. Never in the four web workers, which stay read-only.</span>
+      <span class="k">owns</span><span class="v"><code>fact</code>, <code>fact_ledger</code>, <code>quality_issues</code>, <code>state</code></span>
+    </div>
+    <p><b>One cycle, all in a single transaction per tenant:</b></p>
+    <div class="steps">
+      <div class="st"><div class="n">1</div><div class="t">Claim available tickets: <code>consumed_at IS NULL AND abandoned_at IS NULL AND available_at &lt;= clock_timestamp()</code>. <b>Not <code>now()</code></b>, which is fixed at transaction start.</div></div>
+      <div class="st"><div class="n">2</div><div class="t">Coalesce ranges into disjoint runs.</div></div>
+      <div class="st"><div class="n">3</div><div class="t">Take <code>pg_advisory_xact_lock(hashtext('analytics:' || customer_code))</code>. <b>Distinct from the stitcher's key</b>, or a slow fold stalls log stitching.</div></div>
+      <div class="st"><div class="n">4</div><div class="t"><code>SET LOCAL work_mem = '64MB'</code>, since the global 4 MB spills grouping to disk.</div></div>
+      <div class="st"><div class="n">5</div><div class="t">Read current <code>log_transactions</code> in range, carrying <code>UtcWindow.covers(..., include_null=True)</code>.</div></div>
+      <div class="st"><div class="n">6</div><div class="t">Normalise via N2.</div></div>
+      <div class="st"><div class="n">7</div><div class="t">Read existing <code>fact</code> rows in the <b>same</b> range.</div></div>
+      <div class="st"><div class="n">8</div><div class="t"><b>Range diff</b>, never per-row upsert.</div></div>
+      <div class="st"><div class="n">9</div><div class="t">Apply outcomes, append every changed version to <code>fact_ledger</code>, hand deltas to N5, write quarantine rows.</div></div>
+      <div class="st"><div class="n">10</div><div class="t">Update <code>state</code>, publish the retention position, stamp tickets consumed. <b>One commit.</b></div></div>
+    </div>
+    <p style="margin-top:14px;"><b>The diff, which is the heart of the component:</b></p>
+    <div class="scroll"><table>
+      <thead><tr><th>Condition</th><th>Action</th><th>Total</th></tr></thead>
+      <tbody>
+        <tr><td>in both, fingerprint equal</td><td>skip</td><td>unchanged</td></tr>
+        <tr><td>in both, fingerprint differs</td><td>reverse old, apply new</td><td>moves by the difference</td></tr>
+        <tr><td><b>in fact, absent from source</b></td><td class="own">reverse</td><td>decreases</td></tr>
+        <tr><td>in source, absent from fact</td><td>apply</td><td>increases</td></tr>
+      </tbody>
+    </table></div>
+    <p>The third row is why the diff must span a <b>range</b>. A merge makes one id disappear, and a
+    per-id update would never look for it, leaving its contribution stranded permanently.</p>
+    <div class="co" style="margin-bottom:0;"><h4>Failure policy</h4>
+      <p>A poisoned row is quarantined and <b>the tenant continues</b>. A failed run leaves tickets open,
+      bumps <code>attempts</code>, and dead-letters at the configured maximum. One bad row never halts a
+      tenant, following the precedent already set in <code>consumer_cursors.py</code>.</p></div>
+  </div>
+
+  <div class="comp new">
+    <div class="hd"><span class="cid">N4</span><p class="nm">Metric registry</p><span class="path">analytics/registry.py</span></div>
+    <div class="kv">
+      <span class="k">job</span><span class="v">Hold what is measured, <b>as data rather than code</b>.</span>
+      <span class="k">row</span><span class="v"><code>id</code>, <code>customer_code</code>, <code>name</code>, <code>dimensions</code>, <code>measure</code>, <code>filter</code>, <code>grains</code>, <code>status</code>, <code>created_by</code>, <code>backfilled_through</code></span>
+    </div>
+    <p>Shape follows <code>NotificationRule</code>, which already proved the pattern here. Dispatch must be
+    a <b>registry, not an if-chain</b>, unlike <code>build_evaluator</code> today.</p>
+    <p><b>Validation the registry enforces:</b> a quantity measure may only be registered where the methods
+    actually carry quantities, and <b>only 2 of 49 do</b>. Dimensions must exist on the fact row. A
+    definition cannot go active until its backfill has run, or its chart shows a false start date.</p>
+  </div>
+
+  <div class="comp new">
+    <div class="hd"><span class="cid">N5</span><p class="nm">Rollup folder</p><span class="path">analytics/fold.py</span></div>
+    <div class="kv">
+      <span class="k">job</span><span class="v">Maintain the grain cascade per active definition.</span>
+      <span class="k">cascade</span><span class="v"><code>fact → hourly → daily → monthly</code>. Each level reads only the level below.</span>
+      <span class="k">owns</span><span class="v">the three rollup tables</span>
+    </div>
+    <p><b>Every write is recompute-and-replace</b>, never increment. An additive upsert double-counts on
+    the first retry.</p>
+    <p><b>Additive components only.</b> Sums and counts direct. Averages as <code>sum</code> plus
+    <code>count</code>. Variance as <code>sum</code>, <code>sum_sq</code>, <code>count</code>. Percentiles
+    as a 20-bucket log histogram, because bucket counts add and percentiles do not. Distinct counts are
+    <b>not cascaded</b>; they are computed per period from the fact table, cheap because the fact table and
+    the monthly grain share a partition boundary.</p>
+    <p style="margin-bottom:0;"><b>Weekly has no table.</b> ISO Monday weeks derive from daily at read time.</p>
+  </div>
+
+  <div class="comp new">
+    <div class="hd"><span class="cid">N6</span><p class="nm">Read layer</p><span class="path">repositories/analytics_repository.py</span></div>
+    <div class="kv">
+      <span class="k">job</span><span class="v">Answer every question, and be the <b>only</b> component that does.</span>
+      <span class="k">owns</span><span class="v">no tables</span>
+    </div>
+    <p><b>Grain selection.</b> The coarsest grain covering the window, targeting under 100,000 rows
+    scanned. A twelve-month request resolves to monthly, never daily.</p>
+    <p><b>Two-tier read.</b> Pre-aggregated rollups for settled ranges, unioned with a bounded live scan
+    of the recent tail. Both halves use <b>one boundary value read from the persisted cursor</b>, never a
+    freshly computed one, or a lagging worker produces double counts or gaps.</p>
+    <p style="margin-bottom:0;"><b>Ad-hoc fallback.</b> A query no definition covers falls back to a
+    bounded fact-table scan, and the response marks itself as such so the interface can show it rather
+    than silently running slow.</p>
+  </div>
+
+  <div class="comp new">
+    <div class="hd"><span class="cid">N7</span><p class="nm">API and agent tools</p><span class="path">api/v1/analytics.py · log_agent/tools.py</span></div>
+    <div class="scroll"><table>
+      <thead><tr><th>Endpoint</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>GET /analytics/status</code></td><td><b>exactly one row read</b> plus <code>ETag</code>, because the browser polls every 2 s per tab</td></tr>
+        <tr><td><code>GET /analytics/metrics</code></td><td>list and manage definitions</td></tr>
+        <tr><td><code>POST /analytics/metrics</code></td><td>create a definition, returns <code>202</code> with a backfill job</td></tr>
+        <tr><td><code>GET /analytics/series</code></td><td>one series per selected type, or one combined total, <b>toggleable</b></td></tr>
+        <tr><td><code>GET /analytics/breakdown</code></td><td>top-N by dimension for a window</td></tr>
+        <tr><td><code>POST /analytics/backfill</code> · <code>/reconcile</code></td><td><code>202 Accepted</code>, tracked</td></tr>
+      </tbody>
+    </table></div>
+    <p><b>Agent tools</b> added to <code>TOOLS</code> and <code>_DISPATCH</code>. The agent already exists
+    at <code>POST /api/v1/logs/debug/ask</code>, with the tenant injected server-side and never
+    model-exposed. Because metrics are registry rows, the tools are generic:
+    <code>list_metrics</code>, <code>query_metric</code>, <code>explain_freshness</code>. <b>No new tool
+    per metric.</b></p>
+    <p style="margin-bottom:0;"><b>Frontend</b> needs a <code>next.config.mjs</code> rewrite for
+    <code>/api/v1/analytics/*</code> or every request 404s. Charts are hand-built inline SVG.</p>
+  </div>
+
+  <div class="comp later">
+    <div class="hd"><span class="cid">M1</span><p class="nm">ML pipeline</p><span class="path">services/analytics_ml/ · later phase</span></div>
+    <p><b>Reads <code>fact_ledger</code> at a pinned <code>revision</code></b>, not the current fact
+    table. This is what makes a training run repeatable months later, and it is the reason the history
+    table must exist from day one rather than being added when ML starts.</p>
+    <p><b>Writes</b> <code>feature_set</code> (features plus the pinned revision and a code version) and
+    <code>prediction</code> (output keyed by subject, horizon and model version).</p>
+    <p><b>Registers its own cursor</b> <code>ml:features-v1</code>, so retention will not drop history it
+    still needs.</p>
+    <p style="margin-bottom:0;"><b>Predictions are served by N6</b> through the same read layer, so a
+    forecast and an actual are never fetched by two code paths that could disagree. Anomaly detection
+    reuses E5 rather than a parallel alerting path.</p>
+  </div>
+</section>
+
+<!-- FLOWS -->
+<section id="flows">
+  <h2>Data flows</h2>
+
+  <h3>Flow A · change to ticket</h3>
+<pre class="flow">E1 parse ─┐
+          ├─► log_entries ─► E2 stitch ─► log_transactions
+E2 rebuild┘                       │
+                                  └─► N1 ─► analytics_pending_windows
+                                      (same transaction as the change)</pre>
+  <div class="co info"><h4>The property everything rests on</h4>
+    <p>The ticket and the change commit together, or neither commits. A rolled-back rebuild leaves no
+    ticket; a committed rebuild always leaves one. That is what makes the coverage argument hold.</p></div>
+
+  <h3>Flow B · ticket to fact</h3>
+<pre class="flow">pending_windows ─► N3 claim + coalesce + lock
+                     │
+                     ├─read─► log_transactions        (current truth for the range)
+                     ├─read─► fact                    (existing rows, same range)
+                     ├─► N2 normalise
+                     ├─► range diff
+                     ├─write─► fact                   (upsert)
+                     ├─write─► fact_ledger           (append)
+                     ├─write─► quality_issues
+                     ├─► N5 apply deltas
+                     ├─write─► state
+                     ├─write─► consumer_cursors
+                     └─write─► pending_windows.consumed_at
+                     ───────── one transaction ─────────</pre>
+
+  <h3>Flow C · fact to rollups</h3>
+<pre class="flow">analytics_facts
+        │  per active definition in analytics_metrics
+        ▼
+   hourly_rollups ──► daily_rollups ──► monthly_rollups
+                          │
+                     weekly derived at read time, no table</pre>
+  <p>Any level can be deleted and rebuilt from the fact table, which is what makes rollups safe to treat
+  as disposable.</p>
+
+  <h3>Flow D · read</h3>
+<pre class="flow">request ─► N7 ─► N6
+                  ├─ pick coarsest grain covering the window
+                  ├─read─► monthly_rollups | _daily | _hourly   (settled)
+                  ├─read─► log_transactions tail               (live, bounded)
+                  ├─ union on ONE boundary from consumer_cursors
+                  └─read─► state                               (freshness)
+                                    │
+                        ┌───────────┴───────────┐
+                     Frontend                Agent tools</pre>
+
+  <h3>Flow E · ML training</h3>
+<pre class="flow">fact_ledger @ pinned revision
+        ├─► M1 build features ─► feature_set
+        ├─► M1 train ─────────► model artifact on disk
+        └─► M1 infer ─────────► prediction ─► N6 ─► N7</pre>
+  <p>Pinning a revision is what makes step 1 reproducible. Without the history table it is not.</p>
+
+  <h3>Flow F · retention safety</h3>
+<pre class="flow">N3 ─► consumer_cursors('analytics:warehouse-v1')  ┐
+M1 ─► consumer_cursors('ml:features-v1')          ├─► E4 min position
+E5 ─► consumer_cursors('notifications')           ┘        │
+                                                           ▼
+                                       drop partitions older than min</pre>
+  <p style="margin-bottom:0;">A component that stops reporting is excluded and logged critical rather than
+  blocking retention forever. That trade is already decided in <code>consumer_cursors.py</code>.</p>
+</section>
+
+<!-- INVARIANTS -->
+<section id="inv">
+  <h2>Invariants</h2>
+  <p class="lede">Each fails <strong>silently</strong>, producing a plausible wrong number rather than an
+  error. Each maps to a test in the plan.</p>
+  <div class="inv">
+    <span class="n">1</span><span class="t">Exactly <b>one component writes each table</b>.</span>
+    <span class="n">2</span><span class="t">No transaction is deleted by any path without a committed ticket whose range contains its <code>started_at</code>.</span>
+    <span class="n">3</span><span class="t">Ticket and change commit in the <b>same transaction</b>.</span>
+    <span class="n">4</span><span class="t">A ticket is stamped consumed only after its <b>entire range</b> is diffed.</span>
+    <span class="n">5</span><span class="t">The diff spans a <b>range</b>, so a vanished id is reversed.</span>
+    <span class="n">6</span><span class="t">A matching fingerprint writes nothing, which is what makes retries free.</span>
+    <span class="n">7</span><span class="t">Rollup writes are <b>recompute-and-replace</b>, never increment.</span>
+    <span class="n">8</span><span class="t">Rollups store additive <b>components</b>, never finished answers.</span>
+    <span class="n">9</span><span class="t">Both halves of a read use <b>one boundary value</b> from the persisted cursor.</span>
+    <span class="n">10</span><span class="t">A missing source field is recorded as <b>absent, never zero</b>.</span>
+    <span class="n">11</span><span class="t">The fact row is written <b>wide</b>, because omissions cannot be backfilled after 60 days.</span>
+    <span class="n">12</span><span class="t">Analytics uses its <b>own advisory lock namespace</b>, so it can never stall ingestion.</span>
+    <span class="n">13</span><span class="t">Quarantine <b>never halts a tenant</b>.</span>
+    <span class="n">14</span><span class="t">The analytics cursor field is <b>one named constant</b>, so an upstream move to <code>updated_at</code> is a single edit.</span>
+  </div>
+</section>
+
+<!-- OPEN -->
+<section id="open">
+  <h2>Open questions</h2>
+  <div class="co bad"><h4>Answer before Phase 1</h4>
+    <p><b>1. Table naming.</b> The scheme above is a proposal. Renaming after the first migration costs a
+    migration.</p>
+    <p><b>4. Production volume and tenant count</b>, still outstanding from the plan, which size every
+    grain and index above.</p></div>
+  <div class="co"><h4>Answer before N7</h4>
+    <p><b>2. Definition scope.</b> Are metric definitions per tenant, or global templates a tenant can
+    enable? Per tenant is assumed above.</p>
+    <p><b>3. Who may create metrics.</b> There is no authentication in this codebase yet
+    (<code>api/deps.py:34-42</code> is a permit-all placeholder). If metric creation should be restricted,
+    that needs an answer.</p></div>
+</section>
+
+</div>
+</body>
+</html>
