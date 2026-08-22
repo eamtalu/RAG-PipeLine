@@ -396,8 +396,25 @@ def _settledness(source: Sequence[Mapping[str, Any]]) -> tuple[Decimal | None, d
     return share, oldest
 
 
+async def _source_watermark(db: AsyncSession, customer_code: str) -> datetime | None:
+    """The newest `started_at` the PROJECTION holds for this tenant.
+
+    F4's first number, and the half that was missing until it was noticed in production: the column
+    existed, the API read it and `freshness()` divided by it, but nothing wrote it -- so `lag_seconds`
+    was always null and `stale` could never fire. A pipeline hours behind would have reported itself as
+    Provisional or Settled, which is the one thing F4 exists to prevent.
+
+    Read inside the fold's own transaction, per the column's contract: "as observed at the same moment
+    ... two reads would show a lag that is really just the gap between them". Observing it later would
+    fold the worker's own scheduling delay into the reported lag.
+    """
+    return await db.scalar(select(func.max(LogTransaction.started_at)).where(
+        LogTransaction.customer_code == customer_code))
+
+
 async def _update_state(db: AsyncSession, customer_code: str, *, folded: dict, quarantined: int,
-                        event_watermark: datetime | None, frontier: datetime | None,
+                        event_watermark: datetime | None, source_watermark: datetime | None,
+                        frontier: datetime | None,
                         settledness: tuple[Decimal | None, datetime | None],
                         now: datetime) -> None:
     """F5: write everything the status card shows, so the polled endpoint is ONE indexed lookup.
@@ -416,7 +433,8 @@ async def _update_state(db: AsyncSession, customer_code: str, *, folded: dict, q
 
     values = {
         "id": uuid.uuid4(), "customer_code": customer_code,
-        "analytics_watermark": event_watermark, "source_write_frontier": frontier,
+        "analytics_watermark": event_watermark, "source_watermark": source_watermark,
+        "source_write_frontier": frontier,
         "unsealed_share": share, "oldest_unsealed_at": oldest_unsealed,
         "facts_total": max(net_facts, 0), "quarantined_rows": quarantined,
         "revision": 1, "last_cycle_at": now, "last_error": None, "updated_at": now,
@@ -427,6 +445,11 @@ async def _update_state(db: AsyncSession, customer_code: str, *, folded: dict, q
         set_={
             "analytics_watermark": func.greatest(
                 AnalyticsTenantState.analytics_watermark, stmt.excluded.analytics_watermark),
+            # NOT forward-only, unlike the analytics watermark. This one describes the SOURCE, and the
+            # source legitimately shrinks: a date-range delete or a partition drop lowers the newest
+            # started_at. Clamping it forward would leave a permanent phantom lag that nothing could
+            # clear.
+            "source_watermark": stmt.excluded.source_watermark,
             "source_write_frontier": func.greatest(
                 AnalyticsTenantState.source_write_frontier, stmt.excluded.source_write_frontier),
             "unsealed_share": stmt.excluded.unsealed_share,
@@ -525,6 +548,7 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         await _update_state(
             db, customer_code, folded=folded, quarantined=quarantined,
             event_watermark=max((f["event_time"] for f in facts if f["event_time"]), default=None),
+            source_watermark=await _source_watermark(db, customer_code),
             frontier=max((r["created_at"] for r in source_rows if r.get("created_at")), default=None),
             settledness=_settledness(source_rows), now=now)
         # Stamped BEFORE the counts are refreshed, and the order is not cosmetic: `_refresh_counts`

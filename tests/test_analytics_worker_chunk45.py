@@ -633,3 +633,66 @@ def test_each_gate_describes_only_its_own_worker():
     worker_off = " ".join(_startup_log(analytics=False, reconcile=True, caplog=None))
     assert "Analytics worker disabled" in worker_off
     assert "reconcil" not in worker_off.lower()
+
+
+# ==================================================== F4's OTHER number (found in production)
+#
+# The first production fold reported `provisional: true, unsealed_share: 0.35903` -- and
+# `lag_seconds: null`. Settledness worked; COPY FRESHNESS did not, because nothing ever
+# wrote `source_watermark`. The column existed, the API read it, `freshness()` divided by
+# it, and no component populated it.
+#
+# The consequence is exactly what F4 was written to prevent: with source_watermark NULL,
+# `lag_seconds` is always None and `stale` is always False, so a pipeline that had fallen
+# hours behind would report itself as Provisional or Settled. The one state that means
+# "these numbers are missing recent activity" was unreachable.
+
+async def test_the_fold_records_the_source_watermark_too():
+    """F4 needs BOTH numbers. Without this the interface can never say "behind"."""
+    await _plant([{"at": T0, "qty": "10.0"}])
+    await n3.consume_tenant(CC)
+    st = await _state()
+    assert st.source_watermark is not None, \
+        "source_watermark was never written, so lag_seconds is always null and stale never fires"
+
+
+async def test_both_watermarks_come_from_the_same_snapshot():
+    """The column's own docstring: "as observed at the same moment ... two reads would show a
+    lag that is really just the gap between them". Reading the source watermark in a later
+    transaction would make the reported lag include the worker's own scheduling delay."""
+    import inspect
+    src = inspect.getsource(n3._consume_run)
+    assert src.index("source_watermark=") < src.index("await db.commit()"), \
+        "the source watermark must be observed inside the fold's own transaction"
+
+
+async def test_lag_is_computable_after_a_fold():
+    """The end-to-end property: a real freshness reading, not two nulls."""
+    from app.services.analytics import read as n6
+    await _plant([{"at": T0, "qty": "10.0"}])
+    await n3.consume_tenant(CC)
+    st = await _state()
+    f = n6.freshness(analytics_watermark=st.analytics_watermark,
+                     source_watermark=st.source_watermark,
+                     unsealed_share=st.unsealed_share,
+                     oldest_unsealed_at=st.oldest_unsealed_at)
+    assert f["lag_seconds"] is not None, "lag must be a number once a fold has happened"
+    assert f["lag_seconds"] >= 0
+
+
+async def test_the_source_watermark_is_the_projections_newest_row_not_the_folded_one():
+    """They differ precisely when analytics is behind, which is the only time the number
+    matters. Folding an OLD window while a newer transaction exists must report a lag."""
+    from sqlalchemy import select as _select, func as _func
+    from app.persistence.models.log_transaction import LogTransaction as _LT
+
+    # A newer transaction that the fold's window does NOT cover.
+    await _plant([{"at": T0 + timedelta(days=2), "qty": "1.0"}], ticket=False)
+    await _plant([{"at": T0, "qty": "10.0"}])
+    await n3.consume_tenant(CC)
+
+    st = await _state()
+    async with async_session() as db:
+        newest = await db.scalar(_select(_func.max(_LT.started_at)).where(_LT.customer_code == CC))
+    assert st.source_watermark == newest
+    assert st.analytics_watermark < st.source_watermark, "so the lag is non-zero"
