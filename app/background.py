@@ -26,6 +26,7 @@ from app.services.workers.embedding_worker import run_worker
 from app.services.workers.log_watcher import run_log_watcher
 from app.services.workers.log_stitch_worker import run_log_stitch_worker, pending_backlog
 from app.services.workers.analytics_worker import run_analytics_worker
+from app.services.workers.analytics_reconcile_worker import run_analytics_reconcile_worker
 from app.services.workers.ssh_log_fetcher import run_ssh_log_fetcher
 from app.services.workers.log_parse_worker import run_log_parse_worker, unfinished_ingest_objects
 from app.services.workers.log_partition_worker import run_log_partition_worker
@@ -114,6 +115,10 @@ async def start_background_tasks() -> list[asyncio.Task]:
     # queue depth would take that decision away from the operator for no safety gain.
     if settings.analytics_worker_enabled:
         tasks.append(asyncio.create_task(run_analytics_worker()))
+    # The auditor, gated separately from the folder: it must be possible to run the platform
+    # without the audit, and to run the audit alone while investigating.
+    if settings.analytics_reconcile_worker_enabled:
+        tasks.append(asyncio.create_task(run_analytics_reconcile_worker()))
     else:
         logger.info("Analytics worker disabled (analytics_worker_enabled=False); tickets accumulate "
                     "on analytics_pending_windows and are folded whenever it is switched on")

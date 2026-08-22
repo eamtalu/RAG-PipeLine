@@ -34,13 +34,16 @@ so a second runner would be harmless rather than an error.
 
 import asyncio
 import logging
-from datetime import date as date_type, datetime
+from dataclasses import dataclass
+from datetime import date as date_type, datetime, timedelta, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import distinct, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
 from app.persistence import partitioning as pt
+from app.persistence.models.analytics_pending_window import AnalyticsPendingWindow
+from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
 from app.services import consumer_cursors
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.settings import settings
@@ -204,11 +207,121 @@ async def periods_blocked_by_consumers(db: AsyncSession, periods: list[Period]) 
             if consumer_cursors.blocks_until(_period_bounds(*p)[1], min_position=floor)}
 
 
+#: The tables whose partitions the analytics health gate can hold. The SOURCE only.
+#:
+#: Deliberately not the analytics tables themselves: gating those on analytics health would be circular,
+#: and the fact table and its ledger are KEEP_FOREVER anyway. What has to survive a broken analytics
+#: platform is the data a repair would read.
+HEALTH_GATED: frozenset[str] = frozenset({"log_entries", "log_transactions", "log_entry_assignment"})
+
+
+@dataclass(frozen=True)
+class AnalyticsHealth:
+    """Whether analytics is in a state where losing source data would be unrecoverable.
+
+    `holding` is the answer; the two tenant lists are the explanation, because "retention is blocked"
+    with no named cause is an alert nobody can act on.
+    """
+
+    holding: bool
+    reason: str
+    unhealthy_tenants: list[str]
+    #: Tenants that ARE unhealthy but have been so for longer than the cap, so the hold was released for
+    #: them. Their totals are now permanently unprovable once the partitions go, which is why the release
+    #: is logged CRITICAL rather than merely noted.
+    expired_tenants: list[str]
+
+
+async def analytics_health(db: AsyncSession, *, now: datetime | None = None) -> AnalyticsHealth:
+    """Which tenants are broken in a way that makes source retention dangerous.
+
+    Unhealthy means a dead-lettered ticket (a range that will never be diffed) or a recorded cycle error.
+    It deliberately does NOT mean an open ticket: those are the normal steady state at roughly one every
+    70 seconds.
+
+    "Unused" is not "unhealthy". A tenant with no state, or one that has never folded (NULL frontier),
+    is not broken -- and the analytics worker ships disabled, so that is the normal condition on any
+    instance that has not adopted it. Reading it as a fault would freeze partition drops everywhere.
+
+    The hold is capped at `analytics_retention_hold_max_days`, measured from the tenant's last successful
+    cycle. Past that the hold is released and logged CRITICAL: blocking forever fills the disk, which is
+    a total outage, while losing the ability to prove one tenant's totals is contained. This is the same
+    trade `consumer_cursors` makes for a consumer that has stopped reporting.
+    """
+    now = now or datetime.now(timezone.utc)
+    rows = (await db.execute(select(
+        AnalyticsTenantState.customer_code, AnalyticsTenantState.last_error,
+        AnalyticsTenantState.last_cycle_at))).all()
+    if not rows:
+        return AnalyticsHealth(False, "no analytics state: the platform is unused here", [], [])
+
+    dead = {cc for cc in (await db.execute(select(distinct(AnalyticsPendingWindow.customer_code))
+                                          .where(AnalyticsPendingWindow.abandoned_at.isnot(None)))
+                          ).scalars().all()}
+
+    cap = timedelta(days=settings.analytics_retention_hold_max_days)
+    holding, expired, reasons = [], [], []
+    for cc, last_error, last_cycle_at in rows:
+        why = []
+        if cc in dead:
+            why.append("abandoned ticket(s)")
+        if last_error:
+            why.append("last cycle failed")
+        if not why:
+            continue
+        # A tenant that has never run cannot have been broken "since the epoch": NULL means never, and
+        # treating it as long-ago would expire the cap instantly and make this gate a no-op.
+        if last_cycle_at is not None and (now - last_cycle_at) > cap:
+            expired.append(cc)
+        else:
+            holding.append(cc)
+            reasons.append(f"{cc}: {', '.join(why)}")
+
+    if expired:
+        logger.critical(
+            "Analytics has been unhealthy for more than %d days for %s. RELEASING the source-retention "
+            "hold so the disk does not fill: their partitions can now be dropped, and once they are, "
+            "those tenants' totals become permanently unprovable. Fix analytics or accept the loss.",
+            settings.analytics_retention_hold_max_days, ", ".join(sorted(expired)))
+
+    return AnalyticsHealth(bool(holding),
+                           "; ".join(reasons) if reasons else "all tenants healthy",
+                           sorted(holding), sorted(expired))
+
+
+async def periods_blocked_by_analytics(db: AsyncSession, periods: list[Period],
+                                       *, now: datetime | None = None) -> set[Period]:
+    """Of `periods`, the SOURCE ones held because analytics could not be repaired without them.
+
+    Fails CLOSED, unlike the consumer-cursor default. An error reading health is not evidence that
+    analytics is fine, and the cost of holding one extra cycle is a day of disk against permanently
+    unprovable totals. The cap still bounds how long that can go on.
+    """
+    if not periods or not settings.analytics_retention_gate_enabled:
+        return set()
+    candidates = {p for p in periods if p[0] in HEALTH_GATED}
+    if not candidates:
+        return set()
+    try:
+        health = await analytics_health(db, now=now)
+    except Exception:
+        logger.exception("Could not read analytics health; HOLDING source retention this cycle rather "
+                         "than assuming it is safe to drop")
+        return candidates
+    if not health.holding:
+        return set()
+    logger.warning("Holding source retention for %d partition(s): %s",
+                   len(candidates), health.reason)
+    return candidates
+
+
 async def periods_blocked(db: AsyncSession, periods: list[Period]) -> set[Period]:
-    """Both holds, and both are required: Stage 2 must have finished writing a partition, and every
-    live consumer must have finished reading it."""
+    """Three holds, and all are required: Stage 2 must have finished WRITING a partition, every live
+    consumer must have finished READING it, and analytics must not be in a state where losing the source
+    would make a wrong total unprovable."""
     return (await periods_blocked_by_pending(db, periods)
-            | await periods_blocked_by_consumers(db, periods))
+            | await periods_blocked_by_consumers(db, periods)
+            | await periods_blocked_by_analytics(db, periods))
 
 
 async def days_blocked_by_pending(db: AsyncSession, days: list[date_type]) -> set[date_type]:

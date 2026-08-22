@@ -162,6 +162,30 @@ class Settings(BaseSettings):
     analytics_backoff_base_seconds: float = 5.0
     analytics_backoff_cap_seconds: float = 900.0
 
+    # Reconciliation worker (Phase 4). REPORT-ONLY: it never repairs, per Phase 7's sequencing.
+    # OFF by default for the same reason the analytics worker is -- it is only meaningful once something
+    # is folding.
+    analytics_reconcile_worker_enabled: bool = False
+    analytics_reconcile_interval_seconds: int = 3600
+    # The span one pass covers, and how far back it ENDS. The lag matters as much as the span: records
+    # are not final for 1.7 h on average, so a window reaching to now would report every still-unsealed
+    # contributor as drift, and a check that is always red is a check nobody reads.
+    analytics_reconcile_window_hours: int = 24
+    analytics_reconcile_lag_hours: int = 6
+
+    # Gate source retention on healthy analytics state (Phase 4).
+    #
+    # log_transactions partitions drop at 60 days. If analytics is broken when that happens, the source
+    # needed to repair it is gone -- so a wrong total stops being merely undetected and becomes
+    # unprovable. This hold buys time to fix analytics before the evidence expires.
+    #
+    # BOUNDED, and the bound is the important part. consumer_cursors already learned this: blocking
+    # retention forever fills the disk, which is a total outage, while losing the ability to prove one
+    # tenant's totals is contained. So the hold expires and releases at CRITICAL rather than growing
+    # into an incident of its own.
+    analytics_retention_gate_enabled: bool = True
+    analytics_retention_hold_max_days: int = 14
+
     # --- Ingest queue: decoupling SSH fetching from Stage 1 parsing (log_source_objects) ---
     # Master switch, ON since 2026-08-05. The fetcher downloads bytes, saves them, and commits a
     # log_source_objects ticket together with the file checkpoint in ONE transaction; log_parse_worker
