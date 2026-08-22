@@ -115,13 +115,22 @@ async def start_background_tasks() -> list[asyncio.Task]:
     # queue depth would take that decision away from the operator for no safety gain.
     if settings.analytics_worker_enabled:
         tasks.append(asyncio.create_task(run_analytics_worker()))
-    # The auditor, gated separately from the folder: it must be possible to run the platform
-    # without the audit, and to run the audit alone while investigating.
-    if settings.analytics_reconcile_worker_enabled:
-        tasks.append(asyncio.create_task(run_analytics_reconcile_worker()))
     else:
         logger.info("Analytics worker disabled (analytics_worker_enabled=False); tickets accumulate "
                     "on analytics_pending_windows and are folded whenever it is switched on")
+    # The auditor, gated separately from the folder: it must be possible to run the platform
+    # without the audit, and to run the audit alone while investigating.
+    #
+    # This `if/else` used to be inserted BETWEEN the gate above and its `else`, which silently
+    # re-bound that `else` to this condition -- so a disabled auditor announced "Analytics worker
+    # disabled (analytics_worker_enabled=False)" while the worker was running perfectly. Nothing
+    # failed and no test looked at what startup SAYS, so the false line was believed over the
+    # running process. Each gate now owns its own branches, and chunk 45 asserts it.
+    if settings.analytics_reconcile_worker_enabled:
+        tasks.append(asyncio.create_task(run_analytics_reconcile_worker()))
+    else:
+        logger.info("Analytics reconciliation worker disabled "
+                    "(analytics_reconcile_worker_enabled=False); nothing audits the folded data")
     # Remote SSH log fetcher: the per-customer poll supervisor. ON by default and idle until a source
     # is enabled from the frontend (ssh_log_fetcher_enabled is only a global kill-switch).
     if settings.ssh_log_fetcher_enabled:

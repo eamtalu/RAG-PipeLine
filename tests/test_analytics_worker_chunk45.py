@@ -564,3 +564,72 @@ def test_the_cycle_stamps_tickets_after_it_applies_them():
     src = inspect.getsource(n3._consume_run)
     assert src.index("_apply(") < src.index("consumed_at=now")
     assert src.index("consumed_at=now") < src.index("await db.commit()")
+
+
+# ==================================================== startup logging (found in production)
+#
+# A log line that LIES about the system's state cost real time: with the worker
+# correctly enabled and the auditor correctly disabled, startup printed
+# "Analytics worker disabled (analytics_worker_enabled=False)". It was believed over the
+# running process, and the wrong thing was investigated for an hour.
+#
+# Cause: the reconcile-worker `if` was inserted between the analytics worker's `if` and
+# its `else`, silently re-binding that `else` to the new condition. Nothing failed --
+# both branches are syntactically fine, and no test looked at what startup SAYS.
+
+def _startup_log(analytics: bool, reconcile: bool, caplog) -> list[str]:
+    """The messages `start_background_tasks` emits for a given flag pair.
+
+    Read from the source rather than by running it: starting the real loops would open
+    database connections and SSH pollers. What is under test is the branch structure, and
+    that is what the source shows.
+    """
+    import ast
+    import inspect
+    import app.background as bg
+
+    tree = ast.parse(inspect.getsource(bg.start_background_tasks))
+    out: list[str] = []
+    flags = {"analytics_worker_enabled": analytics,
+             "analytics_reconcile_worker_enabled": reconcile}
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        # only the two single-attribute gates we care about
+        if not (isinstance(test, ast.Attribute) and test.attr in flags):
+            continue
+        branch = node.body if flags[test.attr] else node.orelse
+        for stmt in ast.walk(ast.Module(body=branch, type_ignores=[])):
+            if isinstance(stmt, ast.Constant) and isinstance(stmt.value, str):
+                out.append(stmt.value)
+    return out
+
+
+def test_startup_does_not_claim_the_worker_is_disabled_when_it_is_enabled():
+    """The exact production symptom. This is the assertion whose absence let a false
+    message ship, and it fails loudly if the two gates' branches ever cross again."""
+    messages = " ".join(_startup_log(analytics=True, reconcile=False, caplog=None))
+    assert "Analytics worker disabled" not in messages, (
+        "startup announced the analytics worker as disabled while it was enabled: "
+        + messages)
+
+
+def test_startup_does_say_so_when_the_worker_really_is_disabled():
+    """The other direction, so the fix is not simply deleting the message."""
+    messages = " ".join(_startup_log(analytics=False, reconcile=False, caplog=None))
+    assert "Analytics worker disabled" in messages
+
+
+def test_each_gate_describes_only_its_own_worker():
+    """The structural rule the bug broke: the reconcile gate must not talk about the
+    folder, and the folder's gate must not talk about the auditor. Sharing a branch is
+    how one flag came to report on the other."""
+    reconcile_off = " ".join(_startup_log(analytics=True, reconcile=False, caplog=None))
+    assert "reconcil" in reconcile_off.lower(), \
+        "the disabled auditor must name ITSELF, not the folder"
+
+    worker_off = " ".join(_startup_log(analytics=False, reconcile=True, caplog=None))
+    assert "Analytics worker disabled" in worker_off
+    assert "reconcil" not in worker_off.lower()
