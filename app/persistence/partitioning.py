@@ -99,6 +99,30 @@ PARTITIONED: tuple[PartitionedTable, ...] = (
     PartitionedTable("log_entry_assignment", "entry_ts",
                      "a copy of its entry's timestamp, so it co-partitions with log_entries",
                      grain=Grain.daily),
+
+    # --- analytics platform (Phase 1) ---
+    # Every one states its grain explicitly, and every one has a matching retention policy in
+    # log_partition_worker (KEEP_FOREVER or RETENTION_DAYS). A table registered here WITHOUT a policy
+    # silently inherits the log tables' 60-day retention, which for the fact table and its ledger would
+    # mean the worker dropping the two things nothing can rebuild.
+    #
+    # `analytics_monthly_rollups` is deliberately absent: roughly 300K rows over five years, so there is
+    # nothing worth pruning and partitioning it would add planning cost for no gain.
+    PartitionedTable("analytics_facts", "event_time",
+                     "the transaction's own start instant; monthly because it is kept forever",
+                     grain=Grain.monthly),
+    PartitionedTable("analytics_fact_ledger", "recorded_at",
+                     "when the version was written, not when it happened: the ledger is append-only",
+                     grain=Grain.monthly),
+    PartitionedTable("analytics_hourly_rollups", "bucket_start",
+                     "start of the hour; cut DAILY because a day of hourly rows is what retention drops",
+                     grain=Grain.daily),
+    PartitionedTable("analytics_daily_rollups", "business_date",
+                     "the tenant-LOCAL day; yearly because it is kept forever and stays small",
+                     grain=Grain.yearly),
+    PartitionedTable("analytics_quality_issues", "detected_at",
+                     "when the row was quarantined; monthly, bounded at a year",
+                     grain=Grain.monthly),
 )
 
 BY_TABLE: dict[str, PartitionedTable] = {t.table: t for t in PARTITIONED}
@@ -199,6 +223,30 @@ def partition_name(table: str, day: date_type) -> str:
 
 def default_partition_name(table: str) -> str:
     return f"{table}_{_DEFAULT_SUFFIX}"
+
+
+#: Regex fragment matching any suffix a partition of ours can carry, at ANY grain, plus DEFAULT.
+#: Derived from `_SUFFIX_FORMAT` rather than written out, so adding a grain cannot leave a consumer
+#: behind. Alembic's autogenerate filter is the consumer that matters: a partition it fails to
+#: recognise is reflected as an unknown table, and it proposes DROPPING it and its indexes.
+_SUFFIX_PATTERN = "|".join(sorted(
+    {fmt.replace("%Y", r"\d{4}").replace("%m", r"\d{2}").replace("%d", r"\d{2}")
+     for fmt in _SUFFIX_FORMAT.values()},
+    key=len, reverse=True)) + f"|{_DEFAULT_SUFFIX}"
+
+
+def partition_name_pattern() -> str:
+    """A regex matching every partition name of every partitioned table, at every grain.
+
+    Lives here because this module is the single source of truth for what a partition is called, and the
+    one consumer that gets it wrong does so catastrophically: Alembic autogenerate reflects an
+    unrecognised partition as an unknown table and proposes dropping it.
+
+    Matches the PARENT NAME plus a grain-shaped suffix rather than a bare prefix, so a real table that
+    merely starts with the same characters is never hidden.
+    """
+    parents = "|".join(t.table for t in PARTITIONED)
+    return rf"(?:{parents})_(?:{_SUFFIX_PATTERN})"
 
 
 def _bound(day: date_type) -> str:
@@ -344,19 +392,32 @@ async def covered_days(db, table: str) -> list[date_type]:
     return [d for d in rows if d is not None]
 
 
-async def ensure_coverage(db, *, days: list[date_type]) -> int:
-    """Create any missing partition covering `days`, across every partitioned table. Returns how many
-    were created. Safe to re-run — the DDL is `IF NOT EXISTS`.
+async def ensure_coverage(db, *, days: list[date_type],
+                         tables: tuple[str, ...] | None = None) -> int:
+    """Create any missing partition covering `days`. Returns how many were created. Safe to re-run —
+    the DDL is `IF NOT EXISTS`.
 
     `days` is a list of DAYS the caller needs covered, not a list of partitions. Each table maps them
     onto its own grain and de-duplicates, so a month of requested days is one CREATE for a monthly
     table and thirty for a daily one. That keeps every caller grain-agnostic: the worker asks for
     "today plus the precreate window" and the migration asks for the span of existing data, and neither
     has to know how any table is cut.
+
+    `tables` restricts which tables are provisioned; None means all of them, which is what the runway
+    worker and the log-table migration both want. The analytics worker passes only its own destinations:
+    it is a strict reader of the ingestion pipeline, and creating log partitions for a historic range
+    would hand retention new partitions to drop on tables it has no business touching.
+
+    An unknown table name raises rather than being skipped. A typo would otherwise provision nothing and
+    look exactly like a healthy no-op, which is precisely how a destination goes unprovisioned unnoticed.
     """
     from sqlalchemy import text
+    if tables is None:
+        selected = PARTITIONED
+    else:
+        selected = tuple(BY_TABLE[name] for name in tables)   # KeyError on a typo, deliberately
     created = 0
-    for t in PARTITIONED:
+    for t in selected:
         for start in sorted({period_start(t.grain, d) for d in days}):
             if await partition_exists(db, t.table, start):
                 continue

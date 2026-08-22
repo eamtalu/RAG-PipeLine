@@ -133,15 +133,29 @@ def test_expired_days_keeps_the_boundary_day():
 def test_every_partitioned_table_declares_a_key_that_exists_on_its_model():
     """Guards the config against a rename: the key column is named as a string, so a model change
     would otherwise only surface as a runtime SQL error during a migration."""
-    models = {"log_entries": LogEntry, "log_transactions": LogTransaction,
-              "log_entry_assignment": LogEntryAssignment}
+    from app.persistence import models as all_models
+    by_table = {getattr(all_models, n).__tablename__: getattr(all_models, n)
+                for n in all_models.__all__
+                if hasattr(getattr(all_models, n), "__tablename__")}
     for t in pt.PARTITIONED:
-        assert t.key in models[t.table].__table__.columns, f"{t.table}.{t.key} is gone"
+        model = by_table.get(t.table)
+        assert model is not None, f"{t.table} is partitioned but has no registered model"
+        assert t.key in model.__table__.columns, f"{t.table}.{t.key} is gone"
 
 
-def test_the_three_hot_tables_are_all_configured():
+def test_exactly_the_expected_tables_are_configured():
+    """Was "the three hot tables". Phase 1 added five analytics tables, so the set is eight.
+
+    Kept as an EXACT set rather than a subset check on purpose: a table appearing here without being
+    considered is how one silently inherits the log tables' 60-day retention, which for the fact table
+    and its ledger would mean the worker dropping the two things nothing can rebuild.
+    """
     assert {t.table for t in pt.PARTITIONED} == {
-        "log_entries", "log_transactions", "log_entry_assignment"}
+        # Stage 1 and 2, daily.
+        "log_entries", "log_transactions", "log_entry_assignment",
+        # Analytics (Phase 1). Grain and retention are asserted in test_analytics_schema_chunk41.
+        "analytics_facts", "analytics_fact_ledger",
+        "analytics_hourly_rollups", "analytics_daily_rollups", "analytics_quality_issues"}
 
 
 def test_entries_and_their_assignments_are_co_partitioned_on_the_same_grain():
@@ -188,13 +202,29 @@ async def test_every_table_has_a_default_partition_for_null_keys(db):
 
 async def test_the_partition_key_stayed_nullable(db):
     """If a later change put the key in a PRIMARY KEY, PostgreSQL would silently make it NOT NULL and
-    every NULL-timestamp entry would become un-insertable."""
+    every NULL-timestamp entry would become un-insertable.
+
+    That applies to the tables whose key comes from PARSED LOG DATA, where a NULL is legitimate: the
+    parser genuinely produces entries whose timestamp will not parse, and `analytics_facts.event_time`
+    inherits that nullability from `log_transactions.started_at`.
+
+    It does NOT apply to keys the analytics worker COMPUTES. A rollup bucket, a ledger write instant and
+    a quarantine timestamp are always known, so those are NOT NULL by design: allowing a NULL there
+    would mean a row that no bucket owns, sitting in a DEFAULT partition that no reader prunes and no
+    retention pass reclaims. They keep their DEFAULT partition anyway, as insurance against a key
+    outside the provisioned runway rather than against a NULL.
+    """
+    # Key nullable because it is parsed from a log line and may legitimately be absent.
+    FROM_LOG_DATA = {"log_entries", "log_transactions", "log_entry_assignment", "analytics_facts"}
     for t in pt.PARTITIONED:
         nullable = await db.scalar(text("""
             SELECT is_nullable FROM information_schema.columns
             WHERE table_name = :tbl AND column_name = :col
         """), {"tbl": t.table, "col": t.key})
-        assert nullable == "YES", f"{t.table}.{t.key} became NOT NULL"
+        expected = "YES" if t.table in FROM_LOG_DATA else "NO"
+        assert nullable == expected, (
+            f"{t.table}.{t.key} is {nullable}, expected {expected}: a parsed key must stay nullable, "
+            f"a computed one must not")
 
 
 async def test_identity_is_a_unique_that_contains_the_key_but_does_not_lead_with_it(db):

@@ -57,18 +57,30 @@ _LAG_ONE_DAY = frozenset({"log_entries", "log_entry_assignment"})
 #: Tables whose partitions are NEVER dropped. `droppable_days` returns nothing for these, whatever
 #: `log_partition_retention_days` is set to, so no configuration change can reach them.
 #:
-#: Empty today, and deliberately so: this change is then provably behaviour-preserving for the three
-#: log tables. The analytics fact table, its ledger and the daily and monthly rollups belong here when
-#: they land (see docs/analytics-ml-architecture/final_architecture.md, section 6). They are not merely
-#: long-lived: their raw source is dropped at 60 days, so a dropped fact partition cannot be rebuilt
-#: from anything. Before this set existed there was no way to express that, and registering such a
-#: table would have had the worker delete it a month at a time.
-KEEP_FOREVER: frozenset[str] = frozenset()
+#: The analytics fact table, its ledger and the daily rollups. They are not merely long-lived: their raw
+#: source is dropped at 60 days, so a dropped partition here cannot be rebuilt from anything at all.
+#: Before this set existed there was no way to express that, and registering such a table would have had
+#: the worker delete it a month at a time.
+#:
+#: `analytics_monthly_rollups` is kept forever too but is absent, because it is not partitioned: this set
+#: governs partition drops and nothing else.
+KEEP_FOREVER: frozenset[str] = frozenset({
+    "analytics_facts",
+    "analytics_fact_ledger",
+    "analytics_daily_rollups",
+})
 
 #: Retention in days for tables that do NOT follow `log_partition_retention_days`, keyed by table.
-#: Empty today. The plan wants 90 days for the hourly rollups and a year for the quality issues.
-#: A table listed in KEEP_FOREVER ignores this.
-RETENTION_DAYS: dict[str, int] = {}
+#: A table listed in KEEP_FOREVER ignores this. Every partitioned analytics table appears in one
+#: collection or the other: appearing in neither means silently inheriting the log tables' 60 days, and
+#: a test asserts that cannot happen.
+RETENTION_DAYS: dict[str, int] = {
+    # The shortest-lived level: a request older than this resolves to the daily grain anyway.
+    "analytics_hourly_rollups": 90,
+    # Long enough to explain a total that was questioned months later, bounded so a permanently broken
+    # source cannot grow it forever.
+    "analytics_quality_issues": 365,
+}
 
 
 async def db_today(db: AsyncSession) -> date_type:

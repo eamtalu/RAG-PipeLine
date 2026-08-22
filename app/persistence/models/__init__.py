@@ -25,6 +25,15 @@ from app.persistence.models.notification import (
     NotificationDelivery,
 )
 
+from app.persistence.models.analytics_pending_window import AnalyticsPendingWindow
+from app.persistence.models.analytics_fact import (AnalyticsFact, AnalyticsFactLedger,
+                                                   QuantityClassification)
+from app.persistence.models.analytics_metric import AnalyticsMetric, MetricStatus
+from app.persistence.models.analytics_rollup import (AnalyticsHourlyRollup, AnalyticsDailyRollup,
+                                                     AnalyticsMonthlyRollup, DIMENSION_SLOTS)
+from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
+from app.persistence.models.analytics_quality_issue import AnalyticsQualityIssue
+
 __all__ = [
     "Base",
     "Job",
@@ -50,4 +59,17 @@ __all__ = [
     "NotificationRule",
     "NotificationEvent",
     "NotificationDelivery",
+    # --- analytics platform (Phase 1) ---
+    "AnalyticsPendingWindow",
+    "AnalyticsFact",
+    "AnalyticsFactLedger",
+    "QuantityClassification",
+    "AnalyticsMetric",
+    "MetricStatus",
+    "AnalyticsHourlyRollup",
+    "AnalyticsDailyRollup",
+    "AnalyticsMonthlyRollup",
+    "DIMENSION_SLOTS",
+    "AnalyticsTenantState",
+    "AnalyticsQualityIssue",
 ]

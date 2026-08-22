@@ -29,14 +29,20 @@ def _include_object(obj, name, type_, reflected, compare_to):
     unknown tables and proposes dropping every one of those indexes — a revision that would be
     silently catastrophic if anyone ran it.
 
-    Matching on the parent name plus a date-or-default suffix rather than a bare prefix, so a real
-    table that merely starts with the same characters is never hidden.
+    Matching on the parent name plus a grain-shaped suffix rather than a bare prefix, so a real table
+    that merely starts with the same characters is never hidden.
+
+    The pattern comes from `partitioning.partition_name_pattern()` rather than being written here. It
+    used to be a hardcoded daily shape (`\d{4}_\d{2}_\d{2}`), which silently stopped matching the
+    moment the analytics tables introduced MONTHLY (`_2026_08`) and YEARLY (`_2026`) partitions -- so
+    autogenerate would have proposed dropping every one of them. Deriving it keeps that from recurring
+    when a grain is next added.
     """
-    parents = "|".join(t.table for t in _pt.PARTITIONED)
-    if re.fullmatch(rf"(?:{parents})_(?:\d{{4}}_\d{{2}}_\d{{2}}|default)", name or ""):
+    pattern = _pt.partition_name_pattern()
+    if re.fullmatch(pattern, name or ""):
         return False
     if type_ == "index" and getattr(obj, "table", None) is not None and re.fullmatch(
-            rf"(?:{parents})_(?:\d{{4}}_\d{{2}}_\d{{2}}|default)", obj.table.name):
+            pattern, obj.table.name):
         return False
     return True
 

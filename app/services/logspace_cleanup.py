@@ -16,6 +16,10 @@ Cascade map (so this stays correct as the schema grows):
   - Deleting `notification_events` CASCADEs its deliveries; deleting `log_ssh_sources` CASCADEs its
     file checkpoints.
   - Deleting the `customers` row CASCADEs customer_display_names + logspace_presence.
+  - The nine `analytics_*` tables have NO foreign key of any kind: `customer_code` is a soft tenant key
+    there, exactly as it is on `log_entry_assignment`. So nothing cascades on their behalf and every one
+    is deleted explicitly (F13). A table missing from that loop leaves its rows behind forever, and
+    nobody looks at a deleted tenant's data again.
 The remaining customer_code-keyed tables have no job/tenant FK, so they are deleted explicitly.
 """
 
@@ -36,6 +40,13 @@ from app.persistence.models.log_ssh_file_checkpoint import LogSshFileCheckpoint
 from app.persistence.models.log_ssh_fetch_run import LogSshFetchRun
 from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_source_object import LogSourceObject
+from app.persistence.models.analytics_pending_window import AnalyticsPendingWindow
+from app.persistence.models.analytics_fact import AnalyticsFact, AnalyticsFactLedger
+from app.persistence.models.analytics_metric import AnalyticsMetric
+from app.persistence.models.analytics_rollup import (AnalyticsHourlyRollup, AnalyticsDailyRollup,
+                                                     AnalyticsMonthlyRollup)
+from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
+from app.persistence.models.analytics_quality_issue import AnalyticsQualityIssue
 from app.persistence.storage.local import LocalStorage
 from app.settings import settings
 from app.persistence.models.notification import (
@@ -109,6 +120,20 @@ async def purge_logspace(db: AsyncSession, customer_code: str) -> bool:
     #     partitions can be dropped — so the jobs cascade below never reaches them.
     await db.execute(delete(LogEntryAssignment).where(
         LogEntryAssignment.customer_code == customer_code))
+
+    # 2a-analytics) F13: the analytics platform keys on `customer_code`, a SOFT tenant key with no
+    #     foreign key anywhere, exactly like log_entry_assignment. So nothing cascades on its behalf and
+    #     each table must be deleted explicitly. A table missing from this list leaves its rows behind
+    #     forever, and nobody looks at a deleted tenant's data again.
+    #
+    #     Note this is the OPPOSITE of what F12 asks for on the ordinary delete paths. There, a window's
+    #     contents changed and the fix is to publish a ticket so the range diff corrects the totals.
+    #     Here the TENANT is going away, so correcting its totals is meaningless: publishing a ticket
+    #     would have the worker try to fold a tenant that no longer exists.
+    for _analytics in (AnalyticsQualityIssue, AnalyticsMonthlyRollup, AnalyticsDailyRollup,
+                       AnalyticsHourlyRollup, AnalyticsFactLedger, AnalyticsFact,
+                       AnalyticsTenantState, AnalyticsMetric, AnalyticsPendingWindow):
+        await db.execute(delete(_analytics).where(_analytics.customer_code == customer_code))
 
     # 2b) Jobs → cascades chunks, chunks_entity, embedding_queue, log_entries, log_transactions.
     await db.execute(delete(Job).where(Job.customer_code == customer_code))

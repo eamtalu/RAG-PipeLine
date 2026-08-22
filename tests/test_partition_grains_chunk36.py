@@ -52,11 +52,17 @@ def _probe(grain: pt.Grain) -> pt.PartitionedTable:
 
 
 # ============================================================== 1. grain arithmetic (pure)
-def test_the_three_grains_exist_and_the_real_log_tables_are_all_daily():
-    """The log tables must not change behaviour. This is the regression guard for that."""
+def test_the_three_grains_exist_and_the_LOG_tables_are_still_all_daily():
+    """Was "the real log tables", asserted over every registered table -- correct when only the three
+    log tables existed, and wrong once Phase 1 registered monthly and yearly analytics tables.
+
+    Narrowed to what it was actually guarding: the three production tables must not change grain.
+    Whether the analytics tables have the right one is asserted in test_analytics_schema_chunk41, next
+    to the retention policy it has to agree with.
+    """
     assert {g.value for g in pt.Grain} == {"daily", "monthly", "yearly"}
-    for t in pt.PARTITIONED:
-        assert t.grain is pt.Grain.daily, f"{t.table} silently changed grain"
+    for table in ("log_entries", "log_transactions", "log_entry_assignment"):
+        assert pt.grain_of(table) is pt.Grain.daily, f"{table} silently changed grain"
 
 
 def test_period_start_floors_a_date_into_its_partition():
@@ -220,10 +226,29 @@ def test_a_per_table_retention_override_is_respected(monkeypatch):
     assert pw.droppable_days(PROBE, [just_outside], today) == [just_outside]
 
 
-def test_the_forever_set_and_override_map_are_empty_today():
-    """So this change is provably behaviour-preserving for the three log tables."""
-    assert pw.KEEP_FOREVER == frozenset()
-    assert pw.RETENTION_DAYS == {}
+def test_every_entry_in_the_retention_collections_is_a_registered_partitioned_table():
+    """Was "both are empty today", which was true when the grains landed and is deliberately false now
+    that Phase 1 has registered the analytics tables.
+
+    What still needs guarding is that neither collection names something that does not exist: a typo
+    there fails OPEN, silently leaving the real table on the log tables' 60-day retention.
+    """
+    for table in pw.KEEP_FOREVER | set(pw.RETENTION_DAYS):
+        assert table in pt.BY_TABLE, (
+            f"{table} has a retention policy but is not a registered partitioned table; a typo here "
+            f"fails open and leaves the real table on the log default")
+
+
+def test_the_log_tables_are_untouched_by_those_collections():
+    """The regression that matters: the three production tables must still follow
+    `log_partition_retention_days`, with only the documented one-day entries lag."""
+    from app.settings import settings
+    base = settings.log_partition_retention_days
+    assert pw.retention_days_for("log_transactions") == base
+    assert pw.retention_days_for("log_entries") == base + 1
+    assert pw.retention_days_for("log_entry_assignment") == base + 1
+    for table in ("log_entries", "log_transactions", "log_entry_assignment"):
+        assert table not in pw.KEEP_FOREVER and table not in pw.RETENTION_DAYS
 
 
 def test_log_table_retention_is_unchanged_including_the_one_day_lag():
