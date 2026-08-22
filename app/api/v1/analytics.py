@@ -1,0 +1,258 @@
+"""N7: the analytics read API. Phase 5.
+
+Every endpoint takes the tenant through `get_current_customer` and the session through `get_session`, so
+a typo'd tenant is a clean 404 and never a silent cross-tenant query. That is the existing convention and
+the reason it exists applies here more than anywhere: a chart that quietly answered for the wrong tenant
+would look entirely plausible.
+
+Three things here are shaped by measurements rather than taste.
+
+**`/status` reads exactly ONE row** (F5). The browser polls it every 2 seconds per tab across four
+gunicorn workers. The original design computed counts over several tables per poll; the worker now writes
+every field this endpoint needs into `analytics_tenant_state`, so this is one indexed lookup plus an
+ETag. There is a test asserting the query count, because the natural way to add a field to this response
+is to join another table.
+
+**`/series` never returns a finished answer.** It returns additive role values per bucket - sums and
+counts - and the caller divides. Invariant 8 does not stop at the rollup table: an endpoint that returned
+an average would be the one place twelve monthly averages could get averaged into a year.
+
+**There is no `POST /analytics/backfill`.** The plan lists one; correction log D8 cancelled it. An
+endpoint that 202s and then folds nothing would be worse than its absence, and an endpoint that DID
+backfill would contradict a decision taken deliberately. `POST /analytics/reconcile` remains, because
+that is the half of Phase 4 that survived.
+"""
+
+import hashlib
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_customer
+from app.config.database import get_session
+from app.persistence.models.analytics_metric import AnalyticsMetric
+from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
+from app.services.analytics import definition as d
+from app.services.analytics import read as n6
+from app.services.analytics import reconcile as rc
+from app.services.analytics import registry
+from app.services.mnp_log_ingestion.pipeline.time_bounds import UtcWindow
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+#: Hard cap on a breakdown's top-N. Keyset pagination is not meaningful for a ranked aggregate, so the
+#: bound is the cap itself, and it is small because a chart with 500 bars is not a chart.
+_MAX_TOP_N = 200
+
+#: Default series window when the caller gives none. A day, not "everything": an unbounded default is how
+#: a read endpoint becomes an outage on the first curious click.
+_DEFAULT_SPAN = timedelta(days=1)
+
+
+def _window(start: datetime | None, end: datetime | None) -> UtcWindow:
+    end = end or datetime.now(timezone.utc)
+    start = start or (end - _DEFAULT_SPAN)
+    if start >= end:
+        raise HTTPException(400, detail="`start` must be before `end`.")
+    return UtcWindow(start=start, end=end)
+
+
+async def _state(db: AsyncSession, customer: str) -> AnalyticsTenantState | None:
+    """The ONE row. Every field the status card shows lives here by design (F5)."""
+    return (await db.execute(select(AnalyticsTenantState).where(
+        AnalyticsTenantState.customer_code == customer))).scalar_one_or_none()
+
+
+@router.get("/status")
+async def analytics_status(response: Response,
+                           customer: str = Depends(get_current_customer),
+                           db: AsyncSession = Depends(get_session)):
+    """Freshness and health for one tenant. EXACTLY one row read, plus an ETag.
+
+    Both freshness numbers (F4), because one cannot say what the user needs to know: `lag_seconds`
+    answers "am I behind", and `unsealed_share` answers "is what I have still going to move". A window
+    with unsealed contributors is PROVISIONAL, not stale - different words for the user and different
+    actions for an operator.
+
+    The ETag is the tenant revision (A5), which the worker bumps in the same commit as the work it
+    describes. Keying it off anything computed here would let a 304 be served over changed data.
+    """
+    state = await _state(db, customer)
+    if state is None:
+        # Not an error: the worker ships disabled, so this is the normal state until it is switched on.
+        # Saying so explicitly beats zeros, which would render as a healthy, empty chart.
+        body = {"customer_code": customer, "configured": False,
+                "detail": "analytics has not folded anything for this tenant yet",
+                "freshness": n6.freshness(analytics_watermark=None, source_watermark=None,
+                                          unsealed_share=None, oldest_unsealed_at=None)}
+        response.headers["ETag"] = '"unconfigured"'
+        return body
+
+    freshness = n6.freshness(analytics_watermark=state.analytics_watermark,
+                            source_watermark=state.source_watermark,
+                            unsealed_share=state.unsealed_share,
+                            oldest_unsealed_at=state.oldest_unsealed_at)
+    response.headers["ETag"] = f'"{state.revision}"'
+    return {
+        "customer_code": customer,
+        "configured": True,
+        "revision": state.revision,
+        "freshness": {**freshness,
+                      "analytics_watermark": _iso(freshness["analytics_watermark"]),
+                      "source_watermark": _iso(freshness["source_watermark"]),
+                      "oldest_unsealed_at": _iso(freshness["oldest_unsealed_at"]),
+                      "unsealed_share": (None if freshness["unsealed_share"] is None
+                                         else str(freshness["unsealed_share"]))},
+        "queue": {"open_tickets": state.open_tickets,
+                  "abandoned_tickets": state.abandoned_tickets},
+        "volume": {"facts_total": state.facts_total,
+                   "quarantined_rows": state.quarantined_rows},
+        "last_cycle_at": _iso(state.last_cycle_at),
+        "last_error": state.last_error,
+        # D8: there is no backfill, so the interface must say "no history before here" rather than draw
+        # an empty chart, which reads as zero activity.
+        "history_starts_at": _iso(state.analytics_watermark and state.last_cycle_at and
+                                  state.analytics_watermark),
+        "backfilled": False,
+    }
+
+
+def _iso(value):
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+@router.get("/metrics")
+async def list_metrics(customer: str = Depends(get_current_customer),
+                       db: AsyncSession = Depends(get_session),
+                       limit: int = Query(default=50, ge=1, le=200)):
+    """This tenant's metric definitions. Bounded, and no default COUNT(*).
+
+    Reads the ROWS rather than reporting `CONSUMPTION`: the whole point of the registry is that the code
+    does not know which metrics exist.
+    """
+    rows = (await db.execute(select(AnalyticsMetric).where(
+        AnalyticsMetric.customer_code == customer)
+        .order_by(AnalyticsMetric.name).limit(limit))).scalars().all()
+    return {"metrics": [{
+        "id": str(r.id), "name": r.name, "status": r.status,
+        "dimensions": r.dimensions, "grains": r.grains,
+        "measures": [m.get("name") for m in (r.measures or [])],
+        "filter": r.filter,
+        # NULL means no history has been built, which after D8 is the permanent state for every metric.
+        "backfilled_through": _iso(r.backfilled_through),
+        "created_by": r.created_by,
+    } for r in rows]}
+
+
+async def _definition(db: AsyncSession, customer: str, name: str):
+    for definition_id, definition in await registry.active_definitions(db, customer):
+        if definition.name == name:
+            return definition_id, definition
+    raise HTTPException(404, detail=f"No ACTIVE metric named {name!r} for this tenant. "
+                                    f"GET /analytics/metrics lists what exists.")
+
+
+@router.get("/series")
+async def analytics_series(customer: str = Depends(get_current_customer),
+                          db: AsyncSession = Depends(get_session),
+                          metric: str = Query(default="consumption"),
+                          measure: str = Query(default="quantity"),
+                          start: datetime | None = Query(default=None),
+                          end: datetime | None = Query(default=None),
+                          group_by: str | None = Query(default=None)):
+    """One measure over time, two-tier.
+
+    Returns additive ROLES per bucket, never a finished answer. The response states which grain it chose
+    and which spans were read live, so a caller can tell a settled number from a provisional one instead
+    of having to trust that they are the same.
+    """
+    window = _window(start, end)
+    definition_id, definition = await _definition(db, customer, metric)
+    if measure not in {m.name for m in definition.measures}:
+        raise HTTPException(400, detail=f"{metric!r} has no measure {measure!r}; it has "
+                                        f"{sorted(m.name for m in definition.measures)}.")
+    dims = tuple(x.strip() for x in (group_by or "").split(",") if x.strip())
+    try:
+        decision = n6.resolve(definition, group_by=dims)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from None
+
+    state = await _state(db, customer)
+    out = await n6.series(db, customer, definition_id, definition, window=window, measure=measure,
+                          group_by=dims,
+                          watermark=state.analytics_watermark if state else None)
+    return {**out, "metric": metric, "ad_hoc": decision.ad_hoc, "resolution": decision.reason,
+            "window": {"start": window.start.isoformat(), "end": window.end.isoformat()}}
+
+
+@router.get("/breakdown")
+async def analytics_breakdown(customer: str = Depends(get_current_customer),
+                             db: AsyncSession = Depends(get_session),
+                             metric: str = Query(default="consumption"),
+                             measure: str = Query(default="quantity"),
+                             dimension: str = Query(...),
+                             start: datetime | None = Query(default=None),
+                             end: datetime | None = Query(default=None),
+                             top: int = Query(default=10, ge=1, le=_MAX_TOP_N)):
+    """Top-N by one dimension for a window. Bounded by `top`, capped at _MAX_TOP_N."""
+    window = _window(start, end)
+    definition_id, definition = await _definition(db, customer, metric)
+    try:
+        decision = n6.resolve(definition, group_by=(dimension,))
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from None
+
+    state = await _state(db, customer)
+    out = await n6.series(db, customer, definition_id, definition, window=window, measure=measure,
+                          group_by=(dimension,),
+                          watermark=state.analytics_watermark if state else None)
+
+    totals: dict = {}
+    for point in out["points"]:
+        key = point["dimensions"][0] if point["dimensions"] else None
+        roles = point["roles"]
+        bucket = totals.setdefault(key, {"sum_value": 0, "count_value": 0})
+        from decimal import Decimal as _D
+        bucket["sum_value"] = str(_D(str(bucket["sum_value"])) + _D(roles.get("sum_value", "0")))
+        bucket["count_value"] += roles.get("count_value", 0) or 0
+
+    from decimal import Decimal as _D
+    ranked = sorted(totals.items(), key=lambda kv: -abs(_D(str(kv[1]["sum_value"]))))[:top]
+    return {"metric": metric, "measure": measure, "dimension": dimension, "grain": out["grain"],
+            "ad_hoc": decision.ad_hoc, "resolution": decision.reason,
+            "window": {"start": window.start.isoformat(), "end": window.end.isoformat()},
+            "rows": [{"value": k, **v} for k, v in ranked]}
+
+
+@router.post("/reconcile", status_code=202)
+async def trigger_reconcile(customer: str = Depends(get_current_customer),
+                           db: AsyncSession = Depends(get_session),
+                           start: datetime | None = Query(default=None),
+                           end: datetime | None = Query(default=None),
+                           repair: bool = Query(default=False)):
+    """Run the three reconciliation checks now, for one tenant. 202 with the report.
+
+    `repair` defaults to FALSE, matching the worker and Phase 7's sequencing. A repair never invents a
+    number: a missing fact publishes a ticket, a drifted bucket is re-folded, and an orphaned entry gets
+    neither because it needs a Stage 2 regroup.
+    """
+    window = _window(start, end)
+    report = await rc.reconcile_tenant(db, customer, window=window, repair=repair)
+    if repair:
+        await db.commit()
+    return {
+        "customer_code": customer,
+        "window": report["window"],
+        "healthy": report["healthy"],
+        "by_check": report["by_check"],
+        "tickets_published": report["tickets_published"],
+        "buckets_recomputed": report["buckets_recomputed"],
+        "findings": [{"check": f.check, "summary": f.summary, "detail": f.detail}
+                     for f in report["findings"]],
+    }
