@@ -7,7 +7,14 @@ Everything else on this subject is superseded and should not be implemented from
 Last revised 2026-08-21.
 
 **Revision note, 2026-08-21.**
-Two changes, both from re-reading the code. Neither alters the design.
+Several changes, all from re-reading the code and measuring the live server. **None alters the
+architecture.**
+
+> **Every change is tabulated in [section 17, the correction log](#17-correction-log), with what the
+> document said before.** Go there first if a downstream component is behaving unexpectedly and you
+> need to know whether the document moved under it.
+
+Summarised below; the log is authoritative.
 
 **1. A factual error corrected throughout.**
 `regroup_incremental` was described as the live path running every 70 seconds, and it is neither.
@@ -62,6 +69,7 @@ Alembic migrations for this work should cite **`docs/analytics-ml-architecture/f
 4. **Decisions** covers the thirteen corrections, the metric registry, and the grain cascade.
 5. **Build** covers phases, verification and invariants.
 6. **Open questions** lists what is still blocking.
+7. **Correction log** records every post-final change with its previous value, so a decision taken on older wording can be traced and reversed.
 
 ---
 
@@ -123,11 +131,31 @@ Prepared statements amortise it to about 9 ms, and asyncpg prepares by default.
 
 **Filter on `method`, never `transaction_type`.**
 `ConfirmPickLine` is 1:1 with `attributes->>'QuantityPicked'`.
-`transaction_type` contains WMS-supplied placeholders (`xxxxxx`, `XXXXX`, `00xxxx`, `0050XX`), and `AddStockCountLine` carries real `CountedQuantity` under a placeholder, so a type filter silently drops real data.
+`transaction_type` contains WMS-supplied placeholders, and `AddStockCountLine` carries real `CountedQuantity` under one, so a type filter silently drops real data.
+**Corrected 2026-08-21:** the placeholder set is `xxxxxx`, `XXXXX`, `00xxxx`, `0050XX` **and `XXXXXX`**; the original list of four missed the last.
+Because that list has now been wrong once, detection is a PATTERN rather than an enumeration: any value containing `x` or `X`. Empirically every such value on this data is a placeholder and no legitimate code contains one. See C2.
 
-**Only 2 of 49 methods carry quantities.**
-`ConfirmPickLine` (14,654 rows) and `ReportCount` (9,076).
-For the other 47 the meaningful measures are volume, duration, status and actor.
+**Only 3 of 49 methods carry quantities.** Corrected 2026-08-21, was "2 of 49".
+
+| Method | Field | Rows |
+|---|---|---|
+| `ConfirmPickLine` | `QuantityPicked` | 16,075 |
+| `ReportCount` | `CountedQuantity` | 11,343 |
+| `AddStockCountLine` | `CountedQuantity` | 83 |
+
+`AddStockCountLine` is the third, and this document already named it one paragraph above as the trap
+where a real quantity hides under a placeholder `transaction_type`: it was measured but not counted.
+For the other 46 the meaningful measures are volume, duration, status and actor.
+Encoded as the allow-list in `app/services/analytics/contract.py` (`QUANTITY_FIELD`); see C1 in the
+correction log.
+
+The row counts above are also higher than the original 14,654 and 9,076 simply because more data has
+arrived since. That is growth, not a discrepancy.
+
+**A JSONB key's presence is not evidence the method carries a quantity.** Added 2026-08-21.
+3 of 7,307 `ListItemAlternateUnitsOfMeasure` rows carry a stray `CountedQuantity` (values 3.415, 18, 0, all under `transaction_type = xxxxxx`).
+A listing call has no business reporting a stock count, so this is parser leakage.
+Consequence for N2: read a quantity only from an allow-listed METHOD. Testing `attributes ? key` instead would fold three phantom stock counts into the totals. See C3.
 
 **Quantity fields.**
 `QuantityPicked` and `ExpectedQuantity` are 100% clean.
@@ -577,7 +605,10 @@ This is where correctness is won, which is why the module has no I/O.
 - Cast quantities to `NUMERIC`, never float, treating empty string as **absent** rather than zero.
 - Classify as `pick` (quantity above zero), `attempt` (quantity zero), or non-quantity.
 - Compute `business_date` in the tenant timezone.
-- Compute the version fingerprint over every field affecting a measure.
+- Compute the version fingerprint over every field affecting a measure, **excluding the source row's `created_at`**, which Stage 2 refreshes on every rebuild by construction. Including it would make every fingerprint differ every cycle, so no recheck could ever be absorbed as a no-op and the 98.7% rebuild rate would become a write rate.
+- A transaction with **no `method`** is a `non_quantity` fact, never a quarantine (added 2026-08-22, C7). 25 of 397 live transactions have none and they are real activity, so quarantining them would hide 6.3% of transactions from every volume, duration and status metric while the totals still looked plausible.
+
+Quarantine is therefore narrow by design: the only reason is a quantity-bearing method whose quantity cannot be read.
 
 **Absent is never zero.**
 A missing field means "not supplied", a different fact from zero, and it must survive as such.
@@ -587,7 +618,7 @@ A missing field means "not supplied", a different fact from zero, and it must su
 Turns tickets into fact rows and aggregate deltas, exactly once in effect.
 Runs inside the existing singleton `python -m app.worker`, never in the four web workers, which stay read-only for analytics.
 
-One cycle, all in a single transaction per tenant:
+One cycle, one transaction per RUN (corrected 2026-08-22, D6; this said "a single transaction per tenant"):
 
 1. Claim available tickets: `consumed_at IS NULL AND abandoned_at IS NULL AND available_at <= clock_timestamp()`.
    **Not `now()`**, which is fixed at transaction start and would make a fresh row look permanently not-yet-due.
@@ -621,7 +652,10 @@ A failed run leaves its tickets open, bumps `attempts`, and dead-letters at the 
 One bad row never halts a tenant, following the precedent in `consumer_cursors.py`.
 
 **Retention position.**
-The maximum `created_at` observed among fully processed rows, published under `analytics:warehouse-v1`.
+The maximum `created_at` observed among fully processed rows, stored **per tenant** on `analytics_tenant_state.source_write_frontier`, and published under `analytics:warehouse-v1` as the **MINIMUM across tenants** (corrected 2026-08-22, D5; this originally published the maximum directly).
+Per tenant because `consumer_cursors` holds one row per consumer while retention is global: a tenant that is far ahead must not speak for one that is far behind.
+A tenant that has processed nothing has a NULL frontier and suppresses publishing entirely.
+See also D9, a unit mismatch in this mechanism that is being carried deliberately.
 Held in a **single named constant**, because a deferred upstream change to update-in-place would require switching to `updated_at`.
 
 ## N4. Metric registry
@@ -629,19 +663,25 @@ Held in a **single named constant**, because a deferred upstream change to updat
 Holds what is measured, as data rather than code.
 
 Definition row: `id`, `customer_code`, `name`, `dimensions`, `measure`, `filter`, `grains`, `status` in `draft`/`active`/`inactive`, `created_by`, `backfilled_through`.
+Each measure carries `name`, `aggregation`, `field`, a classification filter (`only`) and a **status filter** (`statuses`), added 2026-08-22 (C6) because an errored or incomplete pick carries a full quantity and would otherwise be counted.
+Both filters are per MEASURE, not per definition, so one definition can hold a total and an error count that differ only by which rows they admit.
+Consumption admits `success` only.
+`soft` is excluded on the reading that a not-found response means the confirmation never registered in the system of record, and the choice is safe to make strictly because zero of the 69 live `soft` transactions carry a quantity-bearing method (C8).
 Shape follows `NotificationRule`, which already proved the pattern here.
 Dispatch must be a **registry, not an if-chain**, unlike `build_evaluator` today.
 
 Validation the registry enforces:
 
-- A quantity measure may only be registered where the methods actually carry quantities, and only 2 of 49 do.
+- A quantity measure may only be registered where the methods actually carry quantities, and only 3 of 49 do (C1). Enforced against `contract.QUANTITY_FIELD` so the registry and the contract cannot disagree.
 - Dimensions must exist on the fact row.
 - A definition cannot go active until its backfill has run, or its chart shows a false start date.
 
 ## N5. Rollup folder
 
 Maintains the grain cascade per active definition: `facts → hourly → daily → monthly`.
-Each level reads only the level below, so the fact table is read once per cycle.
+Hourly and daily are folded from the facts; monthly reads the level below (corrected 2026-08-22, D7; this said every level reads only the level below).
+The fact table is still read only once per cycle: the dirty facts are read once and folded into both grains in a single pass.
+Daily cannot come from hourly because hourly buckets are UTC hours while daily buckets are the tenant-local `business_date`, and at a half-hour UTC offset one hour per day straddles two local dates.
 
 **Every write is recompute-and-replace, never increment.**
 An additive upsert double-counts on the first retry.
@@ -852,7 +892,12 @@ Resolved in favour of a separate table with an identical shape.
 See N1 for the two reasons.
 
 **F8. Zero-quantity picks are attempts, not consumption.**
-9.2% of pick confirmations record zero units and still say success, typically an empty location.
+**Corrected 2026-08-21**, was a single figure of 9.2%. Measured now, and the denominator matters:
+
+- **8.29%** of `ConfirmPickLine` confirmations alone (1,333 of 16,075) record zero units and still say success, typically an empty location.
+- **7.47%** across all three quantity-carrying methods (2,056 of 27,511), which is what the consumption metric reports because its filter spans all three.
+
+Quote whichever matches the denominator on screen; the two are not interchangeable. See C4.
 Fix: three counters in every rollup.
 `quantity` (sum of units), `pick_count` (confirmations above zero), `attempt_count` (all confirmations).
 The zero-pick rate derives from the last two and is a first-class metric, because it names specific empty locations and replaces the fill rate this data cannot support.
@@ -971,11 +1016,16 @@ Every query still carries a `started_at` predicate for partition pruning, becaus
 
 Sizing at 50,000 picks per day and 5,000 active items:
 
-| Grain | Retention | Rows at 5 years |
-|---|---|---|
-| Hourly | 90 days | 3.2 M |
-| Daily | forever | 9.1 M |
-| Monthly | forever | 300 K |
+| Grain | Retention | Rows at 5 years, per measure | Rows at 5 years, consumption (3 measures) |
+|---|---|---|---|
+| Hourly | 90 days | 3.2 M | 9.6 M |
+| Daily | forever | 9.1 M | 27.3 M |
+| Monthly | forever | 300 K | 900 K |
+
+**Revised 2026-08-21 (C5).** The original figures assumed one rollup row per definition per bucket.
+Measure slots are now named for their additive ROLE (`sum_value`, `count_value`, `sum_sq`, `min_value`, `max_value`, `histogram`) rather than numbered, which makes invariant 8 structural: there is no column a finished answer could be written into.
+The cost is that a definition needing one sum and two counts cannot share one set of role columns, so a rollup row is keyed per **(definition, measure)** and consumption emits three rows per bucket instead of one.
+Multiply by the number of measures a definition carries.
 
 Rows scanned for "top items this month": 1,500,000 raw, 1,080,000 hourly, 150,000 daily, **5,000 monthly**.
 
@@ -1031,9 +1081,11 @@ Prove coverage by grepping for every statement that removes a `log_transactions`
 Range diff, never per-record update.
 Quarantine without halting, own lock namespace, write-time cursor, `work_mem` per transaction.
 
-**Phase 4. Backfill and checks.**
+**Phase 4. Checks.** ~~Backfill and checks.~~
+**There is no backfill** (decided 2026-08-22, D8): analytics counts from switch-on, and earlier history is not folded.
 Windowed routine reconciliation plus explicit full runs, and the completeness check against `log_entries`.
 Gate source retention on healthy state.
+Every run provisions its own destination partitions before reading (C9), which is required regardless of D8 because `regroup_all` and rotated log files also produce facts with an old `event_time`.
 
 **Phase 5. Read APIs.**
 Grain selection, both freshness numbers, single-query status.
@@ -1042,7 +1094,7 @@ Grain selection, both freshness numbers, single-query status.
 Provisional versus stale, hand-built charts, and the `next.config.mjs` rewrite.
 
 **Phase 7. Rollout.**
-Schema, then tickets with the worker off, then backfill and report-only reconciliation, then one tenant, then the interface behind a feature flag.
+Schema, then tickets with the worker off, then report-only reconciliation (~~then backfill and~~ - D8), then one tenant, then the interface behind a feature flag.
 
 # 13. Invariants
 
@@ -1153,3 +1205,89 @@ Two live defects found during this work, unrelated to analytics.
 The server has no pgvector, so it retries forever roughly every 4 seconds on both the web and worker processes, masking real errors.
 
 `PgVectorStore.query()` lacks the `text_match` parameter that `search_service.py:167-172` passes, so hybrid search raises `TypeError` on the default backend.
+
+---
+
+# 17. Correction log
+
+Every change made to this document after it was declared final, with **what it said before**, so a
+decision taken on the old wording can be traced and reversed.
+
+Kept as a table rather than in git history alone for one reason: a reader who finds a downstream
+component behaving unexpectedly needs to know whether the document changed under it, and needs the old
+value to compare against. Each entry is also marked inline where the fact lives.
+
+**Almost nothing here changes the architecture.** Most entries correct a measured figure, add a fact,
+or record a sizing consequence. The components, flows, invariants and delivery sequence are unchanged
+except where an entry says otherwise: F12, F13, E4, and **D8, which cancels the Phase 4 backfill
+outright**. D8 is the only entry that removes planned work and the only one that makes history
+permanently unrecoverable, so it is stated in full rather than summarised.
+
+## Ground truth corrections, from Phase 0 (2026-08-21)
+
+| # | Section | It said | It is | Evidence |
+|---|---|---|---|---|
+| C1 | 3, and N4's validation | "Only **2** of 49 methods carry quantities. `ConfirmPickLine` (14,654 rows) and `ReportCount` (9,076)." | **3**: `ConfirmPickLine`/`QuantityPicked` 16,075, `ReportCount`/`CountedQuantity` 11,343, `AddStockCountLine`/`CountedQuantity` 83 | Live query grouping by `method` on the presence of each quantity key. `AddStockCountLine` was already named in this section as a trap, so it was measured but not counted. |
+| C2 | 3 | Placeholder `transaction_type` values are "`xxxxxx`, `XXXXX`, `00xxxx`, `0050XX`" | Those **plus `XXXXXX`**, and detection is now a pattern (`[xX]`) rather than a list | `SELECT DISTINCT transaction_type WHERE transaction_type ~ '[xX]'` returned five values. |
+| C3 | 3 (added) | nothing | 3 of 7,307 `ListItemAlternateUnitsOfMeasure` rows carry a stray `CountedQuantity`, so a quantity must be read from an allow-listed METHOD and never from the presence of a JSONB key | Values 3.415, 18, 0, all under `transaction_type = xxxxxx`. |
+| C4 | F8 | "**9.2%** of pick confirmations record zero units" | **8.29%** of `ConfirmPickLine` alone (1,333 / 16,075); **7.47%** across all three quantity methods (2,056 / 27,511) | Two different denominators. The original single figure did not say which, and they are not interchangeable. |
+| C5 | 11, grains sizing | Hourly 3.2 M / Daily 9.1 M / Monthly 300 K rows at 5 years, assuming one rollup row per definition per bucket | Same **per measure**; consumption carries three, so 9.6 M / 27.3 M / 900 K | Consequence of naming measure slots for their additive role instead of numbering them, which makes invariant 8 structural. A definition needing one sum and two counts cannot share one set of role columns. |
+
+**If C5 turns out to be the wrong trade**, the fallback is the original design: anonymous
+`measure1..measure8` slots and one rollup row per definition. That restores the smaller row counts and
+costs the structural guarantee, so additivity goes back to being a review convention. The decision is
+reversible until the first Phase 1 migration.
+
+## Design corrections, earlier the same day
+
+| # | Section | It said | It is |
+|---|---|---|---|
+| D1 | 3, F1 | `regroup_incremental` is the live path, running every 70 seconds | It is reachable only from two HTTP endpoints. The automated path is `log_stitch_worker` -> `finalize_pending` -> `regroup_window`. Inherited from three stale comments in `derive_transactions.py`. Moves ledger churn DOWN and F1's priority down. |
+| D2 | N1, F12 | Tickets publish from three sites, all in `derive_transactions.py` | **Five.** Both halves of `DELETE /logs/data` also remove `log_transactions`, and one does so through a `jobs` cascade with no statement to hook. |
+| D3 | 6, F13 | "E6 deletes from every non-partitioned log table but touches neither `log_entries` nor `log_transactions`" | It deletes the tenant's `jobs`, and both tables go with them via `ON DELETE CASCADE`. Needs the opposite fix from F12: delete the tenant's `analytics_*` rows rather than publish a ticket. |
+| D4 | 5, and new E4 detail | E4 "exists", with no detail section | Extended: `partitioning.py` gained a per-table `Grain` (daily/monthly/yearly) and `log_partition_worker` gained `KEEP_FOREVER` / `RETENTION_DAYS`. Was a prerequisite for Phase 1, not part of it. |
+
+## Ground truth corrections, from Phase 3 (2026-08-22)
+
+Every one of these was found by running the pipeline end to end against real data.
+None of them could have been found by re-reading the fixtures, and C6 is a case where the fixtures were right about the intent and wrong about the data.
+
+| # | Section | It said | It is | Evidence |
+|---|---|---|---|---|
+| C6 | Phase 0 fixtures, N4, F8 | The `error` fixture: "A hard failure carries no units. It must not appear in the quantity total, and must not be silently folded in as a zero-unit attempt either." It modelled such a row as `quantity = None`. | An errored `ConfirmPickLine` carries a **full** `QuantityPicked`, and so does an `incomplete` one. The quantity is stated on the REQUEST line; whether the pick failed is decided by what arrives afterwards. So both summed into consumption and nothing could express the rule. | Five synthetic scenarios through the real parser, stitcher and worker: the facts total **30.333333** across all statuses and **10.333333** across completed ones. Per-row: `success/10.0`, `success/0.0`, `incomplete/10.0`, `error/10.0`, all classified `pick`. |
+| C7 | N2 (added) | nothing about transactions with no `method` | **25 of 397** live transactions (6.3%) have no method, and they are real stitched activity, not fragments: `entry_count` 2 to 28, durations to 172,523 ms, `mi_program_count = 0` on 24 of 25, and `status = incomplete` on 9. They normalise as `non_quantity` facts. Quarantining them - the first implementation - would have hidden 6.3% of transactions from every volume, duration and status metric while the totals still looked plausible. | Live query over `log_transactions WHERE method IS NULL`, inspecting entry counts, durations and statuses. |
+| C8 | N4, and C6's status set | nothing about the `soft` status | **69** live `soft` transactions exist and **zero** carry a quantity-bearing method. `soft` means "M3 returned not-found/needs-value but the app coped", so if the ERP returned not-found the confirmation did not register in the system of record. It is excluded from consumption on that reading, and the measurement is what makes the choice safe: it moves no current number. | Live query crossing `status` with the three quantity-bearing methods. |
+| C9 | E4, Phase 4 | nothing about the analytics partition runway being forward-only | The runway is built forward only (`coverage_days(today, ahead=14)`), because ingestion only ever writes new data. Measured 2026-08-22: `analytics_facts` partitions began **2026-07-01** while the 60-day source floor was **2026-06-23**, an 8-day window with nowhere to go; `analytics_hourly_rollups` began 2026-07-22, a 29-day window; `analytics_daily_rollups` was fully covered. Worse, a filled DEFAULT partition is a **one-way door**: PostgreSQL then refuses to create that period's real partition. | Partition bounds read from `pg_class.relpartbound`. The one-way door was verified directly: `CREATE TABLE ... PARTITION OF` failed with "updated partition constraint for default partition would be violated by some row". |
+
+**On C6, what was NOT changed.** The fact rows still record `status = error, quantity = 10.0`, because that is what happened.
+A fact is a record of an event; whether it counts toward a metric is a registry decision.
+The fix is therefore a new `Measure.statuses` filter, held per measure for the same reason `only` is per measure - one definition can then carry both a total and an error count.
+If the exclusion of `incomplete` turns out to be wrong, note that it is self-correcting: a later Stage 2 pass closes the transaction and it counts under its real status.
+
+## Design corrections, from Phase 3 (2026-08-22)
+
+| # | Section | It said | It is |
+|---|---|---|---|
+| D5 | N3, retention position | "The maximum `created_at` observed among fully processed rows, published under `analytics:warehouse-v1`." | That value is stored **per tenant**, on a new `analytics_tenant_state.source_write_frontier` column (migration `d5e83c1a6f97`), and the value published is the **MINIMUM across tenants**. `consumer_cursors` holds one row per consumer while retention is global, so publishing whatever the worker had just processed would let a tenant that is far ahead advance the position past one that is far behind - and `log_partition_worker` would then drop source partitions the lagging tenant had never read, with its cursor moving past the gap unaware. A tenant with a NULL frontier has processed nothing and suppresses publishing entirely, because SQL's `MIN` would otherwise skip it and publish a claim that is too far ahead. |
+| D6 | Phase 3, N3 | "One cycle, all in a single transaction per tenant" | One transaction per **run**. N1 splits a wide range into per-day tickets precisely so each unit of work stays bounded and a poison day fails in isolation, which is only true if a day is also a transaction boundary. A single transaction spanning a `regroup_all` ticket set would read 60 days of transactions at once and let one bad day roll back 59 good ones. Invariant 4 is unaffected: each run's tickets are stamped consumed in the same transaction as that run's changes. |
+| D7 | N5, grain cascade | "Each level reads only the level below, so the fact table is read once per cycle." | Hourly **and** daily are both folded from the facts; only monthly reads the level below. Hourly buckets are UTC hours while daily buckets are the tenant-LOCAL `business_date`, so folding daily from hourly is exact only when the tenant's UTC offset is a whole number of hours - at +05:30 one UTC hour per day straddles two local dates and would be attributed entirely to one, wrong by up to half a day's traffic, silently, and only for some tenants. The stated concern is preserved exactly: the dirty facts are read ONCE and folded into both grains in a single pass. |
+| D8 | **Phase 4, Phase 7** | "Phase 4. Backfill and checks." and Phase 7's "then backfill and report-only reconciliation" | **There is no backfill.** Decision taken 2026-08-22 after C9 was measured. Analytics counts from the day the worker is switched on; history before that is not folded, and becomes unrecoverable once its raw `log_entries` pass 60-day retention. Phase 4 keeps its other three items - windowed reconciliation, the completeness check against `log_entries`, and gating source retention on healthy state. Phase 6 gains an obligation: the interface must show "no history before &lt;switch-on date&gt;" rather than draw an empty chart, which would read as zero activity. `analytics_metrics.backfilled_through` stays NULL, which is the field that signals it. |
+| D9 | N3, F6 (recorded, not corrected) | - | A unit mismatch that predates this design and is being carried deliberately. F6 specifies the retention position as a `log_transactions.created_at`, a WRITE time, matching what every other consumer publishes (`NotificationRule.cursor_at` says so in its own comment). But `log_partition_worker.periods_blocked_by_consumers` compares that position against a partition's **event-time** upper bound. Write times run ahead of event times, so partitions are released slightly earlier than a strict reading allows, and a transaction written long after the event it describes is where the gap bites. Deviating for one consumer would make the MIN across consumers a comparison between two different units, which is worse. Implemented as specified. |
+
+**D8 is a deliberate loss of data, not a deferral.**
+The alternative - provisioning partitions for the historical range and folding it - was costed and rejected: it needed one call to the already-tested `pt.migration_days`, roughly three extra monthly partitions on the fact table and sixty daily ones on the hourly rollups.
+It remains available for as long as the raw entries survive, which is 60 days from each day's ingestion.
+After that the decision cannot be revisited, because there is nothing left to fold.
+
+**The runway gap C9 identified is closed regardless of D8**, because skipping the backfill removes only one of the three paths that write facts with an old `event_time`.
+The others are `regroup_all` re-deriving a tenant's whole history, and an ingested rotated log file (`eSmartServerLog.txt.40`) carrying weeks-old lines.
+Every run therefore calls `pt.ensure_coverage` for its own destinations before reading anything, in its own short transaction so the `ACCESS EXCLUSIVE` lock is not held for the length of the run.
+The alternative of skipping rows with no destination was rejected: filtering the source read makes it narrower than the stored read, and the range diff reads that as *reverse it*, so any fact already in a DEFAULT partition would be deleted and its contribution stripped from every rollup.
+
+## How to read an entry
+
+Each inline correction is dated and states what it replaced, so the section reads correctly on its own.
+This table exists so the set is enumerable without re-reading the document.
+
+Corrections are numbered and never renumbered. A future correction to a corrected figure gets a new
+number and cites the old one, so the chain stays traceable.

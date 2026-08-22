@@ -309,6 +309,7 @@
     <li><a href="#inv">Invariants</a></li>
     <li><a href="#verify">Verification</a></li>
     <li><a href="#open">Open questions</a></li>
+    <li><a href="#corrections">Correction log</a></li>
   </ol>
 </nav>
 <section id="unusual">
@@ -937,7 +938,7 @@ res = await db.execute(delete(Job).where(
       <span class="k">owns</span><span class="v">no tables</span>
     </div>
     <ul>
-      <li>Reject placeholder <code>transaction_type</code> values (<code>xxxxxx</code>, <code>XXXXX</code>, <code>0050XX</code>).</li>
+      <li>Reject placeholder <code>transaction_type</code> values. <b>C2:</b> the set is <code>xxxxxx</code>, <code>XXXXX</code>, <code>00xxxx</code>, <code>0050XX</code> and <code>XXXXXX</code>; detection is a pattern (<code>[xX]</code>), not a list, because the list has been wrong once. A placeholder makes the DIMENSION unusable and does not invalidate the row or its quantity.</li>
       <li>Cast quantities to <code>NUMERIC</code>, never float, treating empty string as <b>absent</b> rather than zero.</li>
       <li>Classify as <b>pick</b> (quantity above zero), <b>attempt</b> (quantity zero), or non-quantity.</li>
       <li>Compute <code>business_date</code> in the tenant timezone.</li>
@@ -995,7 +996,7 @@ res = await db.execute(delete(Job).where(
     <p>Shape follows <code>NotificationRule</code>, which already proved the pattern here. Dispatch must be
     a <b>registry, not an if-chain</b>, unlike <code>build_evaluator</code> today.</p>
     <p><b>Validation the registry enforces:</b> a quantity measure may only be registered where the methods
-    actually carry quantities, and <b>only 2 of 49 do</b>. Dimensions must exist on the fact row. A
+    actually carry quantities, and <b>only 3 of 49 do</b> (C1), enforced against <code>contract.QUANTITY_FIELD</code> so the registry and the contract cannot disagree. Dimensions must exist on the fact row. A
     definition cannot go active until its backfill has run, or its chart shows a false start date.</p>
   </div>
 
@@ -1203,7 +1204,8 @@ E5 ─► consumer_cursors('notifications')           ┘        │
   </div></div>
 
   <div class="fix p2"><div class="hd"><span class="id">F8</span><p class="ti">Zero-quantity picks are attempts, not consumption</p></div><div class="bd">
-    <p><span class="lbl d">defect</span><br><b>9.2%</b> of pick confirmations record zero units and still say success, typically an empty location. Counting them as picks inflates productivity by about a tenth.</p>
+    <p><span class="lbl d">defect</span><br>A share of pick confirmations record zero units and still say success, typically an empty location. Counting them as picks inflates productivity.</p>
+    <p><span class="lbl x">corrected 2026-08-21 (C4)</span><br>Was a single figure of <b>9.2%</b>. Measured now, and the denominator matters: <b>8.29%</b> of <code>ConfirmPickLine</code> alone (1,333 / 16,075), and <b>7.47%</b> across all three quantity-carrying methods (2,056 / 27,511), which is what the consumption metric reports because its filter spans all three. The two are not interchangeable.</p>
     <p><span class="lbl f">fix</span><br>Three counters, all stored in every rollup: <code>quantity</code> (sum of units), <code>pick_count</code> (confirmations above zero), <code>attempt_count</code> (all confirmations). The zero-pick rate derives from the last two and is a first-class metric, because it names specific empty locations and replaces the fill rate this data cannot support.</p>
   </div></div>
 
@@ -1290,10 +1292,16 @@ E5 ─► consumer_cursors('notifications')           ┘        │
   <code>transaction_name</code> (22 values, the operator's screen). Both are low cardinality, so together
   they stay under roughly 1,700 hourly rows per day.</p>
   <div class="co bad">
-    <h4>Only 2 of the 49 methods carry quantities</h4>
-    <p><code>ConfirmPickLine</code> (14,654 rows) and <code>ReportCount</code> (9,076). For the other 47
-    the meaningful measures are volume, duration, status and actor. <b>The interface must not offer a
-    quantity measure for a method that has none.</b></p>
+    <h4>Only 3 of the 49 methods carry quantities</h4>
+    <p><b>Corrected 2026-08-21 (C1)</b>, was "2 of 49". <code>ConfirmPickLine</code>/<code>QuantityPicked</code>
+    16,075 rows, <code>ReportCount</code>/<code>CountedQuantity</code> 11,343, and
+    <code>AddStockCountLine</code>/<code>CountedQuantity</code> 83. The third was already named above as
+    the trap where a real quantity hides under a placeholder type, so it was measured but not counted.
+    For the other 46 the meaningful measures are volume, duration, status and actor. <b>The interface
+    must not offer a quantity measure for a method that has none.</b></p>
+    <p class="note">A JSONB key's presence is not evidence either (C3): 3 of 7,307
+    <code>ListItemAlternateUnitsOfMeasure</code> rows carry a stray <code>CountedQuantity</code>. Read a
+    quantity only from an allow-listed method.</p>
   </div>
 
   <h3>How a user-defined metric works</h3>
@@ -1342,11 +1350,11 @@ E5 ─► consumer_cursors('notifications')           ┘        │
   local date is not the partition key.</p>
 
   <div class="scroll"><table>
-    <thead><tr><th>Grain</th><th>Retention</th><th class="num">Rows at 5 years</th></tr></thead>
+    <thead><tr><th>Grain</th><th>Retention</th><th class="num">Rows at 5 years, per measure</th><th class="num">Rows at 5 years, consumption (3 measures)</th></tr></thead>
     <tbody>
-      <tr><td>Hourly</td><td>90 days</td><td class="num">3.2 M</td></tr>
-      <tr><td>Daily</td><td>forever</td><td class="num">9.1 M</td></tr>
-      <tr><td>Monthly</td><td>forever</td><td class="num">300 K</td></tr>
+      <tr><td>Hourly</td><td>90 days</td><td class="num">3.2 M</td><td class="num">9.6 M</td></tr>
+      <tr><td>Daily</td><td>forever</td><td class="num">9.1 M</td><td class="num">27.3 M</td></tr>
+      <tr><td>Monthly</td><td>forever</td><td class="num">300 K</td><td class="num">900 K</td></tr>
     </tbody>
   </table></div>
   <p class="note">Sized at 50,000 picks/day and 5,000 active items. Read-layer rule: choose the coarsest
@@ -1489,5 +1497,194 @@ E5 ─► consumer_cursors('notifications')           ┘        │
   default backend.</p>
 </section>
 
+
+<section id="corrections">
+  <h2>Correction log</h2>
+  <p class="lede">Every change made after this document was declared final, with <b>what it said
+  before</b>, so a decision taken on the old wording can be traced and reversed. Most entries correct a
+  measured figure, add a fact, or record a sizing consequence - the exception is <b>D8, which cancels
+  the Phase 4 backfill outright</b>, the only entry that removes planned work and the only one that
+  makes history permanently unrecoverable.</p>
+
+  <h3>Ground truth corrections, from Phase 0 (2026-08-21)</h3>
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>Section</th><th>It said</th><th>It is</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td class="num">C1</td><td>3, N4</td>
+        <td>"Only <b>2</b> of 49 methods carry quantities. <code>ConfirmPickLine</code> (14,654 rows) and <code>ReportCount</code> (9,076)."</td>
+        <td><b>3</b>: <code>ConfirmPickLine</code>/<code>QuantityPicked</code> 16,075, <code>ReportCount</code>/<code>CountedQuantity</code> 11,343, <code>AddStockCountLine</code>/<code>CountedQuantity</code> 83</td>
+        <td>Grouped by <code>method</code> on the presence of each quantity key. <code>AddStockCountLine</code> was already named in section 3 as a trap, so it was measured but not counted.</td></tr>
+      <tr><td class="num">C2</td><td>3</td>
+        <td>Placeholders are "<code>xxxxxx</code>, <code>XXXXX</code>, <code>00xxxx</code>, <code>0050XX</code>"</td>
+        <td>Those <b>plus <code>XXXXXX</code></b>, and detection is now a pattern (<code>[xX]</code>) rather than a list</td>
+        <td><code>SELECT DISTINCT transaction_type WHERE transaction_type ~ '[xX]'</code> returned five.</td></tr>
+      <tr><td class="num">C3</td><td>3 (added)</td><td>nothing</td>
+        <td>3 of 7,307 <code>ListItemAlternateUnitsOfMeasure</code> rows carry a stray <code>CountedQuantity</code>, so a quantity is read from an allow-listed METHOD, never from a JSONB key's presence</td>
+        <td>Values 3.415, 18, 0, all under <code>transaction_type = xxxxxx</code>.</td></tr>
+      <tr><td class="num">C4</td><td>F8</td><td>"<b>9.2%</b> of pick confirmations record zero units"</td>
+        <td><b>8.29%</b> of <code>ConfirmPickLine</code> alone (1,333 / 16,075); <b>7.47%</b> across all three quantity methods (2,056 / 27,511)</td>
+        <td>Two different denominators. The original figure did not say which, and they are not interchangeable.</td></tr>
+      <tr><td class="num">C5</td><td>11, sizing</td>
+        <td>Hourly 3.2 M / Daily 9.1 M / Monthly 300 K at 5 years, assuming one rollup row per definition per bucket</td>
+        <td>Same <b>per measure</b>; consumption carries three, so 9.6 M / 27.3 M / 900 K</td>
+        <td>Consequence of naming measure slots for their additive role instead of numbering them, which makes invariant 8 structural.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="co">
+    <h4>If C5 turns out to be the wrong trade</h4>
+    <p>The fallback is the original design: anonymous <code>measure1..measure8</code> slots and one
+    rollup row per definition. That restores the smaller row counts and costs the structural guarantee,
+    so additivity goes back to being a review convention. <b>Reversible until the first Phase 1
+    migration.</b></p>
+  </div>
+
+  <h3>Design corrections, earlier the same day</h3>
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>Section</th><th>It said</th><th>It is</th></tr></thead>
+    <tbody>
+      <tr><td class="num">D1</td><td>3, F1</td><td><code>regroup_incremental</code> is the live path, running every 70 seconds</td>
+        <td>Reachable only from two HTTP endpoints. The automated path is <code>log_stitch_worker</code> &rarr; <code>finalize_pending</code> &rarr; <code>regroup_window</code>. Moves ledger churn DOWN and F1's priority down.</td></tr>
+      <tr><td class="num">D2</td><td>N1, F12</td><td>Tickets publish from three sites, all in <code>derive_transactions.py</code></td>
+        <td><b>Five.</b> Both halves of <code>DELETE /logs/data</code> also remove <code>log_transactions</code>, one through a <code>jobs</code> cascade with no statement to hook.</td></tr>
+      <tr><td class="num">D3</td><td>6, F13</td><td>"E6 ... touches neither <code>log_entries</code> nor <code>log_transactions</code>"</td>
+        <td>It deletes the tenant's <code>jobs</code>, and both go with them via <code>ON DELETE CASCADE</code>. Needs the OPPOSITE fix from F12: delete the tenant's <code>analytics_*</code> rows rather than publish a ticket.</td></tr>
+      <tr><td class="num">D4</td><td>5, E4</td><td>E4 "exists", no detail section</td>
+        <td>Extended: per-table <code>Grain</code> plus <code>KEEP_FOREVER</code> / <code>RETENTION_DAYS</code>. A prerequisite for Phase 1, not part of it.</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Ground truth corrections, from Phase 3 (2026-08-22)</h3>
+  <p>Every one of these was found by running the pipeline end to end against real data. C6 is a case
+  where the fixtures were right about the intent and wrong about the data.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>Section</th><th>It said</th><th>It is</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td class="num">C6</td><td>Phase 0 fixtures, N4, F8</td>
+        <td>The <code>error</code> fixture: "A hard failure carries no units. It must not appear in the
+        quantity total, and must not be silently folded in as a zero-unit attempt either." It modelled
+        such a row as <code>quantity = None</code>.</td>
+        <td>An errored <code>ConfirmPickLine</code> carries a <b>full</b> <code>QuantityPicked</code>,
+        and so does an <code>incomplete</code> one. The quantity is stated on the REQUEST line; whether
+        the pick failed is decided by what arrives afterwards. Both summed into consumption, and nothing
+        could express the rule - so <code>Measure.statuses</code> was added.</td>
+        <td>Five synthetic scenarios through the real parser, stitcher and worker: the facts total
+        <b>30.333333</b> across all statuses and <b>10.333333</b> across completed ones. Per row:
+        <code>success/10.0</code>, <code>success/0.0</code>, <code>incomplete/10.0</code>,
+        <code>error/10.0</code>, all classified <code>pick</code>.</td></tr>
+      <tr><td class="num">C7</td><td>N2 (added)</td><td>nothing about transactions with no
+        <code>method</code></td>
+        <td><b>25 of 397</b> live transactions (6.3%) have none, and they are real stitched activity
+        rather than fragments: <code>entry_count</code> 2 to 28, durations to 172,523 ms,
+        <code>mi_program_count = 0</code> on 24 of 25, <code>status = incomplete</code> on 9. They
+        normalise as <code>non_quantity</code> facts. Quarantining them - the first implementation -
+        would have hidden 6.3% of transactions from every volume, duration and status metric while the
+        totals still looked plausible.</td>
+        <td>Live query over <code>log_transactions WHERE method IS NULL</code>, inspecting entry counts,
+        durations and statuses.</td></tr>
+      <tr><td class="num">C8</td><td>N4, C6's status set</td><td>nothing about the <code>soft</code>
+        status</td>
+        <td><b>69</b> live <code>soft</code> transactions exist and <b>zero</b> carry a quantity-bearing
+        method. <code>soft</code> means "M3 returned not-found/needs-value but the app coped", so if the
+        ERP returned not-found the confirmation never registered in the system of record. It is excluded
+        from consumption on that reading, and the measurement is what makes the strict choice safe: it
+        moves no current number.</td>
+        <td>Live query crossing <code>status</code> with the three quantity-bearing methods.</td></tr>
+      <tr><td class="num">C9</td><td>E4, Phase 4</td><td>nothing about the analytics partition runway
+        being forward-only</td>
+        <td>The runway is built forward only (<code>coverage_days(today, ahead=14)</code>), because
+        ingestion only ever writes new data. Measured 2026-08-22: <code>analytics_facts</code>
+        partitions began <b>2026-07-01</b> while the 60-day source floor was <b>2026-06-23</b>, an
+        8-day window with nowhere to go; <code>analytics_hourly_rollups</code> began 2026-07-22, a
+        29-day window; <code>analytics_daily_rollups</code> was fully covered. Worse, a filled DEFAULT
+        partition is a <b>one-way door</b>: PostgreSQL then refuses to create that period's real
+        partition.</td>
+        <td>Partition bounds read from <code>pg_class.relpartbound</code>. The one-way door was verified
+        directly: <code>CREATE TABLE ... PARTITION OF</code> failed with "updated partition constraint
+        for default partition would be violated by some row".</td></tr>
+    </tbody>
+  </table></div>
+  <div class="co">
+    <h4>On C6, what was NOT changed</h4>
+    <p>The fact rows still record <code>status = error, quantity = 10.0</code>, because that is what
+    happened. A fact is a record of an event; whether it counts toward a metric is a registry decision.
+    The filter is held <b>per measure</b> for the same reason <code>only</code> is, so one definition can
+    carry both a total and an error count. If excluding <code>incomplete</code> proves wrong, note that
+    it is self-correcting: a later Stage 2 pass closes the transaction and it counts under its real
+    status.</p>
+  </div>
+
+  <h3>Design corrections, from Phase 3 (2026-08-22)</h3>
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>Section</th><th>It said</th><th>It is</th></tr></thead>
+    <tbody>
+      <tr><td class="num">D5</td><td>N3, retention position</td>
+        <td>"The maximum <code>created_at</code> observed among fully processed rows, published under
+        <code>analytics:warehouse-v1</code>."</td>
+        <td>Stored <b>per tenant</b> on a new <code>analytics_tenant_state.source_write_frontier</code>
+        column (migration <code>d5e83c1a6f97</code>), and published as the <b>MINIMUM across
+        tenants</b>. <code>consumer_cursors</code> holds one row per consumer while retention is global,
+        so publishing whatever the worker had just processed would let a tenant far ahead advance the
+        position past one far behind - and <code>log_partition_worker</code> would then drop source
+        partitions the lagging tenant had never read, its cursor moving past the gap unaware. A tenant
+        with a NULL frontier suppresses publishing entirely, because SQL's <code>MIN</code> would skip it
+        and publish a claim that is too far ahead.</td></tr>
+      <tr><td class="num">D6</td><td>Phase 3, N3</td><td>"One cycle, all in a single transaction per
+        tenant"</td>
+        <td>One transaction per <b>run</b>. N1 splits a wide range into per-day tickets precisely so each
+        unit of work stays bounded and a poison day fails in isolation, which is only true if a day is
+        also a transaction boundary. A single transaction spanning a <code>regroup_all</code> ticket set
+        would read 60 days of transactions at once and let one bad day roll back 59 good ones. Invariant
+        4 is unaffected: each run's tickets are stamped consumed in the same transaction as its
+        changes.</td></tr>
+      <tr><td class="num">D7</td><td>N5, grain cascade</td><td>"Each level reads only the level below, so
+        the fact table is read once per cycle."</td>
+        <td>Hourly <b>and</b> daily are both folded from the facts; only monthly reads the level below.
+        Hourly buckets are UTC hours while daily buckets are the tenant-LOCAL <code>business_date</code>,
+        so folding daily from hourly is exact only at whole-hour UTC offsets - at +05:30 one hour per day
+        straddles two local dates and would be attributed entirely to one, wrong by up to half a day's
+        traffic, silently, and only for some tenants. The stated concern is preserved exactly: the dirty
+        facts are read ONCE and folded into both grains in a single pass.</td></tr>
+      <tr><td class="num">D8</td><td><b>Phase 4, Phase 7</b></td><td>"Phase 4. Backfill and checks." and
+        Phase 7's "then backfill and report-only reconciliation"</td>
+        <td><b>There is no backfill.</b> Decided 2026-08-22 after C9 was measured. Analytics counts from
+        the day the worker is switched on; earlier history is not folded and becomes unrecoverable once
+        its raw <code>log_entries</code> pass 60-day retention. Phase 4 keeps its other three items -
+        windowed reconciliation, the completeness check against <code>log_entries</code>, and gating
+        source retention on healthy state. Phase 6 gains an obligation: show "no history before
+        &lt;switch-on date&gt;" rather than an empty chart, which would read as zero activity.
+        <code>analytics_metrics.backfilled_through</code> stays NULL, which is the field that signals
+        it.</td></tr>
+      <tr><td class="num">D9</td><td>N3, F6 (recorded, not corrected)</td><td>-</td>
+        <td>A unit mismatch that predates this design and is carried deliberately. F6 specifies the
+        retention position as a <code>log_transactions.created_at</code>, a WRITE time, matching what
+        every other consumer publishes (<code>NotificationRule.cursor_at</code> says so in its own
+        comment). But <code>periods_blocked_by_consumers</code> compares that position against a
+        partition's <b>event-time</b> upper bound. Write times run ahead of event times, so partitions
+        are released slightly earlier than a strict reading allows, and a transaction written long after
+        the event it describes is where the gap bites. Deviating for one consumer would make the MIN
+        across consumers a comparison between two different units, which is worse. Implemented as
+        specified.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="co">
+    <h4>D8 is a deliberate loss of data, not a deferral</h4>
+    <p>The alternative - provisioning partitions for the historical range and folding it - was costed and
+    rejected: one call to the already-tested <code>pt.migration_days</code>, roughly three extra monthly
+    partitions on the fact table and sixty daily ones on the hourly rollups. It stays available only for
+    as long as the raw entries survive, which is 60 days from each day's ingestion. After that the
+    decision cannot be revisited, because there is nothing left to fold.</p>
+    <p><b>The C9 runway gap is closed regardless of D8</b>, because skipping the backfill removes only
+    one of the three paths that write facts with an old <code>event_time</code>. The others are
+    <code>regroup_all</code> re-deriving a tenant's whole history, and an ingested rotated log file
+    (<code>eSmartServerLog.txt.40</code>) carrying weeks-old lines. Every run therefore calls
+    <code>pt.ensure_coverage</code> for its own destinations before reading anything, in its own short
+    transaction so the <code>ACCESS EXCLUSIVE</code> lock is not held for the length of the run. Skipping
+    rows with no destination was rejected: filtering the source read makes it narrower than the stored
+    read, and the range diff reads that as <i>reverse it</i>, so any fact already in a DEFAULT partition
+    would be deleted and its contribution stripped from every rollup.</p>
+  </div>
+
+  <p class="note">Corrections are numbered and never renumbered. A future correction to a corrected
+  figure gets a new number and cites the old one, so the chain stays traceable.</p>
+</section>
 </div></body>
 </html>
