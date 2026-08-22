@@ -885,6 +885,7 @@ erDiagram
         datetime analytics_watermark "copy freshness: how far I have folded"
         datetime source_watermark "same snapshot, so the two cannot disagree"
         datetime source_write_frontier "F6: max source created_at folded; published as a MIN across tenants"
+        datetime history_starts_at "EARLIEST folded event_time; what the no-backfill notice reads"
         numeric unsealed_share "settledness: still due to move?"
         datetime oldest_unsealed_at
         int open_tickets

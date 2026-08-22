@@ -415,3 +415,118 @@ async def test_the_live_half_still_separates_combos_when_grouping_is_asked_for()
                               watermark=T0 - WIDE)
     by_method = {p["dimensions"][0]: Decimal(p["roles"]["sum_value"]) for p in out["points"]}
     assert by_method == {"ConfirmPickLine": Decimal(10), "ReportCount": Decimal(4)}
+
+
+async def test_status_reports_where_history_BEGINS_not_where_it_ends():
+    """The production symptom: the card said "No analytics history before 11:07" while the
+    chart beneath it plotted data from 09:00. It was reporting the newest folded instant as
+    the start of history."""
+    await _plant_and_fold([{"at": T0, "qty": "10.0"},
+                           {"at": T0 + timedelta(hours=3), "qty": "5.0"}])
+    async with async_session() as db:
+        body = await api.analytics_status(Response(), customer=CC, db=db)
+    start = body["history_starts_at"]
+    watermark = body["freshness"]["analytics_watermark"]
+    assert start is not None
+    assert start < watermark, f"history must begin BEFORE the watermark: {start} vs {watermark}"
+    assert start.startswith(T0.isoformat()[:16])
+
+
+async def test_status_still_reads_exactly_one_row_after_the_history_fix():
+    """The fix had to stay inside F5's one-row contract -- min(event_time) over the fact table
+    would have been the obvious implementation and would have broken it."""
+    await _plant_and_fold([{"at": T0, "qty": "10.0"}])
+    seen: list[str] = []
+
+    def record(conn, cursor, statement, params, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            seen.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record)
+    try:
+        async with async_session() as db:
+            await api.analytics_status(Response(), customer=CC, db=db)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record)
+    assert len([s for s in seen if "analytics_tenant_state" in s]) == 1
+    assert not any("analytics_facts" in s for s in seen), "no aggregate over the fact table"
+
+
+# ==================================================== POST /metrics (N7)
+ITEM_METRIC = {
+    "name": "consumption_by_item",
+    "dimensions": ["method", "item_number"],
+    "measures": [{"name": "quantity", "aggregation": "sum", "field": "quantity",
+                  "only": ["pick", "attempt", "correction"], "statuses": ["success"]}],
+    "filter": {"methods": ["ConfirmPickLine"]},
+    "grains": ["hourly", "daily", "monthly"],
+    "status": "active",
+}
+
+
+async def test_a_metric_can_be_registered_as_data_and_is_then_folded():
+    """The registry's whole claim, exercised through the API: a metric nobody wrote code for
+    is created as a ROW and the worker folds it."""
+    async with async_session() as db:
+        created = await api.create_metric(payload=dict(ITEM_METRIC), customer=CC, db=db)
+    assert created["name"] == "consumption_by_item"
+    assert created["backfilled_through"] is None, "D8: it has no history until a range is re-folded"
+
+    stats = await _plant_and_fold([{"at": T0, "qty": "10.0", "method": "ConfirmPickLine"}])
+    assert stats["definitions_rolled"] == 2, "the seed plus the newly registered metric"
+
+    async with async_session() as db:
+        rows = (await db.execute(select(AnalyticsHourlyRollup).join(
+            AnalyticsMetric, AnalyticsMetric.id == AnalyticsHourlyRollup.definition_id)
+            .where(AnalyticsMetric.name == "consumption_by_item"))).scalars().all()
+    assert rows, "the new metric must have rollup rows"
+    assert {r.dim2 for r in rows} == {"101978"}, "keyed by item_number in slot 2"
+
+
+async def test_an_invalid_definition_is_rejected_with_every_problem_at_once():
+    """Validated through the SAME function the worker applies, so a definition that would fold
+    to a silently empty chart is refused at the door rather than skipped later."""
+    bad = {**ITEM_METRIC, "name": "bad", "dimensions": ["no_such_field"],
+           "measures": [{"name": "q", "aggregation": "sum", "field": "quantity",
+                         "only": [], "statuses": ["nope"]}],
+           "filter": {"methods": ["ListPickLines"]}}
+    async with async_session() as db:
+        with pytest.raises(HTTPException) as exc:
+            await api.create_metric(payload=bad, customer=CC, db=db)
+    assert exc.value.status_code == 400
+    detail = " ".join(exc.value.detail)
+    assert "no_such_field" in detail          # dimension not on the fact row
+    assert "nope" in detail                    # status the projection never emits
+    assert "ListPickLines" in detail           # quantity summed over a method that carries none
+
+
+async def test_a_duplicate_name_is_a_409_not_a_second_row():
+    """Two definitions with one name would make "which metric is this chart" unanswerable."""
+    async with async_session() as db:
+        await api.create_metric(payload=dict(ITEM_METRIC), customer=CC, db=db)
+        with pytest.raises(HTTPException) as exc:
+            await api.create_metric(payload=dict(ITEM_METRIC), customer=CC, db=db)
+    assert exc.value.status_code == 409
+
+
+async def test_a_nameless_or_measureless_metric_is_refused():
+    async with async_session() as db:
+        for payload, missing in (({**ITEM_METRIC, "name": "  "}, "name"),
+                                 ({**ITEM_METRIC, "name": "m2", "measures": []}, "measure")):
+            with pytest.raises(HTTPException) as exc:
+                await api.create_metric(payload=payload, customer=CC, db=db)
+            assert exc.value.status_code == 400 and missing in str(exc.value.detail)
+
+
+async def test_creating_a_metric_does_not_promise_a_backfill():
+    """The plan specified 202 + a backfill job. D8 cancelled the backfill, so a 202 would
+    promise work that never happens."""
+    # Asserted against the actual route table, not the source: `or True` in an assertion is
+    # a test that cannot fail.
+    route = next(r for r in api.router.routes
+                 if r.path == "/analytics/metrics" and "POST" in r.methods)
+    assert route.status_code == 201, "202 would promise a backfill that D8 cancelled"
+    async with async_session() as db:
+        out = await api.create_metric(payload=dict(ITEM_METRIC), customer=CC, db=db)
+    assert "no history yet" in out["detail"]
+    assert "reconcile" in out["detail"], "it must say HOW to get history"

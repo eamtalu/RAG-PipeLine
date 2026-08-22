@@ -47,6 +47,22 @@ class AnalyticsTenantState(Base):
     #: really just the gap between them.
     source_watermark: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    #: The EARLIEST event_time this tenant has folded, so the interface can say where history begins.
+    #:
+    #: Needed because there is no backfill (correction D8): analytics counts from switch-on, and the
+    #: period before that must be LABELLED rather than drawn as zero, since an empty chart reads as "no
+    #: activity" when the truth is "not measured". The first implementation reported the analytics
+    #: WATERMARK for this, which is the newest folded instant -- so the notice claimed there was no
+    #: history before a moment the chart was already plotting data at. It contradicted the chart
+    #: directly beneath it.
+    #:
+    #: Kept as a column rather than computed on read because F5 requires the status endpoint to be
+    #: exactly ONE row read, and `min(event_time)` over a 13M-row fact table is not that.
+    #:
+    #: Moves BACKWARD only, mirroring how `analytics_watermark` moves forward only: folding an older
+    #: range legitimately extends history into the past, which is exactly what a late backfill does.
+    history_starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     #: F6's retention frontier for THIS tenant: the maximum `log_transactions.created_at` among rows it
     #: has fully processed. A WRITE time, not an event time, matching what `consumer_cursors` positions
     #: mean everywhere else in the codebase (see `NotificationRule.cursor_at`).

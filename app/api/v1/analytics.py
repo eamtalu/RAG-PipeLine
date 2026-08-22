@@ -28,7 +28,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -117,8 +117,11 @@ async def analytics_status(response: Response,
         "last_error": state.last_error,
         # D8: there is no backfill, so the interface must say "no history before here" rather than draw
         # an empty chart, which reads as zero activity.
-        "history_starts_at": _iso(state.analytics_watermark and state.last_cycle_at and
-                                  state.analytics_watermark),
+        #
+        # This used to report `analytics_watermark`, the NEWEST folded instant, as the point history
+        # STARTS at -- so the notice claimed there was no history before a moment the chart was already
+        # plotting data at. It now reads the earliest folded instant, which is what the sentence means.
+        "history_starts_at": _iso(state.history_starts_at),
         "backfilled": False,
     }
 
@@ -148,6 +151,62 @@ async def list_metrics(customer: str = Depends(get_current_customer),
         "backfilled_through": _iso(r.backfilled_through),
         "created_by": r.created_by,
     } for r in rows]}
+
+
+@router.post("/metrics", status_code=201)
+async def create_metric(payload: dict = Body(...),
+                        customer: str = Depends(get_current_customer),
+                        db: AsyncSession = Depends(get_session)):
+    """Register a metric. The registry is the whole point: this writes a ROW, not code.
+
+    Validated through `definition.validate()` -- the SAME function the worker applies before folding, so
+    a definition that would produce a silently empty chart is rejected here rather than accepted and
+    then skipped at fold time. Every problem is returned at once, because a half-valid definition should
+    not be reported one error per save.
+
+    201, not the plan's 202: the 202 existed because creating a metric started a backfill job, and
+    correction D8 cancelled the backfill. Returning 202 with nothing running behind it would promise
+    work that never happens. History for a new metric comes from re-folding a range instead, which is an
+    explicit operator action -- `POST /analytics/reconcile?repair=true`.
+    """
+    try:
+        measures = tuple(registry.measure_from_json(m) for m in (payload.get("measures") or ()))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(400, detail=f"malformed measure: {exc}") from None
+
+    definition = d.MetricDefinition(
+        name=(payload.get("name") or "").strip(),
+        dimensions=tuple(payload.get("dimensions") or ()),
+        measures=measures,
+        grains=tuple(payload.get("grains") or ("hourly", "daily", "monthly")),
+        method_filter=tuple((payload.get("filter") or {}).get("methods") or ()),
+        status=d.Status(payload.get("status") or d.Status.draft.value),
+    )
+    if not definition.name:
+        raise HTTPException(400, detail="`name` is required.")
+    if not definition.measures:
+        raise HTTPException(400, detail="at least one measure is required.")
+
+    problems = d.validate(definition)
+    if problems:
+        raise HTTPException(400, detail=problems)
+
+    existing = await db.scalar(select(AnalyticsMetric.id).where(
+        AnalyticsMetric.customer_code == customer, AnalyticsMetric.name == definition.name))
+    if existing is not None:
+        raise HTTPException(409, detail=f"a metric named {definition.name!r} already exists here.")
+
+    row = AnalyticsMetric(**registry.to_row(definition, customer_code=customer,
+                                            created_by=payload.get("created_by") or "api"))
+    db.add(row)
+    await db.commit()
+    return {"id": str(row.id), "name": row.name, "status": row.status,
+            "dimensions": row.dimensions, "grains": row.grains,
+            "measures": [m.get("name") for m in (row.measures or [])],
+            # D8 again: no history exists for it until a range is re-folded.
+            "backfilled_through": None,
+            "detail": ("Registered. It has no history yet -- re-fold a range with "
+                       "POST /analytics/reconcile?repair=true to populate it.")}
 
 
 async def _definition(db: AsyncSession, customer: str, name: str):

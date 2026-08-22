@@ -413,8 +413,8 @@ async def _source_watermark(db: AsyncSession, customer_code: str) -> datetime | 
 
 
 async def _update_state(db: AsyncSession, customer_code: str, *, folded: dict, quarantined: int,
-                        event_watermark: datetime | None, source_watermark: datetime | None,
-                        frontier: datetime | None,
+                        event_watermark: datetime | None, history_start: datetime | None,
+                        source_watermark: datetime | None, frontier: datetime | None,
                         settledness: tuple[Decimal | None, datetime | None],
                         now: datetime) -> None:
     """F5: write everything the status card shows, so the polled endpoint is ONE indexed lookup.
@@ -433,7 +433,8 @@ async def _update_state(db: AsyncSession, customer_code: str, *, folded: dict, q
 
     values = {
         "id": uuid.uuid4(), "customer_code": customer_code,
-        "analytics_watermark": event_watermark, "source_watermark": source_watermark,
+        "analytics_watermark": event_watermark, "history_starts_at": history_start,
+        "source_watermark": source_watermark,
         "source_write_frontier": frontier,
         "unsealed_share": share, "oldest_unsealed_at": oldest_unsealed,
         "facts_total": max(net_facts, 0), "quarantined_rows": quarantined,
@@ -445,6 +446,11 @@ async def _update_state(db: AsyncSession, customer_code: str, *, folded: dict, q
         set_={
             "analytics_watermark": func.greatest(
                 AnalyticsTenantState.analytics_watermark, stmt.excluded.analytics_watermark),
+            # BACKWARD only, the mirror of the watermark above: folding an older range legitimately
+            # extends history into the past, which is what a late backfill does. `least` ignores NULLs,
+            # so a first fold sets it and later folds only ever widen the range.
+            "history_starts_at": func.least(
+                AnalyticsTenantState.history_starts_at, stmt.excluded.history_starts_at),
             # NOT forward-only, unlike the analytics watermark. This one describes the SOURCE, and the
             # source legitimately shrinks: a date-range delete or a partition drop lowers the newest
             # started_at. Clamping it forward would leave a permanent phantom lag that nothing could
@@ -548,6 +554,7 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         await _update_state(
             db, customer_code, folded=folded, quarantined=quarantined,
             event_watermark=max((f["event_time"] for f in facts if f["event_time"]), default=None),
+            history_start=min((f["event_time"] for f in facts if f["event_time"]), default=None),
             source_watermark=await _source_watermark(db, customer_code),
             frontier=max((r["created_at"] for r in source_rows if r.get("created_at")), default=None),
             settledness=_settledness(source_rows), now=now)

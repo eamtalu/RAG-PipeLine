@@ -696,3 +696,56 @@ async def test_the_source_watermark_is_the_projections_newest_row_not_the_folded
         newest = await db.scalar(_select(_func.max(_LT.started_at)).where(_LT.customer_code == CC))
     assert st.source_watermark == newest
     assert st.analytics_watermark < st.source_watermark, "so the lag is non-zero"
+
+
+# ==================================================== where history begins (found in production)
+#
+# The status card said "No analytics history before 11:07 AM" while the chart directly
+# beneath it plotted data from 09:00. It reported the analytics WATERMARK -- the newest
+# folded instant -- as the point history STARTS at, so the notice contradicted the chart on
+# screen and understated the history by two hours.
+
+async def test_the_fold_records_where_history_begins():
+    await _plant([{"at": T0, "qty": "10.0"}])
+    await n3.consume_tenant(CC)
+    st = await _state()
+    assert st.history_starts_at is not None
+    assert st.history_starts_at == T0, "the EARLIEST folded instant, not the newest"
+
+
+async def test_history_start_and_watermark_are_the_two_ENDS_of_the_range():
+    """The bug in one assertion: these must not be the same field. With more than one bucket
+    folded, the start is the oldest and the watermark is the newest."""
+    await _plant([{"at": T0, "qty": "10.0"},
+                  {"at": T0 + timedelta(hours=3), "qty": "5.0"}])
+    await n3.consume_tenant(CC)
+    st = await _state()
+    assert st.history_starts_at == T0
+    assert st.analytics_watermark == T0 + timedelta(hours=3)
+    assert st.history_starts_at < st.analytics_watermark
+
+
+async def test_history_start_moves_BACKWARD_when_older_data_is_folded():
+    """Mirroring how the watermark moves forward only. Folding an older range legitimately
+    extends history into the past -- which is exactly what a late backfill does -- so
+    clamping this forward would permanently understate what is available."""
+    await _plant([{"at": T0, "qty": "10.0"}])
+    await n3.consume_tenant(CC)
+    assert (await _state()).history_starts_at == T0
+
+    older = T0 - timedelta(hours=4)
+    await _plant([{"at": older, "qty": "1.0"}], ticket=False)
+    async with async_session() as db:
+        db.add(AnalyticsPendingWindow(customer_code=CC, range_start=older - timedelta(hours=1),
+                                      range_end=older + timedelta(hours=1)))
+        await db.commit()
+    await n3.consume_tenant(CC)
+    assert (await _state()).history_starts_at == older, "history must extend backwards"
+
+
+async def test_history_start_does_not_move_forward_when_only_newer_data_is_folded():
+    await _plant([{"at": T0, "qty": "10.0"}])
+    await n3.consume_tenant(CC)
+    await _plant([{"at": T0 + timedelta(hours=2), "qty": "1.0"}])
+    await n3.consume_tenant(CC)
+    assert (await _state()).history_starts_at == T0
