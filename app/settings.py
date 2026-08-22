@@ -147,6 +147,21 @@ class Settings(BaseSettings):
     # Cap on tenants stitched per drain, so one very busy tenant set cannot monopolise a tick.
     log_stitch_max_customers_per_tick: int = 25
 
+    # --- Analytics worker (N3): folds log_transactions into analytics_facts ---
+    # OFF by default. Phase 2 shipped the ticket publisher, so analytics_pending_windows is already
+    # accumulating; this switch decides whether anything consumes it. Deploying the consumer dark lets
+    # ticket coverage be watched against real traffic before any fact is written.
+    analytics_worker_enabled: bool = False
+    analytics_poll_seconds: float = 2.0
+    # Cap on tenants folded per drain, so one busy tenant set cannot monopolise a tick.
+    analytics_max_customers_per_tick: int = 25
+    # Dead-letter after this many failures. Matches the Stage 2 queue: a range that has failed five
+    # times is failing for a reason a sixth attempt will not change, and an abandoned ticket is
+    # visible on the status card rather than silently retried forever.
+    analytics_max_attempts: int = 5
+    analytics_backoff_base_seconds: float = 5.0
+    analytics_backoff_cap_seconds: float = 900.0
+
     # --- Ingest queue: decoupling SSH fetching from Stage 1 parsing (log_source_objects) ---
     # Master switch, ON since 2026-08-05. The fetcher downloads bytes, saves them, and commits a
     # log_source_objects ticket together with the file checkpoint in ONE transaction; log_parse_worker

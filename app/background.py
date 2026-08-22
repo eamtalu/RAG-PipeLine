@@ -25,6 +25,7 @@ from app.settings import settings
 from app.services.workers.embedding_worker import run_worker
 from app.services.workers.log_watcher import run_log_watcher
 from app.services.workers.log_stitch_worker import run_log_stitch_worker, pending_backlog
+from app.services.workers.analytics_worker import run_analytics_worker
 from app.services.workers.ssh_log_fetcher import run_ssh_log_fetcher
 from app.services.workers.log_parse_worker import run_log_parse_worker, unfinished_ingest_objects
 from app.services.workers.log_partition_worker import run_log_partition_worker
@@ -102,6 +103,20 @@ async def start_background_tasks() -> list[asyncio.Task]:
         tasks.append(asyncio.create_task(run_log_stitch_worker()))
     else:
         logger.info("Log stitch worker disabled (log_stitch_worker_enabled=False, queue empty)")
+    # Analytics worker (N3): drains analytics_pending_windows into analytics_facts.
+    #
+    # STRICTLY flag-gated, and deliberately unlike the stitch and parse workers above, which start on
+    # a backlog even when disabled. That auto-start exists because for them a queue nobody drains means
+    # LOST DATA: the parse worker's checkpoint has already advanced past those bytes, and unstitched
+    # entries are never revisited. Neither is true here. An unconsumed analytics ticket loses nothing —
+    # log_transactions still holds the truth and the ticket stays open — so the failure mode is a stale
+    # chart, not missing data. Auto-starting a consumer that writes to nine tables on the strength of a
+    # queue depth would take that decision away from the operator for no safety gain.
+    if settings.analytics_worker_enabled:
+        tasks.append(asyncio.create_task(run_analytics_worker()))
+    else:
+        logger.info("Analytics worker disabled (analytics_worker_enabled=False); tickets accumulate "
+                    "on analytics_pending_windows and are folded whenever it is switched on")
     # Remote SSH log fetcher: the per-customer poll supervisor. ON by default and idle until a source
     # is enabled from the frontend (ssh_log_fetcher_enabled is only a global kill-switch).
     if settings.ssh_log_fetcher_enabled:
