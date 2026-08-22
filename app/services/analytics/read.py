@@ -330,9 +330,26 @@ async def _live_points(db, customer_code: str, definition: d.MetricDefinition,
     bucket_of = ((lambda r: n5.hour_of(r["event_time"]) if r.get("event_time") else None)
                  if grain == "hourly" else (lambda r: r.get("business_date")))
     folded = n5.group_fold(facts, definition, bucket_of)
-    return {(bucket, tuple(dims[definition.dimensions.index(g)] for g in group_by
-                           if g in definition.dimensions)): measures[measure]
-            for (bucket, dims), measures in folded.items() if measure in measures}
+
+    # ACCUMULATED, not comprehended. `group_fold` keys by the definition's FULL dimension
+    # tuple, and the requested `group_by` is usually narrower -- with no grouping at all it
+    # is empty, so every combo in a bucket reduces to the same key. A dict comprehension
+    # keeps the LAST of those and silently discards the rest.
+    #
+    # That is not hypothetical: it shipped. One production hour held eight distinct
+    # (method, transaction_name) combos of which one contributed 681 units; the last combo
+    # iterated was a non-quantity method, so the bucket reported ZERO and the units tile
+    # read 681 short of the breakdown table directly beneath it. It only showed with no
+    # grouping, because a grouping keeps the keys distinct -- which is why every earlier
+    # test passed.
+    out: dict = {}
+    for (bucket, dims), measures in folded.items():
+        if measure not in measures:
+            continue
+        key = (bucket, tuple(dims[definition.dimensions.index(g)] for g in group_by
+                             if g in definition.dimensions))
+        out[key] = d.add_roles(out.get(key, {}), measures[measure])
+    return out
 
 
 async def series(db, customer_code: str, definition_id, definition: d.MetricDefinition, *,

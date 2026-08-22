@@ -39,6 +39,7 @@ from app.persistence.models.job import Job
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.services.analytics import consume as n3
 from app.services.analytics.contract import QUANTITY_FIELD as QF
+from app.services.mnp_log_ingestion.pipeline.time_bounds import UtcWindow
 
 CC = "api-probe"
 T0 = datetime(2026, 8, 10, 14, 30, tzinfo=timezone.utc)
@@ -351,3 +352,66 @@ async def test_reconcile_reports_per_check():
         body = await api.trigger_reconcile(customer=CC, db=db, start=None, end=None, repair=False)
     assert set(body["by_check"]) == {"facts_vs_transactions", "rollups_vs_facts",
                                      "entries_vs_assignments"}
+
+
+async def test_the_live_half_adds_every_dimension_combo_in_a_bucket():
+    """Found in production, from a screenshot: the UNITS tile read 19,144.43 while the
+    breakdown table beneath it summed to 19,825.43 -- and the series reported one hour as
+    `sum=0 count=0` when the stored rollup for that hour held 681.
+
+    Cause: `_live_points` built a dict COMPREHENSION keyed on the REDUCED dimensions. That
+    hour had eight distinct (method, transaction_name) combos, only one of which
+    contributes to consumption. With `group_by=()` all eight collapse to a single key, and
+    a dict comprehension silently keeps the LAST one -- which was a non-quantity method,
+    so the whole bucket reported zero.
+
+    It only showed with no grouping. `group_by=("method",)` keeps the keys distinct, which
+    is exactly why the table was right and the tile was wrong, and why every test until
+    now passed: they all grouped, or had one combo per bucket.
+
+    Silent under-reporting, in the LIVE half -- the recent tail the two-tier read exists to
+    serve.
+    """
+    from app.services.analytics import read as n6
+    from app.services.analytics import registry
+
+    # Two quantity-bearing methods in the SAME hour: two dimension combos, both contributing.
+    await _plant_and_fold([
+        {"at": T0, "qty": "10.0", "method": "ConfirmPickLine"},
+        {"at": T0 + timedelta(minutes=5), "qty": "4.0", "method": "ReportCount"},
+    ])
+
+    async with async_session() as db:
+        (definition_id, definition), = await registry.active_definitions(db, CC)
+        # A watermark BEFORE the data forces the whole window through the live half.
+        out = await n6.series(db, CC, definition_id, definition,
+                              window=UtcWindow(start=T0 - WIDE, end=T0 + WIDE),
+                              measure="quantity", group_by=(),
+                              watermark=T0 - WIDE)
+
+    assert out["from_rollups"] is False, "the point of this test is the LIVE path"
+    total = sum(Decimal(p["roles"].get("sum_value", "0")) for p in out["points"])
+    assert total == Decimal(14), f"expected 10 + 4 from two combos in one bucket, got {total}"
+
+    counts = sum(p["roles"].get("count_value", 0) or 0 for p in out["points"])
+    assert counts == 2, f"both confirmations must be counted, got {counts}"
+
+
+async def test_the_live_half_still_separates_combos_when_grouping_is_asked_for():
+    """The other direction, so the fix is not "always merge": with a grouping, each combo
+    keeps its own row."""
+    from app.services.analytics import read as n6
+    from app.services.analytics import registry
+
+    await _plant_and_fold([
+        {"at": T0, "qty": "10.0", "method": "ConfirmPickLine"},
+        {"at": T0 + timedelta(minutes=5), "qty": "4.0", "method": "ReportCount"},
+    ])
+    async with async_session() as db:
+        (definition_id, definition), = await registry.active_definitions(db, CC)
+        out = await n6.series(db, CC, definition_id, definition,
+                              window=UtcWindow(start=T0 - WIDE, end=T0 + WIDE),
+                              measure="quantity", group_by=("method",),
+                              watermark=T0 - WIDE)
+    by_method = {p["dimensions"][0]: Decimal(p["roles"]["sum_value"]) for p in out["points"]}
+    assert by_method == {"ConfirmPickLine": Decimal(10), "ReportCount": Decimal(4)}
