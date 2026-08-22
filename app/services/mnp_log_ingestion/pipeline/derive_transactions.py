@@ -37,6 +37,7 @@ from app.persistence.models.log_regroup_run import LogRegroupRun, LogRegroupRunS
 from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
 from app.services.mnp_log_ingestion.pipeline import assignments, continuity, time_bounds
 from app.services.queueing import retry_policy
+from app.services.analytics import pending_windows as analytics_tickets
 
 logger = logging.getLogger(__name__)
 
@@ -673,6 +674,17 @@ async def regroup_all(db: AsyncSession, customer_code: str | None = None) -> dic
     customer (used for a full repair)."""
     # Assignments first: the FK cascade is gone (it made partitions undroppable), so they must be
     # removed explicitly or every full regroup leaves orphans pointing at deleted transactions.
+    # N1, publish site 3 of 5. The span has to be read BEFORE the delete: this frees the tenant's whole
+    # history and commits, so afterwards there is nothing left to derive bounds from. One aggregate per
+    # tenant rather than every row, since only the extremes matter and `publish` splits by day.
+    span_stmt = select(LogTransaction.customer_code,
+                       func.min(LogTransaction.started_at),
+                       func.max(LogTransaction.started_at)).group_by(LogTransaction.customer_code)
+    if customer_code is not None:
+        span_stmt = span_stmt.where(LogTransaction.customer_code == customer_code)
+    for code, lo, hi in (await db.execute(span_stmt)).all():
+        await analytics_tickets.publish_for_transactions(db, code, started_ats=[lo, hi])
+
     await assignments.delete_for_customer(db, customer_code)
     del_stmt = delete(LogTransaction)
     if customer_code is not None:
@@ -776,14 +788,26 @@ async def regroup_incremental(db: AsyncSession, customer_code: str | None = None
     with unassigned entries (what the background worker runs)."""
     # 1. free unsealed transactions only; sealed rows stay. Their assignments go first — no cascade
     #    does it for us, and this runs on the live path every cycle, so an orphan here compounds.
-    unsealed_stmt = select(LogTransaction.id).where(LogTransaction.sealed.is_(False))
+    # Selects `started_at` alongside the id now: N1 needs the instant, and after the delete below there
+    # is nothing left to derive it from (F1). Bounds MUST come from the freed set rather than from
+    # incoming entries, because this delete has no time predicate at all -- an older unsealed row caught
+    # in the same sweep would otherwise never be ticketed and its contribution would drift for good.
+    unsealed_stmt = select(LogTransaction.id, LogTransaction.started_at,
+                           LogTransaction.customer_code).where(LogTransaction.sealed.is_(False))
     free_stmt = delete(LogTransaction).where(LogTransaction.sealed.is_(False))
     if customer_code is not None:
         unsealed_stmt = unsealed_stmt.where(LogTransaction.customer_code == customer_code)
         free_stmt = free_stmt.where(LogTransaction.customer_code == customer_code)
-    await assignments.delete_for_transactions(
-        db, list((await db.execute(unsealed_stmt)).scalars().all()))
+    freed_rows = (await db.execute(unsealed_stmt)).all()
+    await assignments.delete_for_transactions(db, [r.id for r in freed_rows])
     await db.execute(free_stmt)
+
+    # N1, publish site 2 of 5. Before the commit, so ticket and change are atomic (invariant 3).
+    # Grouped per tenant because `customer_code=None` frees every tenant's unsealed rows at once, and a
+    # ticket is meaningless without knowing whose window it describes.
+    for code in {r.customer_code for r in freed_rows}:
+        await analytics_tickets.publish_for_transactions(
+            db, code, started_ats=[r.started_at for r in freed_rows if r.customer_code == code])
     await db.commit()
 
     # 2. customers that have any still-unassigned entry (freed unsealed + brand-new)
@@ -863,6 +887,18 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
     await assignments.delete_for_transactions(db, freed)
     await db.execute(delete(LogTransaction).where(LogTransaction.id.in_(freed)) if freed
                      else delete(LogTransaction).where(sa_false()))
+
+    # N1 (Phase 2), publish site 1 of 5. Inside THIS transaction, so the ticket and the change commit
+    # together or neither does (invariant 3).
+    #
+    # Published HERE rather than at the end of the function, and that placement is the point: the rows
+    # above are already gone, and the `if not rows` early return below can exit before anything is
+    # rebuilt. Publishing after that return would miss exactly the case where transactions were freed
+    # and NOT recreated -- the case where facts most need reversing.
+    #
+    # The padded window is used rather than the freed rows' own span: it is what this function already
+    # guarantees is lossless, so a ticket cannot describe less than the rebuild does.
+    await analytics_tickets.publish(db, customer_code, lo=lo_p, hi=hi_p)
 
     # 2. read the now-unassigned entries across the full padded span, in stream order. The upper read
     #    bound is hi_p (= hi + pad), not hi: a freed transaction anchored at hi can own entries up to

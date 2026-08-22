@@ -28,6 +28,7 @@ from app.persistence.models.log_source_object import LogSourceObject, SourceObje
 from app.persistence import partitioning as pt
 from app.services.workers.log_partition_worker import db_today, days_of_runway
 from app.services.mnp_log_ingestion.pipeline import assignments, time_bounds
+from app.services.analytics import pending_windows as analytics_tickets
 from app.services.logspace_cleanup import purge_source_objects_files
 from app.services.workers.log_parse_worker import reset_abandoned_objects
 from app.services.mnp_log_ingestion.LogIngestion import LogIngestion, get_log_ingestion, DOCUMENT_TYPE
@@ -703,6 +704,20 @@ async def delete_log_data(
                                 .where(LogEntry.customer_code == customer))
         n_txn = await db.scalar(select(func.count()).select_from(LogTransaction)
                                 .where(LogTransaction.customer_code == customer))
+        # N1 (F12), publish site 5 of 5, and the awkward one. The transactions below are removed by the
+        # `jobs` cascade, not by a statement here, so there is nothing to hook at the point of
+        # destruction: the ticket has to be published NOW, while the rows are still readable. Afterwards
+        # their span is unrecoverable and their contribution would sit in every total permanently.
+        #
+        # The tenant SURVIVES a wipe (only its log data goes), which is what distinguishes this from the
+        # tenant purge in logspace_cleanup: there the tenant is leaving, so its analytics rows are
+        # deleted outright and no ticket is published at all (F13).
+        span = (await db.execute(
+            select(func.min(LogTransaction.started_at), func.max(LogTransaction.started_at))
+            .where(LogTransaction.customer_code == customer))).one()
+        if n_txn:
+            await analytics_tickets.publish_for_transactions(
+                db, customer, started_ats=[span[0], span[1]])
         # Assignments first — they have no FK to cascade from (see the model docstring), so the
         # jobs cascade below reaches entries and transactions but never them.
         await assignments.delete_for_customer(db, customer)
@@ -748,6 +763,19 @@ async def delete_log_data(
         select(LogTransaction.id).where(*txn_conds))).scalars().all()))
     await assignments.delete_for_entries(db, list((await db.execute(
         select(LogEntry.id).where(*ent_conds))).scalars().all()))
+
+    # N1 (F12), publish site 4 of 5. Before the delete, in the same transaction (invariant 3).
+    #
+    # The `regroup_incremental` call at the end of this function does NOT cover these rows: its bounds
+    # come from the freed UNSEALED set, and by then these are already gone -- sealed ones included.
+    # Bounds are read from the same `txn_conds` the delete uses, so the ticket describes exactly what is
+    # removed rather than an approximation of it.
+    span = (await db.execute(
+        select(func.min(LogTransaction.started_at), func.max(LogTransaction.started_at))
+        .where(*txn_conds))).one()
+    if span[0] is not None or span[1] is not None:
+        await analytics_tickets.publish_for_transactions(db, customer,
+                                                        started_ats=[span[0], span[1]])
 
     txn_res = await db.execute(delete(LogTransaction).where(*txn_conds))
     ent_res = await db.execute(delete(LogEntry).where(*ent_conds))
