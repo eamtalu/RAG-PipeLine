@@ -1862,6 +1862,164 @@ Neither ordering is forced by correctness - this one is chosen because R3 is the
 
 **S0 is independent of all of it** and is the cheapest thing on the list.
 
+## 18d. Target-state component map: where every planned change lands
+
+Section 18c's map is the system AS IT IS.
+It named the 34 tables that exist plus the 2 planned ML tables, and it did not show the registry, the discovery table, the capture path, the per-record grain, or the two tables S1-S4 introduces.
+This is that map: the same pipelines, with every change from S0 through M1 placed on the component it touches.
+
+Verified before writing: all 34 existing tables appear, all 6 new tables appear and **none of them exists yet**, nothing is invented, every line citation resolves to a real file, and every figure matches the figure already in this document.
+
+The six new tables:
+
+| Table | Introduced by | Partitioned | Note |
+|---|---|---|---|
+| `log_open_stream` | S2 | **no**, deliberately | small self-cleaning working set; needs a TTL reaper |
+| `log_pending_request` | S2 | **no**, deliberately | same |
+| `analytics_transaction_registry` | R1 | no | **name proposed, not agreed**; one row per `transaction_name` |
+| `analytics_field_registry` | R1 | no | **name proposed, not agreed**; one row per `(method, field)` |
+| `analytics_feature_sets` | M1 | to decide | named in section 5's table list already |
+| `analytics_predictions` | M1 | to decide | same |
+
+Plus one undecided: R4's per-record grain is either a seventh table or a second row type in `analytics_facts`, and which it is depends on whether `rollups.recompute` folds two grains cleanly.
+That code has not been read yet, so the map marks it `[OPEN]` rather than guessing.
+
+```
+  LEGEND   [NEW]  does not exist yet        [CHANGE] exists, this work modifies it
+           [NEW?] proposed name, NOT agreed  [OPEN]  design decision not yet made
+
+=== P1  INGESTION ============================== untouched by any of this work
+   log_ssh_sources . log_ssh_file_checkpoints . log_ssh_fetch_runs
+   log_source_objects ======> QUEUE
+=== P2  STAGE 1: PARSE ========================= untouched
+   parse_insert.py  ->  log_entries    daily x94 . 60 days . append-only
+                        ALREADY parses response + mi_result in full.
+                        Stage 2 discards it today; R3 stops discarding.
+   log_regroup_pending ======> QUEUE
+=== P3  STAGE 2: DERIVE ======================== S0 . S1 . S2 . S3 . S4
+   derive_transactions.py
+    S0 [CHANGE] sweep the 2,516 rows stuck past their seal window
+    S1 [CHANGE] explicit sealer, WITH A BOUNDED HORIZON
+                unbounded, it seals a 59-day-old row and alerts one day
+                before that row's entries are dropped
+    S2 [NEW]    log_open_stream         unpartitioned, self-cleaning
+       [NEW]    log_pending_request     unpartitioned, self-cleaning
+                ^^ both need a TTL REAPER in the sealer tick.
+                   derived state cannot leak; persisted state can.
+                   monitor count(*): a number that only grows is the alarm.
+    S3 [CHANGE] log_transactions      UPDATE in place, not delete+reinsert
+       [CHANGE] log_entry_assignment  APPEND-ONLY   52.7M -> 2.6M writes
+       [NEW]    partial index on log_transactions
+                CREATE INDEX ON ONLY parent -> per-partition CONCURRENTLY
+                -> ATTACH PARTITION   (recipe from migration b3d914c7ea52)
+    S4 [CHANGE] state machine replaces the window re-derive   22.4 -> ~1.0
+   log_regroup_runs                 [audit] one row per regroup run, unchanged
+        |
+        v   ticket still published IN THE SAME COMMIT (invariant 3, unchanged)
+   analytics_pending_windows ======> QUEUE     volume falls ~95% after S3
+                                              STILL one ticket per
+                                              (customer, window). NOT segregated.
+=== P4  ANALYTICS ============================== R1 . R1b . R3 . R4
+   consume.py     reads analytics_tenant_state (watermark, revision, frontier)
+    S1 [CHANGE] _FRONTIER_COLUMN  created_at -> updated_at   consume.py:85
+    R1 [NEW?]   analytics_transaction_registry     one row per transaction_name
+                   [x] Capture   irreversible if unticked
+                   [x] Show      free, reversible, retroactive
+                   [ ] Expand    per-record rows, ~200k/day
+                   transaction_name IS NULL -> no row: always capture, never show
+    R1 [NEW?]   analytics_field_registry          one row per (method, field)
+                   captured bool. unknown key -> NAME ONLY, captured=false.
+                   never the value, because facts are KEEP FOREVER.
+    R1 [CHANGE] ONE shared source predicate, read by BOTH:
+                   consume.py:239       the fold
+                   reconcile.py:125     facts_vs_transactions
+                ^^ if these two diverge, the auditor alerts FOREVER
+    R1 [CHANGE] analytics_metrics.filter gains "transactions" beside "methods"
+                (a method is shared across transactions: ConfirmPickLine is in
+                 both Brighton Stock Pick and JIT and Shorts Pick)
+        |
+        v   normalizer.py
+    R3 [CHANGE] merge response scalars into attributes, NAMESPACED
+                   resp.*  response payload   (947 scalars / 145 keys measured)
+                   mi.*    mi_result + record_count
+                   gated by analytics_field_registry
+        |
+        +--> analytics_facts         monthly x5 . KEEP FOREVER . latest version
+        |      [CHANGE] attributes 806 -> ~2000 bytes, ~3 GB over 5 years
+        |      [CHANGE] every fingerprint changes  =>  FULL RE-FOLD
+        +--> analytics_fact_ledger   monthly x5 . KEEP FOREVER . EVERY version
+        |      [CHANGE] +1 revision per fact per re-fold (one full copy)
+        +--> analytics_quality_issues   monthly x5 . 365 days
+        +--> [OPEN] R4 per-record grain: a NEW TABLE, or a 2nd row type in
+                    analytics_facts? depends on whether rollups.recompute
+                    folds two grains cleanly. NOT yet read.
+        |
+        v   rollups.py                                     DIMENSION_SLOTS = 4
+   R1b [CHANGE] a dimension may name  attr:resp.BaseUoM
+                validate() asks analytics_field_registry, NOT FACT_FIELDS
+     C [CHANGE] promotion: attr: -> typed column via _FROM_ATTRIBUTES
+                copies, never moves, so the attr: path keeps resolving.
+                fingerprint change re-folds = the backfill, for free.
+                BOTH paths must use _as_text or one UoM splits in two.
+        |
+        +--> analytics_hourly_rollups   daily x67 .  90 days
+        +--> analytics_daily_rollups    yearly x2 . KEEP FOREVER
+        +--> analytics_monthly_rollups  unpartitioned . KEEP FOREVER
+        |
+        v   read.py -> api/v1/analytics.py -> the chart
+    R2 [NEW]    frontend registry screen: 7 transactions, 3 switches,
+                the discovery list for newly seen fields
+=== P5  NOTIFICATIONS ========================== S0 fixes one, S1 moves two
+    S0 [FIX]    stability.py's "incomplete AND sealed" alert starts working
+                (577 rows can never reach that state today)
+    S1 [CHANGE] notifications/cursor.py:153-157  created_at -> updated_at
+                ^^ FAILS UNSAFE if forgotten
+    S1 [CHANGE] evaluators.py:64 dedup key gains status  (free improvement)
+   notification_rules . notification_events . notification_deliveries .
+   customer_notification_channels
+=== P6  RAG / ASSISTANT ======================== untouched
+   log_entries -> embedding_queue -> chunks / chunks_entity -> embeddings
+=== P7  ML ===================================== M1, and only after R3
+   analytics_fact_ledger --pinned revision--> [NEW] analytics_feature_sets
+                                                        |
+                                                        v
+                                              [NEW] analytics_predictions
+   [NEW] cursor ml:features-v1        (the name is already reserved)
+   the ledger makes a training set REPRODUCIBLE.
+   it cannot invent features never captured -- which is why R3 gates M1.
+=== CROSS-CUTTING ==============================
+   log_partition_worker  [CHANGE] must NOT register log_open_stream or
+                                  log_pending_request. Every existing grain,
+                                  retention and drop gate is unchanged.
+   consumer_cursors      [CHANGE] under-reports after S3. costs disk, not data.
+   logspace_cleanup      [CHANGE] enumerates 9 analytics models explicitly at
+                                  logspace_cleanup.py:133-135. EVERY new table
+                                  must be added or a tenant delete orphans it.
+   customers . customer_display_names . logspace_presence . saved_views .
+   jobs . idempotency_keys . alembic_version              [platform + tenancy]
+
+   TABLE COUNT   34 exist today  +  6 new  ( log_open_stream,
+                 log_pending_request, analytics_transaction_registry,
+                 analytics_field_registry, analytics_feature_sets,
+                 analytics_predictions )  + 1 undecided (R4)  =  40 or 41
+```
+
+### Three obligations this map makes visible
+
+**`logspace_cleanup.py:133-135` enumerates the nine analytics models by name.**
+Every new table must be added there or a tenant delete orphans its rows.
+This is a list in source, so nothing warns you - the test that a tenant delete leaves no rows behind has to name the new tables too.
+
+**The two S2 tables need a reaper that no existing table needed.**
+`evict_stale` closes a stream when an entry arrives, so a tenant that stops ingesting leaves its streams open forever.
+Derived state cannot leak; persisted state can.
+The TTL sweep belongs in the sealer tick, and `count(*)` on both tables is the only signal - a number that only grows is the alarm, and there is no upstream event to catch it.
+
+**One shared source predicate, or the auditor is permanently red.**
+`consume.py:239` decides what gets folded and `reconcile.py:125` decides what should exist.
+If a capture-off transaction is skipped by one and expected by the other, `facts_vs_transactions` reports a discrepancy on every run forever.
+A permanently red check is worse than no check, because it trains you to ignore the one thing that would catch a real divergence.
+
 ## Also corrected while measuring
 
 `settings.py:78-79` and `:110-112` claim "real transactions are ≤2 min".
