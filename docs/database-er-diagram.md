@@ -219,7 +219,8 @@ erDiagram
         text error_text
         int entry_count
         jsonb attributes "long-tail params"
-        datetime created_at
+        datetime created_at "first written"
+        datetime updated_at "last written; what the notification cursor reads (S1)"
     }
 
     log_entry_assignment {
@@ -283,11 +284,11 @@ erDiagram
     log_entries ||..o| log_entry_assignment : "currently assigned (soft, no FK)"
 ```
 
-### `log_entry_assignment` — why `log_entries` is now append-only
+### `log_entry_assignment` - why `log_entries` is now append-only
 
 Stage 2 used to write the grouping result back onto `log_entries` (`transaction_id` / `seq`) and clear it again through an `ON DELETE SET NULL` cascade.
 `transaction_id` is indexed, so every rewrite touched the heap *and* the index, and the unsealed tail is regrouped repeatedly before it seals.
-Measured on production 2026-08-05: **105,838,123 updates at 0.0% HOT** on 1.9M rows — roughly 55 rewrites per row.
+Measured on production 2026-08-05: **105,838,123 updates at 0.0% HOT** on 1.9M rows - roughly 55 rewrites per row.
 That was the write amplification, dead-tuple churn and vacuum pressure behind the outage.
 
 Separating the current interpretation from the raw evidence fixes it.
@@ -439,7 +440,7 @@ erDiagram
 Note: `log_ssh_fetch_runs.source_id` is nullable and has no foreign key.
 A null value means the run covered all enabled sources; otherwise it points at one source.
 
-### `log_source_objects` — the fetch/parse handoff
+### `log_source_objects` - the fetch/parse handoff
 
 One row is one contiguous byte range downloaded from a remote log file and saved to object storage, plus whether it has been parsed yet.
 It exists so the SSH fetcher can stop parsing inline: the fetcher inserts this row and advances `log_ssh_file_checkpoints.last_offset` in **one transaction**, then releases the SSH connection and the per-host lock, and a separate worker (`app/services/workers/log_parse_worker.py`) leases the row and runs Stage 1.
@@ -450,7 +451,7 @@ The checkpoint is a promise that everything behind it is handled; advancing it w
 It also carries the retry budget that the fetch path previously lacked (`attempts` / `max_attempts` / `available_at` / `last_error`), giving it the same dead-letter semantics `log_regroup_pending` already has for Stage 2.
 
 `source_id` deliberately has **no** foreign key: deleting an SSH source must never delete ingestion evidence, the same rule `log_ssh_fetch_runs.source_id` follows.
-`job_id` is likewise a soft reference and is transitional — it disappears when `jobs` is retired from the log path.
+`job_id` is likewise a soft reference and is transitional - it disappears when `jobs` is retired from the log path.
 
 ```mermaid
 erDiagram
@@ -486,7 +487,7 @@ erDiagram
 ```
 
 Deletion: `log_source_objects` has no job or tenant foreign key, so a tenant purge deletes it explicitly and unlinks the referenced files first (`app/services/logspace_cleanup.py`).
-A **date-range** log delete deliberately leaves it alone — these rows describe byte ranges, not log dates.
+A **date-range** log delete deliberately leaves it alone - these rows describe byte ranges, not log dates.
 
 ## Subsystem 4: Customer registry
 
@@ -585,9 +586,12 @@ Publishing that frozen minimum would pin partition retention for the WHOLE INSTA
 A disabled tenant is not a slow reader; it is not a reader.
 
 Streaming rules read `log_transactions` **incrementally**, via `notification_rules.cursor_at` (migration `c7a02f68b1d4`).
-The cursor is a `log_transactions.created_at` - the WRITE time, not `started_at` which is when the log line happened.
+The cursor is a `log_transactions.updated_at` - the LAST-WRITE time, not `started_at` which is when the log line happened.
+It read `created_at` until S1. Sealing became an explicit UPDATE, which does not refresh `created_at`, so a sealed row would have fallen permanently behind the cursor and `stability.py`'s `incomplete AND sealed` alert could never have fired.
 That distinction is load-bearing: a week-old file backfilled today produces rows with an old `started_at` but a new `created_at`, so a cursor on `started_at` would silently never see them.
-`log_transactions.created_at` is indexed for exactly this (migration `b3d914c7ea52`); because the table is partitioned, that index had to be built per-partition and attached, since PostgreSQL refuses `CREATE INDEX CONCURRENTLY` on a partitioned parent.
+`log_transactions` carries a composite `(customer_code, updated_at)` index for exactly this (migration `c4e17b9d5a83`), matching both the filter and the sort.
+The older single-column `created_at` index (`b3d914c7ea52`) is retained but no longer serves the feed.
+Because the table is partitioned, both had to be built per-partition and attached, since PostgreSQL refuses `CREATE INDEX CONCURRENTLY` on a partitioned parent.
 
 The engine never reads closer to the present than `notification_cursor_lag_seconds`.
 `created_at` is stamped when Python builds the row rather than when Postgres commits it, so a long Stage 2 transaction can commit a row whose timestamp already sits behind the cursor; without the lag that row is never read, and dedupe cannot recover something never seen.
@@ -618,7 +622,8 @@ Any such channel that already exists dead-letters on its FIRST attempt rather th
 
 ### `consumer_cursors` - retention must not outrun its readers
 
-`consumer_cursors` holds one row per incremental reader of `log_transactions`: `consumer` (the name), `position` (a `created_at` watermark meaning "everything strictly before here is consumed") and `updated_at` (a heartbeat).
+`consumer_cursors` holds one row per incremental reader of `log_transactions`: `consumer` (the name), `position` (a write-time watermark meaning "everything strictly before here is consumed") and `updated_at` (a heartbeat).
+Analytics still measures its own frontier on `log_transactions.created_at` (`consume.py:_FRONTIER_COLUMN`); S3 moves that to `updated_at` as well, and until it does the two readers deliberately track different columns.
 
 The partition worker already refuses to drop a day Stage 2 has not finished stitching.
 It now also refuses to drop a day a live consumer has not finished READING - `days_blocked_by_consumers`, gated on the minimum position across the registry.
@@ -659,7 +664,7 @@ erDiagram
         string severity
         jsonb target_channel_ids
         string status "draft/active/inactive"
-        datetime cursor_at "how far this rule has read (log_transactions.created_at); NULL = never run"
+        datetime cursor_at "how far this rule has read (log_transactions.updated_at); NULL = never run"
         datetime created_at
         datetime updated_at
     }
@@ -1002,7 +1007,7 @@ The nine `analytics_*` tables add **no rows to this table**. They have no enforc
 | `log_transactions.id` | `analytics_quality_issues.source_transaction_id` | nullable: a row can be unusable precisely because its identity could not be read |
 | `jobs.id` | `log_regroup_pending.job_id` | nullable, no FK |
 | `log_ssh_sources.id` | `log_ssh_fetch_runs.source_id` | nullable, no FK (null = all sources) |
-| `log_ssh_sources.id` | `log_source_objects.source_id` | nullable, no FK — deleting a source must not delete ingestion evidence |
+| `log_ssh_sources.id` | `log_source_objects.source_id` | nullable, no FK - deleting a source must not delete ingestion evidence |
 | `jobs.id` | `log_source_objects.job_id` | nullable, no FK; transitional, set by the parse worker |
 | `notification_rules.id` | `notification_events.rule_id` | provenance, no FK |
 | future `log_flow` | `log_transactions.flow_id` | Phase-3 hook, no FK |

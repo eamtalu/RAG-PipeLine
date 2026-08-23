@@ -82,6 +82,21 @@ class Settings(BaseSettings):
     # slow/late response can still join it; only after this long "abandon" window is it sealed as
     # permanently incomplete. Keeps the unsealed pool tiny without ever splitting a slow request.
     log_abandon_window_seconds: int = 3600
+    # S1's sealer refuses to touch a transaction whose `ended_at` is older than this. It is a BOUND on
+    # the sealer, not a seal window: without it the sealer would seal a 59-day-old row, bump
+    # `updated_at`, and — because the notification cursor now reads that column — alert on a
+    # transaction whose entries retention drops the next day, leaving a detail view with no entries.
+    #
+    # Measured on the DATABASE clock, deliberately unlike the seal/abandon cutoffs, which use the
+    # tenant's newest entry. What this guards against is retention, and retention uses `db_today`; a
+    # tenant whose logs are 90 days stale would otherwise get a horizon 150 days back and the sealer
+    # would reach into partitions that are already gone.
+    #
+    # Kept EQUAL to log_partition_retention_days by decision (2026-08-23). That leaves one day of
+    # residual risk at the boundary, which is accepted and recorded in section 18e; a value comfortably
+    # inside retention (45) removes it at the cost of never sealing the oldest rows. It is a setting so
+    # that changing the trade-off is configuration, not a code change.
+    log_seal_horizon_days: int = 60
     # How far back `_cutoffs` probes for the newest entry before giving up and scanning unbounded.
     # Once log_entries is partitioned by UTC day, an unbounded max(timestamp) opens all 60 partitions
     # on every regroup cycle; this bound prunes it to the last few days. It must comfortably exceed

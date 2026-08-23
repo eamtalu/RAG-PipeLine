@@ -56,9 +56,13 @@ def alertable_predicate():
     """The same rule as a SQL predicate, for the engine's window query.
 
     Applied in SQL rather than after fetching on purpose. Every Stage 2 rebuild refreshes
-    `created_at`, so an in-flight transaction re-enters the cursor's feed on *every* rebuild until it
+    `updated_at`, so an in-flight transaction re-enters the cursor's feed on *every* rebuild until it
     seals. Filtering in Python would mean paying for that churn on every tick; filtering here means
     never fetching it.
+
+    S1 note: the churn is what makes this gate necessary, and S1 is also what makes the gate finally
+    WORK. Before it, a row could pass its abandon window without any rebuild touching it, so it never
+    reached `incomplete AND sealed` at all - the branch below was unreachable for 2,516 rows.
     """
     if settings.notification_alert_only_sealed:
         return LogTransaction.sealed.is_(True)

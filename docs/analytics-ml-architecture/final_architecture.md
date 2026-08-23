@@ -1885,7 +1885,7 @@ What follows is what remains, in dependency order rather than in the order it wa
 
 | Stage | What | Depends on | On a clock? |
 |---|---|---|---|
-| **S1** | Explicit sealer. Clears the 2,516-row backlog on its first tick, then keeps sealing. Horizon 60 days. | nothing | no, but `stability.py`'s `incomplete AND sealed` alert is disabled until it runs |
+| **S1** | **BUILT 2026-08-24** - explicit sealer, `updated_at`, and the cursor moved onto it. See 18f. | nothing | done |
 | **R1** | Registry table, the shared source predicate read by BOTH `consume.py:239` and `reconcile.facts_vs_transactions`, and `transactions` beside `methods` in the fold filter | nothing | no |
 | **R1b** | `attr:` dimension resolution, with `validate` checking the registry instead of `FACT_FIELDS` | R1 | no, but R3 is pointless without it |
 | **R3** | Response scalar capture, namespaced `resp.*` / `mi.*`, allowlist-gated, seeded from the 145 measured keys minus credentials | R1, R1b | **YES - 60 days** |
@@ -2100,6 +2100,73 @@ Four defects were found in this document by the audit itself, all recorded in pl
 
 Two of those four - the `S0` duplicate and the `unsealed_share` mechanism - were introduced by earlier passes of this document.
 Recording that is the point: this section exists so the next audit starts from what the last one found.
+
+## 18f. S1 as BUILT, 2026-08-24
+
+**Shipped.** Migration `c4e17b9d5a83`, 22 tests in `tests/test_stage2_sealer_chunk53.py`, full suite 1,087 passing.
+This is the first part of iteration 2 to exist.
+
+### S1 turned out to be three things, not one
+
+The plan described S1 as an UPDATE that sets `sealed = true`.
+Implementing it surfaced that this fixes the flag and nothing else, because the notification cursor read `created_at`:
+
+```
+read_window: lo = the rule's cursor_at,  hi = now - lag      cursor.py:63-76
+the cursor only ever moves FORWARD                            cursor.py:106+
+the 3600 s lookback applies ONLY when cursor_at IS NULL
+```
+
+`alertable_predicate` names the mechanism it depends on in its own docstring: *"every Stage 2 rebuild refreshes `created_at`, so an in-flight transaction re-enters the cursor's feed on every rebuild until it seals."*
+An UPDATE does not refresh `created_at`.
+So a row sealed by the sealer would never re-enter the feed, `stability.py`'s `incomplete AND sealed` alert would still never fire for the 2,516 rows, and the sealer would have added a SECOND silent miss on top of the one it was written to remove.
+
+Earlier passes of this document asserted repeatedly that S1 fixes the notification gap.
+That was wrong as specified, and is why S1 shipped as:
+
+| # | Part | Why it cannot be deferred |
+|---|---|---|
+| 1 | `updated_at`, backfilled to `created_at` | the cursor needs a column that moves on an UPDATE |
+| 2 | the cursor reads `updated_at` (`cursor.py`, `engine.py`) | without it part 3 is invisible |
+| 3 | the sealer, horizon 60 days | the actual fix |
+
+Moving the cursor NOW rather than at S3 was deliberate: today the sealer is the only writer of an UPDATE, so the change is observable in isolation.
+After S3 every rebuild is an UPDATE and the same edit would land under churn.
+
+### Four things found by building it
+
+**The sealer must enumerate its own tenants.**
+The plan said to hang it off `log_stitch_worker`, which iterates `customers_with_due_work()` - tenants with an open `log_regroup_pending` row.
+That would not have worked: the stuck rows are stuck *because* nothing tickets them any more, so enumerating by ticket leaves the sealer unable to reach the rows it exists to fix.
+It enumerates by unsealed rows instead, which is what `ix_log_transactions_unsealed` is for.
+
+**Two clocks, deliberately.**
+The seal and abandon cutoffs use `_cutoffs`, measured against the tenant's newest entry, so back-dated ingestion seals correctly.
+The horizon uses the DATABASE clock, because what it guards against is retention dropping the partition and retention uses `db_today`.
+A tenant whose logs stopped 90 days ago would otherwise get a horizon 150 days back and the sealer would reach into partitions already gone.
+Both are pinned by tests.
+
+**The migration's first version silently did the wrong thing.**
+`ADD COLUMN updated_at TIMESTAMPTZ DEFAULT now()` does not leave existing rows NULL - PostgreSQL evaluates the default once and stores it as the column's missing value for every pre-existing row.
+The backfill was written `WHERE updated_at IS NULL`, matched nothing, and all 397 local rows ended up holding one identical timestamp 62 days from their own `created_at`.
+Since the cursor now reads that column, every notification rule would have seen its entire retained history as newly written and rescanned it.
+Caught by a post-migration check that counted `updated_at <> created_at`, not by a test.
+The column is now added with no default, backfilled unconditionally, constrained, and only then given a default.
+
+**S1 causes no analytics fact churn at all.**
+`sealed` is not one of the 24 `contract.FACT_FIELDS` and the normaliser never reads it, so sealing cannot change a fact fingerprint.
+The range diff reports `unchanged` and no fact or ledger row is written.
+
+### Two things left as they are
+
+**The horizon is 60 days, equal to `log_partition_retention_days`.**
+That leaves one day of residual risk at the boundary - a row sealed at 59 days bumps `updated_at`, is read by the cursor, and could alert one day before its entries are dropped.
+Kept at 60 by decision; it is a setting (`log_seal_horizon_days`), so changing the trade-off is configuration.
+The consequence is that rows already past the horizon when S1 first runs never seal.
+Locally that is all 96 unsealed rows, whose newest is 74 days old; on the deployed database the oldest unsealed is 2026-08-06, so all 2,516 are inside the horizon and will seal.
+
+**`ix_log_transactions_created_at` is retained** although the cursor no longer uses it.
+The index redesign stays deferred pending `pg_stat_statements` with the analytics and reconcile workers ENABLED - the earlier "never scanned" measurement was taken with them off, which this document already records once as a mistake.
 
 ## Also corrected while measuring
 

@@ -35,6 +35,7 @@ from app.settings import settings
 from app.config.database import async_session
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.services.mnp_log_ingestion.pipeline.derive_transactions import finalize_pending
+from app.services.mnp_log_ingestion.pipeline import sealer
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,15 @@ async def drain_once() -> dict:
 
 
 async def _tick() -> None:
-    """One iteration: drain, and report only when there was something to do.
+    """One iteration: seal, drain, and report only when there was something to do.
+
+    SEALING RUNS FIRST, and separately from the drain. It has its own tenant list on purpose: this
+    worker drains tenants with an open `log_regroup_pending` row, and the rows that need sealing are
+    stuck precisely because nothing tickets them any more (see `sealer`). Enumerating by ticket would
+    have left the sealer unable to reach the rows it exists to fix.
+
+    Its failures are swallowed the same way the drain's are - the rows simply stay unsealed and the
+    next tick retries - so a sealer problem can never stop stitching, which is the load-bearing half.
 
     Swallows errors so a single bad tick never kills the loop — every per-window failure is already
     recorded durably on log_regroup_pending, so there is nothing to lose by carrying on.
@@ -126,9 +135,17 @@ async def _tick() -> None:
     load-bearing.
     """
     try:
+        seal_stats = await sealer.seal_due()
+    except Exception:
+        logger.exception("Sealer error - stitching continues; rows stay unsealed for the next tick")
+        seal_stats = {}
+    if seal_stats.get("sealed") or seal_stats.get("failed"):
+        logger.info("Sealer: %s", seal_stats)
+
+    try:
         stats = await drain_once()
     except Exception:
-        logger.exception("Stitch worker error — retrying next tick")
+        logger.exception("Stitch worker error - retrying next tick")
         return
     if stats["customers"]:
         logger.info("Stitch drain: %s", stats)

@@ -17,7 +17,8 @@ import enum
 import uuid
 from datetime import datetime, date, timezone
 
-from sqlalchemy import UniqueConstraint, String, DateTime, Date, Enum, Integer, Text, Boolean, ForeignKey, Index
+from sqlalchemy import (UniqueConstraint, String, DateTime, Date, Enum, Integer, Text, Boolean,
+                        ForeignKey, Index, text)
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -44,6 +45,16 @@ class LogTransaction(Base):
                          postgresql_nulls_not_distinct=True),
         Index("ix_log_transactions_customer_date", "customer_code", "date"),
         Index("ix_log_transactions_customer_user", "customer_code", "user_name"),
+        # S1. The notification cursor reads `customer_code = ? AND updated_at >= ? AND < ? ORDER BY
+        # updated_at`, so the index has to match both the filter and the sort (CLAUDE.md rule 4).
+        # Before S1 that query was on `created_at` and had no composite index at all; it was fast only
+        # because the feed is small and recent.
+        Index("ix_log_transactions_customer_updated", "customer_code", "updated_at"),
+        # S1. The sealer's own access pattern, and the reason a tick is cheap: `NOT sealed` is 2.1% of
+        # rows, so a partial index is roughly fifty times smaller than a full one. Both the sealer's
+        # tenant enumeration and its UPDATE filter on exactly this.
+        Index("ix_log_transactions_unsealed", "customer_code", "ended_at",
+              postgresql_where=text("NOT sealed")),
         # NOTE: `primary_key=True` on the id column below is the ORM's row identity ONLY. The DDL
         # SQLAlchemy would emit from it (`PRIMARY KEY (id)`) is invalid on a partitioned table and is
         # never used — Alembic builds this schema, nothing calls create_all (pinned by a test in
@@ -130,3 +141,23 @@ class LogTransaction(Base):
     attributes: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # S1. When this row was last WRITTEN, whether by construction or by an UPDATE.
+    #
+    # Equal to `created_at` at birth and backfilled to it for every existing row, so a row nothing ever
+    # updates behaves exactly as it did before this column existed.
+    #
+    # It exists because sealing became an explicit UPDATE. `created_at` is not refreshed by an UPDATE,
+    # and the notification cursor only ever moves forward from its stored position — so a row sealed by
+    # the sealer would never re-enter the feed and `stability.py`'s "incomplete AND sealed" alert could
+    # never fire. The cursor reads THIS column instead (`notifications/cursor.py`).
+    #
+    # NOT NULL is load-bearing rather than tidy: the cursor's range filter and ORDER BY would silently
+    # drop every NULL row from the feed, which is precisely the "nothing absorbs a skip" failure that
+    # module's docstring forbids.
+    #
+    # S3 will make `created_at` genuinely mean "first written" by removing the delete-and-reinsert. At
+    # that point this column carries the churn `created_at` carries today, and it is already the one the
+    # cursor reads — which is why the cursor was moved here in S1, while the sealer was the only writer
+    # of updates and the change could be observed in isolation.
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 default=lambda: datetime.now(timezone.utc))

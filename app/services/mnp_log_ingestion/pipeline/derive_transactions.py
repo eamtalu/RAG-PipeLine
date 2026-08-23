@@ -608,7 +608,11 @@ def _cap_over_length(values: dict, customer_code: str) -> dict:
 async def _write_transaction(db: AsyncSession, *, tid: uuid.UUID, values: dict, is_sealed: bool,
                              entries: list[LogEntry], customer_code: str) -> LogTransaction:
     """Insert one transaction and record which entries belong to it. Caller commits."""
-    txn = LogTransaction(id=tid, sealed=is_sealed, **values)
+    # S1: `updated_at` is stamped equal to `created_at` at birth, so a row nothing ever updates
+    # behaves exactly as it did before the column existed. The notification cursor reads it, so a row
+    # written without it would be invisible to every rule.
+    now = datetime.now(timezone.utc)
+    txn = LogTransaction(id=tid, sealed=is_sealed, created_at=now, updated_at=now, **values)
     db.add(txn)
     await db.flush()  # get txn.id
     await assignments.write(db, transaction_id=txn.id, entries=entries,

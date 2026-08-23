@@ -10,10 +10,14 @@ A cursor fixes both - it is a bookmark saying "I have read up to here". But a na
 introduces a failure mode that is far worse than the waste it removes, so most of this file is about
 that:
 
-    `created_at` is stamped when PYTHON BUILDS the row (log_transaction.py:132), not when Postgres
-    COMMITS it. A long Stage 2 transaction can therefore commit a row whose timestamp already sits
-    behind a cursor that has moved past it. That row is never read again, and dedupe cannot help -
-    dedupe prevents duplicates, it cannot recover something never seen.
+    `updated_at` is stamped when PYTHON BUILDS or UPDATEs the row, not when Postgres COMMITS it. A
+    long Stage 2 transaction can therefore commit a row whose timestamp already sits behind a cursor
+    that has moved past it. That row is never read again, and dedupe cannot help - dedupe prevents
+    duplicates, it cannot recover something never seen.
+
+    (S1 moved the cursor from `created_at` to `updated_at`. Sealing became an explicit UPDATE, which
+    does not refresh `created_at`, so a sealed row would have fallen permanently behind the cursor.
+    The lag argument below is unchanged - only the column it applies to.)
 
 The lag closes that: never read closer to the present than `notification_cursor_lag_seconds`, so every
 transaction that could write into a timestamp range has already committed by the time it is read.
@@ -164,6 +168,9 @@ def test_a_rule_does_not_re_evaluate_rows_behind_its_own_cursor():
     class _Row:
         def __init__(self, created_at):
             self.created_at = created_at
+            # S1: the cursor reads `updated_at`. Equal to created_at here, which is what a real row
+            # looks like until something updates it.
+            self.updated_at = created_at
             self.customer_code = CC
             self.status = LogTransactionStatus.error
             self.method = self.error_text = self.user_name = None
@@ -182,14 +189,20 @@ def test_a_rule_does_not_re_evaluate_rows_behind_its_own_cursor():
 
 
 # =============================================================== the index (step 1)
-async def test_created_at_is_indexed(db):
+async def test_the_column_the_cursor_reads_is_indexed(db):
     """Every incremental reader filters and orders on it. Without an index the cursor query is a scan
-    of every partition - slower than the rescan it replaces."""
+    of every partition - slower than the rescan it replaces.
+
+    Renamed at S1. This asserted `created_at`, which the cursor no longer reads; it now needs a
+    COMPOSITE index on `(customer_code, updated_at)` because the query filters on both and sorts on the
+    second (CLAUDE.md rule 4). Asserting the old column would have kept passing forever while
+    describing an index the feed had stopped using - a green test guarding nothing."""
     n = await db.scalar(text("""
         SELECT count(*) FROM pg_indexes
-        WHERE tablename = 'log_transactions' AND indexdef LIKE '%created_at%'
+        WHERE tablename = 'log_transactions'
+          AND indexdef LIKE '%customer_code%' AND indexdef LIKE '%updated_at%'
     """))
-    assert n and n >= 1, "log_transactions.created_at must be indexed"
+    assert n and n >= 1, "the cursor's (customer_code, updated_at) index is missing"
 
 
 # =============================================================== engine behaviour (DB)
@@ -220,7 +233,7 @@ async def _txn(db, job, *, created_at, started_at=None, status=LogTransactionSta
                        date=(started_at or created_at).date())
     db.add(t)
     await db.flush()
-    await db.execute(text("UPDATE log_transactions SET created_at = :c WHERE id = :i"),
+    await db.execute(text("UPDATE log_transactions SET created_at = :c, updated_at = :c WHERE id = :i"),
                      {"c": created_at, "i": t.id})
     await db.flush()
     return t
@@ -347,7 +360,7 @@ async def test_the_cursor_query_is_ordered_oldest_first(db):
     stmt = cur.window_stmt(CC, cur.Window(lo=_utc(2026, 8, 8, 11, 0), hi=_utc(2026, 8, 8, 12, 0)),
                            limit=10)
     compiled = str(stmt.compile(db.bind, compile_kwargs={"literal_binds": True}))
-    assert "ORDER BY log_transactions.created_at ASC" in compiled
+    assert "ORDER BY log_transactions.updated_at ASC" in compiled
 
 
 def test_rules_sharing_a_customer_are_read_with_one_query():
@@ -407,7 +420,7 @@ async def _committed_txn(created_at, *, status=LogTransactionStatus.error):
                            date=created_at.date(), error_text="boom")
         s.add(t)
         await s.flush()
-        await s.execute(text("UPDATE log_transactions SET created_at = :c WHERE id = :i"),
+        await s.execute(text("UPDATE log_transactions SET created_at = :c, updated_at = :c WHERE id = :i"),
                         {"c": created_at, "i": t.id})
         await s.commit()
         return t.id

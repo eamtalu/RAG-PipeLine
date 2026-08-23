@@ -59,7 +59,7 @@ def _events_from(ev, rule: NotificationRule, txns: list[LogTransaction]) -> list
     """
     out = []
     for txn in txns:
-        event = ev.evaluate(txn) if cursor.is_after(txn.created_at, rule.cursor_at) else None
+        event = ev.evaluate(txn) if cursor.is_after(txn.updated_at, rule.cursor_at) else None
         if event is not None:   # streaming evaluators are sync
             out.append(event)
     return out
@@ -109,7 +109,7 @@ async def _run_customer_streaming(db: AsyncSession, repo: NotificationRepository
 
     set_display_timezone(await get_customer_timezone(db, customer_code))  # localize message times
     # The stability gate is a NOTIFICATION concern, so it is passed to the generic reader rather than
-    # living inside it. Applied in SQL: Stage 2 refreshes created_at on every rebuild, so an in-flight
+    # living inside it. Applied in SQL: Stage 2 refreshes updated_at on every rebuild, so an in-flight
     # transaction would otherwise re-enter the feed on every single tick until it sealed.
     txns = list((await db.execute(
         cursor.window_stmt(customer_code, window, limit=settings.notification_candidate_limit,

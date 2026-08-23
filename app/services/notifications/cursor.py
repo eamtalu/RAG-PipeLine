@@ -9,16 +9,24 @@ A cursor is a bookmark: one timestamp per rule saying "I have read up to here".
 
 Three ideas make it correct, and they are not interchangeable:
 
-**Read on `created_at`, never `started_at`.** `started_at` is when the log line happened;
-`created_at` is when the row was written. A week-old file backfilled today has an old `started_at`
-but a new `created_at`, so a cursor on `started_at` silently skips it — the same bug as the old
-1-hour lookback.
+**Read on `updated_at`, never `started_at`.** `started_at` is when the log line happened;
+`updated_at` is when the row was last written. A week-old file backfilled today has an old
+`started_at` but a new `updated_at`, so a cursor on `started_at` silently skips it - the same bug as
+the old 1-hour lookback.
 
-**Lag behind the present.** `created_at` is stamped when Python BUILDS the row
-(`log_transaction.py:132`), not when Postgres COMMITS it. A long Stage 2 transaction can therefore
-commit a row whose timestamp already sits behind a cursor that has moved past it — and that row is
-never read again. Dedupe cannot help: it prevents duplicates, it cannot recover something never seen.
-Staying `lag` behind the present guarantees everything that could write into a range has committed.
+**It was `created_at` until S1, and the change is load-bearing.** Sealing used to happen only as a
+side effect of re-insertion, so a row that changed always got a fresh `created_at` and re-entered this
+feed by itself. S1 made sealing an explicit UPDATE, which does not refresh `created_at` - so a sealed
+row would have fallen permanently behind the cursor and `stability.py`'s `incomplete AND sealed`
+alert, the one its docstring calls genuinely useful, could never have fired. Reading `updated_at`
+instead is what keeps "a row that changed is a row this feed sees" true. S3 removes
+delete-and-reinsert entirely, at which point this is the ONLY column that still moves.
+
+**Lag behind the present.** `updated_at` is stamped when Python BUILDS or UPDATEs the row, not when
+Postgres COMMITS it. A long Stage 2 transaction can therefore commit a row whose timestamp already
+sits behind a cursor that has moved past it - and that row is never read again. Dedupe cannot help: it
+prevents duplicates, it cannot recover something never seen. Staying `lag` behind the present
+guarantees everything that could write into a range has committed.
 
 **Left-inclusive windows.** `[lo, hi)` with `lo` inclusive, so a row landing exactly on a boundary is
 read twice rather than zero times. The invariant this module exists to hold is:
@@ -93,14 +101,14 @@ def read_window_for_group(cursors, *, now: datetime, lag: timedelta,
     return read_window(min(resolved), now=now, lag=lag, lookback=lookback) if resolved else None
 
 
-def is_after(created_at: datetime, cursor: datetime | None) -> bool:
+def is_after(updated_at: datetime, cursor: datetime | None) -> bool:
     """Whether a row is new to a rule sitting at `cursor`.
 
     The in-memory half of sharing one query: rows fetched on behalf of a rule that is behind must not
     re-alert a rule that has already passed them. Inclusive of the cursor itself, matching the
     window's inclusive lower bound — a boundary row is re-evaluated and dropped by dedupe.
     """
-    return cursor is None or created_at >= cursor
+    return cursor is None or updated_at >= cursor
 
 
 def advance(window: Window, *, rows_read: int, limit: int,
@@ -140,7 +148,7 @@ def window_stmt(customer_code: str, window: Window, *, limit: int, extra=None):
     extraction and analytics are expected to reuse, so one consumer's semantics — notifications only
     wanting settled transactions, say — must not be baked in here.
 
-    Ordered by `created_at` ASCENDING, which `advance` depends on: it moves the cursor to the newest
+    Ordered by `updated_at` ASCENDING, which `advance` depends on: it moves the cursor to the newest
     row read, and that is only sound if the batch is a contiguous prefix of the window. Newest-first
     would make a truncated read jump the cursor past everything it did not fetch.
 
@@ -150,11 +158,11 @@ def window_stmt(customer_code: str, window: Window, *, limit: int, extra=None):
         select(LogTransaction)
         .where(
             LogTransaction.customer_code == customer_code,
-            LogTransaction.created_at >= window.lo,   # inclusive — see the module docstring
-            LogTransaction.created_at < window.hi,
+            LogTransaction.updated_at >= window.lo,   # inclusive - see the module docstring
+            LogTransaction.updated_at < window.hi,
             *(extra or []),
         )
-        .order_by(LogTransaction.created_at.asc())
+        .order_by(LogTransaction.updated_at.asc())
         .limit(limit)
     )
 
@@ -193,8 +201,12 @@ async def fetch_for_rule(db: AsyncSession, rule: NotificationRule, *,
 
 
 def _newest(rows: list[LogTransaction]) -> datetime | None:
-    """Newest write time in a batch, ignoring rows that somehow carry none."""
-    return max((r.created_at for r in rows if r.created_at is not None), default=None)
+    """Newest write time in a batch, ignoring rows that somehow carry none.
+
+    Reads `updated_at`, the column `window_stmt` ORDERS BY. Reading a different one would let the
+    cursor advance past rows it never fetched, which is the single thing this module must never do.
+    """
+    return max((r.updated_at for r in rows if r.updated_at is not None), default=None)
 
 
 def _forward_only(current: datetime | None, proposed: datetime) -> datetime:
