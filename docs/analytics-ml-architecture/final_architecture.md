@@ -1662,8 +1662,44 @@ How an attribute-backed field becomes groupable:
 | **B** | a dimension may name an attribute path, `attr:resp.BaseUoM` | no | no, a JSONB extraction | the discovery registry |
 | **C** | B to explore, then promote the ones that prove useful | only for promotion | after promotion | both |
 
-B is what the stated goal requires, and the discovery registry from R1 is what makes it safe: `validate` checks the named field against the registry rather than a hardcoded tuple, so a typo is still refused, but a newly discovered field becomes usable without a release.
+**Decided: C.** Attribute paths to explore, promotion to typed columns for what proves useful.
+B alone is what the stated goal requires, and the discovery registry from R1 is what makes it safe: `validate` checks the named field against the registry rather than a hardcoded tuple, so a typo is still refused, but a newly discovered field becomes usable without a release.
 The registry stops being an allowlist and becomes the schema.
+
+### Why C is cheaper than it looks, and the one thing it must not get wrong
+
+Two existing mechanisms decide this, both verified rather than assumed.
+
+**Promotion copies; it never moves.**
+`normalizer.py:228-231` puts `attributes` on the fact first and only then reads out of it with `attributes.get(key)`.
+The key therefore survives promotion, so a metric still written as `attr:resp.BaseUoM` keeps resolving after `base_uom` exists.
+That retires the risk of one dimension splitting across two representations: the two paths read the same surviving value, they do not compete.
+
+**The fingerprint makes promotion self-healing.**
+`_fingerprint` (`normalizer.py:139`) hashes every field not in `_NOT_FINGERPRINTED`, which includes the promoted columns and the `attributes` blob itself.
+So adding a promoted column changes the fingerprint of every fact.
+The range diff then reports those transactions as CHANGED rather than `unchanged`, reinserts them with the new column populated, and the rollups recompute off the rebuilt facts.
+
+That means promotion needs **no hand-written backfill**.
+Without this, a promoted column would be NULL on every historical fact while the stored rollup still held the value, and `rollups_vs_facts` would report drift on every historical bucket - a permanently red auditor, which is worse than no auditor.
+The docstring already anticipates the reasoning: the blob is fingerprinted *"precisely so a measure nobody has thought of yet can be built from it later, which makes a change inside it a change to a potential measure."*
+
+**The cost this makes explicit.**
+Promotion re-folds the retention window, and so does R3, because adding response scalars to `attributes` changes every fingerprint too.
+Neither is free, and both need tickets published across the retention range exactly as a `Capture` flip does.
+This is the correct behaviour rather than a problem - it is what populates the new column on old facts - but it should be a deliberate, announced operation, not a side effect of a save button.
+
+**The invariant C must not get wrong.**
+Both read paths must normalise identically.
+The `attr:` path extracts text from JSONB; the promoted column goes through `_as_text`.
+If those differ by so much as trimming or case, the same base UoM lands in two different rollup rows and one item's total splits in half.
+One helper, used by both, asserted by a test that folds the same fact down each path and compares the stored dimension byte for byte.
+
+**Still open, and not specific to C.**
+Whether an ACTIVE definition's `dimensions` may be edited at all.
+`dim1..dim4` are positional and interpreted through `definition.dimensions`, so changing that list changes what the existing rollup rows mean while their values stay as they were.
+The safe rule is that dimensions and measures are immutable once active and an edit forks a new definition, which is what `status` and `backfilled_through` already exist to support.
+Promotion does not need this resolved, since renaming `attr:resp.BaseUoM` to `base_uom` yields the identical dimension VALUE and so leaves stored rollups correct - but a genuine dimension change does.
 
 Worth stating either way: four dimensions at hourly grain multiplied by item-number cardinality is where the rollup tables actually grow, and `DIMENSION_SLOTS` caps it at four for that reason rather than by accident.
 
