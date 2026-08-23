@@ -1749,8 +1749,13 @@ E5 ─► consumer_cursors('notifications')           ┘        │
     </tbody>
   </table></div>
   <p><b>2,516 rows are permanently unsealed</b>, oldest 2026-08-06. Two silent consequences inside this
-  platform: <b>F4's settledness signal is wrong</b> - <code>unsealed_share</code> is inflated by
-  sludge rather than describing a live tail, so a window can read as <i>provisional</i> forever; and
+  platform: <b>F4's settledness signal is wrong, though not in the way first written here</b> -
+  <code>_settledness</code> (<code>consume.py:383-395</code>) computes the share over THIS WINDOW's rows
+  only, and <code>analytics_tenant_state</code> holds one row per tenant, overwritten each run, so sludge
+  outside the newest folded window cannot accumulate into the number. What actually breaks is subtler: a
+  row passing its seal window without a rebuild stays unsealed forever, so a window folded while holding
+  one records a share that never improves, and a tenant that stops ingesting freezes a permanently
+  <i>provisional</i>-looking number. Corrected during the 18c/18d verification pass; and
   <b>E5's most useful alert may never fire</b>, because <code>stability.py</code> gates on
   <code>incomplete + sealed</code>. Fixed first, independently of the rest.</p>
 
@@ -1995,6 +2000,25 @@ ticket arrives                          entry arrives
   traffic.</p>
   <p>The single most important test in the plan is the narrowest: <b>a RESPONSE arriving in a later
   window than its REQUEST must still produce one transaction, not two.</b></p>
+
+  <div class="co">
+    <h4>Two things the verification pass added</h4>
+    <p><b><code>_DERIVE_VERSION</code> is not optional, and it is easy to leave out.</b> S3 skips a
+    rewrite when the stored fingerprint matches the recomputed one. So if <code>_group</code>,
+    <code>compute</code>, <code>_is_sealed</code>, <code>_anchor</code> or
+    <code>_entry_stream_order</code> is edited without bumping a version constant that feeds the hash,
+    stored rows keep matching their own stale fingerprint and the edited derivation never reaches them.
+    The projection is then quietly wrong forever, with no failing test and no alert - the worst shape a
+    bug can take in a system whose whole job is to be the trusted projection. Pin it with a source-digest
+    test; the repository already uses <code>inspect.getsource</code> assertions elsewhere. Specified in
+    the plan, and not carried into this document until the verification pass.</p>
+    <p><b>S1 causes no analytics fact churn at all</b>, which was not obvious. <code>sealed</code> is NOT
+    one of the 24 <code>contract.FACT_FIELDS</code> and the normaliser never reads it -
+    <code>consume.py</code> loads the column only for F4's settledness figure. So sealing a row cannot
+    change its fact fingerprint, the range diff reports <code>unchanged</code>, and no fact or ledger row
+    is written. S1 therefore needs no analytics ticket and has no re-fold cost, worth stating because the
+    opposite was assumed while planning it.</p>
+  </div>
 
   <h3>18a. Response capture: decided 2026-08-23</h3>
   <p class="lede">A separate change from S1-S4. It touches no Stage 2 code, and is recorded here
@@ -2330,12 +2354,12 @@ ticket arrives                          entry arrives
   <div class="scroll"><table>
     <thead><tr><th>Stage</th><th>What</th><th>Depends on</th><th>On a clock?</th></tr></thead>
     <tbody>
-      <tr><td><b>S0</b></td><td>Sealer sweep: seal the 2,516 rows past their window</td><td>nothing</td><td>no, but <code>stability.py</code>'s <code>incomplete AND sealed</code> alert is disabled until it runs</td></tr>
+      <tr><td><b>S1</b></td><td>Explicit sealer. Clears the 2,516-row backlog on its first tick, then keeps sealing. Horizon 60 days.</td><td>nothing</td><td>no, but <code>stability.py</code>'s <code>incomplete AND sealed</code> alert is disabled until it runs</td></tr>
       <tr><td><b>R1</b></td><td>Registry table, the shared source predicate read by BOTH <code>consume.py:239</code> and <code>reconcile.facts_vs_transactions</code>, and <code>transactions</code> beside <code>methods</code></td><td>nothing</td><td>no</td></tr>
       <tr><td><b>R1b</b></td><td><code>attr:</code> dimension resolution, <code>validate</code> checking the registry instead of <code>FACT_FIELDS</code></td><td>R1</td><td>no, but R3 is pointless without it</td></tr>
       <tr><td><b>R3</b></td><td>Response scalar capture, namespaced <code>resp.*</code>/<code>mi.*</code>, allowlist-gated, seeded from the 145 measured keys minus credentials</td><td>R1, R1b</td><td><b>YES - 60 days</b></td></tr>
       <tr><td><b>R2</b></td><td>Frontend registry screen: 7 transactions, three switches, the discovery list</td><td>R1, R3</td><td>no</td></tr>
-      <tr><td><b>S1-S4</b></td><td>The Stage 2 redesign</td><td>R-work first: both change <code>consume.py</code>, and S1 moves <code>_FRONTIER_COLUMN</code> off <code>created_at</code></td><td>no</td></tr>
+      <tr><td><b>S2-S4</b></td><td>The rest of the Stage 2 redesign</td><td>R-work first: both change <code>consume.py</code>, and S1 moves <code>_FRONTIER_COLUMN</code> off <code>created_at</code></td><td>no</td></tr>
       <tr><td><b>R4</b></td><td>Per-record expansion for transactions with <code>Expand</code> ticked</td><td>R3</td><td>no</td></tr>
       <tr><td><b>M1</b></td><td>ML: <code>analytics_feature_sets</code>, <code>analytics_predictions</code>, <code>ml:features-v1</code></td><td>R3</td><td>no</td></tr>
     </tbody>
@@ -2348,13 +2372,17 @@ ticket arrives                          entry arrives
   <code>consume.py</code>, S1 moves the frontier column, and the registry predicate lands in the same
   query S1 rewrites. Doing S1 first means doing that query twice. Neither ordering is forced by
   correctness - this one is chosen because R3 is the only item with an expiry.</p>
-  <p class="note"><b>S0 is independent of all of it</b> and is the cheapest thing on the list.</p>
+  <p class="note"><b>S1 is independent of all of it</b> and is the cheapest thing on the list. An earlier
+  draft listed a separate <code>S0</code> "sealer sweep" ahead of <code>S1</code>. That was a duplicate:
+  <code>S1</code> IS the sealer and its first tick clears the backlog, so there was never a second piece
+  of work. Removed rather than left as a synonym, because two names for one change is how a thing gets
+  built twice.</p>
 
   <h3>18d. Target-state component map: where every planned change lands</h3>
   <p class="lede">Section 18c's map is the system AS IT IS. It named the 34 existing tables plus the 2
   planned ML tables, and it did not show the registry, the discovery table, the capture path, the
   per-record grain, or the two tables S1-S4 introduces. This is that map: the same pipelines, with every
-  change from S0 through M1 placed on the component it touches.</p>
+  change from S1 through M1 placed on the component it touches.</p>
   <p>Verified before writing: all 34 existing tables appear, all 6 new tables appear and <b>none of them
   exists yet</b>, nothing is invented, every line citation resolves to a real file, and every figure
   matches the figure already in this document.</p>
@@ -2384,10 +2412,10 @@ ticket arrives                          entry arrives
                         ALREADY parses response + mi_result in full.
                         Stage 2 discards it today; R3 stops discarding.
    log_regroup_pending ======&gt; QUEUE
-=== P3  STAGE 2: DERIVE ======================== S0 . S1 . S2 . S3 . S4
+=== P3  STAGE 2: DERIVE ======================== S1 . S2 . S3 . S4
    derive_transactions.py
-    S0 [CHANGE] sweep the 2,516 rows stuck past their seal window
-    S1 [CHANGE] explicit sealer, WITH A BOUNDED HORIZON
+    S1 [CHANGE] explicit sealer, WITH A BOUNDED HORIZON (60 days)
+                its first tick clears the 2,516-row backlog
                 unbounded, it seals a 59-day-old row and alerts one day
                 before that row&#x27;s entries are dropped
     S2 [NEW]    log_open_stream         unpartitioned, self-cleaning
@@ -2457,8 +2485,8 @@ ticket arrives                          entry arrives
         v   read.py -&gt; api/v1/analytics.py -&gt; the chart
     R2 [NEW]    frontend registry screen: 7 transactions, 3 switches,
                 the discovery list for newly seen fields
-=== P5  NOTIFICATIONS ========================== S0 fixes one, S1 moves two
-    S0 [FIX]    stability.py&#x27;s &quot;incomplete AND sealed&quot; alert starts working
+=== P5  NOTIFICATIONS ========================== S1 fixes one and moves two
+    S1 [FIX]    stability.py&#x27;s &quot;incomplete AND sealed&quot; alert starts working
                 (577 rows can never reach that state today)
     S1 [CHANGE] notifications/cursor.py:153-157  created_at -&gt; updated_at
                 ^^ FAILS UNSAFE if forgotten
@@ -2507,6 +2535,37 @@ ticket arrives                          entry arrives
     is worse than no check, because it trains you to ignore the one thing that would catch a real
     divergence.</p>
   </div>
+
+  <h3>18e. Open decisions register</h3>
+  <p class="lede">Verified 2026-08-23 by auditing every decision reached in design against this document:
+  <b>34 of 34 present</b>. Below is what remains genuinely undecided - here rather than only in a
+  conversation, because an unanswered question nobody can find is indistinguishable from a decision
+  nobody made.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Question</th><th>Recommendation</th><th>Blocks</th><th>Why it matters</th></tr></thead>
+    <tbody>
+      <tr><td>transaction_name IS NULL</td><td>always captured, never shown; no registry row</td><td>R1</td><td>`CheckOperator`, `CheckServer` - 57 transactions. Connectivity probes, not warehouse activity.</td></tr>
+      <tr><td>a transaction seen for the first time</td><td>`Capture` on, `Show` off</td><td>R1</td><td>So it is never silently lost, nor silently added to a chart.</td></tr>
+      <tr><td>the two registry table names</td><td>`analytics_transaction_registry`, `analytics_field_registry`</td><td>R1</td><td>Proposed here, never agreed. Both are created by R1.</td></tr>
+      <tr><td>may an ACTIVE definition's <code>dimensions</code> be edited</td><td>immutable once active; an edit forks a new definition</td><td>R2</td><td>`dim1..dim4` are positional, so changing the list changes what stored rows mean while their values stay put. `status` and `backfilled_through` already exist to support forking.</td></tr>
+      <tr><td>R4's per-record grain</td><td>undecided</td><td>R4</td><td>A seventh table, or a second row type in `analytics_facts`. Depends on whether `rollups.recompute` folds two grains cleanly - that code has not been read.</td></tr>
+      <tr><td><code>analytics_feature_sets</code> / `analytics_predictions` partitioning</td><td>undecided</td><td>M1</td><td>Deferred with M1. Neither table exists yet.</td></tr>
+    </tbody>
+  </table></div>
+  <p>Nothing in this list blocks S1, which is why S1 leads the staging.</p>
+  <h4>What the audit corrected</h4>
+  <div class="scroll"><table>
+    <thead><tr><th>Defect</th><th>Correction</th></tr></thead>
+    <tbody>
+      <tr><td><code>S0</code> listed as a stage ahead of <code>S1</code></td><td>A duplicate - <code>S1</code> IS the sealer and its first tick clears the backlog. Removed.</td></tr>
+      <tr><td><code>unsealed_share</code> described as "inflated by permanent sludge"</td><td>Wrong mechanism. <code>_settledness</code> reads only the current window, and the value is stored one row per tenant, overwritten. Restated.</td></tr>
+      <tr><td><code>_DERIVE_VERSION</code> specified in the plan, absent here</td><td>Added. Without it an edited derivation never reaches stored rows and the projection is quietly wrong forever.</td></tr>
+      <tr><td>S1 assumed to cause analytics re-folding</td><td>It does not. <code>sealed</code> is not one of the 24 <code>contract.FACT_FIELDS</code>, so sealing cannot change a fact fingerprint.</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Two of those four - the <code>S0</code> duplicate and the <code>unsealed_share</code>
+  mechanism - were introduced by earlier passes of this document. Recording that is the point: this
+  section exists so the next audit starts from what the last one found.</p>
 
   <h3>Also corrected while measuring</h3>
   <p><code>settings.py:78-79</code> and <code>:110-112</code> claim "real transactions are &le;2 min".

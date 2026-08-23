@@ -1352,7 +1352,7 @@ So sealing is a *side effect of re-insertion*: once `lo_p` advances past a row's
 **2,516 rows are permanently unsealed**, the oldest dating to 2026-08-06.
 Two silent consequences inside this platform:
 
-- **F4's settledness signal is wrong.** `unsealed_share` and `oldest_unsealed_at` (section N3, surfaced on the status card) are inflated by permanent sludge rather than describing a live tail. A window can therefore read as *provisional* forever.
+- **F4's settledness signal is wrong, though not in the way first written here.** `_settledness` (`consume.py:383-395`) computes the share over THIS WINDOW's rows only, and `analytics_tenant_state` holds one row per tenant, overwritten each run - so unsealed rows outside the newest folded window contribute nothing, and sludge cannot accumulate into the number. What actually breaks is subtler: a row that passes its seal window without a rebuild stays unsealed forever, so a window folded while holding one records a share that will never improve, and a tenant that stops ingesting freezes a permanently *provisional*-looking number. The correction was found by reading the code during the 18c/18d verification pass, not when this line was written.
 - **E5's most useful alert may never fire.** `stability.py` gates on `incomplete + sealed`; if nothing ever seals an incomplete row, that path is unreachable.
 
 This is fixed first, independently of the rest.
@@ -1401,9 +1401,21 @@ Each is a required follow-up, not an optional one.
 
 `created_at` also changes meaning: today it is "last rebuilt", afterwards it is genuinely "first written".
 
+**`_DERIVE_VERSION` is not optional, and it is easy to leave out.**
+S3 skips a rewrite when the stored fingerprint matches the recomputed one.
+So if `_group`, `compute`, `_is_sealed`, `_anchor` or `_entry_stream_order` is ever edited without bumping a version constant that feeds the hash, the stored rows keep matching their own stale fingerprint and the edited derivation never reaches them.
+The projection is then quietly wrong forever, with no failing test and no alert - the worst shape a bug can take in a system whose whole job is to be the trusted projection.
+Pin it with a source-digest test; the repository already uses `inspect.getsource` assertions elsewhere.
+This was specified in the plan and had not been carried into this document until the verification pass.
+
 **One free improvement it unlocks.** `evaluators.py:64`'s dedup key is `(rule_id, transaction_id)` and version-blind, so a transaction whose status changed from `incomplete` to `error` is deduped away and never re-alerts - an accepted residual risk in `stability.py`. With a row fingerprint available, the key becomes `(rule_id, transaction_id, status)`.
 
 **What does not change.** The range diff, the ledger, the rollup cascade, the metric registry and every invariant in section 13 are unaffected. The diff already treats a changed transaction and a vanished transaction identically, which is precisely why it absorbs this upstream change without modification - the property section 8 claimed for it, now tested against a real one.
+
+**S1 causes no analytics fact churn at all, which was not obvious.**
+`sealed` is NOT one of the 24 `contract.FACT_FIELDS` and the normaliser never reads it - `consume.py` loads the column only for F4's settledness figure.
+So sealing a row cannot change its fact fingerprint, the range diff reports `unchanged`, and no fact or ledger row is written.
+S1 therefore needs no analytics ticket and has no re-fold cost, which is worth stating because the opposite was assumed while planning it.
 
 ## Impact on the position-tracking tables
 
@@ -1843,12 +1855,12 @@ What follows is what remains, in dependency order rather than in the order it wa
 
 | Stage | What | Depends on | On a clock? |
 |---|---|---|---|
-| **S0** | Sealer sweep: seal the 2,516 rows past their window | nothing | no, but `stability.py`'s `incomplete AND sealed` alert is disabled until it runs |
+| **S1** | Explicit sealer. Clears the 2,516-row backlog on its first tick, then keeps sealing. Horizon 60 days. | nothing | no, but `stability.py`'s `incomplete AND sealed` alert is disabled until it runs |
 | **R1** | Registry table, the shared source predicate read by BOTH `consume.py:239` and `reconcile.facts_vs_transactions`, and `transactions` beside `methods` in the fold filter | nothing | no |
 | **R1b** | `attr:` dimension resolution, with `validate` checking the registry instead of `FACT_FIELDS` | R1 | no, but R3 is pointless without it |
 | **R3** | Response scalar capture, namespaced `resp.*` / `mi.*`, allowlist-gated, seeded from the 145 measured keys minus credentials | R1, R1b | **YES - 60 days** |
 | **R2** | Frontend registry screen: 7 transactions, three switches, the discovery list | R1, R3 | no |
-| **S1-S4** | The Stage 2 redesign | R-work landed first: both change `consume.py`, and S1 moves `_FRONTIER_COLUMN` off `created_at` | no |
+| **S2-S4** | The rest of the Stage 2 redesign | R-work landed first: both change `consume.py`, and S1 moves `_FRONTIER_COLUMN` off `created_at` | no |
 | **R4** | Per-record expansion for transactions with `Expand` ticked | R3 | no |
 | **M1** | ML: `analytics_feature_sets`, `analytics_predictions`, `ml:features-v1` | R3 | no |
 
@@ -1860,13 +1872,17 @@ The alternative spends the 60-day window building a screen.
 Doing S1 first means doing that query twice.
 Neither ordering is forced by correctness - this one is chosen because R3 is the only item with an expiry.
 
-**S0 is independent of all of it** and is the cheapest thing on the list.
+**S1 is independent of all of it** and is the cheapest thing on the list.
+
+An earlier draft of this section listed a separate `S0` "sealer sweep" ahead of `S1`.
+That was a duplicate: `S1` IS the sealer, and its first tick clears the backlog, so there was never a second piece of work.
+The entry is removed rather than left as a synonym, because two names for one change is how a thing gets built twice.
 
 ## 18d. Target-state component map: where every planned change lands
 
 Section 18c's map is the system AS IT IS.
 It named the 34 tables that exist plus the 2 planned ML tables, and it did not show the registry, the discovery table, the capture path, the per-record grain, or the two tables S1-S4 introduces.
-This is that map: the same pipelines, with every change from S0 through M1 placed on the component it touches.
+This is that map: the same pipelines, with every change from S1 through M1 placed on the component it touches.
 
 Verified before writing: all 34 existing tables appear, all 6 new tables appear and **none of them exists yet**, nothing is invented, every line citation resolves to a real file, and every figure matches the figure already in this document.
 
@@ -1896,10 +1912,10 @@ That code has not been read yet, so the map marks it `[OPEN]` rather than guessi
                         ALREADY parses response + mi_result in full.
                         Stage 2 discards it today; R3 stops discarding.
    log_regroup_pending ======> QUEUE
-=== P3  STAGE 2: DERIVE ======================== S0 . S1 . S2 . S3 . S4
+=== P3  STAGE 2: DERIVE ======================== S1 . S2 . S3 . S4
    derive_transactions.py
-    S0 [CHANGE] sweep the 2,516 rows stuck past their seal window
-    S1 [CHANGE] explicit sealer, WITH A BOUNDED HORIZON
+    S1 [CHANGE] explicit sealer, WITH A BOUNDED HORIZON (60 days)
+                its first tick clears the 2,516-row backlog
                 unbounded, it seals a 59-day-old row and alerts one day
                 before that row's entries are dropped
     S2 [NEW]    log_open_stream         unpartitioned, self-cleaning
@@ -1969,8 +1985,8 @@ That code has not been read yet, so the map marks it `[OPEN]` rather than guessi
         v   read.py -> api/v1/analytics.py -> the chart
     R2 [NEW]    frontend registry screen: 7 transactions, 3 switches,
                 the discovery list for newly seen fields
-=== P5  NOTIFICATIONS ========================== S0 fixes one, S1 moves two
-    S0 [FIX]    stability.py's "incomplete AND sealed" alert starts working
+=== P5  NOTIFICATIONS ========================== S1 fixes one and moves two
+    S1 [FIX]    stability.py's "incomplete AND sealed" alert starts working
                 (577 rows can never reach that state today)
     S1 [CHANGE] notifications/cursor.py:153-157  created_at -> updated_at
                 ^^ FAILS UNSAFE if forgotten
@@ -2019,6 +2035,37 @@ The TTL sweep belongs in the sealer tick, and `count(*)` on both tables is the o
 `consume.py:239` decides what gets folded and `reconcile.py:125` decides what should exist.
 If a capture-off transaction is skipped by one and expected by the other, `facts_vs_transactions` reports a discrepancy on every run forever.
 A permanently red check is worse than no check, because it trains you to ignore the one thing that would catch a real divergence.
+
+## 18e. Open decisions register
+
+Verified 2026-08-23 by auditing every decision reached in design against this document: **34 of 34 present**.
+The list below is what remains genuinely undecided.
+It is here rather than only in a conversation because an unanswered question that nobody can find is indistinguishable from a decision nobody made.
+
+| Question | Recommendation | Blocks | Why it matters |
+|---|---|---|---|
+| transaction_name IS NULL | always captured, never shown; no registry row | R1 | `CheckOperator`, `CheckServer` - 57 transactions. Connectivity probes, not warehouse activity. |
+| a transaction seen for the first time | `Capture` on, `Show` off | R1 | So it is never silently lost, nor silently added to a chart. |
+| the two registry table names | `analytics_transaction_registry`, `analytics_field_registry` | R1 | Proposed here, never agreed. Both are created by R1. |
+| may an ACTIVE definition's `dimensions` be edited | immutable once active; an edit forks a new definition | R2 | `dim1..dim4` are positional, so changing the list changes what stored rows mean while their values stay put. `status` and `backfilled_through` already exist to support forking. |
+| R4's per-record grain | undecided | R4 | A seventh table, or a second row type in `analytics_facts`. Depends on whether `rollups.recompute` folds two grains cleanly - that code has not been read. |
+| `analytics_feature_sets` / `analytics_predictions` partitioning | undecided | M1 | Deferred with M1. Neither table exists yet. |
+
+Nothing in this list blocks S1, which is why S1 leads the staging.
+
+### What the audit corrected
+
+Four defects were found in this document by the audit itself, all recorded in place above rather than silently patched:
+
+| Defect | Correction |
+|---|---|
+| `S0` was listed as a stage ahead of `S1` | A duplicate - `S1` IS the sealer and its first tick clears the backlog. Removed. |
+| `unsealed_share` described as "inflated by permanent sludge" | Wrong mechanism. `_settledness` reads only the current window and the value is stored one row per tenant, overwritten. Restated. |
+| `_DERIVE_VERSION` specified in the plan, absent here | Added. Without it an edited derivation never reaches stored rows and the projection is quietly wrong forever. |
+| S1 assumed to cause analytics re-folding | It does not. `sealed` is not one of the 24 `contract.FACT_FIELDS`, so sealing cannot change a fact fingerprint. |
+
+Two of those four - the `S0` duplicate and the `unsealed_share` mechanism - were introduced by earlier passes of this document.
+Recording that is the point: this section exists so the next audit starts from what the last one found.
 
 ## Also corrected while measuring
 
