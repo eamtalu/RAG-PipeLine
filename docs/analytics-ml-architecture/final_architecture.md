@@ -1703,6 +1703,165 @@ Promotion does not need this resolved, since renaming `attr:resp.BaseUoM` to `ba
 
 Worth stating either way: four dimensions at hourly grain multiplied by item-number cardinality is where the rollup tables actually grow, and `DIMENSION_SLOTS` caps it at four for that reason rather than by accident.
 
+## 18c. ML readiness, the component map, and the staging plan
+
+Every claim below was checked against the running code and the live database before being written.
+Where the document was wrong, the correction is stated rather than quietly patched.
+
+### ML: the part that had to exist from day one already does
+
+F10 said the fact ledger *"must exist from day one rather than being added when ML starts"*.
+It does, and it is working.
+
+| Claim | Verified how |
+|---|---|
+| `analytics_fact_ledger` exists, append-only | `models/analytics_fact.py:157`, written at `analytics/consume.py:325` |
+| every version is retained, not just the latest | live: 524 distinct transactions produce 586 ledger rows, **62 of them at revision 2** |
+| partitioned for long retention | monthly on `recorded_at` (`partitioning.py:114`), 5 partitions live |
+| outlives raw data | in `KEEP_FOREVER` (`log_partition_worker.py:70-74`) while `log_entries` drops at 60 days |
+| the ML cursor name is reserved | `ml:features-v1`, and `consumer_cursors.report` is already called by analytics (`consume.py:520`) and notifications (`notification_worker.py:32`) |
+
+Those 62 second-revision rows are the whole point: a rebuild does not destroy the prior value, so a training set built at a revision can be rebuilt identically later.
+That is the acceptance test the plan already states (Phase 1, test 11).
+
+**Not built, and genuinely deferrable:** `analytics_feature_sets`, `analytics_predictions`, the `ml:features-v1` registration, and `services/analytics_ml/`.
+None of it is on a clock.
+
+**What is on a clock is feature CAPTURE, not the ML pipeline.**
+The ledger guarantees a training set can be reproduced; it cannot invent features that were never captured.
+Today a model would see 24 typed fields.
+After R3 it would see those plus the response scalars - `OnHandQuantity`, `AllocatedQuantity`, `TotalNumberOfBalances`, and per-record `STQT`/`ALQT`.
+Raw entries expire at 60 days, so a feature not captured today is not recoverable later.
+This is the second independent reason to move R3 early, the first being section 18a's.
+
+**A cost to state plainly.**
+R3 changes every fingerprint, so it re-folds the retention window and writes a NEW ledger revision for every fact.
+Each later promotion does the same.
+The ledger is designed to grow this way, but it grows in steps of roughly one full copy per re-fold, so re-folds must be deliberate and counted rather than routine.
+
+### Two errors found in the node table
+
+Both were introduced when the plan was written and never reconciled against what shipped.
+
+| Node | Document said | Actually |
+|---|---|---|
+| N5 Rollup folder | `services/analytics/fold.py` | **`services/analytics/rollups.py`** - no `fold.py` exists anywhere |
+| N6 Read layer | `persistence/repositories/analytics_repository.py` | **`services/analytics/read.py`** - no repository file exists |
+
+Four shipped modules have no node id at all: `diff.py` (the range diff), `consume.py` (N3's cycle), `contract.py`, `synthetic.py`, plus `reconcile.py` and `analytics_reconcile_worker.py` for the auditor.
+The other 8 cited paths that appear to be missing are only the document's shorthand, writing `workers/x.py` for `app/services/workers/x.py`.
+
+### The component map
+
+34 parent tables exist.
+All 34 appear below, plus the 2 planned ML tables, flagged as planned.
+Every partition count, grain and retention figure here was read from the database and from `log_partition_worker.KEEP_FOREVER` / `RETENTION_DAYS`, not recalled.
+
+```
+                          WMS host  (SFTP / local directory)
+                                        |
+=== P1  INGESTION ==========================================================
+   log_ssh_sources             which hosts, enabled per tenant     [config]
+   log_ssh_file_checkpoints    byte offset per file              [position]
+   log_ssh_fetch_runs          one row per fetch attempt            [audit]
+                                        |
+                                        v   bytes downloaded, NOT yet parsed
+   log_source_objects  =========> QUEUE
+=== P2  STAGE 1: PARSE =====================================================
+   drained by log_parse_worker  ->  parse_insert.py
+   parses request AND response in full
+                                        |
+                                        v
+   log_entries        daily x 94 . 60 days . APPEND-ONLY
+                      publishes NO analytics ticket: an entry is not a transaction
+                                        |
+   log_regroup_pending =========> QUEUE  (window needs stitching)
+=== P3  STAGE 2: DERIVE ====================================================
+   drained by log_stitch_worker  ->  derive_transactions.py
+   groups entries into transactions, inherits ids, seals when settled
+                                        |
+        +-------------------------------+-------------------------------+
+        v                               v                               v
+   log_transactions              log_entry_assignment          log_regroup_runs
+   daily x 95 . 60 days          daily x 16 . 60 days               [audit]
+   MUTABLE projection            entry -> transaction
+   (delete + reinsert)           co-partitioned with entries
+        |
+        |  publishes the ticket IN THE SAME COMMIT  (invariant 3)
+        |  5 sites: derive_transactions.py:686/809/901, logs.py:719/777
+        v
+   analytics_pending_windows ====> QUEUE   range_start/range_end, NO txn identity
+=== P4  ANALYTICS ==========================================================
+   drained by analytics_worker (poll 2.0s)  ->  consume.py
+   claim -> advisory lock -> range diff -> normalise
+        |
+        |   reads     analytics_metrics        the registry: what to measure
+        |   reads     analytics_tenant_state   watermark, revision, frontier
+        |
+        +--> analytics_facts          monthly x 5 . KEEP FOREVER . latest version
+        |        |                    the feature row: 24 typed fields + attributes
+        |        |
+        +--> analytics_fact_ledger    monthly x 5 . KEEP FOREVER . EVERY version
+        |                             append-only. what makes ML reproducible.
+        +--> analytics_quality_issues monthly x 5 . 365 days . quarantine
+                 |
+                 v   rollups.py folds facts into additive roles
+        +--> analytics_hourly_rollups   daily x 67 .  90 days
+        +--> analytics_daily_rollups    yearly x 2 . KEEP FOREVER
+        +--> analytics_monthly_rollups  unpartitioned . KEEP FOREVER
+                 |
+                 v   read.py picks the coarsest grain that answers the question
+              api/v1/analytics.py  ->  /status /metrics /series /breakdown /reconcile
+                 |
+                 v
+              the chart                       audited by analytics_reconcile_worker
+=== P5  NOTIFICATIONS ======================================================
+   notification_rules  ->  evaluated against log_transactions
+   notification_events  ->  notification_deliveries  ->  customer_notification_channels
+=== P6  RAG / ASSISTANT ====================================================
+   log_entries -> embedding_queue -> chunks / chunks_entity -> embeddings (pgvector)
+=== P7  ML  (PLANNED, NOT BUILT) ===========================================
+   analytics_fact_ledger  --pinned revision-->  analytics_feature_sets
+                                                        |
+                                                        v
+                                                analytics_predictions
+   registers its own cursor: ml:features-v1
+=== CROSS-CUTTING ==========================================================
+   log_partition_worker   creates the runway ahead, drops past retention
+                          4 gates: retention . open window . live consumer . entry lag
+   consumer_cursors       the live-consumer gate. analytics:warehouse-v1,
+                          notifications, (ml:features-v1). Empty = nothing blocked.
+   logspace_cleanup       per-tenant purge across every table above
+   customers / customer_display_names / logspace_presence / saved_views /
+   jobs / idempotency_keys / alembic_version          [platform + tenancy]
+```
+
+### Staging, from here to the end
+
+Everything E1-E8 and N1-N7 is built and running.
+What follows is what remains, in dependency order rather than in the order it was thought of.
+
+| Stage | What | Depends on | On a clock? |
+|---|---|---|---|
+| **S0** | Sealer sweep: seal the 2,516 rows past their window | nothing | no, but `stability.py`'s `incomplete AND sealed` alert is disabled until it runs |
+| **R1** | Registry table, the shared source predicate read by BOTH `consume.py:239` and `reconcile.facts_vs_transactions`, and `transactions` beside `methods` in the fold filter | nothing | no |
+| **R1b** | `attr:` dimension resolution, with `validate` checking the registry instead of `FACT_FIELDS` | R1 | no, but R3 is pointless without it |
+| **R3** | Response scalar capture, namespaced `resp.*` / `mi.*`, allowlist-gated, seeded from the 145 measured keys minus credentials | R1, R1b | **YES - 60 days** |
+| **R2** | Frontend registry screen: 7 transactions, three switches, the discovery list | R1, R3 | no |
+| **S1-S4** | The Stage 2 redesign | R-work landed first: both change `consume.py`, and S1 moves `_FRONTIER_COLUMN` off `created_at` | no |
+| **R4** | Per-record expansion for transactions with `Expand` ticked | R3 | no |
+| **M1** | ML: `analytics_feature_sets`, `analytics_predictions`, `ml:features-v1` | R3 | no |
+
+**Why R3 before R2**, which inverts the obvious order: the allowlist starts empty, so R3 alone would capture nothing.
+Seeding it with the 145 already-measured keys means capture begins accumulating history while the interface to manage it is still being built.
+The alternative spends the 60-day window building a screen.
+
+**Why the R-work precedes S1-S4**, which inverts the earlier plan: both touch `consume.py`, S1 moves the frontier column, and the registry predicate lands in the same query S1 rewrites.
+Doing S1 first means doing that query twice.
+Neither ordering is forced by correctness - this one is chosen because R3 is the only item with an expiry.
+
+**S0 is independent of all of it** and is the cheapest thing on the list.
+
 ## Also corrected while measuring
 
 `settings.py:78-79` and `:110-112` claim "real transactions are ≤2 min".
