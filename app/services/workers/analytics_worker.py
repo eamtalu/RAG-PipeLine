@@ -1,4 +1,4 @@
-"""Analytics worker — the consumer that drains `analytics_pending_windows` into facts.
+"""Analytics worker - the consumer that drains `analytics_pending_windows` into facts.
 
 The loop only. Everything it does per tenant lives in `services/analytics/consume.py`, mirroring how
 `log_stitch_worker` sits over `finalize_pending`: a loop that owns polling and error containment, and a
@@ -61,7 +61,7 @@ async def _tick() -> None:
     try:
         stats = await drain_once()
     except Exception:
-        logger.exception("Analytics worker error — retrying next tick")
+        logger.exception("Analytics worker error - retrying next tick")
         return
     if stats.get("customers"):
         logger.info("Analytics drain: %s", stats)

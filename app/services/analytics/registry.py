@@ -100,7 +100,7 @@ async def active_definitions(db: AsyncSession, customer_code: str
         try:
             definition = from_row(row)
         except (KeyError, ValueError) as exc:
-            logger.error("Analytics: registry row %s (%r) for %s could not be read (%s) — skipped; "
+            logger.error("Analytics: registry row %s (%r) for %s could not be read (%s) - skipped; "
                          "the tenant's other metrics still fold", row.id, row.name, customer_code, exc)
             continue
         problems = d.validate(definition)

@@ -1568,6 +1568,105 @@ Response fields are prefixed on capture (`resp.QuantityOnHand`, `mi.STQT`) so `f
 Whether the per-record grain is a new table or a second row type in `analytics_facts`.
 A separate table keeps the existing fact row's meaning clean but doubles the fold path; the answer depends on how `rollups.recompute` handles two grains, which has not been looked at yet.
 
+## 18b. The registry, and how a provisioned transaction reaches analytics
+
+Traced against the running code, not designed.
+Everything in the first half is existing behaviour; the second half records what per-transaction insight configuration needs and does not yet have.
+
+### There is no stream. There is a ticket.
+
+```
+raw log file
+     |
+     v  Stage 1   parse_insert.py            ->  log_entries          (append-only)
+     |                                           publishes NOTHING
+     v  Stage 2   derive_transactions.py      ->  log_transactions
+     |                                           publishes the ticket, in the SAME COMMIT
+     v
+  analytics_pending_windows                   <-  a Postgres row: range_start, range_end
+     |                                            NO transaction identity
+     v  N3        consume.py                   poll 2.0s: claim -> lock -> range diff -> normalise
+     v
+  analytics_facts  ->  analytics_rollups  ->  revision++  ->  the chart reloads
+```
+
+Stage 1 never publishes a ticket, and that is correct: analytics measures transactions, so a ticket cannot exist until Stage 2 has decided what the transaction is.
+
+The five publish sites:
+
+| Site | Occasion |
+|---|---|
+| `derive_transactions.py:686` | full wipe and rebuild |
+| `derive_transactions.py:809` | unsealed rows freed for restitch |
+| `derive_transactions.py:901` | the padded regroup window |
+| `logs.py:719`, `logs.py:777` | on-demand regroup or delete from the API |
+
+The hand-off is a durable row rather than a push, because the worker is a separate systemd process and gunicorn recycles its workers.
+A push would lose the hand-off on any restart; a row survives it.
+`derive_transactions.py:805` states the property directly: *"Before the commit, so ticket and change are atomic (invariant 3)."*
+So a rebuilt transaction with no ticket cannot occur.
+
+**The consequence for the registry.**
+Because a ticket carries a time range and no transaction identity, provisioning a transaction does not create a stream.
+It changes what the consumer does with windows it was going to process anyway.
+Flipping `Capture` on therefore needs no separate backfill machinery: write the registry row and publish tickets across the retention range in one commit, and the ordinary path does the rest.
+The range diff reports every already-folded transaction as `unchanged` (fingerprint-absorbed) and inserts only the newly captured one, and `_coalesce` (`consume.py:194`) merges adjacent tickets so 60 days is a handful of runs rather than sixty.
+
+That is why the queue must stay one ticket per `(customer, window)`.
+Segregating it per transaction would cost a per-transaction cursor, lock and reaper to buy the ability to skip work that must not be skipped.
+
+**The invariant a registry write must honour.**
+The registry row and its tickets must be written in the SAME commit, exactly as Stage 2 does.
+Row first, commit, then publish leaves a transaction marked captured with no tickets - silently absent until some unrelated rebuild happens to touch those windows.
+The natural shape of an API handler is "save, then react", so this is easy to get wrong.
+
+### Configuring insights per transaction
+
+What the registry already supports, verified against the code:
+
+| Requirement | Supported | Where |
+|---|---|---|
+| hourly, daily, monthly aggregation | **yes** | `GRAINS` (`definition.py:47`) also has `weekly`, derived from daily at read time |
+| per item | **yes** | `item_number` is one of 24 eligible fact fields |
+| several different metrics on one transaction | **yes** | many definitions, each with its own dimensions, measures and grains |
+| a different set of metrics per transaction | **yes** | `method_filter` at `definition.py:261`, plus the `transactions` key R1 adds |
+| written from the interface, no deploy | **yes** at the API (`POST /metrics`), **no** UI yet |
+| up to 4 dimensions per definition | **yes, capped** | `DIMENSION_SLOTS = 4` (`analytics_rollup.py:48`) - `dim1..dim4` are columns, so 5 is a migration |
+
+What it does NOT support, and this is a correction to section 18a:
+
+**An `attributes` key can be neither a dimension nor a measure.**
+`validate` rejects both - dimensions at `definition.py:216`, measure fields at `definition.py:226` - because each is checked against `contract.FACT_FIELDS`, and `attributes` is not in it.
+Mechanically it would fail anyway: `rollups.py:125` reads `row.get(name)` off the flat fact dict, so `row.get("resp.BaseUoM")` is `None` when the value lives nested under `row["attributes"]`.
+
+Section 18a claimed the namespacing meant *"`fold`'s `row.get(field)` keeps working unchanged"*.
+That is true of `fold` and false of the path as a whole: `validate` refuses the definition long before `fold` sees a row.
+So R3 as written captures response scalars that nothing can then read.
+Capture and read must land together or the feature is storage with no product.
+
+**There is no unit-of-measure field at all.**
+None of the 24 eligible fields is a UoM, which is why `AnalyticsPanel` carries the `mixesUnitsOfMeasure` warning: pick confirmations do not record one, so a total silently adds kilograms to eaches.
+Grouping by base UoM is therefore not a configuration change today - the value has to be captured first, and then be readable.
+
+**A promotion mechanism already exists, but is a code constant.**
+`_FROM_ATTRIBUTES` (`normalizer.py:47`) lifts `LotNumber`, `FromLocation` and `ToLocation` out of `attributes` into typed columns.
+That is precedent for promoting a field, and also the reason promotion alone is not the answer: it is a dict in source, so every new field is a deploy, which defeats configuring from the interface.
+
+### The open decision
+
+How an attribute-backed field becomes groupable:
+
+| | Mechanism | Deploy per field? | Indexable | Validation authority |
+|---|---|---|---|---|
+| **A** | promote to a typed fact column, extending `_FROM_ATTRIBUTES` | yes | yes | `FACT_FIELDS`, as now |
+| **B** | a dimension may name an attribute path, `attr:resp.BaseUoM` | no | no, a JSONB extraction | the discovery registry |
+| **C** | B to explore, then promote the ones that prove useful | only for promotion | after promotion | both |
+
+B is what the stated goal requires, and the discovery registry from R1 is what makes it safe: `validate` checks the named field against the registry rather than a hardcoded tuple, so a typo is still refused, but a newly discovered field becomes usable without a release.
+The registry stops being an allowlist and becomes the schema.
+
+Worth stating either way: four dimensions at hourly grain multiplied by item-number cardinality is where the rollup tables actually grow, and `DIMENSION_SLOTS` caps it at four for that reason rather than by accident.
+
 ## Also corrected while measuring
 
 `settings.py:78-79` and `:110-112` claim "real transactions are ≤2 min".

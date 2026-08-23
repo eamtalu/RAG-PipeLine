@@ -2050,6 +2050,108 @@ ticket arrives                          entry arrives
   but doubles the fold path; the answer depends on how <code>rollups.recompute</code> handles two grains,
   which has not been looked at yet.</p>
 
+  <h3>18b. The registry, and how a provisioned transaction reaches analytics</h3>
+  <p class="lede">Traced against the running code, not designed. The first half is existing behaviour;
+  the second records what per-transaction insight configuration needs and does not yet have.</p>
+
+  <h4>There is no stream. There is a ticket.</h4>
+<pre>raw log file
+     |
+     v  Stage 1   parse_insert.py         -&gt;  log_entries        (append-only)
+     |                                        publishes NOTHING
+     v  Stage 2   derive_transactions.py  -&gt;  log_transactions
+     |                                        publishes the ticket, in the SAME COMMIT
+     v
+  analytics_pending_windows                &lt;- a Postgres row: range_start, range_end
+     |                                         NO transaction identity
+     v  N3        consume.py               poll 2.0s: claim -&gt; lock -&gt; diff -&gt; normalise
+     v
+  analytics_facts -&gt; analytics_rollups -&gt; revision++ -&gt; the chart reloads</pre>
+  <p>Stage 1 never publishes a ticket, and that is correct: analytics measures transactions, so a ticket
+  cannot exist until Stage 2 has decided what the transaction is.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Publish site</th><th>Occasion</th></tr></thead>
+    <tbody>
+      <tr><td><code>derive_transactions.py:686</code></td><td>full wipe and rebuild</td></tr>
+      <tr><td><code>derive_transactions.py:809</code></td><td>unsealed rows freed for restitch</td></tr>
+      <tr><td><code>derive_transactions.py:901</code></td><td>the padded regroup window</td></tr>
+      <tr><td><code>logs.py:719</code>, <code>logs.py:777</code></td><td>on-demand regroup or delete from the API</td></tr>
+    </tbody>
+  </table></div>
+  <p>The hand-off is a durable row rather than a push, because the worker is a separate systemd process
+  and gunicorn recycles its workers. A push would lose the hand-off on any restart; a row survives it.
+  <code>derive_transactions.py:805</code> states the property directly: <i>"Before the commit, so ticket
+  and change are atomic (invariant 3)."</i> So a rebuilt transaction with no ticket cannot occur.</p>
+  <p><b>The consequence for the registry.</b> Because a ticket carries a time range and no transaction
+  identity, provisioning a transaction does not create a stream - it changes what the consumer does with
+  windows it was going to process anyway. Flipping <code>Capture</code> on therefore needs no separate
+  backfill machinery: write the registry row and publish tickets across the retention range in one
+  commit, and the ordinary path does the rest. The range diff reports every already-folded transaction
+  as <code>unchanged</code> and inserts only the newly captured one, and <code>_coalesce</code>
+  (<code>consume.py:194</code>) merges adjacent tickets so 60 days is a handful of runs, not sixty.</p>
+  <p>That is why the queue stays one ticket per <code>(customer, window)</code>. Segregating it per
+  transaction would cost a per-transaction cursor, lock and reaper to buy the ability to skip work that
+  must not be skipped.</p>
+  <div class="co">
+    <h4>The invariant a registry write must honour</h4>
+    <p>The registry row and its tickets must be written in the SAME commit, exactly as Stage 2 does. Row
+    first, commit, then publish leaves a transaction marked captured with no tickets - silently absent
+    until some unrelated rebuild happens to touch those windows. The natural shape of an API handler is
+    "save, then react", so this is easy to get wrong.</p>
+  </div>
+
+  <h4>Configuring insights per transaction</h4>
+  <div class="scroll"><table>
+    <thead><tr><th>Requirement</th><th>Supported</th><th>Where</th></tr></thead>
+    <tbody>
+      <tr><td>hourly, daily, monthly aggregation</td><td><b>yes</b></td><td><code>GRAINS</code> (<code>definition.py:47</code>) also has <code>weekly</code>, derived from daily at read time</td></tr>
+      <tr><td>per item</td><td><b>yes</b></td><td><code>item_number</code> is one of 24 eligible fact fields</td></tr>
+      <tr><td>several metrics on one transaction</td><td><b>yes</b></td><td>many definitions, each with its own dimensions, measures, grains</td></tr>
+      <tr><td>a different metric set per transaction</td><td><b>yes</b></td><td><code>method_filter</code> at <code>definition.py:261</code>, plus the <code>transactions</code> key R1 adds</td></tr>
+      <tr><td>written from the interface, no deploy</td><td><b>yes</b> at the API</td><td><code>POST /metrics</code> exists; no UI yet</td></tr>
+      <tr><td>dimensions per definition</td><td><b>capped at 4</b></td><td><code>DIMENSION_SLOTS = 4</code> - <code>dim1..dim4</code> are columns, so 5 is a migration</td></tr>
+    </tbody>
+  </table></div>
+  <div class="co">
+    <h4>Correction to 18a: an attributes key can be neither a dimension nor a measure</h4>
+    <p><code>validate</code> rejects both - dimensions at <code>definition.py:216</code>, measure fields
+    at <code>definition.py:226</code> - because each is checked against <code>contract.FACT_FIELDS</code>,
+    which does not contain <code>attributes</code>. Mechanically it would fail anyway:
+    <code>rollups.py:125</code> reads <code>row.get(name)</code> off the flat fact dict, so
+    <code>row.get("resp.BaseUoM")</code> is <code>None</code> when the value is nested under
+    <code>row["attributes"]</code>.</p>
+    <p>Section 18a claimed the namespacing meant <i>"fold's row.get(field) keeps working unchanged"</i>.
+    True of <code>fold</code>, false of the path as a whole: <code>validate</code> refuses the definition
+    long before <code>fold</code> sees a row. So R3 as written captures response scalars that nothing can
+    read. Capture and read must land together, or the feature is storage with no product.</p>
+  </div>
+  <p><b>There is no unit-of-measure field at all.</b> None of the 24 eligible fields is a UoM, which is
+  why <code>AnalyticsPanel</code> carries the <code>mixesUnitsOfMeasure</code> warning: pick
+  confirmations do not record one, so a total silently adds kilograms to eaches. Grouping by base UoM is
+  not a configuration change today - the value must be captured first, and then be readable.</p>
+  <p><b>A promotion mechanism already exists, but is a code constant.</b>
+  <code>_FROM_ATTRIBUTES</code> (<code>normalizer.py:47</code>) lifts <code>LotNumber</code>,
+  <code>FromLocation</code> and <code>ToLocation</code> into typed columns. That is precedent for
+  promoting a field, and also why promotion alone is not the answer: it is a dict in source, so every new
+  field is a deploy, which defeats configuring from the interface.</p>
+
+  <h4>The open decision</h4>
+  <div class="scroll"><table>
+    <thead><tr><th></th><th>Mechanism</th><th>Deploy per field?</th><th>Indexable</th><th>Validation authority</th></tr></thead>
+    <tbody>
+      <tr><td><b>A</b></td><td>promote to a typed fact column, extending <code>_FROM_ATTRIBUTES</code></td><td>yes</td><td>yes</td><td><code>FACT_FIELDS</code>, as now</td></tr>
+      <tr><td><b>B</b></td><td>a dimension may name an attribute path, <code>attr:resp.BaseUoM</code></td><td>no</td><td>no, a JSONB extraction</td><td>the discovery registry</td></tr>
+      <tr><td><b>C</b></td><td>B to explore, then promote what proves useful</td><td>only for promotion</td><td>after promotion</td><td>both</td></tr>
+    </tbody>
+  </table></div>
+  <p>B is what the stated goal requires, and the discovery registry from R1 makes it safe:
+  <code>validate</code> checks the named field against the registry rather than a hardcoded tuple, so a
+  typo is still refused but a newly discovered field becomes usable without a release. The registry stops
+  being an allowlist and becomes the schema.</p>
+  <p class="note">Worth stating either way: four dimensions at hourly grain multiplied by item-number
+  cardinality is where the rollup tables actually grow. <code>DIMENSION_SLOTS</code> caps it at four for
+  that reason rather than by accident.</p>
+
   <h3>Also corrected while measuring</h3>
   <p><code>settings.py:78-79</code> and <code>:110-112</code> claim "real transactions are &le;2 min".
   Measured over 151,757 live transactions: avg 1.7 s, p99 28.1 s, <b>max 363.7 s (6.1 min)</b> -

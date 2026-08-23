@@ -158,7 +158,7 @@ async def _ensure_destination_partitions(customer_code: str, lo: datetime, hi: d
         created = await pt.ensure_coverage(db, days=_destination_days(lo, hi),
                                            tables=_DESTINATION_TABLES)
         if created:
-            logger.info("Analytics: provisioned %d destination partition(s) for %s covering %s..%s — "
+            logger.info("Analytics: provisioned %d destination partition(s) for %s covering %s..%s - "
                         "this range predates the forward-only runway", created, customer_code,
                         lo.date(), hi.date())
         await db.commit()
@@ -239,7 +239,7 @@ async def _read_source(db: AsyncSession, customer_code: str, window: UtcWindow) 
             LogTransaction.customer_code == customer_code,
             window.covers(LogTransaction.started_at, include_null=True)))).mappings().all()
     if len(rows) >= _LOUD_RUN_ROWS:
-        logger.warning("Analytics: run for %s read %d source rows for %s..%s — larger than expected "
+        logger.warning("Analytics: run for %s read %d source rows for %s..%s - larger than expected "
                        "for a one-day ticket; NOT truncated, because a partial read would reverse "
                        "every fact past the cut", customer_code, len(rows), window.start, window.end)
     return [dict(r) for r in rows]
@@ -600,7 +600,7 @@ async def _record_failure(customer_code: str, tickets: Sequence[AnalyticsPending
                 abandoned += 1 if give_up else 0
             await db.commit()
     except Exception:
-        logger.exception("Analytics: could not record the failure for %s — its tickets stay open, "
+        logger.exception("Analytics: could not record the failure for %s - its tickets stay open, "
                          "which retries the work rather than losing it", customer_code)
     return abandoned
 
@@ -630,7 +630,7 @@ async def consume_tenant(customer_code: str) -> dict:
         except Exception as exc:
             stats["failed"] += 1
             stats["abandoned"] += await _record_failure(customer_code, rows, exc)
-            logger.exception("Analytics: run %s..%s failed for %s — its tickets stay open for retry; "
+            logger.exception("Analytics: run %s..%s failed for %s - its tickets stay open for retry; "
                              "the tenant's other runs are unaffected", lo, hi, customer_code)
     return stats
 
@@ -645,5 +645,5 @@ async def drain_once() -> dict:
                 stats[key] = stats.get(key, 0) + value
         except Exception:
             stats["failed"] = stats.get("failed", 0) + 1
-            logger.exception("Analytics: tenant %s failed entirely — others are unaffected", cc)
+            logger.exception("Analytics: tenant %s failed entirely - others are unaffected", cc)
     return stats
