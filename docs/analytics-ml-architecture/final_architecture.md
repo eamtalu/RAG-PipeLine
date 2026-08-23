@@ -4,7 +4,31 @@
 It merges the implementation plan and the low-level architecture into one place.
 Everything else on this subject is superseded and should not be implemented from.
 
-Last revised 2026-08-21.
+Last revised 2026-08-21, with iteration 2 added 2026-08-23.
+
+## Read this first: which iteration you are looking at
+
+**ITERATION 1 is everything already built and running.**
+Sections 1 to 17 describe it.
+In the component map in section 5 that is every **green** box (existed before this work and was reused) and every **blue** box (built by this work: N1 to N7, the analytics platform).
+All of it is shipped, deployed and under test - 1,065 tests pass.
+If a section does not say otherwise, it is describing iteration 1.
+
+**ITERATION 2 is everything being built now, and none of it exists yet.**
+Sections 18 to 18e describe it, and it has its own component map.
+It is the eight stages `S1`, `R1`, `R1b`, `R3`, `R2`, `S2-S4`, `R4`, `M1`, plus six new tables.
+Everything belonging to it is drawn in **violet** in the HTML twin, which in this document has always meant "a later phase".
+
+**The single rule: violet means not built.**
+If you are reviewing what is about to change, read only section 18 onward and only the violet.
+
+| | Iteration 1 | Iteration 2 |
+|---|---|---|
+| Status | **shipped and running** | **nothing exists yet** |
+| Sections | 1 to 17 | 18 to 18e |
+| Components | E1-E8 (reused), N1-N7 (built by this work) | S1-S4, R1-R4, M1 |
+| Tables | 34 exist | + 6 new, + 1 undecided |
+| Colour in the maps | green and blue | violet |
 
 **Revision note, 2026-08-21.**
 Several changes, all from re-reading the code and measuring the live server. **None alters the
@@ -367,7 +391,10 @@ Renaming before Phase 1 costs nothing; renaming after the first migration costs 
 
 ---
 
-# 5. Component map
+# 5. Component map (ITERATION 1)
+
+**Everything in this section is built and running.**
+For what is being added, see the iteration-2 map in section 18d.
 
 Fifteen components.
 Eight already exist and are reused unchanged, six are new, one is a later phase.
@@ -1298,7 +1325,10 @@ This table exists so the set is enumerable without re-reading the document.
 Corrections are numbered and never renumbered. A future correction to a corrected figure gets a new
 number and cites the old one, so the chain stays traceable.
 
-# 18. Stage 2 redesign: the deferred update-in-place change, approved 2026-08-23
+# 18. ITERATION 2 begins here. Stage 2 redesign: the deferred update-in-place change, approved 2026-08-23
+
+**Everything from this point to the end of the document is ITERATION 2: planned, approved, and NOT YET BUILT.**
+Sections 1 to 17 above are iteration 1 and are running in production.
 
 This section records a change to the **upstream** pipeline, not to the analytics platform.
 It is in this document because the analytics design rests on premises that this change removes, and because sections 2, N3, F6 and Flow F all already track it as a pending dependency.
@@ -1878,7 +1908,11 @@ An earlier draft of this section listed a separate `S0` "sealer sweep" ahead of 
 That was a duplicate: `S1` IS the sealer, and its first tick clears the backlog, so there was never a second piece of work.
 The entry is removed rather than left as a synonym, because two names for one change is how a thing gets built twice.
 
-## 18d. Target-state component map: where every planned change lands
+## 18d. Component map, ITERATION 2: where every planned change lands
+
+**Nothing in this section exists yet.**
+Section 5's map is iteration 1 - built, deployed, tested.
+This is iteration 2, and the HTML twin carries the same diagram drawn in the document's violet "later phase" colour so the two can be read side by side.
 
 Section 18c's map is the system AS IT IS.
 It named the 34 tables that exist plus the 2 planned ML tables, and it did not show the registry, the discovery table, the capture path, the per-record grain, or the two tables S1-S4 introduces.
