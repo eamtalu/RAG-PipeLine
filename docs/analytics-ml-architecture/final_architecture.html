@@ -310,6 +310,7 @@
     <li><a href="#verify">Verification</a></li>
     <li><a href="#open">Open questions</a></li>
     <li><a href="#corrections">Correction log</a></li>
+    <li><a href="#stage2">Stage 2 redesign</a></li>
   </ol>
 </nav>
 <section id="unusual">
@@ -317,7 +318,10 @@
   <p><code>log_transactions</code> is not an <span class="j" title="Rows are only added, never changed">append-only</span>
   table and not a time series. It is a <span class="j" title="A table built from other data, and rebuildable">mutable
   projection</span>: each record is stitched from roughly 15 raw log lines, and when a late line arrives
-  the row is <strong>deleted and rebuilt</strong>, possibly with different values.</p>
+  the row is <strong>deleted and rebuilt</strong>, possibly with different values.
+  <b>Superseded 2026-08-23 - see <a href="#stage2">section 18</a>:</b> the row stays mutable, but
+  Stage 2 is moving to <code>UPDATE</code> in place. The churn figures below describe the
+  <i>content</i>, which is unchanged; they stop describing the <i>storage</i>.</p>
 
   <div class="stats">
     <div class="stat hot"><span class="n">98.7%</span><span class="l">of rows written more than 5 min after their own log lines</span></div>
@@ -456,7 +460,7 @@ free_stmt = delete(LogTransaction).where(LogTransaction.sealed.is_(False))  # al
       <div class="tot"><span class="tlbl">total</span><span class="big">60</span><span class="verdict">Wrong, permanently, no error.</span></div>
     </div>
     <div class="col good">
-      <div class="col-h">&#10003; Compare the whole 10:00&ndash;10:30 window</div>
+      <div class="col-h">&#10003; Compare the whole 10:00-10:30 window</div>
       <div class="step"><span class="clk">10:00</span><span>Pick recorded as receipt <b>#47</b>, 30 units.</span></div>
       <div class="step"><span class="clk">10:12</span><span>Books redone. Same pick, now receipt <b>#91</b>.</span></div>
       <div class="step"><span class="clk">&rarr;</span><span>#47 absent from source, so <b>reverse &minus;30</b>. #91 absent from our records, so <b>apply +30</b>.</span></div>
@@ -1184,7 +1188,9 @@ E5 ─► consumer_cursors('notifications')           ┘        │
   <div class="fix p2"><div class="hd"><span class="id">F6</span><p class="ti">The retention bookmark must publish a write-time position</p></div><div class="bd">
     <p><span class="lbl d">defect</span><br>Retention gating uses a <span class="j" title="A marker saying how far a reader has got">cursor</span> measured in <span class="j" title="When the row was written, as opposed to when the pick happened">write time</span>, but the worker is driven by event-time ranges and has no natural write-time position. Unresolved, it either publishes nonsense or gates nothing, and the second loses data during the backlog that caused it.</p>
     <p><span class="lbl f">fix</span><br>Track the maximum <code>created_at</code> seen among fully processed rows and publish the minimum across tenants under <code>analytics:warehouse-v1</code>. A ticket is only acknowledged once its whole range is diffed, so every row inside it has been read.</p>
-    <p><span class="lbl x">watch</span><br>A deferred team change would switch the delete-and-reinsert to an <code>UPDATE</code>. Then <code>created_at</code> stops moving and <strong>this fix breaks silently</strong>. Keep the cursor field a single named constant so the switch to <code>updated_at</code> is one edit. That change would also collapse the 98.7% figure this plan is sized against.</p>
+    <p><span class="lbl x">watch</span><br>A deferred team change would switch the delete-and-reinsert to an <code>UPDATE</code>. Then <code>created_at</code> stops moving and <strong>this fix breaks silently</strong>. Keep the cursor field a single named constant so the switch to <code>updated_at</code> is one edit. That change would also collapse the 98.7% figure this plan is sized against.
+    <b>This watch fired on 2026-08-23 - see <a href="#stage2">section 18</a>. The switch is now a
+    live obligation, not a hypothetical.</b></p>
   </div></div>
 
   <div class="fix p2"><div class="hd"><span class="id">F7</span><p class="ti">Copy the existing ticket table; do not share it</p></div><div class="bd">
@@ -1685,6 +1691,373 @@ E5 ─► consumer_cursors('notifications')           ┘        │
 
   <p class="note">Corrections are numbered and never renumbered. A future correction to a corrected
   figure gets a new number and cites the old one, so the chain stays traceable.</p>
+</section>
+
+<section id="stage2">
+  <h2>18. Stage 2 redesign: the deferred update-in-place change</h2>
+  <p class="lede">Approved 2026-08-23. This records a change to the <b>upstream</b> pipeline, not to
+  the analytics platform - but sections 2, N3, F6 and Flow F all already track it as a pending
+  dependency, and it removes premises this design rests on.</p>
+
+  <div class="co">
+    <p><b>Nothing in sections 1-17 is retracted.</b> They describe the platform as built, against
+    a Stage 2 that delete-and-reinserts. This section describes what Stage 2 becomes, and exactly which
+    of those premises stop being true.</p>
+  </div>
+
+  <h3>What was implemented before</h3>
+  <p>Stage 2 is a <b>window re-deriver</b>. A ticket arrives, <code>regroup_window</code> deletes every
+  transaction anchored in <code>[lo &minus; 900 s, hi]</code> regardless of <code>sealed</code>, re-reads
+  the entries the delete just made unassigned, re-groups them from scratch, and re-inserts everything.</p>
+  <p>That shape is deliberate, and it earned three properties this platform was designed around:</p>
+  <ul>
+    <li><b>Back-filling into a sealed region is lossless</b>, because sealed rows are re-derived too.</li>
+    <li><b>A crashed worker needs no recovery</b> - all grouper state is derived per cycle.</li>
+    <li><b>A wrong grouping self-heals</b> on the next of ~22 passes, which is why no
+    split-that-should-have-merged has ever been observed.</li>
+  </ul>
+
+  <h3>Why it is changing</h3>
+  <div class="scroll"><table>
+    <thead><tr><th>Measurement (deployed DB, 2026-08-23)</th><th class="num">Value</th></tr></thead>
+    <tbody>
+      <tr><td>WAL generated</td><td class="num"><b>9.6 GB/day</b> against a 4.5 GB database</td></tr>
+      <tr><td>Inserts per surviving row, <code>log_transactions</code></td><td class="num"><b>22.4</b></td></tr>
+      <tr><td>Inserts per surviving row, <code>log_entry_assignment</code></td><td class="num">18.1 - 52.7 M to hold 2.6 M rows</td></tr>
+      <tr><td>In-place updates anywhere</td><td class="num"><b>0</b></td></tr>
+      <tr><td>Autovacuums on the two tables</td><td class="num">7,493 (278 on one partition)</td></tr>
+      <tr><td>Real content versions per transaction</td><td class="num"><b>1.005</b></td></tr>
+    </tbody>
+  </table></div>
+  <p>The last two lines are the argument: the content is stable, the storage is rewritten ~22 times.
+  <b>And the amplification is arithmetic, not inefficiency</b> - the pad is 900 s and the mean
+  ticket interval is 77.2 s, so padded windows overlap 96%: <code>1800 / 77 &asymp; 23</code>. Storage
+  layout does not appear in that expression, which is why making <code>log_transactions</code>
+  append-only was <b>considered and rejected</b>: it would keep 22 rows instead of writing 22 rows, and
+  every read would then pay version resolution on the hot feed path.</p>
+
+  <h3>A live bug this surfaced</h3>
+  <p><code>sealed</code> is written in exactly one place and <b>no <code>UPDATE</code> sets it
+  anywhere</b>, so sealing is a side effect of re-insertion. Once the window advances past a row
+  (~960 s) nothing re-derives it and it never seals.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Day</th><th class="num">Total</th><th class="num">Unsealed</th><th class="num">of which incomplete</th></tr></thead>
+    <tbody>
+      <tr><td>2026-08-18</td><td class="num">9,437</td><td class="num"><b>733</b></td><td class="num">71</td></tr>
+      <tr><td>2026-08-19</td><td class="num">10,642</td><td class="num">292</td><td class="num">81</td></tr>
+      <tr><td>2026-08-20</td><td class="num">7,679</td><td class="num">172</td><td class="num">20</td></tr>
+    </tbody>
+  </table></div>
+  <p><b>2,516 rows are permanently unsealed</b>, oldest 2026-08-06. Two silent consequences inside this
+  platform: <b>F4's settledness signal is wrong</b> - <code>unsealed_share</code> is inflated by
+  sludge rather than describing a live tail, so a window can read as <i>provisional</i> forever; and
+  <b>E5's most useful alert may never fire</b>, because <code>stability.py</code> gates on
+  <code>incomplete + sealed</code>. Fixed first, independently of the rest.</p>
+
+  <h3>What Stage 2 becomes</h3>
+  <pre><code>BEFORE                                  AFTER
+ticket arrives                          entry arrives
+  -&gt; DELETE every txn in +/-900 s         -&gt; look up open stream (thread, user_ctx)
+  -&gt; entries become unassigned           -&gt; found: append 1 assignment,
+  -&gt; re-read + re-group ALL of them               UPDATE the open transaction
+  -&gt; re-INSERT ALL of them               -&gt; miss:  FALL BACK to the window re-derive
+                                         -&gt; closed transaction: never touched again
+22.4 writes/row                         ~1.0 writes/row</code></pre>
+  <ul>
+    <li><b><code>log_entry_assignment</code> becomes append-only.</b> An entry is assigned once.
+    52.7 M writes drop to 2.6 M.</li>
+    <li><b><code>log_transactions</code> is UPDATEd in place while open, then never touched.</b> It
+    cannot be append-only - the row is an <i>aggregate</i> over its entries, so adding an entry
+    necessarily changes it. But "not append-only" never required delete-and-reinsert.</li>
+  </ul>
+  <div class="scroll"><table>
+    <thead><tr><th>#</th><th>Stage</th><th class="num">Writes/row</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td class="num">S1</td><td>Explicit sealer</td><td class="num">22.4</td><td>fixes the bug above; prerequisite for everything</td></tr>
+      <tr><td class="num">S2</td><td>Durable stream position</td><td class="num">22.4</td><td>no gain alone - <code>open_pos</code> is a batch index and <code>req_pos</code> keys on a CPython object address, so neither survives a process boundary</td></tr>
+      <tr><td class="num">S3</td><td>Fingerprint skip + UPDATE in place</td><td class="num"><b>~1.05</b></td><td>the big win, and the oracle S4 is verified against</td></tr>
+      <tr><td class="num">S4a</td><td>State machine in shadow</td><td class="num">~1.05</td><td>runs both paths, compares fingerprints, promotes nothing</td></tr>
+      <tr><td class="num">S4b</td><td>State machine enabled</td><td class="num"><b>~1.00</b></td><td>removes the re-derive from the hot path</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>What this changes for the analytics platform</h3>
+  <p>Four premises stop being true. Each is a required follow-up, not an optional one.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Where</th><th>Said</th><th>Becomes</th></tr></thead>
+    <tbody>
+      <tr><td><b>Section 2</b></td>
+        <td>"when a late line arrives the row is deleted and rebuilt"</td>
+        <td>The row is <b>updated in place</b>. The 98.7%-rewritten figure stays true of the
+        <i>content</i> but stops being true of the <i>storage</i>.</td></tr>
+      <tr><td><b>N3, F6</b></td>
+        <td>Retention position is <code>max(created_at)</code>, "held in a single named constant because
+        a deferred upstream change to update-in-place would require switching to
+        <code>updated_at</code>"</td>
+        <td><b>That change is now happening.</b> <code>consume.py:85</code>
+        <code>_FRONTIER_COLUMN</code> must move to <code>updated_at</code>. The constant existed for
+        exactly this, and it is the whole of the edit.</td></tr>
+      <tr><td><b>Flow F</b></td>
+        <td>"<b>Watch:</b> a deferred change to update-in-place would stop <code>created_at</code>
+        moving and break this silently"</td>
+        <td>The watch has fired. Until the constant moves, the frontier stalls and
+        <code>periods_blocked_by_consumers</code> holds source partitions forever.</td></tr>
+      <tr><td><b>E5</b></td>
+        <td>The cursor reads <code>created_at</code>, and <code>stability.py</code> exists because every
+        rebuild refreshes it</td>
+        <td><code>cursor.py:153-157</code> must move to <code>updated_at</code>. The churn that filter
+        absorbs largely disappears, so it becomes a much weaker load-bearer.</td></tr>
+    </tbody>
+  </table></div>
+  <p><code>created_at</code> also changes meaning: today "last rebuilt", afterwards genuinely
+  "first written".</p>
+  <div class="co">
+    <h4>One free improvement it unlocks</h4>
+    <p><code>evaluators.py:64</code>'s dedup key is <code>(rule_id, transaction_id)</code> and
+    version-blind, so a transaction whose status changed from <code>incomplete</code> to
+    <code>error</code> is deduped away and never re-alerts - an accepted residual risk in
+    <code>stability.py</code>. With a row fingerprint available the key becomes
+    <code>(rule_id, transaction_id, status)</code>.</p>
+  </div>
+  <p><b>What does not change.</b> The range diff, the ledger, the rollup cascade, the metric registry
+  and every invariant in section 13 are unaffected. The diff already treats a changed transaction and a
+  vanished transaction identically, which is precisely why it absorbs this upstream change without
+  modification - the property section 8 claimed for it, now tested against a real one.</p>
+
+  <h3>Impact on the position-tracking tables</h3>
+  <p>Section 7 already warns that four position-tracking mechanisms are easily confused. This change
+  touches them very unevenly.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Table</th><th>Tracks</th><th>Impact</th><th>If forgotten</th></tr></thead>
+    <tbody>
+      <tr><td><code>log_ssh_file_checkpoints</code></td><td>bytes pulled per remote file</td><td><b>none</b> - Stage 1, upstream</td><td>-</td></tr>
+      <tr><td><code>log_source_objects</code> lease</td><td>who is parsing which byte range</td><td><b>none</b> - Stage 1 queue</td><td>-</td></tr>
+      <tr><td><code>log_regroup_pending</code></td><td>which windows need stitching</td><td><b>none</b>, in meaning or volume</td><td>-</td></tr>
+      <tr><td><code>analytics_pending_windows</code></td><td>which ranges N3 must re-diff</td><td><b>volume falls ~95%</b></td><td>see below</td></tr>
+      <tr><td><code>consumer_cursors</code></td><td>how far each reader got</td><td>column moves to <code>updated_at</code></td><td><b>fails safe</b></td></tr>
+      <tr><td><code>notification_rules.cursor_at</code></td><td>how far each rule has read</td><td>column moves to <code>updated_at</code></td><td><b>fails unsafe</b></td></tr>
+    </tbody>
+  </table></div>
+  <p><b>The SSH checkpoint and the Stage 2 queue are genuinely untouched.</b> The checkpoint is a
+  <i>byte offset</i> in a remote file, and Stage 2 sits downstream of it.
+  <code>log_regroup_pending</code> keeps its meaning and volume - it is still the durable
+  "there is work here" signal written in the same transaction as the entries, which is why Stage 2 can
+  fail completely and be retried. One nuance: after S3 a ticket can be consumed having written nothing.
+  That is correct - <code>consumed_at</code> means <i>examined</i>, not <i>changed</i>.</p>
+  <div class="co">
+    <h4>The two <code>created_at</code> readers fail in opposite directions</h4>
+    <p><code>consumer_cursors</code> (retention) computes <code>max(created_at)</code> over folded rows.
+    After S3 a row created 09:00 and updated 10:00 reports 09:00, so the position <b>under-reports</b>
+    progress - and a lower position blocks <i>more</i> partitions from being dropped. The cost is
+    disk, not data.</p>
+    <p><code>notification_rules.cursor_at</code> reads <code>created_at &gt;= lo AND &lt; hi</code>.
+    After S3 an updated row keeps its original stamp, falls behind the cursor, and is <b>never read
+    again</b> - breaking the one invariant <code>cursor.py</code> exists to hold:
+    <i>"NO ROW IS EVER SKIPPED. Dedupe absorbs a repeat. Nothing absorbs a skip."</i> It must move in
+    the <b>same change</b> as S3.</p>
+  </div>
+  <p><b>The analytics ticket reduction has a hidden cost.</b> <code>regroup_window:901</code> publishes
+  unconditionally every cycle - roughly 22x more than needed. That waste is also a brute-force
+  safety net: even with a wrong diff, N3 would still re-examine the range. Narrowing to "publish only on
+  change" removes the net, so two obligations become load-bearing: the <b>delete</b> branch must still
+  publish, and a ticket must span <b>old and new</b> <code>started_at</code> (a moved start is a reverse
+  of the old analytics key plus an insert of the new one). The replacement net is N7's reconciler, whose
+  <code>facts_vs_transactions</code> check detects exactly a missing fact - but
+  <code>analytics_reconcile_worker_enabled</code> is currently <code>False</code>.
+  <b>Turn it on before S3 ships.</b></p>
+
+  <h3>Impact on notifications: measured, and there is no regression</h3>
+  <p>Checked against the live rule set rather than reasoned about, because S1's seal-flip could in
+  principle release a flood of overdue alerts.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Tenant</th><th>Rule type</th><th>Matches</th><th class="num">Transactions</th></tr></thead>
+    <tbody>
+      <tr><td><code>mnp</code></td><td><code>text_match</code></td><td><code>error_text</code> contains "printer error"</td><td class="num"><b>0</b></td></tr>
+      <tr><td><code>tmp-live</code></td><td><code>status_match</code></td><td><code>{"statuses": ["error"]}</code></td><td class="num">151,216</td></tr>
+    </tbody>
+  </table></div>
+  <p><b>The burst that does not happen.</b> <code>stability.py</code> gates
+  <code>incomplete + unsealed</code> as "wait", so S1 makes those rows alertable for the first time:</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Unsealed status</th><th class="num">Count</th><th>On seal</th></tr></thead>
+    <tbody>
+      <tr><td><code>success</code></td><td class="num">1,908</td><td>already alertable - dedup blocks any repeat</td></tr>
+      <tr><td><code>incomplete</code></td><td class="num"><b>577</b></td><td>becomes alertable for the first time</td></tr>
+      <tr><td><code>soft</code></td><td class="num">151</td><td>already alertable - dedup blocks</td></tr>
+      <tr><td><code>error</code></td><td class="num">3</td><td>already alertable - dedup blocks</td></tr>
+    </tbody>
+  </table></div>
+  <p>Total alert history is 58 events / 58 deliveries, so 577 at once would be a tenfold flood. It does
+  not fire, because <b>neither active rule matches <code>incomplete</code></b> -
+  <code>tmp-live</code> matches only <code>error</code>, and <code>mnp</code> has no transactions.</p>
+  <p>That is a fact about the current configuration, not a property of the design.
+  <b>Re-check the rule set before S1 runs.</b> Any active rule matching <code>incomplete</code> would
+  release one alert per previously-unsealed row, back to 2026-08-06 - in which case seal the
+  historical backlog with rule cursors advanced past it first.</p>
+  <p><b>S1 is a notification fix, not only a risk.</b> <code>stability.py</code> calls
+  <code>incomplete + SEALED</code> "the genuinely useful alert" - the request whose response is
+  never coming. Today 577 rows can never reach that state, so a rule written to catch stuck requests
+  would silently not work. After S1 it does.</p>
+  <p><b>S3 with the cursor moved: no behaviour change.</b> A row alerts once, and re-enters the feed
+  only when it genuinely changed rather than on every one of ~22 rebuilds. <code>stability.py</code>
+  keeps working with less churn to filter.</p>
+  <div class="co">
+    <h4>Deliberately not bundled</h4>
+    <p><code>evaluators.py:64</code>'s dedup key is <code>(rule_id, transaction_id)</code> and
+    version-blind, so a transaction going <code>incomplete</code> to <code>error</code> never re-alerts.
+    A fingerprint makes the fix one line, but it <b>changes alert volume</b> - one transaction
+    could alert more than once. That is an improvement, not a regression fix, so it stays out of this
+    change and behind its own decision.</p>
+  </div>
+
+  <h3>Partitioning, indexes and the new tables</h3>
+  <p><b>Every existing partition rule prevails.</b> Grains unchanged
+  (<code>log_transactions</code> daily, <code>log_entry_assignment</code> daily); the co-partitioning of
+  assignments with entries on <code>entry_ts</code> holds, because append-only does not change
+  <code>entry_ts</code>; retention stays at base for transactions and <b>base + 1</b> for entries and
+  assignments; the one-day lag rationale still applies; all three drop gates are untouched; and the
+  DEFAULT-partition health check is unaffected because the change adds no default rows.</p>
+  <p><b>The two new tables are deliberately NOT partitioned.</b> <code>log_open_stream</code> and
+  <code>log_pending_request</code> are small self-cleaning working sets - a few hundred rows,
+  deleted when a stream closes. Same reasoning that keeps <code>analytics_monthly_rollups</code> out of
+  <code>PARTITIONED</code>.</p>
+  <div class="co">
+    <h4>They need a reaper that derived state never needed</h4>
+    <p><code>evict_stale</code> closes a stream <i>when an entry arrives</i>. A tenant that stops
+    ingesting leaves its streams open forever, and the row leaks. <b>Derived state cannot leak; persisted
+    state can.</b> A TTL sweep on both tables is required, not optional, and belongs in the sealer tick.
+    Monitor <code>count(*)</code> on each - a number that only grows is the alarm, and it is the one
+    failure mode with no upstream signal.</p>
+  </div>
+  <p><b>The sealer must be bounded.</b> Its predicate would otherwise seal a 59-day-old row, bumping
+  <code>updated_at</code>, which feeds the notification cursor - so an ancient transaction could
+  alert <b>one day before its entries are dropped</b>, leaving a detail view with no entries. Add a
+  horizon clause well inside <code>log_partition_retention_days</code>. Theoretical today (the oldest
+  partition is 18 days old) and unavoidable once 60 days of history exists.</p>
+  <p><b>Two mechanical notes on the new partial index.</b>
+  <code>CREATE INDEX CONCURRENTLY</code> is not supported on a partitioned parent, so follow migration
+  <code>b3d914c7ea52</code>: <code>CREATE INDEX ... ON ONLY parent</code>, then per-partition
+  <code>CREATE INDEX CONCURRENTLY</code>, then <code>ALTER INDEX ... ATTACH PARTITION</code> - the
+  parent index stays invalid until every partition attaches. And autogenerate is already safe:
+  <code>alembic/env.py:44-46</code> excludes per-partition <i>indexes</i> as well as tables, deriving the
+  pattern from <code>partition_name_pattern()</code>, so the 33 per-partition copies will not be proposed
+  for dropping.</p>
+  <p><b>The seal flip is not a cheap UPDATE.</b> <code>sealed</code> is indexed and
+  <code>updated_at</code> will be, so HOT is impossible and PostgreSQL writes a new tuple with an entry in
+  all 23 indexes, exactly like an insert - <code>log_entries</code> took 105.8M updates at
+  <b>0.0% HOT</b> for the same reason. Already inside the ~1.05 writes/row estimate, but it means dropping
+  <code>ix_log_transactions_sealed</code> will not buy HOT back, because <code>updated_at</code> must stay
+  indexed for the cursor.</p>
+
+  <h3>Frontend impact: verified, no contract breakage</h3>
+  <p><b>No HTTP response exposes the changing fields.</b> <code>_txn_summary</code>
+  (<code>logs.py:321-345</code>) emits 22 fields and none of <code>created_at</code>,
+  <code>updated_at</code> or <code>sealed</code>; likewise the agent-tool twin and the text renderer.
+  Every <code>created_at</code> in the API layer belongs to a different table. No frontend file reads a
+  transaction-level <code>created_at</code>, <code>sealed</code> or either fingerprint.</p>
+  <p>That matters more than it sounds: <code>created_at</code> changing meaning from "last rebuilt" to
+  "first written" is the riskiest part of the change, and it is <b>invisible to the frontend</b> because
+  it was never serialised.</p>
+  <div class="co">
+    <h4>"Append-only" for assignments means written ONCE, not versioned</h4>
+    <p><code>UNIQUE NULLS NOT DISTINCT (entry_id, entry_ts)</code> must stay in force. Retaining
+    superseded rows for one <code>entry_id</code> would be <b>breaking</b>: <code>logs.py:1059</code>
+    emits <code>timeline[].seq</code> straight from the assignment, so duplicates would render the same
+    step twice and trip <code>MAX_RENDER_ENTRIES</code> sooner.</p>
+  </div>
+  <div class="scroll"><table>
+    <thead><tr><th>Field</th><th>Rendered at</th><th>Change</th></tr></thead>
+    <tbody>
+      <tr><td><code>freshness.unsealed_share</code> / <code>provisional</code></td>
+        <td><code>AnalyticsPanel.tsx:225-235</code></td>
+        <td>the sealer moves the number and can flip the badge from amber <b>Provisional</b> to green <b>Settled</b></td></tr>
+      <tr><td><code>queue.open_tickets</code></td>
+        <td><code>AnalyticsPanel.tsx:283</code></td>
+        <td>publish-on-change makes the "Queue" tile read ~0 permanently, so the tile stops carrying signal</td></tr>
+      <tr><td><code>last_regroup_at</code></td>
+        <td><code>PollingStatus.tsx:158</code></td>
+        <td>a ticket consumed having written nothing still advances it, so "last updated" no longer implies data changed</td></tr>
+    </tbody>
+  </table></div>
+  <p>The <code>pending_regroup</code> banner is unaffected: it derives from local upload phase, and the
+  ~95% ticket reduction is <code>analytics_pending_windows</code>, which
+  <code>/logs/regroup/status</code> never reads.</p>
+
+  <h3>Risk this accepts</h3>
+  <p>The re-deriver's third property - <i>a wrong grouping self-heals on the next pass</i> -
+  is being given up, and it is given up by <b>S3</b> rather than S4: once an identical rebuild writes
+  nothing, nothing revisits the row.</p>
+  <p>Six ways the stream lookup can miss are enumerated in the implementation plan, each producing a
+  <b>split that should have been a merge</b>. Mitigations: a guard
+  (<code>last_entry_ts &lt; lo</code> and <code>lo &minus; last_entry_ts &lt; log_open_gap_seconds</code>,
+  otherwise fall back) and shadow mode - run both paths and compare
+  <code>(id, row_fingerprint, members_fingerprint)</code> until a week of zero divergence on real
+  traffic.</p>
+  <p>The single most important test in the plan is the narrowest: <b>a RESPONSE arriving in a later
+  window than its REQUEST must still produce one transaction, not two.</b></p>
+
+  <h3>18a. Response capture: decided 2026-08-23</h3>
+  <p class="lede">A separate change from S1-S4. It touches no Stage 2 code, and is recorded here
+  because it changes what a fact row can measure.</p>
+
+  <p><b>The gap:</b> Stage 1 parses the response fully and Stage 2 discards it.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Layer</th><th>Parsed by Stage 1</th><th>Reaches <code>analytics_facts</code></th></tr></thead>
+    <tbody>
+      <tr><td>request params + flat request body</td><td>yes</td><td><b>yes</b> - 34 keys via <code>attributes</code></td></tr>
+      <tr><td>nested objects/arrays in the request body</td><td>yes</td><td>no - dropped by <code>_merged_attrs:90</code></td></tr>
+      <tr><td><code>response</code> payload (150,104 entries)</td><td>yes</td><td><b>no</b> - only <code>response_summary</code>, the string <code>"OK"</code></td></tr>
+      <tr><td><code>mi_result.records[]</code> (3,641,353 records)</td><td>yes</td><td><b>no</b></td></tr>
+      <tr><td><code>mi_result.record_count</code> (424,632 values)</td><td>yes</td><td><b>no</b></td></tr>
+    </tbody>
+  </table></div>
+  <p>A real response holds <code>QuantityOnHand</code>, <code>AllocatedQuantity</code>,
+  <code>TotalNumberOfBalances</code>; a real <code>mi_result</code> holds per-record <code>STQT</code>,
+  <code>ALQT</code>, <code>BANO</code>, <code>PRDT</code>, <code>ITDS</code>. None of it is measurable
+  today.</p>
+
+  <h4>Decisions</h4>
+  <p><b>Capture response scalars for all 49 methods.</b> Measured over 400 live responses: 947 scalar
+  values against 9 non-scalar, across 145 distinct keys. Cost is <code>attributes</code> growing from 806
+  to roughly 2,000 bytes - about 1.8 MB/day, roughly 3 GB over five years, against a 4.5 GB database
+  that already generates 9.6 GB of WAL per day. The upside is unrecoverable, which is the same reasoning
+  section 11 uses for the fact row's width.</p>
+  <p><b>Per-record expansion stays selective.</b> <code>records[]</code> is where the ~200k rows/day is,
+  so it is opt-in per method. The 60-day retention window is the safety net: you can always expand a
+  method you did not pick, provided the scalars were already being captured.</p>
+  <div class="co">
+    <h4>Field capture is an allowlist that DISCOVERS</h4>
+    <p><code>_SENSITIVE</code> (<code>derive_transactions.py:45</code>) is a five-word denylist, and the
+    two most frequent response keys across all 145 are <code>AccessToken</code> and
+    <code>M3UserCredentials</code>. A denylist guarding a <code>KEEP_FOREVER</code> table is the wrong
+    shape - one renamed credential field becomes permanent. But a static allowlist would silently
+    drop new fields, losing the future-metric history the capture exists to buy.</p>
+    <p>So an unknown key is neither captured nor ignored: its <b>name only</b> is recorded,
+    <code>captured = false</code>, and surfaced for review. The allowlist becomes data - one row per
+    <code>(method, field)</code>, self-populating rather than hand-maintained. Storing only the name means
+    the discovery record itself cannot leak a value.</p>
+  </div>
+  <p><b>The payload goes to <code>analytics_facts</code>, NOT to <code>log_transactions</code>.</b>
+  Merging it into the projection would widen the exact hot table S3 exists to make cheaper to write.
+  Instead N3 reads the transaction's entries alongside it and passes them to N2, which stays pure because
+  the reading happens in N3. That keeps this change entirely analytics-side.</p>
+  <p><b>Namespace, never flat-merge.</b> Request and response both carry <code>ItemNumber</code>; a flat
+  merge silently drops one. Response fields are prefixed on capture (<code>resp.QuantityOnHand</code>,
+  <code>mi.STQT</code>) so <code>fold</code>'s <code>row.get(field)</code> keeps working unchanged and a
+  collision is structurally impossible.</p>
+  <p class="note"><b>Open, not yet decided:</b> whether the per-record grain is a new table or a second
+  row type in <code>analytics_facts</code>. A separate table keeps the existing fact row's meaning clean
+  but doubles the fold path; the answer depends on how <code>rollups.recompute</code> handles two grains,
+  which has not been looked at yet.</p>
+
+  <h3>Also corrected while measuring</h3>
+  <p><code>settings.py:78-79</code> and <code>:110-112</code> claim "real transactions are &le;2 min".
+  Measured over 151,757 live transactions: avg 1.7 s, p99 28.1 s, <b>max 363.7 s (6.1 min)</b> -
+  longer than <code>log_open_gap_seconds</code> = 300 s. Both windows should be re-derived from
+  measurement rather than from that note.</p>
+
+  <p class="note">Full implementation plan, staging and verification gates:
+  <code>~/.claude/plans/2026-08-23_22-06_stage2-incremental-state-machine.md</code></p>
 </section>
 </div></body>
 </html>

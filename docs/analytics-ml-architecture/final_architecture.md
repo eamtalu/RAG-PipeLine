@@ -89,6 +89,8 @@ Phase 1 lands on a clean head using `deploy.sh`'s ordinary pull, migrate, restar
 `log_transactions` is not append-only and not a time series.
 It is a **mutable derived projection**: each transaction is stitched from roughly 15 raw log lines, and when a late line arrives the row is deleted and rebuilt, possibly with different values.
 
+**Superseded 2026-08-23 - see section 18.** The row is still mutable, but Stage 2 is moving from delete-and-reinsert to UPDATE in place, and `log_entry_assignment` is becoming append-only. The measured churn below describes the *content*, which is unchanged; it stops describing the *storage*.
+
 Measured on the live server:
 
 | Measurement | Value |
@@ -280,6 +282,8 @@ Nothing about the design changes; only the volume estimate moves, and it moves d
 If the deferred update-in-place change ever ships, DELETE and INSERT becomes UPDATE, ids stop churning, and most of this churn disappears.
 That is the same upstream change that would break the retention cursor described in F6.
 One decision, two effects on us, which is why it is tracked as a dependency rather than a footnote.
+
+**It shipped as a decision on 2026-08-23 - see section 18.** Both effects are now live obligations: the churn estimate moves down, and `_FRONTIER_COLUMN` must move to `updated_at` before the frontier stalls.
 
 **Source uniqueness is `UNIQUE NULLS NOT DISTINCT (id, started_at)`, not unique on id.**
 Confirmed in `log_transaction.py:43-44` and migration `a1f6d70b3e92:126`.
@@ -657,6 +661,7 @@ Per tenant because `consumer_cursors` holds one row per consumer while retention
 A tenant that has processed nothing has a NULL frontier and suppresses publishing entirely.
 See also D9, a unit mismatch in this mechanism that is being carried deliberately.
 Held in a **single named constant**, because a deferred upstream change to update-in-place would require switching to `updated_at`.
+**That change was approved on 2026-08-23 (section 18), so this switch is now required rather than hypothetical.**
 
 ## N4. Metric registry
 
@@ -885,6 +890,7 @@ A test asserts the endpoint issues exactly one query.
 Retention gating uses a write-time cursor, but the worker is driven by event-time ranges.
 Fix: track the maximum `created_at` among fully processed rows and publish the minimum across tenants.
 **Watch:** a deferred change to update-in-place would stop `created_at` moving and break this silently, so keep the field a single named constant.
+**This watch has fired - see section 18.** Until the constant moves to `updated_at`, the frontier stalls and source partitions are held indefinitely.
 That change would also collapse the 98.7% figure this plan is sized against.
 
 **F7. Copy the existing ticket table, do not share it.**
@@ -1291,3 +1297,281 @@ This table exists so the set is enumerable without re-reading the document.
 
 Corrections are numbered and never renumbered. A future correction to a corrected figure gets a new
 number and cites the old one, so the chain stays traceable.
+
+# 18. Stage 2 redesign: the deferred update-in-place change, approved 2026-08-23
+
+This section records a change to the **upstream** pipeline, not to the analytics platform.
+It is in this document because the analytics design rests on premises that this change removes, and because sections 2, N3, F6 and Flow F all already track it as a pending dependency.
+
+Nothing in sections 1-17 is retracted.
+Everything in them describes the platform **as built**, against a Stage 2 that delete-and-reinserts.
+This section describes what Stage 2 becomes, and exactly which of those premises stop being true.
+
+## What was implemented before
+
+Stage 2 is a **window re-deriver**.
+A ticket arrives, `regroup_window` deletes every transaction anchored in `[lo - 900 s, hi]` regardless of `sealed`, re-reads the entries that the delete just made unassigned, re-groups them from scratch, and re-inserts everything.
+
+That shape is deliberate and it earned three properties the analytics platform was designed around:
+
+- **Back-filling into a sealed region is lossless**, because sealed rows are re-derived too (`derive_transactions.py:846-848`).
+- **A crashed worker needs no recovery.** All grouper state is derived per cycle, so an interrupted window simply leaves its ticket open.
+- **A wrong grouping self-heals.** Any mis-grouped transaction is re-derived on the next of ~22 passes, which is why no split-that-should-have-merged has ever been observed in production.
+
+## Why it is changing
+
+Measured on the deployed database, 2026-08-23:
+
+| Measurement | Value |
+|---|---|
+| WAL generated | **9.6 GB/day** against a 4.5 GB database (2.05 bn records in 73 days) |
+| Inserts per surviving row, `log_transactions` | **22.4** on one day partition |
+| Inserts per surviving row, `log_entry_assignment` | 18.1 - 52.7 M inserts to hold 2.6 M rows |
+| In-place updates | **0** anywhere - always DELETE + INSERT |
+| Autovacuums on the two tables | 7,493; 278 on a single day partition |
+| Real content versions per transaction | **1.005** (measured from `analytics_fact_ledger`) |
+
+The last two lines are the argument: the content is stable, the storage is rewritten ~22 times.
+
+**And the amplification is arithmetic, not inefficiency.**
+`pad = max(log_regroup_pad_seconds, log_seal_window_seconds)` = 900 s, and the mean interval between stitch tickets is 77.2 s, so consecutive padded windows overlap 96%: `1800 / 77 ≈ 23`.
+Storage layout does not appear in that expression, which is why making `log_transactions` append-only was **considered and rejected** - it would keep 22 rows instead of writing 22 rows, and every read would then pay version resolution on the hot feed path.
+
+## A live bug this investigation surfaced
+
+`sealed` is written in exactly one place, `_write_transaction` (`derive_transactions.py:611`), from `_is_sealed`.
+**No `UPDATE` sets it anywhere.**
+So sealing is a *side effect of re-insertion*: once `lo_p` advances past a row's `started_at` (~960 s), nothing re-derives it and it never seals.
+
+| Day | Total | Unsealed | of which incomplete |
+|---|---|---|---|
+| 2026-08-18 | 9,437 | **733** | 71 |
+| 2026-08-19 | 10,642 | 292 | 81 |
+| 2026-08-20 | 7,679 | 172 | 20 |
+
+**2,516 rows are permanently unsealed**, the oldest dating to 2026-08-06.
+Two silent consequences inside this platform:
+
+- **F4's settledness signal is wrong.** `unsealed_share` and `oldest_unsealed_at` (section N3, surfaced on the status card) are inflated by permanent sludge rather than describing a live tail. A window can therefore read as *provisional* forever.
+- **E5's most useful alert may never fire.** `stability.py` gates on `incomplete + sealed`; if nothing ever seals an incomplete row, that path is unreachable.
+
+This is fixed first, independently of the rest.
+
+## What Stage 2 becomes
+
+An **incremental state machine**, with the re-deriver retained as a verified fallback.
+
+```
+BEFORE                                  AFTER
+ticket arrives                          entry arrives
+  -> DELETE every txn in +/-900 s         -> look up open stream (thread, user_ctx)
+  -> entries become unassigned            -> found: append 1 assignment,
+  -> re-read + re-group ALL of them                UPDATE the open transaction
+  -> re-INSERT ALL of them                -> miss:  FALL BACK to the window re-derive
+                                          -> closed transaction: never touched again
+22.4 writes/row                         ~1.0 writes/row
+```
+
+Two shape changes matter more than the mechanism:
+
+- **`log_entry_assignment` becomes append-only.** An entry is assigned once. 52.7 M writes drop to 2.6 M.
+- **`log_transactions` is UPDATEd in place while open, then never touched.** It cannot be append-only: the row is an *aggregate* over its entries (`started_at` = min, `ended_at` = max, `status`, `entry_count`, `response_summary`), so adding an entry necessarily changes it. But "not append-only" never required delete-and-reinsert.
+
+Five stages, each independently shippable:
+
+| # | Stage | Writes/row | Note |
+|---|---|---|---|
+| S1 | Explicit sealer | 22.4 | fixes the bug above; prerequisite for everything |
+| S2 | Durable stream position | 22.4 | no gain alone; `open_pos` is a batch index and `req_pos` keys on a CPython object address, so neither survives a process boundary |
+| S3 | Fingerprint skip + UPDATE in place | **~1.05** | the big win, and the oracle S4 is verified against |
+| S4a | State machine in shadow | ~1.05 | runs both paths, compares fingerprints, promotes nothing |
+| S4b | State machine enabled | **~1.00** | removes the re-derive from the hot path |
+
+## What this changes for the analytics platform
+
+Four premises in sections 1-17 stop being true.
+Each is a required follow-up, not an optional one.
+
+| Where | Said | Becomes |
+|---|---|---|
+| **Section 2** | "`log_transactions` ... when a late line arrives the row is deleted and rebuilt" | The row is **updated in place**. The 98.7%-rewritten figure stays true of the *content* but stops being true of the *storage*. |
+| **N3, F6** | Retention position is `max(log_transactions.created_at)`, "held in a single named constant because a deferred upstream change to update-in-place would require switching to `updated_at`" | **That change is now happening.** `consume.py:85` `_FRONTIER_COLUMN` must move to `updated_at`. The constant existed for exactly this, and it is the whole of the edit. |
+| **Flow F** | "**Watch:** a deferred change to update-in-place would stop `created_at` moving and break this silently" | The watch has fired. Until `_FRONTIER_COLUMN` moves, the analytics retention frontier stalls and `periods_blocked_by_consumers` holds source partitions forever. |
+| **E5 / notifications** | The cursor reads `log_transactions.created_at`, and `stability.py` exists because "every Stage 2 rebuild refreshes `created_at`, so an in-flight transaction re-enters the cursor's feed on every rebuild until it seals" | `cursor.py:153-157` must move to `updated_at`. The churn `stability.py` was written to absorb largely disappears, so that filter becomes a much weaker load-bearer. |
+
+`created_at` also changes meaning: today it is "last rebuilt", afterwards it is genuinely "first written".
+
+**One free improvement it unlocks.** `evaluators.py:64`'s dedup key is `(rule_id, transaction_id)` and version-blind, so a transaction whose status changed from `incomplete` to `error` is deduped away and never re-alerts - an accepted residual risk in `stability.py`. With a row fingerprint available, the key becomes `(rule_id, transaction_id, status)`.
+
+**What does not change.** The range diff, the ledger, the rollup cascade, the metric registry and every invariant in section 13 are unaffected. The diff already treats a changed transaction and a vanished transaction identically, which is precisely why it absorbs this upstream change without modification - the property section 8 claimed for it, now tested against a real one.
+
+## Impact on the position-tracking tables
+
+The document already warns that four position-tracking mechanisms are easily confused (section 7).
+This change touches them very unevenly, so each is stated separately.
+
+| Table | Tracks | Impact | If the follow-up is forgotten |
+|---|---|---|---|
+| `log_ssh_file_checkpoints` | bytes pulled per remote file | **none** - Stage 1, upstream of this | - |
+| `log_source_objects` lease | who is parsing which byte range | **none** - Stage 1 queue | - |
+| `log_regroup_pending` | which windows still need stitching | **none**, in meaning or volume | - |
+| `analytics_pending_windows` | which ranges N3 must re-diff | **volume falls ~95%** | see below |
+| `consumer_cursors` | how far each reader of `log_transactions` has got | column moves to `updated_at` | **fails safe** |
+| `notification_rules.cursor_at` | how far each alert rule has read | column moves to `updated_at` | **fails unsafe** |
+
+**The SSH checkpoint and the Stage 2 queue are genuinely untouched.**
+The checkpoint is a *byte offset* in a remote file and Stage 2 sits downstream of it.
+`log_regroup_pending` keeps its meaning and its volume: it is still the durable "there is work here" signal written in the same transaction as the entries, which is the reason Stage 2 can fail completely and be retried.
+One nuance only - after S3 a ticket can be consumed having written nothing.
+That is correct: `consumed_at` means *examined*, not *changed*.
+
+**The two `created_at` readers fail in opposite directions, which is why they need different urgency.**
+
+- `consumer_cursors` (retention) computes `max(created_at)` over folded rows. After S3 a row created at 09:00 and updated at 10:00 reports 09:00, so the position **under-reports** progress. A lower position blocks *more* partitions from being dropped. The cost is disk, not data. Fix it for accuracy, but it cannot lose data.
+- `notification_rules.cursor_at` reads `created_at >= lo AND < hi`. After S3 an updated row keeps its original stamp, falls behind the cursor, and is **never read again**. That breaks the one invariant `cursor.py` exists to hold - *"NO ROW IS EVER SKIPPED. A row MAY be read more than once. Dedupe absorbs a repeat. Nothing absorbs a skip."* It must move in the **same change** as S3, not after it.
+
+**The analytics ticket reduction has a hidden cost.**
+`regroup_window:901` publishes a ticket unconditionally, every cycle, for the whole padded window - roughly 22x more than needed. That waste is also a **brute-force safety net**: even if the diff logic were wrong, N3 would still re-examine the range. Narrowing to "publish only on change" removes the net, so two obligations become load-bearing rather than incidental:
+
+- the **delete** branch must still publish, or a transaction the rebuild no longer produces keeps its contribution in every total;
+- a ticket must span **old and new** `started_at`, because a transaction whose start moved is a reverse of the old analytics key plus an insert of the new one. Ticketing only the new instant leaves the old fact double-counted for good.
+
+The replacement net already exists - N7's reconciler, whose `facts_vs_transactions` check detects exactly a missing fact.
+But `analytics_reconcile_worker_enabled` is currently `False`.
+**Turn it on before S3 ships.** Swapping an expensive always-on net for a cheap periodic one is a good trade only if the periodic one is running.
+
+## Impact on notifications: measured, and there is no regression
+
+Checked against the live rule set rather than reasoned about, because the seal-flip in S1 could in principle release a flood of overdue alerts.
+
+**The two active rules, and what they match:**
+
+| Tenant | Type | Matches | Transactions |
+|---|---|---|---|
+| `mnp` | `text_match` | `error_text` contains "printer error" | **0** |
+| `tmp-live` | `status_match` | `{"statuses": ["error"]}` | 151,216 |
+
+**The burst that does not happen.** `stability.py` gates `incomplete + unsealed` as "wait", so those rows are not alertable today. S1 seals them, which makes them alertable for the first time:
+
+| Unsealed status | Count | On seal |
+|---|---|---|
+| `success` | 1,908 | already alertable - dedup blocks any repeat |
+| `incomplete` | **577** | becomes alertable for the first time |
+| `soft` | 151 | already alertable - dedup blocks |
+| `error` | 3 | already alertable - dedup blocks |
+
+Total alert history to date is 58 events / 58 deliveries, so 577 at once would be a tenfold flood.
+It does not fire, because **neither active rule matches `incomplete`** - `tmp-live` matches only `error`, and `mnp` has no transactions at all.
+
+That is a fact about the current configuration, not a property of the design.
+**Before S1 runs, re-check the rule set**: any active rule matching `incomplete` would release one alert per previously-unsealed row, back to 2026-08-06.
+If such a rule exists, seal the historical backlog with rule cursors advanced past it, then start the sealer.
+
+**S1 is a notification fix, not just a risk.** `stability.py` calls `incomplete + SEALED` "the genuinely useful alert" - the request whose response is never coming. Today 577 rows can never reach that state, so a rule written to catch stuck requests silently would not work. After S1 it does.
+
+**S3 with the cursor moved: no behaviour change.** A row alerts once, and re-enters the feed only when it genuinely changed - rather than on every one of ~22 rebuilds. `stability.py` keeps working and has less churn to filter, so it becomes a weaker load-bearer rather than a broken one.
+
+**Deliberately NOT bundled.** `evaluators.py:64`'s dedup key is `(rule_id, transaction_id)` and version-blind, so a transaction going `incomplete` to `error` never re-alerts - an accepted residual risk in `stability.py`. A fingerprint makes the fix one line (`(rule_id, transaction_id, status)`), but it **changes alert volume**: one transaction could then alert more than once. That is an improvement, not a regression fix, so it stays out of this change and behind its own decision.
+
+## Partitioning, indexes and the new tables
+
+**Every existing partition rule prevails.** Grains are unchanged (`log_transactions` daily, `log_entry_assignment` daily), the co-partitioning of assignments with entries on `entry_ts` holds because append-only does not change `entry_ts`, retention stays at base for transactions and **base + 1** for entries and assignments, the one-day lag rationale still applies, all three drop gates are untouched, and the DEFAULT-partition health check is unaffected because the change adds no default rows. `chunk36`'s guard that the log tables are untouched by `KEEP_FOREVER` / `RETENTION_DAYS` still passes.
+
+**The two new tables are deliberately NOT partitioned.** `log_open_stream` and `log_pending_request` are small self-cleaning working sets - a few hundred rows, deleted when a stream closes. Same reasoning that keeps `analytics_monthly_rollups` out of `PARTITIONED`: nothing worth pruning, and partitioning adds planning cost for no gain.
+
+**But they need a reaper that derived state never needed.** `evict_stale` closes a stream *when an entry arrives*. A tenant that stops ingesting leaves its streams open forever, and the row leaks. Derived state cannot leak; persisted state can. A TTL sweep on both tables is required, not optional, and belongs in the sealer tick. Monitor `count(*)` on each - a number that only grows is the alarm, and it is the one failure mode with no upstream signal.
+
+**The sealer must be bounded.** Its predicate would otherwise seal a 59-day-old row, bumping `updated_at`, which feeds the notification cursor - so an ancient transaction could alert **one day before its entries are dropped**, leaving a detail view with no entries. Add a horizon clause well inside `log_partition_retention_days`. Theoretical today (the oldest partition is 18 days old) and unavoidable once 60 days of history exists.
+
+**Two mechanical notes on the new partial index.** `CREATE INDEX CONCURRENTLY` is not supported on a partitioned parent, so follow migration `b3d914c7ea52`: `CREATE INDEX ... ON ONLY parent`, then per-partition `CREATE INDEX CONCURRENTLY`, then `ALTER INDEX ... ATTACH PARTITION`; the parent index stays invalid until every partition attaches. And autogenerate is already safe - `alembic/env.py:44-46` excludes per-partition *indexes* as well as tables, deriving the pattern from `partition_name_pattern()`, so the 33 per-partition copies will not be proposed for dropping.
+
+**The seal flip is not a cheap UPDATE.** `sealed` is indexed and `updated_at` will be, so HOT is impossible and PostgreSQL writes a new tuple with an entry in all 23 indexes, exactly like an insert - `log_entries` took 105.8M updates at **0.0% HOT** for the same reason. Already inside the ~1.05 writes/row estimate, but it means dropping `ix_log_transactions_sealed` will not buy HOT back, because `updated_at` must stay indexed for the cursor.
+
+## Frontend impact: verified, no contract breakage
+
+**No HTTP response exposes the changing fields.** `_txn_summary` (`logs.py:321-345`) emits 22 fields and none of `created_at`, `updated_at` or `sealed`; likewise the agent-tool twin and the text renderer. Every `created_at` in the API layer belongs to a different table. No frontend file reads a transaction-level `created_at`, `sealed` or either fingerprint.
+
+That matters more than it sounds: `created_at` changing meaning from "last rebuilt" to "first written" is the riskiest part of the change, and it is **invisible to the frontend** because it was never serialised.
+
+**"Append-only" for assignments means written ONCE, not versioned.** `UNIQUE NULLS NOT DISTINCT (entry_id, entry_ts)` must stay in force. Retaining superseded rows for one `entry_id` would be breaking: `logs.py:1059` emits `timeline[].seq` straight from the assignment, so duplicates would render the same step twice and trip `MAX_RENDER_ENTRIES` sooner.
+
+**Three display meanings change, none needing code:**
+
+| Field | Rendered at | Change |
+|---|---|---|
+| `freshness.unsealed_share` / `provisional` | `AnalyticsPanel.tsx:225-235` | the sealer moves the number and can flip the badge from amber **Provisional** to green **Settled** |
+| `queue.open_tickets` | `AnalyticsPanel.tsx:283` | publish-on-change makes the "Queue" tile read ~0 permanently, so the tile stops carrying signal |
+| `last_regroup_at` | `PollingStatus.tsx:158` | a ticket consumed having written nothing still advances it, so "last updated" no longer implies data changed |
+
+The `pending_regroup` banner is unaffected: it derives from local upload phase, and the ~95% ticket reduction is `analytics_pending_windows`, which `/logs/regroup/status` never reads.
+
+## Risk this accepts
+
+The re-deriver's third property - *a wrong grouping self-heals on the next pass* - is the one being given up, and it is given up by S3 rather than by S4: once an identical rebuild writes nothing, nothing revisits the row.
+
+Six ways the stream lookup can miss are enumerated in the implementation plan, each producing a **split that should have been a merge**.
+The mitigations are a guard (`last_entry_ts < lo` and `lo - last_entry_ts < log_open_gap_seconds`, otherwise fall back) and shadow mode: run both paths and compare `(id, row_fingerprint, members_fingerprint)` until a week of zero divergence on real traffic.
+
+The single most important test in the plan is the narrowest: **a RESPONSE arriving in a later window than its REQUEST must still produce one transaction, not two.**
+
+## 18a. Response capture: decided 2026-08-23
+
+A separate change from S1-S4.
+It touches no Stage 2 code, and is recorded here because it changes what a fact row can measure.
+
+### The gap
+
+Stage 1 parses the response fully and Stage 2 discards it.
+
+| Layer | Parsed by Stage 1 | Reaches `analytics_facts` today |
+|---|---|---|
+| request params + flat request body | yes | **yes** - 34 keys via `attributes` |
+| nested objects/arrays in the request body | yes | no - dropped by `_merged_attrs:90` |
+| `response` payload (150,104 entries, all parsed) | yes | **no** - only `response_summary`, which is the string `"OK"` |
+| `mi_result.records[]` (3,641,353 records) | yes | **no** |
+| `mi_result.record_count` (424,632 values) | yes | **no** |
+
+`_merged_attrs` (`derive_transactions.py:75-91`) loops the entries and reads only `request` and `request_body`.
+A real response holds `QuantityOnHand`, `AllocatedQuantity`, `TotalNumberOfBalances`; a real `mi_result` holds per-record `STQT`, `ALQT`, `BANO`, `PRDT`, `ITDS`.
+None of it is measurable today.
+
+### Decisions
+
+**Capture response scalars for all 49 methods.**
+Measured over 400 live responses: 947 scalar values against 9 non-scalar, across 145 distinct keys.
+Cost is `attributes` growing from 806 to roughly 2,000 bytes, about 1.8 MB/day, roughly 3 GB over five years - against a 4.5 GB database that already generates 9.6 GB of WAL per day.
+The upside is unrecoverable: the same reasoning section 11 already uses for the fact row's width, since raw entries drop at 60 days.
+
+**Per-record expansion stays selective.**
+`records[]` is where the ~200k rows/day is, so it is opt-in per method, chosen in the interface.
+The 60-day retention window is the safety net: you can always decide to expand a method you did not pick, provided the scalars were already being captured.
+
+**Field capture is an allowlist that DISCOVERS.**
+`_SENSITIVE` (`derive_transactions.py:45`) is a five-word denylist, and the two most frequent response keys across all 145 are `AccessToken` and `M3UserCredentials`.
+A denylist guarding a `KEEP_FOREVER` table is the wrong shape: one renamed credential field becomes permanent.
+But a static allowlist would silently drop new fields, losing the future-metric history the capture exists to buy.
+So an unknown key is neither captured nor ignored - its **name only** is recorded, `captured = false`, and surfaced for review.
+The allowlist becomes data, one row per `(method, field)`, self-populating rather than hand-maintained.
+Storing only the name means the discovery record itself cannot leak a value.
+
+**The payload goes to `analytics_facts`, NOT to `log_transactions`.**
+Merging it into the projection would widen the exact hot table S3 exists to make cheaper to write.
+Instead N3 reads the transaction's entries alongside it and passes them to N2, which stays pure because the reading happens in N3.
+That keeps this change entirely analytics-side.
+
+**Namespace, never flat-merge.**
+Request and response both carry `ItemNumber`; a flat merge silently drops one.
+Response fields are prefixed on capture (`resp.QuantityOnHand`, `mi.STQT`) so `fold`'s `row.get(field)` keeps working unchanged and a collision is structurally impossible.
+
+### Open, not yet decided
+
+Whether the per-record grain is a new table or a second row type in `analytics_facts`.
+A separate table keeps the existing fact row's meaning clean but doubles the fold path; the answer depends on how `rollups.recompute` handles two grains, which has not been looked at yet.
+
+## Also corrected while measuring
+
+`settings.py:78-79` and `:110-112` claim "real transactions are ≤2 min".
+Measured over 151,757 live transactions: avg 1.7 s, p99 28.1 s, **max 363.7 s (6.1 min)** - longer than `log_open_gap_seconds` = 300 s.
+Both windows should be re-derived from measurement rather than from that note.
+
+Full implementation plan, staging and verification gates: `~/.claude/plans/2026-08-23_22-06_stage2-incremental-state-machine.md`.
