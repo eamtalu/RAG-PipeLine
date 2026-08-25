@@ -36,12 +36,19 @@ source of truth for no gain.
 
 import hashlib
 import json
+import logging
+from functools import lru_cache
 from datetime import date as date_type, datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sqlalchemy import Enum as SAEnum, String, inspect as sa_inspect
+
+from app.persistence.models.analytics_fact import AnalyticsFact
 from app.services.analytics import contract as c
+
+logger = logging.getLogger(__name__)
 
 #: `attributes` keys promoted to fact columns, because `log_transactions` has no column for them.
 _FROM_ATTRIBUTES: dict[str, str] = {
@@ -157,6 +164,55 @@ def _quarantine(row: Mapping[str, Any], reason: str, detail: str, observed: dict
     }
 
 
+@lru_cache(maxsize=1)
+def _fact_str_limits() -> dict[str, int]:
+    """{field: max_length} for every bounded VARCHAR column on `AnalyticsFact`.
+
+    A PORT of `derive_transactions._txn_str_limits`, and the fact that it had to be ported is the point.
+    That function exists because one over-length `ItemNumber` once stalled all stitching for a tenant -
+    there is a postmortem, `docs/stage2-stitching-stall-postmortem-and-fix.md`. This module was written
+    afterwards, promotes the same kind of value out of the same JSONB, and had no equivalent: 49
+    analytics windows were dead-lettered over two days in production with
+
+        StringDataRightTruncationError: value too long for type character varying(32)
+
+    Measured at the time: `ToLocation` reached 37 characters against a 32-wide `to_location`, and
+    `LotNumber` the same against `lot_number`.
+
+    Read from the ORM MAPPING rather than written as a literal, so a resized or newly added column is
+    picked up for free. A hardcoded list is how the same bug returns after the next migration.
+
+    `Enum` is excluded because its values are fixed and valid, and `Text` has no limit to enforce. This
+    is ORM introspection over the Python mapping, not a query, so the module's no-database property is
+    intact - nothing here opens a session or emits SQL.
+    """
+    return {col.key: col.type.length
+            for col in sa_inspect(AnalyticsFact).columns
+            if isinstance(col.type, String) and not isinstance(col.type, SAEnum)
+            and getattr(col.type, "length", None)}
+
+
+def _cap_over_length(fact: dict) -> dict:
+    """Trim promoted string dimensions to their column width, in place.
+
+    CAPPED rather than quarantined, deliberately. These are DIMENSIONS, not measures: quarantining would
+    discard a real transaction's quantity because a label was long, and the full value is still on the
+    raw log entry - only the queryable column is trimmed. The same trade-off Stage 2 already made for the
+    same reason.
+
+    Runs BEFORE the fingerprint, so the hash describes what is actually STORED. That is for coherence
+    rather than for the diff: the diff recomputes through this same function, so the order could not
+    produce a mismatch either way. What the diff needs is DETERMINISM, which capping preserves.
+    """
+    for field, limit in _fact_str_limits().items():
+        value = fact.get(field)
+        if isinstance(value, str) and len(value) > limit:
+            logger.warning("Analytics: capped over-length %s (%d > %d) to fit its column; the full "
+                           "value remains on the raw log entry", field, len(value), limit)
+            fact[field] = value[:limit]
+    return fact
+
+
 def normalise(row: Mapping[str, Any], *, tenant_timezone: str | None,
               response_attributes: Mapping[str, Any] | None = None
               ) -> tuple[dict | None, dict | None]:
@@ -241,5 +297,7 @@ def normalise(row: Mapping[str, Any], *, tenant_timezone: str | None,
     for field, key in _FROM_ATTRIBUTES.items():
         fact[field] = _as_text(attributes.get(key))
 
+    # BEFORE the fingerprint, so the hash describes what is actually stored. See `_cap_over_length`.
+    _cap_over_length(fact)
     fact["source_version_hash"] = _fingerprint(fact)
     return fact, None

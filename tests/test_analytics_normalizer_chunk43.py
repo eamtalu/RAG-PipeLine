@@ -317,3 +317,118 @@ def test_an_error_transaction_keeps_its_status_and_is_not_a_quantity_row():
     assert issue is None
     assert fact["status"] == "error"
     assert fact["quantity_classification"] == c.Classification.non_quantity.value
+
+
+# ==================================================== the truncation outage, 2026-08-25
+#
+# FOUND IN PRODUCTION, not in review. 49 analytics windows were dead-lettered over two days with
+#
+#     StringDataRightTruncationError: value too long for type character varying(32)
+#
+# on INSERT into `analytics_facts`. Those ranges have NO facts at all - silent, partial analytics data
+# loss that nothing surfaced, because an abandoned ticket is not an alert.
+#
+# The cause is a lesson that was learned once and not carried across. Stage 2 caps promoted string
+# values to their column width in `_cap_over_length`, and that function exists BECAUSE one over-length
+# `ItemNumber` once stalled all stitching for a tenant - there is a postmortem,
+# docs/stage2-stitching-stall-postmortem-and-fix.md. The analytics normaliser was written afterwards,
+# promotes the same kind of value out of the same JSONB, and had no equivalent.
+#
+# Measured on the deployed database at the time of the fix:
+#     ToLocation -> to_location varchar(32)   longest 37, 19 rows over   <- the real overflow
+#     LotNumber  -> lot_number  varchar(64)   longest 37, fits
+#
+# The second line is here because a first probe of mine hardcoded a 32 cap for `lot_number` and reported
+# a false overflow. The model and the deployed schema were then checked column by column and agree
+# exactly - there is no drift. Only the three genuinely-32-wide columns can overflow:
+# `from_location`, `to_location`, `transaction_type`.
+
+def test_an_over_length_promoted_value_is_capped_not_raised():
+    """The exact production failure. A 37-character `LotNumber` must not be able to abort the fold.
+
+    Capped rather than quarantined, deliberately: the value is a DIMENSION, not a measure. Quarantining
+    would discard a real transaction's quantity over a long label, and the full value is still on the raw
+    log entry - only the queryable column is trimmed. Same trade-off Stage 2 already made.
+    """
+    long_loc = "BRI-ZONE-A-AISLE-12-BAY-04-LEVEL-3-POS"
+    assert len(long_loc) == 38, "the measured production value was 37; this is one over"
+    fact, issue = n2.normalise(
+        txn(attributes={"QuantityPicked": "10", "ToLocation": long_loc}), tenant_timezone=LONDON)
+    assert issue is None, "an over-length dimension must not quarantine a real transaction"
+    assert len(fact["to_location"]) == 32
+    assert fact["to_location"] == long_loc[:32]
+
+
+def test_every_promoted_string_is_capped_to_its_own_column_width():
+    """Driven by the ORM mapping rather than a hardcoded list, so a resized or added column is picked up
+    for free - the property Stage 2's `_txn_str_limits` docstring calls out, and the reason this fix
+    cannot rot the way a literal list would."""
+    limits = n2._fact_str_limits()
+    assert limits["to_location"] == 32 and limits["from_location"] == 32
+    assert limits["lot_number"] == 64, "read from the schema, not from a guess about it"
+    assert limits["item_number"] == 128
+
+    over = {"QuantityPicked": "10", "LotNumber": "L" * 80, "ToLocation": "T" * 80,
+            "FromLocation": "F" * 80, "ItemNumber": "I" * 300}
+    fact, issue = n2.normalise(txn(attributes=over), tenant_timezone=LONDON)
+    assert issue is None
+    for field, limit in limits.items():
+        value = fact.get(field)
+        if isinstance(value, str):
+            assert len(value) <= limit, f"{field} is {len(value)} long, over its {limit} column"
+
+
+def test_a_value_within_its_column_is_untouched():
+    """A cap that trimmed a legitimate value would silently change a dimension, splitting one item's
+    total across two labels - which is worse than the crash it replaces."""
+    fact, _ = n2.normalise(
+        txn(attributes={"QuantityPicked": "10", "ToLocation": "BRI-A-01"}), tenant_timezone=LONDON)
+    assert fact["to_location"] == "BRI-A-01"
+
+
+def test_capping_is_deterministic_so_the_diff_still_settles():
+    """A first version of this test claimed the cap MUST precede the fingerprint or "every such row is
+    rewritten forever". That was wrong, and the test failed for the right reason - worth recording,
+    because the wrong version would have passed as soon as it was loosened.
+
+    The range diff recomputes the hash through the same `normalise` call it used originally, so the
+    ORDER of capping cannot produce a mismatch. What actually matters is DETERMINISM: the same source row
+    must hash identically every time, or a capped row would be rewritten on every pass.
+
+    Two rows with different RAW attributes hash differently even when their capped columns match, and
+    that is correct rather than a bug: `attributes` is deliberately in the fingerprint, so that a measure
+    invented next year over the untrimmed value is still a detectable change.
+    """
+    row = txn(attributes={"QuantityPicked": "10", "ToLocation": "T" * 80})
+    a, _ = n2.normalise(row, tenant_timezone=LONDON)
+    b, _ = n2.normalise(row, tenant_timezone=LONDON)
+    assert a["to_location"] == b["to_location"] == "T" * 32
+    assert a["source_version_hash"] == b["source_version_hash"], \
+        "the same source row must hash identically, or a capped row is rewritten on every pass"
+
+    # The raw blob still differs from a genuinely-short value, and SHOULD.
+    short, _ = n2.normalise(txn(attributes={"QuantityPicked": "10", "ToLocation": "T" * 32}),
+                            tenant_timezone=LONDON)
+    assert short["to_location"] == a["to_location"]
+    assert short["source_version_hash"] != a["source_version_hash"], \
+        "the untrimmed value is in `attributes` and is part of what the fingerprint covers"
+
+
+def test_the_cap_runs_before_the_fingerprint():
+    """Not for the diff's sake - see above - but so the hash DESCRIBES what is stored. An audit that
+    recomputed a hash from the stored columns and got a different answer would be investigating a
+    discrepancy that does not exist."""
+    import inspect
+    src = inspect.getsource(n2.normalise)
+    assert src.index("_cap_over_length") < src.index("_fingerprint(fact)")
+
+
+def test_the_cap_covers_the_response_attributes_too():
+    """R3 merges response scalars into the same `attributes`, and they promote through the same path. A
+    cap that only covered request-side keys would leave the identical crash reachable from the response
+    half - which is now the larger source of keys."""
+    fact, issue = n2.normalise(
+        txn(attributes={"QuantityPicked": "10"}), tenant_timezone=LONDON,
+        response_attributes={"ToLocation": "R" * 90})
+    assert issue is None
+    assert len(fact["to_location"]) <= 32
