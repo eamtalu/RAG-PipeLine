@@ -1896,7 +1896,7 @@ What follows is what remains, in dependency order rather than in the order it wa
 | **S4b** | Promote the lookup. Needs a week of `agreed: true` with `seeded_streams` non-zero on LIVE traffic. | S4a | no |
 | **R4** | **BUILT 2026-08-25, CAPTURE ONLY** - `analytics_record_facts`, opt-in per transaction. The record-grain FOLD is not built. See 18n. | R3 | capture done |
 | **R4b** | The record-grain fold and read, so a record metric can be defined | R4 | no |
-| **M1** | ML: `analytics_feature_sets`, `analytics_predictions`, `ml:features-v1` | R3 | no |
+| **M1** | **BUILT 2026-08-25** - reproducible training sets pinned to the ledger, plus the predictions table and the reserved cursor. See 18o. | R3 | done |
 
 **Why R3 before R2**, which inverts the obvious order: the allowlist starts empty, so R3 alone would capture nothing.
 Seeding it with the 145 already-measured keys means capture begins accumulating history while the interface to manage it is still being built.
@@ -2859,6 +2859,98 @@ has no parsable timestamp stays insertable.
 | approval | `rec.STQT` and `rec.ITNO` stored, `rec.BANO` absent |
 | settled window | record-fact ids **byte-identical** - S3's skip survives |
 | 3 records become 1 | **1** row, no orphan tail |
+
+## 18o. M1 as BUILT, 2026-08-25
+
+**Shipped.** Migration `b7e34c9a2f58` (`analytics_feature_sets`, `analytics_predictions`), 20 tests in
+`tests/test_analytics_ml_features_chunk62.py`, full suite 1,315.
+
+This is the chunk F10 was written for. Its claim was that the fact ledger "must exist from day one
+rather than being added when ML starts", and it is now proven on real data rather than asserted:
+**restate a fact, rebuild the training set at the same pin, and the content hash is identical.**
+
+### The plan said "pinned revision". There is no such coordinate.
+
+`analytics_fact_ledger.revision` is PER FACT - measured 1..2 per transaction on live data - and the
+ledger carries no tenant-level revision at all. A per-fact counter cannot identify a moment in time.
+
+The coordinate is an INSTANT, `pinned_at`, resolved against `recorded_at`. That works for a specific
+reason: a fold stamps every ledger row it writes with the same instant, so a fold is atomic in those
+terms and any pin is a clean cut BETWEEN folds rather than through one. Ties break on `revision`
+descending, so even a same-microsecond collision resolves deterministically instead of by whichever row
+the planner happened to return first.
+
+`latest_pin` exists because the natural mistake is to pin to `now()`, which can select a moment a fold
+is part-way through writing.
+
+### What makes it reproducible, and what makes that checkable
+
+A feature set stores three things and no rows:
+
+| | |
+|---|---|
+| `pinned_at` | WHICH versions of the facts |
+| `code_version` | WHICH transformation - the same facts through different code are a different set |
+| `content_hash` | WHAT the answer was |
+
+The rows are a pure function of the first two over the ledger, so storing them would be a second copy
+that can disagree with the first, and it would be the largest table in the system.
+
+The third is what turns "reproducible" from a claim into a test. `verify` rebuilds at the stored pin and
+compares, and it is a production function rather than only a test helper - it is the one check that can
+notice the guarantee has quietly stopped holding, which would otherwise surface as two models that
+disagree for no visible reason.
+
+### Three decisions that each prevent a plausible wrong answer
+
+**A reversed fact is excluded.** The ledger records a reversal as a version like any other, so a
+transaction whose newest version at the pin is a reversal did not exist then. Including it would train a
+model on rows the system had already retracted.
+
+**One row per transaction, not one per version.** A row per version would weight a frequently-restated
+transaction more heavily than a stable one - a bias introduced by Stage 2's write pattern rather than by
+anything in the warehouse.
+
+**An oversized set RAISES rather than truncating.** CLAUDE.md rule 3 applies here more than anywhere: a
+silently truncated training set trains a model on a subset nobody chose, and it looks fine until it is
+wrong in production.
+
+### The cursor, and why registering it matters
+
+`ml:features-v1`, the name reserved in this document from the start. Registering it is not bookkeeping:
+`consumer_cursors` is what stops the partition worker dropping source data a lagging reader has not
+seen. A pipeline that read the ledger WITHOUT registering would have its history dropped from under it,
+and its cursor would move past the gap without noticing.
+
+The position is the PIN, not `now()` - everything strictly before it has been consumed, and anything
+after it has not been looked at.
+
+### A test that was inverted rather than deleted
+
+`test_the_ml_tables_are_not_in_phase_1` asserted these tables did NOT exist, on the grounds that
+"building them now would freeze a feature-set shape before the ML work has said what it needs". M1 has
+now said, so the reason no longer holds. It is now a SHAPE guard on the columns reproducibility
+requires, which is worth more than an absence one.
+
+### E2E on the real ledger
+
+| Step | Result |
+|---|---|
+| build at the ledger high-water mark | 269 rows, 10 features, hash `9a7b6e58...` |
+| cursor | `ml:features-v1` registered at the pin |
+| restate a fact with quantity 999999 | done |
+| **rebuild at the SAME pin** | **hash identical - reproducible** |
+| build at a LATER pin | different hash, and the restated row is present |
+
+The last row matters as much as the one above it: if every pin gave the same answer, reproducibility
+would be trivially satisfied by a function that ignores its argument.
+
+### What M1 is not
+
+It builds training SETS and records model OUTPUTS. It does not train a model - there is no estimator,
+no fitting, no scoring. That is downstream work, and it is now unblocked in the only way that mattered:
+a training set built today can be rebuilt identically in a year, so a model's inputs are recoverable
+when somebody asks why it said what it said.
 
 ## Also corrected while measuring
 

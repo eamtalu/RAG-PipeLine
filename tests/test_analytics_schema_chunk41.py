@@ -96,12 +96,41 @@ def test_every_analytics_table_is_tenant_scoped(table):
     assert "customer_code" in _cols(table)
 
 
-def test_the_ml_tables_are_not_in_phase_1():
-    """M1 is "later" in the component map, and Phase 1's list stops at the ticket table. Building them
-    now would freeze a feature-set shape before the ML work has said what it needs."""
-    for absent in ("analytics_feature_sets", "analytics_predictions"):
-        with pytest.raises(AssertionError):
-            _model(absent)
+def test_the_ml_tables_carry_what_reproducibility_needs():
+    """This test used to assert these tables did NOT exist, on the grounds that "building them now would
+    freeze a feature-set shape before the ML work has said what it needs". M1 has now said, so the
+    reason no longer holds and the assertion is inverted rather than deleted - a shape guard is worth
+    more than an absence one.
+
+    The three columns are what make a training set reproducible, and none is optional:
+
+        pinned_at      WHICH versions of the facts. An instant, not a revision - the plan said
+                       "pinned revision" and there is no such coordinate, since
+                       analytics_fact_ledger.revision is per-fact and the ledger carries no
+                       tenant-level revision.
+        code_version   WHICH transformation. The same facts through different code are a different
+                       training set and must not share an identity.
+        content_hash   WHAT the answer was, so a rebuild can be CHECKED rather than trusted. Without
+                       it "reproducible" is a claim; with it, it is a test.
+    """
+    fs = _cols("analytics_feature_sets")
+    for needed in ("pinned_at", "code_version", "content_hash", "row_count", "feature_names"):
+        assert needed in fs, f"a feature set cannot be reproduced without {needed}"
+
+    pred = _cols("analytics_predictions")
+    # Lineage is the point of the last one: a prediction whose training data cannot be identified
+    # cannot be explained when it turns out to be wrong.
+    for needed in ("subject", "horizon", "model_version", "target_at", "predicted_at",
+                   "feature_set_id"):
+        assert needed in pred, f"a prediction is not assessable without {needed}"
+
+
+def test_the_ml_tables_are_deliberately_unpartitioned():
+    """One row per training run and one per (subject, horizon, model, target) - small next to the fact
+    tables, so there is nothing worth pruning. Registering either without a retention policy is how a
+    table silently inherits the log tables' 60 days."""
+    for table in ("analytics_feature_sets", "analytics_predictions"):
+        assert table not in pt.BY_TABLE
 
 
 # ==================================================== 1. the fact row is wide
