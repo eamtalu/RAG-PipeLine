@@ -76,6 +76,7 @@ from app.services.analytics import normalizer as n2
 from app.services.analytics import registry
 from app.services.analytics import rollups as n5
 from app.services.mnp_log_ingestion.pipeline.time_bounds import UtcWindow
+from app.services.mnp_log_ingestion.pipeline.derive_transactions import _split_run
 from app.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,14 @@ def _coalesce(tickets: Sequence[AnalyticsPendingWindow], gap: timedelta
     """
     runs: list[list] = []
     for t in sorted(tickets, key=lambda r: r.range_start):
+        # `<=`, so ranges that touch at an instant merge too. That is right rather than lax: nothing
+        # can fall strictly between them, so treating them as one range loses nothing - and the BOUND
+        # now comes from `_split_run` below, not from refusing to merge.
+        #
+        # An earlier attempt at this fix used strict `<` to keep runs small. It was the wrong lever:
+        # tickets are padded +/-900s (see `pending_windows`, which explains why - invariant 2), so
+        # consecutive daily tickets GENUINELY overlap by 30 minutes and merge under any comparison.
+        # Splitting after the merge is what bounds the work; strictness only broke a passing test.
         if runs and t.range_start <= runs[-1][1] + gap:
             runs[-1][1] = max(runs[-1][1], t.range_end)
             runs[-1][2].append(t)
@@ -229,6 +238,9 @@ _SOURCE_COLUMNS = (
     LogTransaction.warehouse, LogTransaction.warehouse_id, LogTransaction.user_name,
     LogTransaction.device_id, LogTransaction.device_name, LogTransaction.attributes,
     LogTransaction.sealed, LogTransaction.created_at,
+    # S3's digests, read so the fold can tell "this transaction has not changed at all" without
+    # touching its entries. That is what makes the response read (R3) skippable - see `_needs_entries`.
+    LogTransaction.row_fingerprint, LogTransaction.members_fingerprint,
 )
 
 
@@ -261,8 +273,50 @@ async def _read_source(db: AsyncSession, customer_code: str, window: UtcWindow,
     return [dict(r) for r in rows]
 
 
-async def _read_response_entries(db: AsyncSession, customer_code: str,
-                                 window: UtcWindow) -> dict[uuid.UUID, list[tuple[str, dict]]]:
+#: Bumped when `normalise`, `payload.extract` or the approval rules change what a fact CONTAINS.
+#:
+#: The response-read skip below reuses a stored fact wholesale when its source has not changed. That is
+#: only sound while the code that BUILT it is unchanged too - otherwise an edited derivation would never
+#: reach a settled fact, silently, which is exactly the trap `_DERIVE_VERSION` exists to close on the
+#: Stage 2 side. Same lesson, second place it applies.
+_NORMALISE_VERSION = 1
+
+#: Where the skip decision's inputs live on the stored fact. Prefixed `__` so they cannot be mistaken
+#: for a WMS field, and kept in `attributes` rather than as new columns because they are bookkeeping for
+#: this optimisation rather than anything a metric would measure.
+_SRC_FP_KEY = "__src_fp"
+_NORM_V_KEY = "__norm_v"
+
+
+def _needs_entries(source_row, stored_fact) -> bool:
+    """Whether this transaction's response entries have to be read at all.
+
+    Measured: `_read_response_entries` was 22.8 s of a 23.7 s read - 96% - because it scales with every
+    transaction in the window rather than with the ones that changed. That undoes S3's premise for
+    exactly the runs already too large, which is how a 30 s timeout became unreachable.
+
+    Skippable only when all three hold:
+      - a fact already exists for this transaction
+      - Stage 2's row digest is unchanged, so nothing about the transaction moved
+      - the fact was built by this version of the normalisation
+
+    The second is the load-bearing one. Stage 2's digest covers the row AND, via `members_fingerprint`,
+    which entries it is made of - so an unchanged digest means the response entries are byte-identical.
+    Without S3 there would be no cheap way to know that and this optimisation would not exist.
+    """
+    if stored_fact is None:
+        return True
+    src_fp = source_row.get("row_fingerprint")
+    if src_fp is None:
+        return True          # a pre-S3 row has no digest, so nothing can be proven about it
+    prior = stored_fact.get("attributes") or {}
+    return (prior.get(_SRC_FP_KEY) != src_fp
+            or prior.get(_NORM_V_KEY) != _NORMALISE_VERSION)
+
+
+async def _read_response_entries(db: AsyncSession, customer_code: str, window: UtcWindow,
+                                 only: set | None = None
+                                 ) -> dict[uuid.UUID, list[tuple[str, dict]]]:
     """R3. Each transaction's `response` and `mi_result` entries, keyed by transaction id.
 
     Stage 1 already parsed these in full and Stage 2 discards them, so this is the only place the
@@ -281,7 +335,10 @@ async def _read_response_entries(db: AsyncSession, customer_code: str,
             .join(LogEntry, LogEntry.id == LogEntryAssignment.entry_id)
             .where(LogEntryAssignment.customer_code == customer_code,
                    window.covers(LogEntryAssignment.entry_ts, include_null=True),
-                   LogEntry.entry_type.in_(("response", "mi_result")))
+                   LogEntry.entry_type.in_(("response", "mi_result")),
+                   # R3 + S3: only the transactions whose facts could actually differ. On a settled
+                   # window `only` is empty and this whole read is skipped, which is the 96% saving.
+                   *([LogEntryAssignment.transaction_id.in_(sorted(only))] if only is not None else []))
             .order_by(LogEntryAssignment.transaction_id, LogEntryAssignment.seq))
     out: dict[uuid.UUID, list[tuple[str, dict]]] = {}
     for txn_id, entry_type, fields in (await db.execute(stmt)).all():
@@ -662,6 +719,18 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
     async with async_session() as db:
         await db.execute(select(_lock(customer_code)))
         await db.execute(text(f"SET LOCAL work_mem = '{_WORK_MEM}'"))
+        # The web tier's 30 s guard is wrong for a background fold, exactly as it was wrong for Stage
+        # 1's bulk insert - which relaxes it for the same reason (CLAUDE.md rule 8 names that as a
+        # deliberate exception). A fold of one day legitimately exceeds 30 s: measured 23.7 s of reads
+        # alone on a 10,400-transaction day, before normalising, diffing or writing anything.
+        #
+        # 120 s rather than the 600 s first considered, and the difference is the BOUND. With
+        # near-adjacent coalescing removed a run cannot exceed one ticket span, so the headroom needed
+        # is one day's worth - knowable - instead of however large the next backlog happens to be. A
+        # finite value keeps rule 8's safety net: a genuine runaway still aborts rather than holding a
+        # transaction open across nine tables and pinning the vacuum horizon.
+        await db.execute(text(
+            f"SET LOCAL statement_timeout = {settings.analytics_fold_statement_timeout_ms}"))
 
         # R1. Read ONCE per run and passed to both reads, so the two halves of the diff cannot
         # disagree about what is captured even if somebody flips a switch mid-run. Reading it twice
@@ -672,7 +741,14 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
 
         # R3. The response half, which Stage 2 parses and discards. Read here rather than in N2 so N2
         # keeps its no-database property: it is handed the already-approved scalars as a parameter.
-        by_txn = await _read_response_entries(db, customer_code, window)
+        # Read stored FIRST now, because the response-read skip needs it to decide. Cheap - 134 ms
+        # against the 22.8 s it saves.
+        stored = await _read_stored(db, customer_code, window, suppressed)
+        stored_by_txn = {r["source_transaction_id"]: r for r in stored}
+
+        needs = {row["id"] for row in source_rows
+                 if _needs_entries(row, stored_by_txn.get(row["id"]))}
+        by_txn = await _read_response_entries(db, customer_code, window, only=needs)
 
         # Extract FIRST, register SECOND, read the approvals THIRD. The order is load-bearing and was
         # wrong on the first attempt.
@@ -699,9 +775,24 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
 
         facts, issues = [], []
         for row, observed in observed_by_row:
+            prior = stored_by_txn.get(row["id"])
+            if row["id"] not in needs and prior is not None:
+                # Nothing about this transaction moved and the normalisation is the same version, so the
+                # stored fact is still exactly right. Carried through verbatim so the diff compares it
+                # against itself and reports `unchanged` - no entry read, no normalise, no write.
+                facts.append({k: v for k, v in prior.items() if k not in ("id", "created_at")})
+                continue
             captured_attrs, _unknown = pl.select(observed, approved)
             fact, issue = n2.normalise(row, tenant_timezone=tz,
                                        response_attributes=captured_attrs)
+            if fact is not None:
+                # Stamp the skip inputs so the NEXT fold can prove this fact is current without
+                # touching entries. Written into `attributes` after normalise, so they are inside the
+                # fingerprint and a version bump therefore invalidates every stored fact by itself.
+                fact["attributes"] = {**(fact.get("attributes") or {}),
+                                      _SRC_FP_KEY: row.get("row_fingerprint"),
+                                      _NORM_V_KEY: _NORMALISE_VERSION}
+                fact["source_version_hash"] = n2._fingerprint(fact)
             (facts if fact is not None else issues).append(fact if fact is not None else issue)
 
         # Register any transaction name seen for the first time, at capture=on / show=off. Done from
@@ -714,7 +805,6 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         await capture.observe_names(db, customer_code,
                                    {r.get("transaction_name") for r in source_rows})
 
-        stored = await _read_stored(db, customer_code, window, suppressed)
         outcomes = dd.diff(stored, facts)
 
         now = datetime.now(timezone.utc)
@@ -803,16 +893,68 @@ async def consume_tenant(customer_code: str) -> dict:
     # The same gap Stage 2 uses, for the same reason: two windows less than a pad apart describe
     # overlapping rebuilds, so diffing them separately would do the seam twice.
     from app.services.mnp_log_ingestion.pipeline.derive_transactions import _regroup_pad
-    for lo, hi, rows in _coalesce(tickets, gap=2 * _regroup_pad()):
+    # Merge only tickets that GENUINELY OVERLAP - gap zero, not `2 * pad`.
+    #
+    # The old `2 * pad` gap merged merely-ADJACENT tickets, which is what Stage 2 does and what this
+    # copied. Stage 2's reason does not transfer: there, an overlapping rebuild meant delete +
+    # reinsert of the overlap, which is where its 22.4x write amplification came from. Here, since S3,
+    # re-folding an overlap writes NOTHING - the diff reports `unchanged`.
+    #
+    # So the old gap paid a real price for a vanished benefit. Tickets are padded +/-900s, so adjacent
+    # daily tickets overlap by 30 minutes: merging them saved re-reading 1.8% of an 8-day range, and
+    # cost the `_MAX_TICKET_SPAN = 1 day` bound entirely. One coalesced run became 8 days of work in a
+    # single transaction, which is precisely what exhausted the statement timeout and left 32,400 facts
+    # unbuilt for five days.
+    #
+    # Zero gap still merges true overlaps, which is free and avoids folding the same instant twice in
+    # one pass. It cannot produce a run wider than the widest single ticket plus its overlaps.
+    for lo, hi, rows in _coalesce(tickets, gap=timedelta(0)):
+        # MERGE, THEN SPLIT - exactly Stage 2's shape, which this only copied half of.
+        #
+        # Merging is load-bearing for correctness: a transaction whose rebuild moved its `started_at`
+        # across a ticket boundary is reversed by one ticket and inserted by the next, and merging puts
+        # both sides in one diff instead of leaving two facts transiently double-counted. Chunk 45
+        # asserts that and it still holds.
+        #
+        # Splitting is load-bearing for bounded work. Because tickets are padded (invariant 2), merging
+        # can turn eight bounded daily tickets into one eight-day run in a single transaction - which is
+        # what exhausted the 30 s statement timeout and left 32,400 facts unbuilt for five days. The
+        # ticket table already reasons this way for tickets (`_MAX_TICKET_SPAN`); coalescing undid it,
+        # and this restores it one level up.
+        #
+        # Lossless for the same reason Stage 2's split is: consecutive sub-windows overlap at their seam
+        # and the diff is idempotent, so a seam is folded twice and reported `unchanged` the second time.
+        # `runs` keeps its original meaning - one COALESCED range, one unit of correctness - because
+        # that is what chunk 45 asserts and the property is unchanged. `slices` is the new number: how
+        # many bounded jobs that range was executed as. Reporting both means the split is observable
+        # without redefining a figure other tests and the status card already read.
         stats["runs"] += 1
-        try:
-            for key, value in (await _consume_run(customer_code, lo, hi, rows, tz)).items():
-                stats[key] += value
-        except Exception as exc:
-            stats["failed"] += 1
-            stats["abandoned"] += await _record_failure(customer_code, rows, exc)
-            logger.exception("Analytics: run %s..%s failed for %s - its tickets stay open for retry; "
-                             "the tenant's other runs are unaffected", lo, hi, customer_code)
+        slices = list(_split_run(lo, hi, settings.analytics_max_window_seconds))
+        for index, (sub_lo, sub_hi) in enumerate(slices):
+            stats["slices"] = stats.get("slices", 0) + 1
+            # The tickets go to the LAST slice only. Every slice was stamping all of them, so two
+            # tickets split into two slices reported four consumed - caught by chunk 45.
+            #
+            # The last slice rather than the first, because a ticket claims its whole range: consuming
+            # it before the range is folded would let a crash mid-run leave the remainder with nothing
+            # to retry it. This way an earlier slice's work commits without its ticket, so a retry
+            # re-folds a range that is already correct and the diff reports `unchanged` - at-least-once,
+            # never at-most-once, which is the direction that cannot lose data.
+            claim = rows if index == len(slices) - 1 else []
+            try:
+                for key, value in (await _consume_run(
+                        customer_code, sub_lo, sub_hi, claim, tz)).items():
+                    stats[key] += value
+            except Exception as exc:
+                # Per SUB-WINDOW, so one poison six-hour slice fails in isolation instead of taking the
+                # whole coalesced run with it. The tickets are attached to the run, so they stay open and
+                # the next tick retries only what failed.
+                stats["failed"] += 1
+                stats["abandoned"] += await _record_failure(customer_code, rows, exc)
+                logger.exception("Analytics: run %s..%s failed for %s - its tickets stay open for "
+                                 "retry; the tenant's other runs are unaffected",
+                                 sub_lo, sub_hi, customer_code)
+                break   # the rest of this run's slices would very likely fail the same way
     return stats
 
 

@@ -120,6 +120,23 @@ class Settings(BaseSettings):
     # stream when an ENTRY ARRIVES, so a tenant that stops ingesting leaves its streams open forever
     # and the rows leak. Derived state cannot leak; persisted state can.
     stage2_stream_ttl_seconds: int = 86400
+    # The analytics fold's own statement timeout, in ms. The web tier's 30 s guard is wrong for a
+    # background worker - Stage 1's bulk insert relaxes it for the same reason. 120 s is comfortable
+    # headroom over ONE ticket span (measured: 23.7 s of reads on a 10,400-transaction day) and stays
+    # finite, so a genuine runaway still aborts instead of holding a transaction open across nine
+    # tables. Raise it only if a legitimate single-day fold is timing out; if a MULTI-day run is, the
+    # bug is the coalescing, not this number.
+    analytics_fold_statement_timeout_ms: int = 120_000
+    # The widest span one analytics fold may cover, in seconds. Coalescing merges overlapping tickets
+    # for CORRECTNESS - a transaction whose rebuild moved its `started_at` across a boundary must be
+    # reversed and re-inserted inside one diff - but because tickets are padded (invariant 2) that merge
+    # can turn eight bounded daily tickets into one eight-day run. This splits the merged range back
+    # into bounded jobs, which is exactly what Stage 2 does with `log_regroup_max_window_seconds`.
+    #
+    # 21600 (6h) matches Stage 2 deliberately: the two walk the same ranges, so a shared figure means one
+    # number to reason about rather than two that can drift. Measured 23.7 s of reads for a full DAY, so
+    # a six-hour slice is comfortably inside the 120 s fold timeout.
+    analytics_max_window_seconds: int = 21600
     # How far back `_cutoffs` probes for the newest entry before giving up and scanning unbounded.
     # Once log_entries is partitioned by UTC day, an unbounded max(timestamp) opens all 60 partitions
     # on every regroup cycle; this bound prunes it to the last few days. It must comfortably exceed
