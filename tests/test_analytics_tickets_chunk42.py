@@ -302,16 +302,29 @@ def test_every_statement_that_removes_a_transaction_is_a_known_publish_site():
     #: STATEMENTS that remove a transaction, per module -- not sites. The two differ, and conflating
     #: them is what this test exists to stop being possible:
     #:
-    #:   derive_transactions  4 statements, 3 sites. `regroup_window` writes its delete as a ternary
-    #:                        (`... .in_(freed) if freed else ... .where(false())`), so one logical site
-    #:                        is two `delete(LogTransaction)` occurrences. Both are inside the single
-    #:                        publish at site 1.
+    #:   derive_transactions  6 statements, 3 sites. `regroup_window` writes its pre-S3 fallback delete
+    #:                        as a ternary (`... .in_(freed) if freed else ... .where(false())`), so one
+    #:                        logical site is two occurrences. S3 added two more, both still inside the
+    #:                        SAME publish at site 1 and both classified here rather than left to be
+    #:                        rediscovered:
+    #:
+    #:                          _persist's `vanished` branch - a transaction the rebuild no longer
+    #:                          produces, i.e. a merge, a split, or an upstream delete. Before S3 this
+    #:                          case needed no statement, because everything had already been deleted
+    #:                          unconditionally.
+    #:
+    #:                          regroup_window's early return - a window whose entries have all
+    #:                          disappeared. Also new for the same reason, and it was a real bug for
+    #:                          about ten minutes: this very test's sibling
+    #:                          (`..._publishes_even_when_the_rebuild_finds_nothing`) caught S3 leaving
+    #:                          those rows alive, pointing at nothing, with the ticket describing a
+    #:                          reversal that never happened.
     #:   logs                 2 statements, 2 sites: the date-range delete, and the `delete(Job)` whose
     #:                        cascade removes transactions with no statement of its own to hook.
     #:   logspace_cleanup     1 statement, 0 sites. The deliberate non-site: the tenant is leaving, so
     #:                        F13 deletes its analytics rows outright instead of publishing.
     KNOWN = {
-        "derive_transactions": 4,
+        "derive_transactions": 6,
         "logs": 2,
         "logspace_cleanup": 1,
     }

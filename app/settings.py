@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     # inside retention (45) removes it at the cost of never sealing the oldest rows. It is a setting so
     # that changing the trade-off is configuration, not a code change.
     log_seal_horizon_days: int = 60
+    # S3's rollback switch. False restores the exact pre-S3 behaviour: every rebuilt transaction is
+    # treated as changed, so every row and every assignment is rewritten as before.
+    #
+    # A flag rather than a revert because S3 is the first stage whose failure mode is a row that
+    # SHOULD have been rewritten and was not - which is invisible until somebody questions a number.
+    # Turning this off is the fastest way to rule S3 out while looking at something else.
+    stage2_fingerprint_skip: bool = True
     # How far back `_cutoffs` probes for the newest entry before giving up and scanning unbounded.
     # Once log_entries is partitioned by UTC day, an unbounded max(timestamp) opens all 60 partitions
     # on every regroup cycle; this bound prunes it to the last few days. It must comfortably exceed

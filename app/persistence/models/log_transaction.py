@@ -161,3 +161,16 @@ class LogTransaction(Base):
     # of updates and the change could be observed in isolation.
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
                                                  default=lambda: datetime.now(timezone.utc))
+
+    # S3. The two digests that make a write conditional on the row having actually changed.
+    #
+    # NULLABLE, and that is the migration strategy rather than an oversight: every existing row has
+    # NULL, a NULL never equals a recomputed digest, so the first pass after deploying rewrites each
+    # row exactly once and fills them in. A NOT NULL column would have needed a backfill that
+    # recomputed the derivation outside the pipeline that owns it.
+    #
+    # Deliberately NOT indexed. They are only ever read by id for a row the rebuild already has in
+    # hand, never searched, and an index on a column that changes on every real write is pure cost -
+    # the same reasoning that makes the seal flip a non-HOT update.
+    row_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    members_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)

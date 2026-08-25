@@ -35,7 +35,8 @@ from app.services.mnp_log_ingestion.timefmt import to_display, set_display_timez
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun, LogRegroupRunStatus
 from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
-from app.services.mnp_log_ingestion.pipeline import assignments, continuity, time_bounds
+from app.services.mnp_log_ingestion.pipeline import (assignments, continuity,
+                                                    fingerprints, time_bounds)
 from app.services.queueing import retry_policy
 from app.services.analytics import pending_windows as analytics_tickets
 
@@ -647,14 +648,43 @@ def _cap_over_length(values: dict, customer_code: str) -> dict:
     return values
 
 
+async def _update_transaction(db: AsyncSession, *, tid: uuid.UUID, started_at, values: dict,
+                              is_sealed: bool, row_fp: str, members_fp: str) -> None:
+    """S3. UPDATE one transaction in place. Caller commits.
+
+    `n_tup_upd` on these tables was exactly 0 everywhere before this function existed.
+
+    Addressed by the FULL key `(id, started_at)`, never by id alone. `started_at` is the partition key,
+    so without it PostgreSQL cannot prune and the UPDATE has to consider all 95 partitions. It is also
+    nullable, so the NULL case needs `IS NULL` rather than `= NULL`: a transaction all of whose entries
+    lack a parsable timestamp lives in the DEFAULT partition, and that is a real case (A7).
+
+    `created_at` is deliberately NOT touched, which is what finally makes it mean "first written".
+    `updated_at` moves, and the notification cursor reads that column - which is why S1 moved the
+    cursor BEFORE this shipped rather than alongside it.
+    """
+    await db.execute(
+        update(LogTransaction)
+        .where(LogTransaction.id == tid,
+               LogTransaction.started_at.is_(None) if started_at is None
+               else LogTransaction.started_at == started_at)
+        .values(**values, sealed=is_sealed, updated_at=datetime.now(timezone.utc),
+                row_fingerprint=row_fp, members_fingerprint=members_fp)
+        .execution_options(synchronize_session=False))
+
+
 async def _write_transaction(db: AsyncSession, *, tid: uuid.UUID, values: dict, is_sealed: bool,
-                             entries: list[LogEntry], customer_code: str) -> LogTransaction:
+                             entries: list[LogEntry], customer_code: str,
+                             row_fp: str | None = None,
+                             members_fp: str | None = None) -> LogTransaction:
     """Insert one transaction and record which entries belong to it. Caller commits."""
     # S1: `updated_at` is stamped equal to `created_at` at birth, so a row nothing ever updates
     # behaves exactly as it did before the column existed. The notification cursor reads it, so a row
     # written without it would be invisible to every rule.
     now = datetime.now(timezone.utc)
-    txn = LogTransaction(id=tid, sealed=is_sealed, created_at=now, updated_at=now, **values)
+    txn = LogTransaction(id=tid, sealed=is_sealed, created_at=now, updated_at=now,
+                         row_fingerprint=row_fp, members_fingerprint=members_fp,
+                         **values)
     db.add(txn)
     await db.flush()  # get txn.id
     await assignments.write(db, transaction_id=txn.id, entries=entries,
@@ -664,7 +694,8 @@ async def _write_transaction(db: AsyncSession, *, tid: uuid.UUID, values: dict, 
 
 async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code: str,
                    seal_cutoff: datetime | None, abandon_cutoff: datetime | None,
-                   cont: continuity.Continuity = continuity.EMPTY) -> dict:
+                   cont: continuity.Continuity = continuity.EMPTY,
+                   stored: dict | None = None) -> dict:
     """Compute + insert each builder with a deterministic id, assign its entries, and seal those
     nothing more can join. Caller commits.
 
@@ -678,34 +709,101 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
     # customer's LOCAL calendar day, not the host's / a global default.
     set_display_timezone(await get_customer_timezone(db, customer_code))
 
+    def _status_of(values) -> str:
+        st = values["status"]
+        return st.value if hasattr(st, "value") else str(st)
+
     created = sealed = assigned = skipped = 0
+    unchanged = row_only = rewritten = 0
     by_status: dict[str, int] = {}
     seen: set[uuid.UUID] = set()
+    stored = stored or {}
+    tz = await get_customer_timezone(db, customer_code)
     ids, existing = await _resolve_ids(db, builders, customer_code, cont)
     for b, tid in zip(builders, ids):
-        if tid in seen or tid in existing:
+        if tid in seen:
+            skipped += 1
+            continue
+        # S3: a stored row this window is rebuilding is NOT a clash - it is the row being compared
+        # against. Before S3 every such row had already been deleted, so `existing` could only mean a
+        # genuine out-of-order collision. Now it means both, and only ids absent from `stored` are the
+        # collision the warning below is about.
+        if tid in existing and tid not in stored:
             skipped += 1
             continue
         seen.add(tid)
         values = _cap_over_length(b.compute(), customer_code)
         is_sealed = _is_sealed(values, seal_cutoff, abandon_cutoff)
+        r_fp = fingerprints.row(values, sealed=is_sealed, tenant_timezone=tz)
+        m_fp = fingerprints.members(e.id for e in b.entries)
+        status = _status_of(values)
+
+        prior = stored.get(tid)
+        if prior is not None:
+            # The 98.7% case. A NULL stored digest never matches a real one, which is what lets the
+            # migration skip a backfill: every pre-S3 row is rewritten exactly once, filling its
+            # columns in as a side effect of work the pipeline was doing anyway.
+            if prior.row_fingerprint == r_fp and prior.members_fingerprint == m_fp:
+                unchanged += 1
+                by_status[status] = by_status.get(status, 0) + 1
+                continue
+
+            members_changed = prior.members_fingerprint != m_fp
+            await _update_transaction(db, tid=tid, started_at=prior.started_at, values=values,
+                                      is_sealed=is_sealed, row_fp=r_fp, members_fp=m_fp)
+            if members_changed:
+                # Only when MEMBERSHIP moved. This split is what takes assignments from 18.1 writes
+                # per surviving row to 1.0: a seal flip changes the row and not the members, so it
+                # never touches an assignment row at all.
+                await assignments.delete_for_transactions(db, [tid])
+                await assignments.write(db, transaction_id=tid, entries=b.entries,
+                                        customer_code=customer_code)
+                assigned += len(b.entries)
+                rewritten += 1
+            else:
+                row_only += 1
+            sealed += int(is_sealed)
+            by_status[status] = by_status.get(status, 0) + 1
+            continue
+
         txn = await _write_transaction(db, tid=tid, values=values, is_sealed=is_sealed,
-                                       entries=b.entries, customer_code=customer_code)
+                                       entries=b.entries, customer_code=customer_code,
+                                       row_fp=r_fp, members_fp=m_fp)
         assigned += len(b.entries)
         created += 1
         sealed += int(is_sealed)
         by_status[txn.status.value] = by_status.get(txn.status.value, 0) + 1
+
+    # S3: anything stored in this window that the rebuild did NOT produce has genuinely vanished - a
+    # merge, a split, or an upstream delete - and has to go. This branch is not optional: leaving it
+    # out would keep a transaction alive that corresponds to no entries, and the analytics range diff
+    # would never see it disappear.
+    vanished = [tid for tid in stored if tid not in seen]
+    if vanished:
+        await assignments.delete_for_transactions(db, vanished)
+        await db.execute(delete(LogTransaction).where(LogTransaction.id.in_(vanished)))
     if skipped:
         logger.warning("Stage 2: skipped %d builder(s) with an already-sealed id (out-of-order/bulk "
                        "ingest). Run a full regroup (POST /logs/regroup) to rebuild cleanly.", skipped)
     return {"transactions_created": created, "transactions_sealed": sealed,
-            "entries_assigned": assigned, "transactions_skipped": skipped, "by_status": by_status}
+            "entries_assigned": assigned, "transactions_skipped": skipped, "by_status": by_status,
+            # S3's own counters, so a run can be read for what it actually WROTE rather than inferred
+            # from row counts. `transactions_unchanged` is the one to watch: it should be the large
+            # majority, and a run where it is zero means the skip is not working.
+            "transactions_unchanged": unchanged, "transactions_row_only": row_only,
+            "transactions_rewritten": rewritten, "transactions_deleted": len(vanished)}
 
 
 def _merge_stats(into: dict, part: dict) -> None:
     """Accumulate one customer's _persist result into the running totals."""
     for k in ("transactions_created", "transactions_sealed", "entries_assigned",
-              "transactions_skipped", "entries_scanned", "orphan_entries"):
+              "transactions_skipped", "entries_scanned", "orphan_entries",
+              # S3's counters. Added here rather than only returned by `_persist`, because the E2E
+              # found them silently absent from every caller's result: the numbers that say whether the
+              # skip is working were computed and then dropped one function short of anywhere they
+              # could be read.
+              "transactions_unchanged", "transactions_row_only", "transactions_rewritten",
+              "transactions_deleted"):
         into[k] = into.get(k, 0) + part.get(k, 0)
     for status, n in part.get("by_status", {}).items():
         into["by_status"][status] = into["by_status"].get(status, 0) + n
@@ -930,9 +1028,28 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
             db, customer_code, time_bounds.from_instants([lo_p, hi_p], pad=timedelta(0))),
         reusable=frozenset(freed))
 
-    await assignments.delete_for_transactions(db, freed)
-    await db.execute(delete(LogTransaction).where(LogTransaction.id.in_(freed)) if freed
-                     else delete(LogTransaction).where(sa_false()))
+    # S3. The delete is GONE from the ordinary path, and this is the change the whole stage is about.
+    #
+    # It was never a storage decision - it was the TRIGGER. `assignments.is_unassigned()` was how a
+    # rebuild found work, and only the delete made entries eligible again. So removing the delete means
+    # replacing the trigger, not merely deleting a statement: eligibility is now decided in Python by
+    # `_eligible` below, from the owner map that was already loaded a few lines up.
+    #
+    # What is read instead is the stored digest of every row about to be recomputed, so the rebuild can
+    # tell "identical" from "changed" and write only the difference.
+    stored = {}
+    if settings.stage2_fingerprint_skip and freed:
+        stored = {r.id: r for r in (await db.execute(
+            select(LogTransaction.id, LogTransaction.started_at, LogTransaction.row_fingerprint,
+                   LogTransaction.members_fingerprint)
+            .where(LogTransaction.id.in_(freed)))).all()}
+    else:
+        # The pre-S3 path, kept behind the flag: delete everything and rebuild it. Byte-identical to
+        # what shipped before, so turning the flag off is a real rollback rather than a different
+        # third behaviour.
+        await assignments.delete_for_transactions(db, freed)
+        await db.execute(delete(LogTransaction).where(LogTransaction.id.in_(freed)) if freed
+                         else delete(LogTransaction).where(sa_false()))
 
     # N1 (Phase 2), publish site 1 of 5. Inside THIS transaction, so the ticket and the change commit
     # together or neither does (invariant 3).
@@ -952,29 +1069,59 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
     #    "Unassigned" is now "has no row in log_entry_assignment" rather than transaction_id IS NULL.
     #    The anti-join stays bounded by the window below — a whole-table anti-join over an
     #    append-only table would not scale.
-    rows = list((await db.execute(
-        select(LogEntry).where(
-            LogEntry.customer_code == customer_code,
-            assignments.is_unassigned(),
-            LogEntry.timestamp >= lo_p,
-            LogEntry.timestamp <= hi_p,
-        ).order_by(
-            LogEntry.timestamp.asc().nullslast(),
-            LogEntry.source_file.asc(),
-            LogEntry.line_number.asc(),
-        )
-    )).scalars().all())
+    # S3: WITHOUT the `is_unassigned()` anti-join when the skip is on, because nothing was deleted so
+    # every entry in the window still has an owner. Eligibility is decided in Python instead:
+    #
+    #     an entry is eligible if it has NO owner (genuinely new), or if its owner is one of the
+    #     transactions this window is rebuilding (`freed`)
+    #
+    # Provably the same set the post-delete anti-join produced: the delete removed exactly the rows in
+    # `freed`, which is exactly what made their entries ownerless. It also takes a NOT EXISTS off the
+    # hot path, and both inputs were already in memory - `cont.owner_by_entry` and `freed`.
+    _rebuilding = frozenset(freed)
+
+    def _eligible(entry_id) -> bool:
+        owner = cont.owner_by_entry.get(entry_id)
+        return owner is None or owner in _rebuilding
+
+    entry_stmt = select(LogEntry).where(
+        LogEntry.customer_code == customer_code,
+        LogEntry.timestamp >= lo_p,
+        LogEntry.timestamp <= hi_p,
+    )
+    if not (settings.stage2_fingerprint_skip and freed):
+        entry_stmt = entry_stmt.where(assignments.is_unassigned())
+    rows = [e for e in (await db.execute(entry_stmt.order_by(
+                LogEntry.timestamp.asc().nullslast(),
+                LogEntry.source_file.asc(),
+                LogEntry.line_number.asc(),
+            ))).scalars().all()
+            if not (settings.stage2_fingerprint_skip and freed) or _eligible(e.id)]
 
     stats = {"mode": "window", "customers": 1, "by_status": {},
              "window_start": lo_p.isoformat(), "window_end": hi_p.isoformat()}
     if not rows:
+        # S3. Before this stage the delete happened ABOVE, so reaching here with stored rows was
+        # impossible - they were already gone. Now nothing has been deleted, so a window whose entries
+        # have all disappeared would leave every one of its transactions alive, pointing at nothing,
+        # with the analytics diff never seeing them go.
+        #
+        # Caught by `test_site_1_publishes_even_when_the_rebuild_finds_nothing`, whose premise is
+        # exactly this: freed and not rebuilt. The ticket was already published above for precisely
+        # this case; without the delete the ticket would have described a reversal that never happened.
+        if stored:
+            await assignments.delete_for_transactions(db, list(stored))
+            await db.execute(delete(LogTransaction).where(LogTransaction.id.in_(list(stored))))
+            logger.info("Stage 2 regroup (window) %s..%s [%s]: %d transaction(s) had no entries left "
+                        "and were removed", lo_p, hi_p, customer_code, len(stored))
         if commit:
             await db.commit()
         logger.info("Stage 2 regroup (window) %s..%s [%s]: no unassigned entries", lo_p, hi_p, customer_code)
         return {**stats, "customers": 0, "entries_scanned": 0,
                 "transactions_created": 0, "transactions_sealed": 0}
     seal_cutoff, abandon_cutoff = await _cutoffs(db, customer_code)
-    result = await _persist(db, _group(rows), customer_code, seal_cutoff, abandon_cutoff, cont)
+    result = await _persist(db, _group(rows), customer_code, seal_cutoff, abandon_cutoff,
+                            cont, stored=stored)
     if commit:
         await db.commit()
     _merge_stats(stats, {**result, "entries_scanned": len(rows),

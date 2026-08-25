@@ -1891,7 +1891,8 @@ What follows is what remains, in dependency order rather than in the order it wa
 | **R3** | **BUILT 2026-08-25** - response scalars into `attributes`, namespaced, seeded allowlist with a credential veto. See 18i. | R1, R1b | done |
 | **R2** | **BUILT 2026-08-25** - registry API, `/analytics/registry`, and `show` wired to the rollup gate. See 18j. | R1, R3 | done |
 | **S2** | **BUILT 2026-08-25** - durable stream position; `req_pos` deleted rather than persisted. See 18k. | S1 | done |
-| **S3-S4** | Fingerprint skip, UPDATE in place, then the lookup | S2 | no |
+| **S3** | **BUILT 2026-08-25** - fingerprint skip and UPDATE in place. 3 identical regroups now write 0 rows. See 18l. | S2 | done |
+| **S4** | The stream lookup, removing the re-derive from the hot path | S3 | no |
 | **R4** | Per-record expansion for transactions with `Expand` ticked | R3 | no |
 | **M1** | ML: `analytics_feature_sets`, `analytics_predictions`, `ml:features-v1` | R3 | no |
 
@@ -2573,6 +2574,107 @@ characters `id(`. It is now an AST walk that asks whether the builtin is actuall
 
 Worth recording because chunks 29 and 55 each hit the first version of this separately: grepping source
 text for a construct is nearly always weaker than parsing for it.
+
+## 18l. S3 as BUILT, 2026-08-25
+
+**Shipped.** Migration `e6b93a4d7f12` (two nullable columns, no backfill), 22 tests in
+`tests/test_stage2_fingerprints_chunk59.py`, full suite 1,243.
+
+Measured on 402 real transactions: **three consecutive regroups of the same window wrote zero rows.**
+Before S3 that same window rewrote every row and every assignment on every pass.
+
+### The delete was the trigger, not a storage decision
+
+`assignments.is_unassigned()` was how a rebuild found work, and only the delete made entries eligible
+again. So removing the delete meant replacing the trigger:
+
+```
+was    DELETE everything in the window -> re-read the entries that are now unassigned
+is     read the stored digests -> read ALL entries in the window -> keep those whose owner is
+       absent or is one of the transactions being rebuilt
+```
+
+Provably the same set: the delete removed exactly the rows in `freed`, which is exactly what made
+their entries ownerless. Both inputs were already in memory, and it takes a `NOT EXISTS` off the hot
+path.
+
+### Two fingerprints, and the split that produces the gain
+
+| | Covers | Changing it costs |
+|---|---|---|
+| `row_fingerprint` | the transaction's own columns | one UPDATE |
+| `members_fingerprint` | an ORDERED digest of the entry ids | an UPDATE **plus** rewriting the assignments |
+
+`entry_count` is not a substitute for the second. Swap one same-timestamped entry between two
+transactions and both keep their counts, their timestamps and every derived column, while
+`log_entry_assignment` holds the wrong mapping forever - because nothing recomputes a row whose
+fingerprint matched.
+
+The split is where the assignment gain comes from: sealing changes the ROW and not the MEMBERS.
+Verified - corrupting a row digest produced one row update and **zero** assignment writes.
+
+### Two bugs found by building it, both mine
+
+**The early return left orphans.** `regroup_window` returns early when no entries are eligible. Before
+S3 the delete had already happened above, so that path was safe. After S3 nothing had been deleted, so
+a window whose entries had all disappeared left every one of its transactions alive pointing at
+nothing - with the ticket published above describing a reversal that never happened.
+
+Caught by `test_site_1_publishes_even_when_the_rebuild_finds_nothing`, whose premise is exactly "freed
+and not rebuilt". That test existed before S3 and was written for a different reason; it earned its
+keep here.
+
+**`existing` stopped meaning what it meant.** `_persist` skipped any id already in the table as an
+out-of-order clash. After S3 the row being compared against is in the table by design, so every single
+transaction would have been skipped as a clash. The check is now "in the table AND not one of the rows
+this window is rebuilding".
+
+### S3's counters were computed and then dropped
+
+`transactions_unchanged`, `_row_only`, `_rewritten`, `_deleted` were returned by `_persist` and not
+propagated by `_merge_stats`, so every caller saw them as absent. The numbers that say whether the
+skip is working were invisible one function short of anywhere they could be read. Found by the E2E
+printing `unchanged=None`.
+
+### E2E, both directions
+
+Proving it writes nothing is only half the job; a no-op would pass that.
+
+| Check | Result |
+|---|---|
+| three identical regroups | **0 writes**, 402 unchanged each time |
+| corrupt a ROW digest | `row_only=1`, `updated_at` moved, **0 assignment writes** |
+| corrupt a MEMBERS digest | `rewritten=1`, row updated, assignments rewritten |
+| back to quiet | settles to 0 writes |
+| `stage2_fingerprint_skip = False` | `created=402, unchanged=0` - full delete-and-reinsert, a real rollback |
+| flag back on | settles to 0 writes |
+
+### Two measurement mistakes worth recording
+
+The first E2E read `pg_stat_user_tables` deltas and reported zero for work that had really happened -
+those counters are updated asynchronously by the stats collector. And `LIKE
+'log_entry_assignment_2026%'` silently missed `log_entry_assignment_default`, which is exactly where
+these May/June rows live. It now counts actual rows and digests `updated_at`, so an in-place UPDATE is
+visible even though the row count does not move.
+
+### `_DERIVE_VERSION`, and what pins it
+
+Currently 1. A test digests the source of `_group`, `compute`, `_merged_attrs`, `_is_sealed`, `_anchor`,
+`_entry_stream_order` and `_stream_pos` and asserts it against a stored constant. Edit any of them and
+the test fails with the new digest and instructions: bump the version if the change alters what a
+transaction's columns SAY, update the constant alone if it was cosmetic.
+
+Without it an edited derivation never reaches stored rows - they keep matching their own stale
+fingerprint, with no failing test and no alert.
+
+### Still deferred
+
+`created_at` now genuinely means "first written" for rows written after this, but rows written before
+S3 keep whatever their last rebuild stamped. The analytics frontier (`consume.py:_FRONTIER_COLUMN`)
+still reads `created_at` and should move to `updated_at` - S1 already moved the NOTIFICATION cursor,
+which was the one that failed unsafe. That remains open.
+
+S4, the lookup, is next and is the only stage that removes the re-derive from the hot path.
 
 ## Also corrected while measuring
 
