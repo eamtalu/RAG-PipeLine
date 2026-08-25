@@ -1,4 +1,6 @@
 from app.persistence.models.consumer_cursor import ConsumerCursor  # noqa: F401
+from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry  # noqa: F401
+from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry  # noqa: F401
 from app.config.database import Base
 from app.persistence.models.job import Job
 from app.persistence.models.chunk import Chunk
@@ -72,4 +74,7 @@ __all__ = [
     "DIMENSION_SLOTS",
     "AnalyticsTenantState",
     "AnalyticsQualityIssue",
+    # --- analytics registry (R1) ---
+    "AnalyticsTransactionRegistry",
+    "AnalyticsFieldRegistry",
 ]

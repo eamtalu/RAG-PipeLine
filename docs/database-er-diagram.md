@@ -765,6 +765,30 @@ erDiagram
         datetime created_at
     }
 
+    analytics_transaction_registry {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string transaction_name "NOT NULL; the unnamed probes get no row, their rule is in code"
+        bool capture "gates whether a fact exists at all; irreversible, defaults TRUE"
+        bool show "gates whether facts reach charts; free and retroactive, defaults FALSE"
+        bool expand "gates R4 per-record rows, defaults FALSE"
+        datetime first_seen_at
+        datetime reviewed_at "NULL = still at defaults, needs review"
+        string reviewed_by
+    }
+    analytics_field_registry {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string method
+        string source "request | response | mi_result"
+        string field "the NAME only; this table has nowhere to put a value"
+        bool captured "FALSE for anything discovered rather than approved"
+        datetime first_seen_at
+        datetime last_seen_at
+        int seen_count
+        datetime reviewed_at
+        string reviewed_by
+    }
     analytics_metrics {
         uuid id PK
         string customer_code "soft tenant key"

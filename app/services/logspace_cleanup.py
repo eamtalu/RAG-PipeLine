@@ -42,6 +42,8 @@ from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_source_object import LogSourceObject
 from app.persistence.models.analytics_pending_window import AnalyticsPendingWindow
 from app.persistence.models.analytics_fact import AnalyticsFact, AnalyticsFactLedger
+from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
+from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_metric import AnalyticsMetric
 from app.persistence.models.analytics_rollup import (AnalyticsHourlyRollup, AnalyticsDailyRollup,
                                                      AnalyticsMonthlyRollup)
@@ -130,9 +132,12 @@ async def purge_logspace(db: AsyncSession, customer_code: str) -> bool:
     #     contents changed and the fix is to publish a ticket so the range diff corrects the totals.
     #     Here the TENANT is going away, so correcting its totals is meaningless: publishing a ticket
     #     would have the worker try to fold a tenant that no longer exists.
+    # R1 added the two registry tables. This list is enumerated BY NAME, so nothing warns you when a
+    # new analytics table is missing from it - a tenant delete would simply leave its rows orphaned.
     for _analytics in (AnalyticsQualityIssue, AnalyticsMonthlyRollup, AnalyticsDailyRollup,
                        AnalyticsHourlyRollup, AnalyticsFactLedger, AnalyticsFact,
-                       AnalyticsTenantState, AnalyticsMetric, AnalyticsPendingWindow):
+                       AnalyticsTenantState, AnalyticsMetric, AnalyticsPendingWindow,
+                       AnalyticsTransactionRegistry, AnalyticsFieldRegistry):
         await db.execute(delete(_analytics).where(_analytics.customer_code == customer_code))
 
     # 2b) Jobs → cascades chunks, chunks_entity, embedding_queue, log_entries, log_transactions.

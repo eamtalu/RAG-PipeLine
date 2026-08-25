@@ -152,6 +152,11 @@ class MetricDefinition:
     measures: tuple[Measure, ...]
     grains: tuple[str, ...]
     method_filter: tuple[str, ...] = ()
+    #: R1. The registry's `show` switch, expressed on the definition. Needed as well as
+    #: `method_filter` because the mapping is many-to-many: `ConfirmPickLine` appears under both
+    #: "Brighton Stock Pick" and "JIT and Shorts Pick (Brighton)", so no method-keyed filter can say
+    #: "one on, the other off". Empty means every transaction, matching `method_filter`'s convention.
+    transaction_filter: tuple[str, ...] = ()
     status: Status = Status.draft
 
 
@@ -217,6 +222,10 @@ def validate(definition: MetricDefinition) -> list[str]:
             problems.append(f"dimension {dim!r} is not a field on the fact row: a chart grouped by it "
                             f"would be silently empty rather than an error")
 
+    # Deliberately NOT validated against known transaction names. Unlike `dimensions`, which must name
+    # a real fact field or the chart is silently empty, a transaction filter naming something not yet
+    # seen is legitimate: a metric can be registered before its transaction first appears in the logs,
+    # and the registry discovers names rather than declaring them.
     for grain in definition.grains:
         if grain not in GRAINS:
             problems.append(f"grain {grain!r} is not one of {', '.join(GRAINS)}")
@@ -259,6 +268,11 @@ def _contributes(row: dict, definition: MetricDefinition, measure: Measure) -> b
     """Whether `row` is inside this definition's filter, this measure's classifications, and its
     statuses."""
     if definition.method_filter and row.get("method") not in definition.method_filter:
+        return False
+    # R1. Checked on `transaction_name`, which is on the fact row, so this needs no join and no new
+    # column. A row whose name is NULL is outside every transaction filter: the unnamed rows are the
+    # connectivity probes, which capture keeps but never shows.
+    if definition.transaction_filter and row.get("transaction_name") not in definition.transaction_filter:
         return False
     if measure.only and row.get("quantity_classification") not in measure.only:
         return False

@@ -1886,7 +1886,7 @@ What follows is what remains, in dependency order rather than in the order it wa
 | Stage | What | Depends on | On a clock? |
 |---|---|---|---|
 | **S1** | **BUILT 2026-08-24** - explicit sealer, `updated_at`, and the cursor moved onto it. See 18f. | nothing | done |
-| **R1** | Registry table, the shared source predicate read by BOTH `consume.py:239` and `reconcile.facts_vs_transactions`, and `transactions` beside `methods` in the fold filter | nothing | no |
+| **R1** | **BUILT 2026-08-25** - both registry tables, the shared capture predicate in all three readers, `transactions` in the fold filter. See 18g. | nothing | done |
 | **R1b** | `attr:` dimension resolution, with `validate` checking the registry instead of `FACT_FIELDS` | R1 | no, but R3 is pointless without it |
 | **R3** | Response scalar capture, namespaced `resp.*` / `mi.*`, allowlist-gated, seeded from the 145 measured keys minus credentials | R1, R1b | **YES - 60 days** |
 | **R2** | Frontend registry screen: 7 transactions, three switches, the discovery list | R1, R3 | no |
@@ -2167,6 +2167,82 @@ Locally that is all 96 unsealed rows, whose newest is 74 days old; on the deploy
 
 **`ix_log_transactions_created_at` is retained** although the cursor no longer uses it.
 The index redesign stays deferred pending `pg_stat_statements` with the analytics and reconcile workers ENABLED - the earlier "never scanned" measurement was taken with them off, which this document already records once as a mistake.
+
+## 18g. R1 as BUILT, 2026-08-25
+
+**Shipped.** Migration `d8f52c6a1b94`, 21 tests in `tests/test_analytics_capture_registry_chunk54.py`, full suite 1,108 passing twice consecutively.
+Table names as proposed in 18e: `analytics_transaction_registry`, `analytics_field_registry`.
+Neither is partitioned, for the reason 18d gave.
+
+### The decision the switches did not settle
+
+`capture` off had three possible scopes, and the difference is not cosmetic - the fold is a range diff, so anything present in stored and absent from source is REVERSED.
+
+| Predicate applied to | Effect on facts that transaction already has |
+|---|---|
+| source only | diff sees stored-and-not-source, **reverses them, history deleted** |
+| **source and stored** | **invisible to the diff: neither compared nor reversed, left alone** |
+| neither | no gate at all |
+
+The middle one shipped.
+"Stop capturing" must not silently mean "destroy what you already have", and the words on the switch do not imply a delete.
+Re-ticking brings the facts back into the comparison, where the fingerprint decides whether anything actually changed - measured below as 269 `unchanged`, 0 inserted.
+
+### Three readers, one predicate
+
+`capture.py` holds it once and three queries import it:
+
+```
+consume._read_source              what the fold reads from log_transactions
+consume._read_stored              what it compares that against, in analytics_facts
+reconcile.facts_vs_transactions   what the auditor expects to find a fact for
+```
+
+Any two disagreeing is permanent and loud: a transaction the fold skips but the auditor expects is reported as a missing fact on every run, forever.
+A test asserts all three call it, checked on the source rather than by behaviour, because the failure mode is a MISSING call and a behavioural test only catches that once someone has written a fixture that happens to flip a switch and run the auditor together.
+
+### Four things the implementation changed about the design
+
+**The gate parameter has no default.**
+It was first written `suppressed: frozenset[str] | None = None`, which meant a caller who forgot the argument silently read every transaction including the suppressed ones - the exact failure the module exists to prevent.
+It is now required, so forgetting is a `TypeError`.
+Found because two of my own tests forgot it and passed.
+
+**The predicate returns EXCLUSIONS, not inclusions.**
+An inclusion list would have to enumerate every name analytics has ever seen, so a brand-new transaction or a tenant with an empty registry would silently not be captured - and that is the one mistake retention makes permanent.
+Exclusions mean unknown is captured and an empty registry captures everything.
+
+**`suppressed` is read ONCE per run and passed to both halves of the diff.**
+Reading it twice would be a race whose symptom is a fact silently reversed because somebody flipped a switch between the two queries.
+
+**Discovery runs from the source rows already in hand**, after the read and inside the same transaction, so a name discovered on a run cannot suppress itself on the run that discovered it.
+`ON CONFLICT DO NOTHING`, so observation never overwrites a decision - a transaction someone deliberately turned off must not come back on by itself the next tick, which is every second.
+
+### E2E against the real projection
+
+Tenant `mnp`, 269 transactions across 7 names, folded through `_consume_run`:
+
+| Step | Result |
+|---|---|
+| empty registry | 269 facts, all 7 names including the 42 unnamed |
+| discovery | **6** names registered `capture=on, show=off`; NULL correctly got no row |
+| `capture` off for "Brighton Stock Pick" | source drops 269 to **73** rows |
+| its existing facts | **196 kept**, `reversed: 0` |
+| auditor | **0 findings** |
+| re-enable | 269 `unchanged`, fact set byte-identical to the original |
+
+### An unrelated flake fixed on the way
+
+`test_the_position_is_the_minimum_across_tenants_not_the_maximum` failed once with no code change, and kept failing with R1 stashed - so it was neither R1 nor R1's E2E pollution.
+The published retention position is the MINIMUM across every tenant, and a tenant with a NULL frontier blocks publication entirely, which the very next test asserts as intended behaviour.
+Other modules commit `analytics_tenant_state` rows and never clean them up, so that file's cursor assertions passed on a fresh database and failed on every run after it.
+The fixture now also clears state rows whose frontier is NULL, scoped so a genuinely processed tenant is untouched.
+
+### Still open
+
+`show` is expressible (`transaction_filter` on the definition, `transactions` beside `methods` in the stored filter) and is NOT yet wired to the registry's `show` column.
+A metric must currently name its transactions explicitly.
+Connecting the column to definition generation belongs with R2, the screen that sets it.
 
 ## Also corrected while measuring
 

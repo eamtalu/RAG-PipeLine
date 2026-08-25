@@ -67,6 +67,7 @@ from app.persistence import partitioning as pt
 from app.persistence.models.log_transaction import LogTransaction
 from app.services import consumer_cursors
 from app.services.analytics import diff as dd
+from app.services.analytics import capture
 from app.services.analytics import normalizer as n2
 from app.services.analytics import registry
 from app.services.analytics import rollups as n5
@@ -227,17 +228,28 @@ _SOURCE_COLUMNS = (
 )
 
 
-async def _read_source(db: AsyncSession, customer_code: str, window: UtcWindow) -> list[dict]:
+async def _read_source(db: AsyncSession, customer_code: str, window: UtcWindow,
+                       suppressed: frozenset[str]) -> list[dict]:
     """The projection's CURRENT truth for this range.
 
     `include_null=True` (A7): a transaction all of whose entries lack a parsable timestamp has a NULL
     `started_at` and lives in the DEFAULT partition. It still has to be diffed, and the stored side is
     read with the same predicate, so the two agree and such rows fold to `unchanged` on every pass.
+
+    R1: `suppressed` are the transaction names this tenant has turned CAPTURE off for. The same set is
+    applied to `_read_stored` and to the auditor - see `capture` for why all three must agree, and why
+    gating only this side would turn un-ticking a switch into a delete.
+
+    REQUIRED, with no default. `None` defaulting to "gate nothing" would mean a caller that forgot the
+    argument silently read every transaction including the suppressed ones, which is the failure this
+    whole module exists to prevent. Pass `frozenset()` to mean "nothing suppressed" and say so.
     """
+    gate = capture.source_predicate(suppressed)
     rows = (await db.execute(
         select(*_SOURCE_COLUMNS).where(
             LogTransaction.customer_code == customer_code,
-            window.covers(LogTransaction.started_at, include_null=True)))).mappings().all()
+            window.covers(LogTransaction.started_at, include_null=True),
+            *([gate] if gate is not None else [])))).mappings().all()
     if len(rows) >= _LOUD_RUN_ROWS:
         logger.warning("Analytics: run for %s read %d source rows for %s..%s - larger than expected "
                        "for a one-day ticket; NOT truncated, because a partial read would reverse "
@@ -245,18 +257,26 @@ async def _read_source(db: AsyncSession, customer_code: str, window: UtcWindow) 
     return [dict(r) for r in rows]
 
 
-async def _read_stored(db: AsyncSession, customer_code: str, window: UtcWindow) -> list[dict]:
+async def _read_stored(db: AsyncSession, customer_code: str, window: UtcWindow,
+                       suppressed: frozenset[str]) -> list[dict]:
     """What analytics currently believes about the same range. Same predicate, necessarily.
 
     A wider stored read than source would reverse rows that are merely outside the window and still
     perfectly valid; a narrower one would never notice what left.
+
+    R1: that "necessarily" now also covers the capture gate. The diff reverses anything present here
+    and absent from source, so gating source alone would make turning `capture` off DELETE every fact
+    that transaction already has. Gating both sides makes them invisible to the diff instead - neither
+    compared nor reversed, just left as they are.
     """
+    gate = capture.fact_predicate(suppressed, AnalyticsFact)
     cols = (AnalyticsFact.id, AnalyticsFact.created_at,
             *(getattr(AnalyticsFact, name) for name in _FACT_COLUMNS))
     rows = (await db.execute(
         select(*cols).where(
             AnalyticsFact.customer_code == customer_code,
-            window.covers(AnalyticsFact.event_time, include_null=True)))).mappings().all()
+            window.covers(AnalyticsFact.event_time, include_null=True),
+            *([gate] if gate is not None else [])))).mappings().all()
     return [dict(r) for r in rows]
 
 
@@ -537,13 +557,28 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         await db.execute(select(_lock(customer_code)))
         await db.execute(text(f"SET LOCAL work_mem = '{_WORK_MEM}'"))
 
-        source_rows = await _read_source(db, customer_code, window)
+        # R1. Read ONCE per run and passed to both reads, so the two halves of the diff cannot
+        # disagree about what is captured even if somebody flips a switch mid-run. Reading it twice
+        # would be a race whose symptom is a fact silently reversed.
+        suppressed = await capture.suppressed_names(db, customer_code)
+
+        source_rows = await _read_source(db, customer_code, window, suppressed)
         facts, issues = [], []
         for row in source_rows:
             fact, issue = n2.normalise(row, tenant_timezone=tz)
             (facts if fact is not None else issues).append(fact if fact is not None else issue)
 
-        stored = await _read_stored(db, customer_code, window)
+        # Register any transaction name seen for the first time, at capture=on / show=off. Done from
+        # the SOURCE rows rather than by a separate query: they are already in hand, and a name can
+        # only be new if it appeared in a window somebody is folding.
+        #
+        # AFTER the read and inside the same transaction, so a name discovered here cannot suppress
+        # itself on the run that discovered it - `observe_names` writes capture=true, but reading the
+        # registry again mid-run is exactly the race the single read above avoids.
+        await capture.observe_names(db, customer_code,
+                                   {r.get("transaction_name") for r in source_rows})
+
+        stored = await _read_stored(db, customer_code, window, suppressed)
         outcomes = dd.diff(stored, facts)
 
         now = datetime.now(timezone.utc)

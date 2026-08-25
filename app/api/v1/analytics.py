@@ -180,6 +180,8 @@ async def create_metric(payload: dict = Body(...),
         measures=measures,
         grains=tuple(payload.get("grains") or ("hourly", "daily", "monthly")),
         method_filter=tuple((payload.get("filter") or {}).get("methods") or ()),
+        # R1: accepted here so the interface can write a per-transaction metric without a deploy.
+        transaction_filter=tuple((payload.get("filter") or {}).get("transactions") or ()),
         status=d.Status(payload.get("status") or d.Status.draft.value),
     )
     if not definition.name:

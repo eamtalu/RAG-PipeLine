@@ -61,7 +61,12 @@ def to_row(definition: d.MetricDefinition, *, customer_code: str,
         # The method allow-list lives under `filter`, which is where the model says row filters go.
         # Per-measure status filters stay ON the measure, because one definition can hold a total and
         # an error count that differ only by status.
-        "filter": {"methods": list(definition.method_filter)},
+        #
+        # R1 adds `transactions` BESIDE `methods` rather than replacing it. Both are needed: a metric
+        # may want every "Full Stock Count" regardless of method, or every `ConfirmPickLine`
+        # regardless of transaction, or the intersection.
+        "filter": {"methods": list(definition.method_filter),
+                   "transactions": list(definition.transaction_filter)},
         "grains": list(definition.grains),
         "status": definition.status.value,
         "created_by": created_by,
@@ -75,6 +80,7 @@ def from_row(row: AnalyticsMetric) -> d.MetricDefinition:
         measures=tuple(measure_from_json(m) for m in (row.measures or ())),
         grains=tuple(row.grains or ()),
         method_filter=tuple((row.filter or {}).get("methods") or ()),
+        transaction_filter=tuple((row.filter or {}).get("transactions") or ()),
         status=d.Status(row.status),
     )
 

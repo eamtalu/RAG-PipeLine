@@ -69,6 +69,7 @@ from app.persistence.models.analytics_rollup import (DIMENSION_SLOTS, AnalyticsD
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_transaction import LogTransaction
+from app.services.analytics import capture
 from app.services.analytics import definition as d
 from app.services.analytics import pending_windows as n1
 from app.services.analytics import registry
@@ -143,10 +144,17 @@ async def facts_vs_transactions(db: AsyncSession, customer_code: str, *,
         AnalyticsQualityIssue.customer_code == customer_code,
         cast(AnalyticsQualityIssue.source_transaction_id, String) == cast(LogTransaction.id, String))
 
+    # R1: a transaction whose capture is switched off has no fact ON PURPOSE, exactly like a
+    # quarantined one. Without this clause the auditor reports it as a missing fact on every single
+    # run, forever - and a permanently red check is worse than no check, because it teaches everyone
+    # to ignore the one thing that would have caught a real divergence. The predicate is imported
+    # rather than rewritten so it cannot drift from the one the fold uses.
+    gate = capture.source_predicate(await capture.suppressed_names(db, customer_code))
     stmt = select(LogTransaction.id, LogTransaction.started_at).where(
         LogTransaction.customer_code == customer_code,
         window.covers(LogTransaction.started_at, include_null=True),
-        ~has_fact.exists(), ~has_reason.exists())
+        ~has_fact.exists(), ~has_reason.exists(),
+        *([gate] if gate is not None else []))
 
     rows = (await db.execute(stmt)).all()
     if not rows:

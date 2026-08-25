@@ -55,6 +55,19 @@ async def _wipe(*codes):
                 await db.execute(delete(model).where(model.customer_code == cc))
             await db.execute(delete(Job).where(Job.customer_code == cc))
         await db.execute(delete(ConsumerCursor).where(ConsumerCursor.consumer == n3.CONSUMER))
+        # Also drop any OTHER tenant's state row that has never been processed.
+        #
+        # Not tidiness - a correctness precondition for this file. The published retention position is
+        # the MINIMUM across every tenant, and by design a tenant with a NULL frontier blocks
+        # publication entirely (see `test_nothing_is_published_while_any_tenant_has_processed_nothing`,
+        # which is the intended behaviour). Other test modules commit `analytics_tenant_state` rows and
+        # do not clean them up, so a leftover NULL-frontier tenant makes every cursor assertion here
+        # depend on which modules ran before - passing on a fresh database and failing on every run
+        # after it. Found exactly that way: 1,108 green, then one failure with no code change.
+        #
+        # Scoped to NULL frontiers only, so a tenant that has genuinely been processed is left alone.
+        await db.execute(delete(AnalyticsTenantState).where(
+            AnalyticsTenantState.source_write_frontier.is_(None)))
         await db.commit()
 
 
