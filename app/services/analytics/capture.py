@@ -50,6 +50,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config.database import async_session
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
 from app.persistence.models.log_transaction import LogTransaction
@@ -57,10 +58,28 @@ from app.services.analytics import payload as pl
 
 logger = logging.getLogger(__name__)
 
-#: A transaction seen for the first time is captured but not shown. Neither default can do harm:
-#: capture-on cannot lose data, show-off cannot surprise a reader with an unreviewed number.
+#: A transaction seen for the first time is CAPTURED and SHOWN. Expansion stays off.
+#:
+#: `show` defaulting TRUE reverses what 18e proposed, and the reason is a regression R2 surfaced rather
+#: than a change of taste. R1's discovery registers every transaction it sees, so with `show` defaulting
+#: false the first fold after deploying would have marked every EXISTING transaction hidden and R2's
+#: rollup gate would then have blanked every existing chart. Twenty-three tests caught it by folding to
+#: zero.
+#:
+#: The two defaults are not symmetric, and neither is "safe" in the abstract:
+#:
+#:   capture=false by default  ->  loses history IRREVERSIBLY, since entries expire at 60 days
+#:   show=false by default     ->  UNDER-COUNTS every chart, silently, until somebody reviews a row
+#:
+#: An under-counting total is the failure this whole architecture exists to prevent: it looks entirely
+#: plausible and nothing says it is wrong. A newly seen transaction appearing on a chart before anybody
+#: reviewed it is real warehouse activity being reported, which is at worst surprising. So both default
+#: to on, and `reviewed_at IS NULL` is what the interface reads to say "needs review" - the review is
+#: surfaced rather than enforced by hiding data.
+#:
+#: `expand` stays off because it is the one with a real cost: ~200k rows/day.
 DEFAULT_CAPTURE = True
-DEFAULT_SHOW = False
+DEFAULT_SHOW = True
 DEFAULT_EXPAND = False
 
 
@@ -77,6 +96,27 @@ async def suppressed_names(db: AsyncSession, customer_code: str) -> frozenset[st
         select(AnalyticsTransactionRegistry.transaction_name).where(
             AnalyticsTransactionRegistry.customer_code == customer_code,
             AnalyticsTransactionRegistry.capture.is_(False)))).scalars().all()
+    return frozenset(rows)
+
+
+async def hidden_names(db: AsyncSession, customer_code: str) -> frozenset[str]:
+    """The transaction names this tenant has turned SHOW off for (R2).
+
+    The mirror of `suppressed_names`, and applied at a completely different point: `capture` gates the
+    FACT, this gates the ROLLUP. That is the whole difference between the two switches - facts are
+    irreversible because entries expire, rollups are recomputable from facts at any time.
+
+    Exclusions again, for the same reason: an unknown or brand-new transaction must default to being
+    SHOWN once somebody has reviewed it, and an empty registry must not hide everything.
+
+    Applied to the rollup read rather than to the chart, because `transaction_name` is only guaranteed
+    to be available there. A metric whose dimensions do not include it could not be filtered at read
+    time from a pre-aggregated bucket at all - the information is gone by then.
+    """
+    rows = (await db.execute(
+        select(AnalyticsTransactionRegistry.transaction_name).where(
+            AnalyticsTransactionRegistry.customer_code == customer_code,
+            AnalyticsTransactionRegistry.show.is_(False)))).scalars().all()
     return frozenset(rows)
 
 
@@ -215,3 +255,20 @@ async def observe_fields(db: AsyncSession, customer_code: str,
                     len(added), customer_code, len(added) - len(unapproved), len(unapproved),
                     ", ".join(unapproved) or "none")
     return added
+
+
+# ---------------------------------------------------------------- session-opening convenience
+# The functions above take a session because the fold already holds one and must not open a second
+# inside its own transaction. These two open their own, for callers that have none - the API and tests.
+# Separate rather than an optional argument, so the fold cannot accidentally take the version that
+# escapes its transaction boundary.
+async def suppressed_names_for(customer_code: str) -> frozenset[str]:
+    """`suppressed_names` for a caller with no session of its own."""
+    async with async_session() as db:
+        return await suppressed_names(db, customer_code)
+
+
+async def hidden_names_for(customer_code: str) -> frozenset[str]:
+    """`hidden_names` for a caller with no session of its own."""
+    async with async_session() as db:
+        return await hidden_names(db, customer_code)

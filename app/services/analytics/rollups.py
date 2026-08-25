@@ -210,7 +210,8 @@ async def _replace(db: AsyncSession, model, customer_code: str, definition_id: u
 
 
 async def _read_dirty_facts(db: AsyncSession, customer_code: str, hours: set[datetime],
-                            dates: set[date_type]) -> list[dict]:
+                            dates: set[date_type],
+                            hidden: frozenset[str] = frozenset()) -> list[dict]:
     """The facts feeding every dirty bucket, read ONCE and folded into both grains.
 
     Two predicates OR-ed rather than one: an hour and a business date are different axes, and a fact can
@@ -227,9 +228,16 @@ async def _read_dirty_facts(db: AsyncSession, customer_code: str, hours: set[dat
                                AnalyticsFact.business_date <= max(dates)))
     if not conditions:
         return []
+    # R2: `hidden` transactions are excluded from every rollup. A NULL `transaction_name` always
+    # passes - the unnamed rows are the connectivity probes, and their rule is fixed in code: always
+    # captured, never shown, which is expressed by the registry never holding a row for them and this
+    # clause never matching them. `x NOT IN (...)` is NULL for a NULL x and a row is kept only when the
+    # predicate is TRUE, so without the explicit IS NULL they would be silently dropped instead.
+    gate = ([AnalyticsFact.transaction_name.is_(None)
+             | AnalyticsFact.transaction_name.notin_(sorted(hidden))] if hidden else [])
     rows = (await db.execute(
         select(AnalyticsFact).where(AnalyticsFact.customer_code == customer_code,
-                                    or_(*conditions)))).scalars().all()
+                                    or_(*conditions), *gate))).scalars().all()
     return [{c.name: getattr(r, c.name) for c in AnalyticsFact.__table__.columns} for r in rows]
 
 
@@ -276,7 +284,8 @@ async def _fold_monthly(db: AsyncSession, customer_code: str, definition_id: uui
 
 async def recompute(db: AsyncSession, customer_code: str, definition_id: uuid.UUID,
                     definition: d.MetricDefinition, *, hours: set[datetime],
-                    dates: set[date_type], computed_at: datetime | None = None) -> dict:
+                    dates: set[date_type], computed_at: datetime | None = None,
+                    hidden: frozenset[str] = frozenset()) -> dict:
     """Rebuild every dirty bucket of one definition, at every grain it declares.
 
     Does NOT commit: the caller owns the boundary, so the rollups land in the same transaction as the
@@ -286,7 +295,13 @@ async def recompute(db: AsyncSession, customer_code: str, definition_id: uuid.UU
     if not hours and not dates:
         return {"hourly": {}, "daily": {}, "monthly": {}}
     now = computed_at or datetime.now(timezone.utc)
-    facts = await _read_dirty_facts(db, customer_code, hours, dates)
+    # R2: `hidden` are the transactions whose `show` switch is off. Excluded HERE rather than at read
+    # time because `transaction_name` is only reliably available at this point - a metric whose
+    # dimensions omit it could not be filtered from a pre-aggregated bucket later.
+    #
+    # Recomputed from scratch every time, so flipping `show` back on refills complete history on the
+    # next fold of the range. That is the "one recompute" the switch promises.
+    facts = await _read_dirty_facts(db, customer_code, hours, dates, hidden)
     stats: dict[str, dict] = {}
 
     if "hourly" in definition.grains:

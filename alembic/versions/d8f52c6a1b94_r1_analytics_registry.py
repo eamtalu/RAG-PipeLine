@@ -13,7 +13,8 @@ DEFAULTS ARE THE SAFETY PROPERTY, and they are set at the DATABASE, not only in 
 
     capture  DEFAULT true    a transaction nobody has reviewed is still captured, because the entries
                              it would have been captured from are gone in 60 days
-    show     DEFAULT false   an unreviewed transaction never appears on somebody's chart
+    show     DEFAULT true    hiding real activity by default under-counts every chart silently,
+                             which is worse than an unreviewed transaction appearing on one
     captured DEFAULT false   (field registry) a field nobody has approved is RECORDED, not stored
 
 A default enforced only in the ORM is one a raw INSERT can bypass, which would give the same
@@ -45,7 +46,7 @@ def upgrade() -> None:
         # even be one row.
         sa.Column("transaction_name", sa.String(128), nullable=False),
         sa.Column("capture", sa.Boolean(), nullable=False, server_default="true"),
-        sa.Column("show", sa.Boolean(), nullable=False, server_default="false"),
+        sa.Column("show", sa.Boolean(), nullable=False, server_default="true"),
         sa.Column("expand", sa.Boolean(), nullable=False, server_default="false"),
         sa.Column("first_seen_at", sa.DateTime(timezone=True), nullable=False,
                   server_default=sa.text("now()")),

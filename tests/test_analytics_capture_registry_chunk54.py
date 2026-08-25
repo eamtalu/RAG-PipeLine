@@ -79,13 +79,38 @@ async def _register(db, name, *, cc=CC, capture_on=True, show=False, expand=Fals
 
 
 # =============================================================== 1. defaults
-def test_a_new_transaction_defaults_to_captured_but_not_shown():
-    """The two failure modes are not symmetric. Capture-off loses history irreversibly the moment a new
-    transaction appears and nobody notices for a week; show-on silently puts an unreviewed transaction
-    on somebody's chart. So the default is the pair that can neither lose data nor surprise a reader."""
+def test_a_new_transaction_defaults_to_captured_and_shown():
+    """Both defaults ON, and `show` being one of them is a CORRECTION made during R2.
+
+    The original reasoning - "show off cannot surprise a reader" - had it backwards. Discovery registers
+    every transaction it sees, so `show` defaulting false meant the first fold after deploying R1 marked
+    every EXISTING transaction hidden, and R2's rollup gate then blanked every existing chart. Twenty-
+    three tests caught it by folding to zero.
+
+    The failure modes are not symmetric, and neither default is safe in the abstract:
+
+        capture off by default  ->  loses history IRREVERSIBLY, entries expire at 60 days
+        show off by default     ->  UNDER-COUNTS every chart, silently, until someone reviews a row
+
+    An under-counting total is the exact failure this architecture exists to prevent. So the review is
+    SURFACED (`reviewed_at IS NULL`) rather than enforced by hiding data.
+    """
     assert capture.DEFAULT_CAPTURE is True
-    assert capture.DEFAULT_SHOW is False
+    assert capture.DEFAULT_SHOW is True
     assert capture.DEFAULT_EXPAND is False
+
+
+async def test_discovery_does_not_hide_an_existing_transaction(db):
+    """The regression the default change fixes, asserted end to end rather than only as a constant.
+
+    R1's discovery runs on every fold. If it registered a transaction in a state that R2's rollup gate
+    treats as hidden, deploying R1 would silently zero every chart that already worked.
+    """
+    await db.execute(text("DELETE FROM analytics_transaction_registry WHERE customer_code = :c"),
+                     {"c": CC})
+    await capture.observe_names(db, CC, {"Brighton Stock Pick", "Full Stock Count"})
+    assert await capture.hidden_names(db, CC) == frozenset(), \
+        "a freshly discovered transaction must not be hidden, or discovery blanks existing charts"
 
 
 async def test_the_model_defaults_match_the_constants(db):
@@ -261,7 +286,7 @@ async def test_observing_a_new_name_registers_it_at_the_defaults(db):
         select(AnalyticsTransactionRegistry.capture, AnalyticsTransactionRegistry.show)
         .where(AnalyticsTransactionRegistry.customer_code == CC,
                AnalyticsTransactionRegistry.transaction_name == "Newly Seen"))).one()
-    assert (row.capture, row.show) == (True, False)
+    assert (row.capture, row.show) == (True, True)
 
 
 async def test_observing_never_overwrites_a_human_decision(db):

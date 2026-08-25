@@ -32,11 +32,16 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.settings import settings
 from app.api.deps import get_current_customer
 from app.config.database import get_session
 from app.persistence.models.analytics_metric import AnalyticsMetric
 from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
+from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
+from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
 from app.services.analytics import capture
+from app.services.analytics import payload as pl
+from app.services.analytics import pending_windows
 from app.services.analytics import definition as d
 from app.services.analytics import read as n6
 from app.services.analytics import reconcile as rc
@@ -322,3 +327,175 @@ async def trigger_reconcile(customer: str = Depends(get_current_customer),
         "findings": [{"check": f.check, "summary": f.summary, "detail": f.detail}
                      for f in report["findings"]],
     }
+
+
+# ============================================================== R2: the registry (what analytics may do)
+@router.get("/registry/transactions")
+async def list_transaction_registry(customer: str = Depends(get_current_customer),
+                                    db: AsyncSession = Depends(get_session)):
+    """Every transaction analytics has seen for this tenant, with its three switches.
+
+    Rows are CREATED by the fold, never here: discovery is what knows a transaction exists. So an empty
+    list means analytics has not folded anything yet, not that nothing is configured - which is worth
+    distinguishing, because the two look identical on a screen.
+
+    `needs_review` is `reviewed_at IS NULL`, i.e. nobody has touched the switches. Surfaced rather than
+    enforced by hiding data: the defaults are both ON, so an unreviewed transaction is counted and
+    flagged, not silently dropped.
+    """
+    rows = (await db.execute(
+        select(AnalyticsTransactionRegistry)
+        .where(AnalyticsTransactionRegistry.customer_code == customer)
+        .order_by(AnalyticsTransactionRegistry.transaction_name))).scalars().all()
+    return {"transactions": [{
+        "transaction_name": r.transaction_name,
+        "capture": r.capture, "show": r.show, "expand": r.expand,
+        "first_seen_at": _iso(r.first_seen_at),
+        "reviewed_at": _iso(r.reviewed_at), "reviewed_by": r.reviewed_by,
+        "needs_review": r.reviewed_at is None,
+    } for r in rows]}
+
+
+@router.patch("/registry/transactions/{transaction_name}")
+async def set_transaction_switches(transaction_name: str, payload: dict = Body(...),
+                                   customer: str = Depends(get_current_customer),
+                                   db: AsyncSession = Depends(get_session)):
+    """Set one transaction's switches. Only the keys present in the body are changed.
+
+    A PATCH rather than a PUT because the three switches are independent decisions with very different
+    consequences, and a PUT would make "I toggled show" silently also reassert capture and expand from
+    whatever the client last read.
+
+    TURNING `capture` OFF PUBLISHES NO TICKET, and turning it ON DOES. That asymmetry is the point:
+    capture-on needs the retention range re-examined so the newly captured transaction gets facts, while
+    capture-off needs nothing re-examined at all - the existing facts are deliberately left alone (see
+    `capture`), so there is nothing for a fold to change.
+
+    `show` publishes a ticket in both directions, because it gates the ROLLUPS and those genuinely have
+    to be recomputed either way. That is the "one recompute" the switch costs, and it is why `show` is
+    the reversible one.
+    """
+    row = await db.scalar(
+        select(AnalyticsTransactionRegistry).where(
+            AnalyticsTransactionRegistry.customer_code == customer,
+            AnalyticsTransactionRegistry.transaction_name == transaction_name))
+    if row is None:
+        # 404 rather than an upsert: a name analytics has never seen is almost always a typo, and
+        # creating a row for it would silently accept the typo and then do nothing measurable.
+        raise HTTPException(404, f"analytics has not seen a transaction named {transaction_name!r} "
+                                 f"for this logspace, so there is nothing to configure")
+
+    before = (row.capture, row.show)
+    for field in ("capture", "show", "expand"):
+        if field in payload:
+            setattr(row, field, bool(payload[field]))
+    row.reviewed_at = datetime.now(timezone.utc)
+    row.reviewed_by = payload.get("reviewed_by") or "api"
+    row.updated_at = datetime.now(timezone.utc)
+
+    # A ticket only when a switch that changes stored data actually moved, and only in the direction
+    # that needs work. Publishing unconditionally would re-fold the retention window every time
+    # somebody ticked `expand`, which changes nothing until R4 exists.
+    published = 0
+    turned_capture_on = (not before[0]) and row.capture
+    show_changed = before[1] != row.show
+    if turned_capture_on or show_changed:
+        frontier = await db.scalar(
+            select(AnalyticsTenantState.source_watermark).where(
+                AnalyticsTenantState.customer_code == customer))
+        history = await db.scalar(
+            select(AnalyticsTenantState.history_starts_at).where(
+                AnalyticsTenantState.customer_code == customer))
+        if frontier is not None:
+            # In the SAME transaction as the switch, which is invariant 3 applied to a registry write:
+            # row first, commit, then publish would leave a switch flipped with nothing to act on it,
+            # and it would stay that way until some unrelated rebuild happened to touch those windows.
+            published = await pending_windows.publish(
+                db, customer,
+                lo=history or (frontier - timedelta(days=settings.log_partition_retention_days)),
+                hi=frontier)
+    await db.commit()
+
+    return {"transaction_name": transaction_name, "capture": row.capture, "show": row.show,
+            "expand": row.expand, "tickets_published": published,
+            "detail": ("the retention range will be re-examined on the next worker tick"
+                       if published else "no re-fold needed for this change")}
+
+
+@router.get("/registry/fields")
+async def list_field_registry(only_unreviewed: bool = Query(False),
+                              limit: int = Query(500, ge=1, le=2000),
+                              customer: str = Depends(get_current_customer),
+                              db: AsyncSession = Depends(get_session)):
+    """Every response field analytics has observed, and whether its VALUE is being kept.
+
+    This is the review surface for the allowlist. A field with `captured = false` has had its NAME
+    recorded and nothing else - there is no column in that table a value could live in - so this
+    endpoint cannot leak one even if a field is a credential.
+
+    `unreviewed first` by default in the ordering, because the whole point of the list is the tail of
+    things nobody has looked at yet.
+    """
+    stmt = (select(AnalyticsFieldRegistry)
+            .where(AnalyticsFieldRegistry.customer_code == customer)
+            .order_by(AnalyticsFieldRegistry.captured,
+                      AnalyticsFieldRegistry.field)
+            .limit(limit))
+    if only_unreviewed:
+        stmt = stmt.where(AnalyticsFieldRegistry.reviewed_at.is_(None))
+    rows = (await db.execute(stmt)).scalars().all()
+    return {"fields": [{
+        "id": str(r.id), "method": r.method, "source": r.source, "field": r.field,
+        "captured": r.captured,
+        # Reported so the interface can warn before somebody ticks a credential by hand. It is advice,
+        # not a block: a person is allowed to decide, which is exactly what the veto reserves for them.
+        "credential_shaped": pl.never_auto_approve(r.field),
+        "seeded": pl.seeded(r.field),
+        "first_seen_at": _iso(r.first_seen_at), "last_seen_at": _iso(r.last_seen_at),
+        "reviewed_at": _iso(r.reviewed_at), "reviewed_by": r.reviewed_by,
+        "needs_review": r.reviewed_at is None,
+    } for r in rows]}
+
+
+@router.patch("/registry/fields/{field_id}")
+async def set_field_capture(field_id: str, payload: dict = Body(...),
+                            customer: str = Depends(get_current_customer),
+                            db: AsyncSession = Depends(get_session)):
+    """Approve or un-approve one observed field.
+
+    Approving publishes a ticket: the field's values are not in any existing fact, so the retention
+    range has to be re-folded for them to appear. Un-approving publishes one too, because the values
+    ARE in existing facts and removing them is also a change - and unlike `capture`, this one really
+    does remove data, which is why it is the caller's explicit action rather than a side effect.
+    """
+    row = await db.scalar(
+        select(AnalyticsFieldRegistry).where(
+            AnalyticsFieldRegistry.customer_code == customer,
+            AnalyticsFieldRegistry.id == field_id))
+    if row is None:
+        raise HTTPException(404, "no such observed field for this logspace")
+    if "captured" not in payload:
+        raise HTTPException(400, "body must contain 'captured'")
+
+    was = row.captured
+    row.captured = bool(payload["captured"])
+    row.reviewed_at = datetime.now(timezone.utc)
+    row.reviewed_by = payload.get("reviewed_by") or "api"
+    row.updated_at = datetime.now(timezone.utc)
+
+    published = 0
+    if was != row.captured:
+        frontier = await db.scalar(
+            select(AnalyticsTenantState.source_watermark).where(
+                AnalyticsTenantState.customer_code == customer))
+        history = await db.scalar(
+            select(AnalyticsTenantState.history_starts_at).where(
+                AnalyticsTenantState.customer_code == customer))
+        if frontier is not None:
+            published = await pending_windows.publish(
+                db, customer,
+                lo=history or (frontier - timedelta(days=settings.log_partition_retention_days)),
+                hi=frontier)
+    await db.commit()
+    return {"id": str(row.id), "field": row.field, "captured": row.captured,
+            "tickets_published": published}

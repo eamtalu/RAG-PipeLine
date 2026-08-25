@@ -2419,6 +2419,81 @@ a third tenant with an OLDER REAL frontier simply wins the global minimum.
 The fixture now clears every tenant's analytics state, since `published == min(a, b)` is only true when
 a and b are the only tenants with a row. Verified by two consecutive full runs.
 
+## 18j. R2 as BUILT, 2026-08-25
+
+**Shipped.** Backend: 4 endpoints, 21 tests, suite 1,203. Frontend: `/analytics/registry`, its menu
+entry, `RegistryPanel`, 16 tests, suite 485, `tsc` clean, zero lint warnings.
+No migration - the tables came with R1.
+
+`show` is now wired to something, which 18h recorded as the gap R2 owed.
+
+### The regression R2 surfaced, which was mine
+
+`DEFAULT_SHOW` was `false`, reasoned in 18e as "an unreviewed transaction never surprises a reader".
+That was backwards.
+R1's discovery registers every transaction it sees, so the first fold after deploying would have marked
+every EXISTING transaction hidden, and R2's rollup gate would then have blanked every existing chart.
+Twenty-three tests caught it by folding to zero.
+
+The two defaults are not symmetric, and neither is safe in the abstract:
+
+| Default | Consequence |
+|---|---|
+| `capture` off | loses history IRREVERSIBLY, because entries expire at 60 days |
+| `show` off | UNDER-COUNTS every chart, silently, until somebody reviews a row |
+
+An under-counting total is the exact failure this architecture exists to prevent: it looks plausible
+and nothing says it is wrong.
+So both default ON, and the review is SURFACED (`needs_review`, from `reviewed_at IS NULL`) rather than
+enforced by hiding data.
+This reverses what 18e proposed, and the reversal is recorded rather than quietly applied.
+
+### Where the `show` gate actually sits
+
+`_read_dirty_facts` (`rollups.py`), not the chart.
+A metric whose dimensions omit `transaction_name` could not be filtered from a pre-aggregated bucket at
+read time - the information is gone by then. Gating the rollup read means:
+
+- facts stay exactly where they are, so nothing is lost
+- flipping it back on refills complete history on the next fold, which is the "one recompute" the switch
+  advertises
+- a NULL `transaction_name` always passes, because `x NOT IN (...)` is NULL for a NULL `x` and a row is
+  kept only when the predicate is TRUE - without the explicit `IS NULL` the connectivity probes would be
+  silently dropped the moment any transaction was hidden
+
+### The ticket asymmetry
+
+| Change | Ticket? | Why |
+|---|---|---|
+| `capture` ON | **yes** | the transaction has no facts for the range it was off |
+| `capture` OFF | **no** | existing facts are deliberately left alone, so a fold would find nothing to change |
+| `show` either way | **yes** | rollups genuinely have to be recomputed in both directions |
+| `expand` | **no** | R4 does not exist, so it changes no stored data |
+
+Publishing unconditionally would re-fold the whole retention window every time somebody ticked a switch
+that does nothing yet.
+The publish happens in the SAME transaction as the switch, which is invariant 3 applied to a registry
+write.
+
+### The screen
+
+Three toggles are not presented as equals, because they are not equal.
+Turning `capture` off is confirmed, and the dialog says to use `show` instead if the intent is only to
+hide something. Nothing else is confirmed - a confirm on the safe direction too is how people learn to
+dismiss them unread.
+
+`PATCH` sends only the key that changed. A `PUT` would make "I toggled show" silently reassert the other
+two from whatever that tab last read, which is how one stale tab undoes another person's decision.
+
+An empty list says WHY it is empty. Rows are created by the fold, so empty means "nothing counted yet"
+rather than "nothing configured", and on a screen those are indistinguishable. A read failure surfaces
+as an alert rather than as an empty table, for the same reason.
+
+### Still not built
+
+R4 (`expand`) and the promotion half of decision C. `expand` is settable and inert, and the screen says
+so rather than implying otherwise.
+
 ## Also corrected while measuring
 
 `settings.py:78-79` and `:110-112` claim "real transactions are ≤2 min".

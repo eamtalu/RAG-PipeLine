@@ -29,12 +29,18 @@ here - always captured, never shown. Captured because a probe that starts failin
 of thing someone will want to measure later, and 60 days from now the entries are gone; never shown
 because they are not warehouse activity and would distort every default chart.
 
-A transaction seen for the first time gets `capture = true, show = false`
-------------------------------------------------------------------------
-The two failure modes are not symmetric. Defaulting capture OFF loses history irreversibly the moment
-a new transaction appears in the logs and nobody notices for a week. Defaulting show ON silently adds
-an unreviewed transaction to somebody's chart. So the default is the pair that can never lose data and
-can never surprise a reader.
+A transaction seen for the first time gets `capture = true, show = true`
+-----------------------------------------------------------------------
+Neither default is "safe" in the abstract, and the two failure modes are not symmetric:
+
+    capture off by default  ->  loses history IRREVERSIBLY, because entries expire at 60 days
+    show off by default     ->  UNDER-COUNTS every chart, silently, until somebody reviews a row
+
+An under-counting total is the exact failure this architecture exists to prevent - it looks plausible
+and nothing says it is wrong. A newly seen transaction appearing on a chart unreviewed is real
+warehouse activity being reported, which is at worst surprising. So both default on, and
+`reviewed_at IS NULL` is what the interface reads to say "needs review": the review is SURFACED rather
+than enforced by hiding data.
 """
 
 import uuid
@@ -68,8 +74,8 @@ class AnalyticsTransactionRegistry(Base):
 
     capture: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True,
                                           server_default="true")
-    show: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False,
-                                       server_default="false")
+    show: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True,
+                                       server_default="true")
     expand: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False,
                                          server_default="false")
 

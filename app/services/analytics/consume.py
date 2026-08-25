@@ -416,11 +416,16 @@ async def _roll_up(db: AsyncSession, customer_code: str, outcomes: Sequence[dd.O
         return {"definitions": 0, "buckets": 0}
 
     await registry.ensure_seed(db, customer_code)
+    # R2. The `show` switch, read once per run like the other two. Facts for a hidden transaction stay
+    # exactly where they are; only the rollups exclude them, which is what makes the switch instant to
+    # reverse - the next fold of the range refills complete history from facts that never left.
+    hidden = await capture.hidden_names(db, customer_code)
     stats = {"definitions": 0, "buckets": len(hours) + len(dates)}
     for definition_id, definition in await registry.active_definitions(db, customer_code):
         try:
             await n5.recompute(db, customer_code, definition_id, definition,
-                               hours=hours, dates=dates, computed_at=computed_at)
+                               hours=hours, dates=dates, computed_at=computed_at,
+                               hidden=hidden)
             stats["definitions"] += 1
         except Exception:
             # Deliberately NOT swallowed beyond logging: this re-raises, failing the whole run. A
