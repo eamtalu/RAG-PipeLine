@@ -64,10 +64,13 @@ from app.persistence.models.analytics_quality_issue import AnalyticsQualityIssue
 from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
 from app.persistence.models.customer import Customer
 from app.persistence import partitioning as pt
+from app.persistence.models.log_entry import LogEntry
+from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_transaction import LogTransaction
 from app.services import consumer_cursors
 from app.services.analytics import diff as dd
 from app.services.analytics import capture
+from app.services.analytics import payload as pl
 from app.services.analytics import normalizer as n2
 from app.services.analytics import registry
 from app.services.analytics import rollups as n5
@@ -255,6 +258,35 @@ async def _read_source(db: AsyncSession, customer_code: str, window: UtcWindow,
                        "for a one-day ticket; NOT truncated, because a partial read would reverse "
                        "every fact past the cut", customer_code, len(rows), window.start, window.end)
     return [dict(r) for r in rows]
+
+
+async def _read_response_entries(db: AsyncSession, customer_code: str,
+                                 window: UtcWindow) -> dict[uuid.UUID, list[tuple[str, dict]]]:
+    """R3. Each transaction's `response` and `mi_result` entries, keyed by transaction id.
+
+    Stage 1 already parsed these in full and Stage 2 discards them, so this is the only place the
+    response half of an exchange becomes measurable. Joined through `log_entry_assignment`, which is
+    what maps an entry to its transaction.
+
+    BOUNDED TWICE, because this is the one read in the cycle whose size is not proportional to the
+    transaction count. Only two of the eight entry types are fetched - the other six carry nothing R3
+    wants - and the window is the same one the source read uses, so the join prunes to the same
+    partitions rather than opening all 94.
+
+    Measured: 17.3 entries per transaction on average, of which the response half is a small fraction,
+    so a one-day ticket is thousands of rows rather than the ~53,000 a full window read would be.
+    """
+    stmt = (select(LogEntryAssignment.transaction_id, LogEntry.entry_type, LogEntry.fields)
+            .join(LogEntry, LogEntry.id == LogEntryAssignment.entry_id)
+            .where(LogEntryAssignment.customer_code == customer_code,
+                   window.covers(LogEntryAssignment.entry_ts, include_null=True),
+                   LogEntry.entry_type.in_(("response", "mi_result")))
+            .order_by(LogEntryAssignment.transaction_id, LogEntryAssignment.seq))
+    out: dict[uuid.UUID, list[tuple[str, dict]]] = {}
+    for txn_id, entry_type, fields in (await db.execute(stmt)).all():
+        et = entry_type.value if hasattr(entry_type, "value") else str(entry_type)
+        out.setdefault(txn_id, []).append((et, fields))
+    return out
 
 
 async def _read_stored(db: AsyncSession, customer_code: str, window: UtcWindow,
@@ -563,9 +595,39 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         suppressed = await capture.suppressed_names(db, customer_code)
 
         source_rows = await _read_source(db, customer_code, window, suppressed)
+
+        # R3. The response half, which Stage 2 parses and discards. Read here rather than in N2 so N2
+        # keeps its no-database property: it is handed the already-approved scalars as a parameter.
+        by_txn = await _read_response_entries(db, customer_code, window)
+
+        # Extract FIRST, register SECOND, read the approvals THIRD. The order is load-bearing and was
+        # wrong on the first attempt.
+        #
+        # Reading `approved` before registering meant a seeded field was not yet approved on the run
+        # that discovered it, so the fact was written WITHOUT it. That self-heals only if the window is
+        # folded again - and tickets are published on change, so a window that never changes again
+        # never is. The gap would have been permanent, which is the exact loss R3 exists to prevent.
+        observed_by_row = [(row, pl.extract(by_txn.get(row["id"], ()))) for row in source_rows]
+        discovered: dict[str, set[str]] = {}
+        for row, observed in observed_by_row:
+            if observed:
+                # EVERY observed name is offered, approved or not: the registry is the review surface,
+                # so a captured field still needs a row saying so and an unknown one needs a row saying
+                # it exists. `observe_fields` seeds and de-duplicates.
+                discovered.setdefault(row.get("method"), set()).update(observed)
+        await capture.observe_fields(db, customer_code, discovered)
+
+        # Now the seeded rows exist, so a field on the seed list is captured on the very run that
+        # discovers it. Read ONCE for the tenant, like `suppressed`, so every transaction in the run is
+        # judged against the same allowlist. An un-ticked field stays un-ticked: `observe_fields` uses
+        # ON CONFLICT DO NOTHING, so it never resurrects a decision.
+        approved = await capture.approved_attributes(db, customer_code)
+
         facts, issues = [], []
-        for row in source_rows:
-            fact, issue = n2.normalise(row, tenant_timezone=tz)
+        for row, observed in observed_by_row:
+            captured_attrs, _unknown = pl.select(observed, approved)
+            fact, issue = n2.normalise(row, tenant_timezone=tz,
+                                       response_attributes=captured_attrs)
             (facts if fact is not None else issues).append(fact if fact is not None else issue)
 
         # Register any transaction name seen for the first time, at capture=on / show=off. Done from

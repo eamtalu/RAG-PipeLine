@@ -1888,7 +1888,7 @@ What follows is what remains, in dependency order rather than in the order it wa
 | **S1** | **BUILT 2026-08-24** - explicit sealer, `updated_at`, and the cursor moved onto it. See 18f. | nothing | done |
 | **R1** | **BUILT 2026-08-25** - both registry tables, the shared capture predicate in all three readers, `transactions` in the fold filter. See 18g. | nothing | done |
 | **R1b** | **BUILT 2026-08-25** - `attr:` paths for dimensions and measures, registry-gated, numeric coercion. See 18h. | R1 | done |
-| **R3** | Response scalar capture, namespaced `resp.*` / `mi.*`, allowlist-gated, seeded from the 145 measured keys minus credentials | R1, R1b | **YES - 60 days** |
+| **R3** | **BUILT 2026-08-25** - response scalars into `attributes`, namespaced, seeded allowlist with a credential veto. See 18i. | R1, R1b | done |
 | **R2** | Frontend registry screen: 7 transactions, three switches, the discovery list | R1, R3 | no |
 | **S2-S4** | The rest of the Stage 2 redesign | R-work landed first: both change `consume.py`, and S1 moves `_FRONTIER_COLUMN` off `created_at` | no |
 | **R4** | Per-record expansion for transactions with `Expand` ticked | R3 | no |
@@ -2317,6 +2317,107 @@ Before R1b all three rows collapsed into one bucket keyed `None`.
 belongs with R2, the screen that sets it. Promotion to a typed column (the second half of decision C)
 is also not built; `attr:` is the explore half, and the shared `dimension_value` is what will make the
 promoted column agree with it.
+
+## 18i. R3 as BUILT, 2026-08-25
+
+**Shipped.** No migration - R3 writes into `attributes`, which already exists. 40 tests in
+`tests/test_analytics_response_capture_chunk56.py`, full suite 1,181 passing twice consecutively.
+The item with the 60-day expiry is closed.
+
+### What now reaches a fact
+
+Measured shapes, not assumed ones:
+
+```
+response   {"response": {"StockZone": "A1", "QuantityOnHand": 1974.0, ...}}   nested ONE level
+           {"response": ""}                                                   empty, and common
+mi_result  {"result": "OK", "program": "MMS060MI",
+            "transaction": "LstBalID", "records": [ ... ]}                     flat, plus ONE array
+```
+
+1,713 scalars against 20 non-scalars over 400 live entries, so a transaction-grain merge captures
+nearly all of it. `records[]` is not expanded - only its length, as `mi.record_count`. That is R4, and
+it is where the ~200k rows/day lives.
+
+`resp.` and `mi.` prefixes are applied on the way in, so a response `ItemNumber` cannot displace the
+request's - verified in the E2E, where the request-side value survives beside eight `resp.*` keys.
+
+### The ordering bug, which was silent and would have been permanent
+
+The first implementation read the approvals and then registered the discovered fields.
+So on the run that DISCOVERED a seeded field, that field was not yet approved and the fact was written
+without it.
+
+That self-heals only if the window is folded again - and tickets are published on change, so a window
+that never changes again never is.
+The response data for it would have been lost when the raw entries expired at 60 days: exactly the loss
+R3 exists to prevent, introduced by R3.
+
+Found by an end-to-end run, not by a unit test. Discovery reported 12 fields and 9 approvals while the
+fact carried nothing but its request-side attribute. The order is now
+extract, register, read approvals, normalise, and a test asserts it on the source, because the defect
+is an ORDER and no return value reveals it.
+
+### The security shape
+
+| Field | Outcome |
+|---|---|
+| approved in the registry | stored |
+| unknown | NAME recorded, `captured = false`, value never stored |
+| credential-shaped | never auto-approved, whatever any list says |
+
+`SEED_FIELDS` exists because an empty registry captures nothing, and shipping "discovers everything,
+captures nothing until somebody clicks" would have spent the whole 60-day window collecting field
+names.
+It lives in code rather than a table on purpose: it is a security boundary, so it should be reviewable
+in a diff.
+
+`never_auto_approve` sits underneath it as defence in depth. A hardcoded list is a thing someone will
+edit, and `AccessToken` and `M3UserCredentials` are the two most frequent response keys of the 145
+measured, flowing toward a table that is `KEEP_FOREVER`. So a credential-shaped name is vetoed no
+matter what the list says - by PATTERN, not by exact name, because the risk is a field the WMS renames
+or adds. `_SENSITIVE`'s five exact words (`derive_transactions.py:45`) are precisely why an exact
+denylist was not enough.
+
+A field can still be approved deliberately, by a person, one row at a time.
+
+### E2E, with credentials planted on purpose
+
+| Assertion | Result |
+|---|---|
+| 12 fields discovered | 9 auto-approved, 3 held for review |
+| `resp.AccessToken`, `resp.M3UserCredentials` | discovered, **not** captured, values absent from the fact |
+| `resp.SomeBrandNewField` | recorded by NAME, value `"review me"` absent |
+| seeded warehouse fields | captured on the FIRST fold, `mi.record_count = 2` |
+| request-side `ItemNumber` | intact beside eight `resp.*` keys |
+| `STQT` / `BANO` from `records[]` | absent, as intended |
+| R1b read | grouped by `attr:resp.BaseUoM`, summed `attr:resp.QuantityOnHand` = 1974.0 |
+
+### A limitation found while testing, worth knowing before deploying
+
+R3 joins entries to transactions through `log_entry_assignment`.
+On this development database that table holds no rows for the `mnp` tenant at all - its 397
+transactions predate the assignment table - so R3 captured nothing for it and the E2E had to be run on
+planted data.
+
+The degradation is graceful: no crash, no wrong numbers, simply no response attributes for
+transactions with no assignments. But it means **R3 captures nothing for any transaction stitched
+before assignments existed**, and that should be checked on the deployed database rather than assumed.
+
+### The cost, as predicted
+
+Every fingerprint changes, because `attributes` is fingerprinted. So the first fold after deploying
+re-writes every fact in the retention window and appends one new ledger revision per fact. That is the
+re-fold `18a` and `18c` both flagged; it is what populates the new keys on existing facts, and it
+should be a deliberate, announced operation rather than a surprise.
+
+### The flake, fixed properly this time
+
+`test_the_position_is_the_minimum_across_tenants_not_the_maximum` failed again.
+The earlier fix (18g) scoped the cleanup to NULL-frontier rows, which was wrong for the second reason:
+a third tenant with an OLDER REAL frontier simply wins the global minimum.
+The fixture now clears every tenant's analytics state, since `published == min(a, b)` is only true when
+a and b are the only tenants with a row. Verified by two consecutive full runs.
 
 ## Also corrected while measuring
 

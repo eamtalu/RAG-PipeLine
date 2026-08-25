@@ -53,6 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
 from app.persistence.models.log_transaction import LogTransaction
+from app.services.analytics import payload as pl
 
 logger = logging.getLogger(__name__)
 
@@ -169,3 +170,48 @@ async def approved_attributes(db: AsyncSession, customer_code: str) -> frozenset
             AnalyticsFieldRegistry.customer_code == customer_code,
             AnalyticsFieldRegistry.captured.is_(True)))).scalars().all()
     return frozenset(rows)
+
+
+async def observe_fields(db: AsyncSession, customer_code: str,
+                         seen: dict[str, set[str]]) -> list[str]:
+    """Register every response field observed, at its seeded approval. Does NOT commit.
+
+    `seen` maps method -> the namespaced field names seen on it. Returns the names newly registered, so
+    the caller can log them: a field appearing for the first time is something somebody has to review.
+
+    A row arrives with `captured = payload.seeded(name)`, which is TRUE only for a name on the
+    hardcoded seed list AND not credential-shaped. Everything else arrives `captured = false`: recorded
+    by NAME so it is reviewable, never by value.
+
+    `ON CONFLICT DO NOTHING` for the same reason `observe_names` uses it - observation must never
+    overwrite a decision. A field somebody has un-ticked has to stay un-ticked even though it is on the
+    seed list, and it is seen again on every single tick.
+
+    `source` is derived from the namespace rather than passed, so the stored row cannot disagree with
+    the prefix the field is addressed by.
+    """
+    rows = []
+    now = datetime.now(timezone.utc)
+    for method, names in seen.items():
+        for name in sorted(names):
+            rows.append({
+                "id": uuid.uuid4(), "customer_code": customer_code,
+                "method": method or "(none)",
+                "source": "mi_result" if name.startswith(pl.MI_PREFIX) else "response",
+                "field": name, "captured": pl.seeded(name),
+                "first_seen_at": now, "last_seen_at": now, "seen_count": 1,
+                "created_at": now, "updated_at": now,
+            })
+    if not rows:
+        return []
+    stmt = pg_insert(AnalyticsFieldRegistry).values(rows).on_conflict_do_nothing(
+        constraint="uq_analytics_field_registry_key")
+    added = list((await db.execute(
+        stmt.returning(AnalyticsFieldRegistry.field))).scalars().all())
+    if added:
+        unapproved = sorted(set(added) - {a for a in added if pl.seeded(a)})
+        logger.info("Analytics: %d response field(s) seen for the first time for %s; %d auto-approved "
+                    "from the seed list, %d recorded by NAME ONLY awaiting review: %s",
+                    len(added), customer_code, len(added) - len(unapproved), len(unapproved),
+                    ", ".join(unapproved) or "none")
+    return added

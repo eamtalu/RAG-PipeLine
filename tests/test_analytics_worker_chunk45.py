@@ -55,19 +55,19 @@ async def _wipe(*codes):
                 await db.execute(delete(model).where(model.customer_code == cc))
             await db.execute(delete(Job).where(Job.customer_code == cc))
         await db.execute(delete(ConsumerCursor).where(ConsumerCursor.consumer == n3.CONSUMER))
-        # Also drop any OTHER tenant's state row that has never been processed.
+        # Drop EVERY tenant's analytics state, not just this file's two.
         #
-        # Not tidiness - a correctness precondition for this file. The published retention position is
-        # the MINIMUM across every tenant, and by design a tenant with a NULL frontier blocks
-        # publication entirely (see `test_nothing_is_published_while_any_tenant_has_processed_nothing`,
-        # which is the intended behaviour). Other test modules commit `analytics_tenant_state` rows and
-        # do not clean them up, so a leftover NULL-frontier tenant makes every cursor assertion here
-        # depend on which modules ran before - passing on a fresh database and failing on every run
-        # after it. Found exactly that way: 1,108 green, then one failure with no code change.
+        # Not tidiness - a correctness precondition. The published retention position is the MINIMUM
+        # across every tenant that has state, so an assertion of the form `published == min(a, b)` is
+        # only true when a and b are the ONLY tenants with a row. Any third tenant breaks it: with a
+        # NULL frontier it blocks publication entirely (which
+        # `test_nothing_is_published_while_any_tenant_has_processed_nothing` asserts as intended), and
+        # with an older real frontier it simply wins the minimum.
         #
-        # Scoped to NULL frontiers only, so a tenant that has genuinely been processed is left alone.
-        await db.execute(delete(AnalyticsTenantState).where(
-            AnalyticsTenantState.source_write_frontier.is_(None)))
+        # A first attempt scoped this to NULL frontiers only and was wrong for the second reason - it
+        # went green, then failed again the moment another tenant had genuinely been processed. Both
+        # failures looked like a code regression and were neither.
+        await db.execute(delete(AnalyticsTenantState))
         await db.commit()
 
 

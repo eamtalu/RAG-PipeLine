@@ -157,7 +157,8 @@ def _quarantine(row: Mapping[str, Any], reason: str, detail: str, observed: dict
     }
 
 
-def normalise(row: Mapping[str, Any], *, tenant_timezone: str | None
+def normalise(row: Mapping[str, Any], *, tenant_timezone: str | None,
+              response_attributes: Mapping[str, Any] | None = None
               ) -> tuple[dict | None, dict | None]:
     """One transaction row as `(fact, None)` or `(None, quality_issue)`.
 
@@ -167,8 +168,18 @@ def normalise(row: Mapping[str, Any], *, tenant_timezone: str | None
 
     `row` is a mapping of `log_transactions` columns plus `attributes`; `tenant_timezone` is an IANA name
     or None for UTC.
+
+    R3: `response_attributes` are the APPROVED, already-namespaced response scalars for this
+    transaction (`resp.*`, `mi.*`). A parameter rather than something read here, so this module keeps
+    its no-database property - N3 does the reading and the approving, and hands the result in.
+
+    Merged rather than replaced, and merged UNDER the request keys so a namespaced response field can
+    never displace one. It cannot collide in practice, because everything here is prefixed and nothing
+    from the request is; the ordering makes that a guarantee rather than an observation.
     """
     attributes = dict(row.get("attributes") or {})
+    if response_attributes:
+        attributes.update(response_attributes)
     #: May legitimately be None, and such a row is a fact like any other. 25 of 397 live transactions
     #: (6.3%) have no method: real stitched activity with 2 to 28 entries, durations up to 172 seconds,
     #: `mi_program_count = 0` on 24 of them, and `status = incomplete` on 9. Quarantining them would hide
