@@ -1890,7 +1890,8 @@ What follows is what remains, in dependency order rather than in the order it wa
 | **R1b** | **BUILT 2026-08-25** - `attr:` paths for dimensions and measures, registry-gated, numeric coercion. See 18h. | R1 | done |
 | **R3** | **BUILT 2026-08-25** - response scalars into `attributes`, namespaced, seeded allowlist with a credential veto. See 18i. | R1, R1b | done |
 | **R2** | **BUILT 2026-08-25** - registry API, `/analytics/registry`, and `show` wired to the rollup gate. See 18j. | R1, R3 | done |
-| **S2-S4** | The rest of the Stage 2 redesign | R-work landed first: both change `consume.py`, and S1 moves `_FRONTIER_COLUMN` off `created_at` | no |
+| **S2** | **BUILT 2026-08-25** - durable stream position; `req_pos` deleted rather than persisted. See 18k. | S1 | done |
+| **S3-S4** | Fingerprint skip, UPDATE in place, then the lookup | S2 | no |
 | **R4** | Per-record expansion for transactions with `Expand` ticked | R3 | no |
 | **M1** | ML: `analytics_feature_sets`, `analytics_predictions`, `ml:features-v1` | R3 | no |
 
@@ -2493,6 +2494,85 @@ as an alert rather than as an empty table, for the same reason.
 
 R4 (`expand`) and the promotion half of decision C. `expand` is settable and inert, and the screen says
 so rather than implying otherwise.
+
+## 18k. S2 as BUILT, 2026-08-25
+
+**Shipped.** No migration, no new table, and no efficiency gain: writes per row stay at 22.4, exactly as
+the plan says. 18 tests in `tests/test_stage2_stream_position_chunk58.py`, full suite 1,221.
+
+S2 is a prerequisite. S4's lookup asks "which open transaction does this entry belong to" against state
+read back from a table, and two pieces of `_group`'s state could not survive a process boundary at all:
+
+| Was | Why it cannot be persisted |
+|---|---|
+| `_TxnBuilder.open_pos` | an index within the CURRENT BATCH. Batch 2's index 0 is not batch 1's index 0, so the number means nothing once written down. |
+| `req_pos: dict[int, int]` | keyed on `id(entry)`, a CPython object address. Not stable across processes, and not stable within one either, since CPython reuses addresses after collection. |
+
+### The fix turned out to be a deletion
+
+`req_pos` existed only to remember WHERE IN THE STREAM a request arrived.
+That is a property of the entry, not of the loop reading it - so the dict was not made durable, it was
+removed. `_stream_pos(e)` derives the same answer from the entry.
+
+That also removed a leak nobody had noticed: `req_pos.pop(id(r), -1)` left an orphaned key behind
+whenever a request was consumed by a path that did not pop it.
+
+### The position, and the field the existing helper was missing
+
+```
+(timestamp is None, timestamp, source_file, line_number)
+```
+
+`source_file` is in it and is deliberately NOT in the pre-existing `_entry_stream_order`.
+That helper orders entries WITHIN one transaction, where the file is effectively constant.
+This one is a key across a whole window, which routinely spans several files - and without the filename,
+two entries on line 5 of two different files compare EQUAL. That is exactly the collision a durable key
+must not have.
+
+### Three builders had no position at all
+
+`open_pos` was never set on the three sites that create a builder for a matched pending request, an
+orphan response, or a request with no response. It stayed at the `-1` default.
+
+Harmless while it was a batch index, because those builders are appended immediately and never compared
+again. Not harmless once S4 reads the field back and expects it to mean something. All three now carry a
+real position, and the E2E asserts that NO builder is left at the sentinel - 0 of 22 on real data.
+
+### The observable change
+
+Two builders opening at the same instant used to break ties on batch index, which is arbitrary; they now
+break on `(source_file, line_number)`, which is a property of the data. Strictly more deterministic.
+
+### E2E on 1,200 real entries
+
+| Check | Result |
+|---|---|
+| one batch | 22 transactions, all 1,200 entries accounted for |
+| builders at the sentinel | **0 of 22** |
+| position order vs read order | identical |
+| entries lost or duplicated, at 7 different cut points | **none** |
+| grouping the same input twice | identical |
+| duplicate positions across the window | **0** |
+
+Honest limitation: that sample spans a single `source_file`, so cross-file uniqueness is covered by the
+unit test rather than by the live data.
+
+### A docstring that was inverted
+
+`_entry_stream_order` said "NULL timestamps first" and always did the opposite: `False` sorts before
+`True`, so an entry that HAS a timestamp comes first and the unparsable ones trail. The behaviour is
+right and is what the renderer wants; only the sentence was wrong. Corrected rather than left, because
+the next person to touch ordering would have trusted it.
+
+### A test assertion that took three attempts
+
+"`_group` must not call `id()`" is a source assertion, since the failure is the PRESENCE of a construct
+rather than a wrong answer. A plain substring search matched the COMMENT that explains the removal.
+Stripping comments was still wrong, because `take_by_reqid(` and `_entry_reqid(` both contain the
+characters `id(`. It is now an AST walk that asks whether the builtin is actually called.
+
+Worth recording because chunks 29 and 55 each hit the first version of this separately: grepping source
+text for a construct is nearly always weaker than parsing for it.
 
 ## Also corrected while measuring
 

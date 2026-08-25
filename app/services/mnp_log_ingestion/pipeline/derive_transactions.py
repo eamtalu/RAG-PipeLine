@@ -66,7 +66,8 @@ class _TxnBuilder:
 
     def __init__(self) -> None:
         self.entries: list[LogEntry] = []
-        self.open_pos: int = -1  # stream position when this transaction opened (for FIFO response match)
+        # S2: a DURABLE stream position, not a batch index. See `_stream_pos`.
+        self.open_pos: tuple = _NO_POS
 
     def add(self, entry: LogEntry) -> None:
         self.entries.append(entry)
@@ -262,7 +263,10 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
     open_by_key: dict[tuple, _TxnBuilder] = {}
     current_by_thread: dict[str | None, tuple] = {}  # thread -> its currently-active key (null inherit)
     pending_reqs: list[LogEntry] = []  # MoveNext REQUEST lines awaiting their processing thread
-    req_pos: dict[int, int] = {}       # stream position of each pending request (for response match)
+    # S2: there is no `req_pos` map any more. It existed to remember where in the stream each pending
+    # request arrived, which is a property of the ENTRY - so it is derived by `_stream_pos` rather than
+    # stored. That also removed a leak: the old `req_pos.pop(id(r), -1)` left an orphaned key behind
+    # whenever a request was consumed by a path that did not pop it.
 
     def take_by_reqid(reqid: str | None) -> LogEntry | None:
         if reqid is None:
@@ -331,7 +335,7 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
             pending_reqs.remove(r)
             nb = _TxnBuilder()
             nb.add(r)
-            nb.open_pos = req_pos.pop(id(r), -1)
+            nb.open_pos = _stream_pos(r)
             builders.append(nb)
 
     for i, e in enumerate(entries):
@@ -342,7 +346,6 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
 
         if et == "request":
             pending_reqs.append(e)
-            req_pos[id(e)] = i
 
         elif et == "request_body":
             # the POST body line itself usually logs as "(null)"; its user is the JSON "User" field.
@@ -355,7 +358,7 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
             if req is not None:
                 b.add(req)
             b.add(e)
-            b.open_pos = req_pos.pop(id(req), i) if req is not None else i
+            b.open_pos = _stream_pos(req) if req is not None else _stream_pos(e)
             open_by_key[key] = b
             current_by_thread[th] = key
 
@@ -366,7 +369,7 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
                 b = open_by_key.get(key)
                 if b is None:
                     b = _TxnBuilder()
-                    b.open_pos = i
+                    b.open_pos = _stream_pos(e)
                     open_by_key[key] = b
                 current_by_thread[th] = key
             else:
@@ -376,7 +379,7 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
                 if b is None:
                     key = (th, None, i)  # anonymous stream (no user seen yet on this thread)
                     b = _TxnBuilder()
-                    b.open_pos = i
+                    b.open_pos = _stream_pos(e)
                     open_by_key[key] = b
                     current_by_thread[th] = key
             b.add(e)
@@ -385,7 +388,7 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
                 req = take_by_user(bu)
                 if req is not None:
                     b.add(req)
-                    b.open_pos = req_pos.pop(id(req), b.open_pos)  # opened when its REQUEST arrived
+                    b.open_pos = _stream_pos(req)  # opened when its REQUEST arrived
 
         elif et == "response":
             # async: no payload user/id, but the log4net header carries the context user. Restrict
@@ -405,8 +408,8 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
 
             best_key = min(u_keys, key=lambda k: open_by_key[k].open_pos, default=None)
             best_key_pos = open_by_key[best_key].open_pos if best_key is not None else None
-            best_req = min(u_reqs, key=lambda r: req_pos.get(id(r), 0), default=None)
-            best_req_pos = req_pos.get(id(best_req)) if best_req is not None else None
+            best_req = min(u_reqs, key=_stream_pos, default=None)
+            best_req_pos = _stream_pos(best_req) if best_req is not None else None
 
             if best_key is not None and (best_req_pos is None or best_key_pos <= best_req_pos):
                 b = close(best_key)
@@ -417,16 +420,22 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
                 b = _TxnBuilder()
                 b.add(best_req)
                 b.add(e)
+                # S2: set, where it previously stayed at the -1 default. Harmless while it was a batch
+                # index, because these builders are appended immediately and never compared again; not
+                # harmless once S4 reads the field back from a table and expects it to mean something.
+                b.open_pos = _stream_pos(best_req)
                 builders.append(b)
             else:
                 b = _TxnBuilder()
                 b.add(e)
+                b.open_pos = _stream_pos(e)     # S2: an orphan response opens at its own position
                 builders.append(b)
 
     builders.extend(open_by_key.values())
     for r in pending_reqs:  # REQUESTs with no work and no RESPONSE -> their own (incomplete) txn
         b = _TxnBuilder()
         b.add(r)
+        b.open_pos = _stream_pos(r)   # S2: as above - every builder now carries a real position
         builders.append(b)
     return builders
 
@@ -448,12 +457,45 @@ def _txn_id(entries: list[LogEntry]) -> uuid.UUID:
 
 
 def _entry_stream_order(e: LogEntry):
-    """Chronological order within one transaction, NULL timestamps first and stable on line number.
+    """Chronological order within one transaction, NULL timestamps LAST and stable on line number.
 
     The `is None` flag rather than the raw value because Python refuses to compare None to a datetime,
     and a transaction can legitimately contain an entry whose timestamp did not parse.
+
+    (This docstring said "NULL timestamps first" until S2. It was wrong and always had been: `False`
+    sorts before `True`, so an entry that HAS a timestamp comes first and the unparsable ones trail.
+    The behaviour is right and is what the renderer wants; only the sentence was inverted.)
     """
     return (e.timestamp is None, e.timestamp, e.line_number or 0)
+
+
+def _stream_pos(e: LogEntry):
+    """S2. Where this entry sits in the tenant's stream, as a DURABLE comparable tuple.
+
+    Derived from the entry rather than assigned by whoever is looping over it, which is the entire
+    point: nothing has to be remembered, so nothing can be remembered wrongly across a process
+    boundary. S4 reads this state back from a table, and the two things it replaced could not survive
+    that at all:
+
+        _TxnBuilder.open_pos     an index within the CURRENT BATCH. Batch 2's index 0 is not batch 1's
+                                 index 0, so the number means nothing once written down.
+        req_pos[id(entry)]       a CPython object address. Not stable across processes, and not even
+                                 stable within one, since CPython reuses addresses after collection.
+
+    `source_file` is included and is deliberately NOT in `_entry_stream_order` above. That helper
+    orders entries WITHIN one transaction, where the file is effectively constant; this one is a key
+    across a whole window, which routinely spans several files. Without the filename two entries on
+    line 5 of two different files compare equal - exactly the collision a durable key must not have.
+
+    Ordering matches the ORDER BY of both entry reads, so the grouper's notion of "earlier" agrees with
+    the order it receives rows in.
+    """
+    return (e.timestamp is None, e.timestamp, e.source_file or "", e.line_number or 0)
+
+
+#: A position that sorts before every real one, for a builder opened by something with no request to
+#: attribute it to. `False` because a real NULL-timestamp entry carries `True` and must sort after.
+_NO_POS = (False, datetime.min.replace(tzinfo=timezone.utc), "", -1)
 
 
 def _clash_window(timestamps) -> "time_bounds.UtcWindow | None":
