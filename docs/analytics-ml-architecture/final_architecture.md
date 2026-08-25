@@ -1889,7 +1889,7 @@ What follows is what remains, in dependency order rather than in the order it wa
 | **R1** | **BUILT 2026-08-25** - both registry tables, the shared capture predicate in all three readers, `transactions` in the fold filter. See 18g. | nothing | done |
 | **R1b** | **BUILT 2026-08-25** - `attr:` paths for dimensions and measures, registry-gated, numeric coercion. See 18h. | R1 | done |
 | **R3** | **BUILT 2026-08-25** - response scalars into `attributes`, namespaced, seeded allowlist with a credential veto. See 18i. | R1, R1b | done |
-| **R2** | Frontend registry screen: 7 transactions, three switches, the discovery list | R1, R3 | no |
+| **R2** | **BUILT 2026-08-25** - registry API, `/analytics/registry`, and `show` wired to the rollup gate. See 18j. | R1, R3 | done |
 | **S2-S4** | The rest of the Stage 2 redesign | R-work landed first: both change `consume.py`, and S1 moves `_FRONTIER_COLUMN` off `created_at` | no |
 | **R4** | Per-record expansion for transactions with `Expand` ticked | R3 | no |
 | **M1** | ML: `analytics_feature_sets`, `analytics_predictions`, `ml:features-v1` | R3 | no |
