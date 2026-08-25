@@ -1892,7 +1892,8 @@ What follows is what remains, in dependency order rather than in the order it wa
 | **R2** | **BUILT 2026-08-25** - registry API, `/analytics/registry`, and `show` wired to the rollup gate. See 18j. | R1, R3 | done |
 | **S2** | **BUILT 2026-08-25** - durable stream position; `req_pos` deleted rather than persisted. See 18k. | S1 | done |
 | **S3** | **BUILT 2026-08-25** - fingerprint skip and UPDATE in place. 3 identical regroups now write 0 rows. See 18l. | S2 | done |
-| **S4** | The stream lookup, removing the re-derive from the hot path | S3 | no |
+| **S4a** | **BUILT 2026-08-25, SHADOW** - state persisted and compared; re-derive still authoritative. See 18m. | S3 | done |
+| **S4b** | Promote the lookup. Needs a week of `agreed: true` with `seeded_streams` non-zero on LIVE traffic. | S4a | no |
 | **R4** | Per-record expansion for transactions with `Expand` ticked | R3 | no |
 | **M1** | ML: `analytics_feature_sets`, `analytics_predictions`, `ml:features-v1` | R3 | no |
 
@@ -2675,6 +2676,95 @@ still reads `created_at` and should move to `updated_at` - S1 already moved the 
 which was the one that failed unsafe. That remains open.
 
 S4, the lookup, is next and is the only stage that removes the re-derive from the hot path.
+
+## 18m. S4a as BUILT, 2026-08-25 - in SHADOW, promoting nothing
+
+**Shipped.** Migration `f4c82e9b6d31` (`log_open_stream`, `log_pending_request`), 24 tests in
+`tests/test_stage2_stream_lookup_chunk60.py`, full suite 1,268.
+
+`stage2_stream_lookup` defaults to `shadow`. The state is written and read, a second grouping is seeded
+from it and COMPARED, and the re-derive stays authoritative. Verified on real data: the shadow pass
+changed the transaction count, the assignment count and the `updated_at` digest by exactly nothing.
+
+### Why shadow rather than on
+
+S3 made the six known miss modes PERMANENT. Nothing revisits a row whose fingerprint matched, so a
+split that should have merged never heals - whereas before S3 it healed on the next of 22 rebuilds,
+which is precisely why none has ever been observed in production. Promoting without measuring
+divergence would make a silent split unrecoverable.
+
+The mode is three-valued (`off` / `shadow` / `on`) and an unrecognised value falls back to **shadow,
+not off**. That is deliberate: a typo falling through to `off` would look exactly like S4 working
+perfectly and never diverging, which is the most misleading failure available.
+
+### The honest limitation, and it is the main finding
+
+**The seeded path could not be exercised on this development data at all.**
+
+Re-running one window refuses every stream as `clock_went_backwards` - correctly, since state saved
+from a window sits inside it and seeding from your own output would be circular. So `agreed: True` on
+a single window is VACUOUSLY true: both runs were unseeded.
+
+Splitting into two adjacent windows refuses all 30 as `quiet_gap`: window A's newest stream ends
+2026-05-19 12:42 and window B starts 2026-05-30, an eleven-day gap. The guard is behaving exactly as
+designed; this dataset simply contains no stream that survives from one window into the next.
+
+So the mechanism is proven by a unit test - a REQUEST in one window and its RESPONSE in another become
+ONE transaction when seeded, and remain two when not - and **not** by live measurement. That is the
+whole argument for shadow mode: divergence can only be measured where windows are minutes apart, which
+is production and not a dev snapshot.
+
+| Run | stored | seeded | refusals | agreed |
+|---|---|---|---|---|
+| same window twice | 98 | 0 | `clock_went_backwards: 98` | vacuously |
+| two adjacent windows | 30 | 0 | `quiet_gap: 30` | vacuously |
+
+### Refusals are counted BY REASON
+
+"The guard declined 900 times because the tenant was idle" and "declined 900 times because the clock
+went backwards" are the same number and completely different problems. So the report carries
+`{quiet_gap: n, clock_went_backwards: n, no_timestamp: n}` rather than a single tally.
+
+### The bug the unique constraint caught
+
+`_group`'s `open_by_key` is a dict, so at most ONE stream per `(thread, user_ctx)` can be open. But the
+list S4 saves from holds FINISHED builders too, and a thread that flipped A to B and back contributes
+two builders under the same key - which violated `uq_log_open_stream_key` on the first real run.
+
+The save now keys rather than appends, newest wins. That is also the right answer rather than merely a
+way to satisfy the constraint: the most recent activity on a key IS the stream a following entry would
+join. `NULLS NOT DISTINCT` is what made this a loud failure instead of a silently duplicated stream.
+
+### Replace, never mutate
+
+Read state, seed, write the RESULT back - all inside `regroup_window`'s existing transaction. The state
+can therefore never be AHEAD of the assignments: either both commit or neither does. A failure leaves
+the ticket open, the retry reads the same pre-failure state, and it converges. An incremental mutation
+would leave state describing entries that were never assigned, with nothing to notice.
+
+State is saved from the AUTHORITATIVE grouping, not the seeded one, or the next window would seed from
+a grouping nobody persisted.
+
+### The reaper, which is required rather than optional
+
+`evict_stale` closes a stream when an ENTRY ARRIVES, so a tenant that stops ingesting leaves its rows
+forever. Derived state could not leak; this can. The sweep runs in the stitch tick, keyed on
+`updated_at` rather than `last_entry_ts` - what matters is how long ago the GROUPER touched the row, not
+how old the log line was, and a backfill of month-old data is actively in use.
+
+`count(*)` on both tables is reported on every sweep, because it is the only health signal these tables
+have and there is no upstream event to catch a leak.
+
+### What promotion needs
+
+A week of `agreed: true` on real traffic WITH `seeded_streams` non-zero. The second half is the part
+this build cannot supply, and the first is meaningless without it.
+
+`_DERIVE_VERSION` stayed at 1. Adding `_group`'s `seed` parameter changed the pinned source digest, and
+the pin fired - working as intended. With no seed the added loop iterates an empty tuple, so every
+existing row derives exactly as before and every stored fingerprint stays valid. Asserted by a test
+rather than reasoned about, because "my change is a no-op" is the belief that makes an unbumped version
+dangerous.
 
 ## Also corrected while measuring
 

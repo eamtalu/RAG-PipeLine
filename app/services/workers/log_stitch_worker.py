@@ -36,6 +36,7 @@ from app.config.database import async_session
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.services.mnp_log_ingestion.pipeline.derive_transactions import finalize_pending
 from app.services.mnp_log_ingestion.pipeline import sealer
+from app.services.mnp_log_ingestion.pipeline import stream_state
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,20 @@ async def _tick() -> None:
         seal_stats = {}
     if seal_stats.get("sealed") or seal_stats.get("failed"):
         logger.info("Sealer: %s", seal_stats)
+
+    # S4's TTL sweep. Required rather than optional (section 18d): `evict_stale` closes a stream when
+    # an ENTRY ARRIVES, so a tenant that stops ingesting leaves its rows behind forever. Derived state
+    # could not leak because it was rebuilt from nothing every batch; persisted state can.
+    #
+    # Its failures are swallowed like the sealer's - a leak is a slow problem, and letting it stop
+    # stitching would turn a slow problem into an outage.
+    try:
+        reaped = await stream_state.reap()
+    except Exception:
+        logger.exception("Stage 2 stream-state reaper failed; stitching continues")
+        reaped = {}
+    if reaped.get("streams_reaped") or reaped.get("pending_reaped"):
+        logger.info("Stream state: %s", reaped)
 
     try:
         stats = await drain_once()

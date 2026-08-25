@@ -36,7 +36,8 @@ from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun, LogRegroupRunStatus
 from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
 from app.services.mnp_log_ingestion.pipeline import (assignments, continuity,
-                                                    fingerprints, time_bounds)
+                                                    fingerprints, stream_state,
+                                                    time_bounds)
 from app.services.queueing import retry_policy
 from app.services.analytics import pending_windows as analytics_tickets
 
@@ -236,7 +237,7 @@ def _entry_user(e: LogEntry) -> str | None:
     return None
 
 
-def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
+def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilder]:
     """Thread+user-aware grouping that demultiplexes concurrent requests.
 
     The M3 server processes many users at once, so the timestamp-ordered stream interleaves them,
@@ -263,7 +264,23 @@ def _group(entries: list[LogEntry]) -> list[_TxnBuilder]:
     # never saw a user (then the stream position is appended to keep them distinct).
     open_by_key: dict[tuple, _TxnBuilder] = {}
     current_by_thread: dict[str | None, tuple] = {}  # thread -> its currently-active key (null inherit)
-    pending_reqs: list[LogEntry] = []  # MoveNext REQUEST lines awaiting their processing thread
+
+    # S4. `seed` is state read back from `log_open_stream`, so a stream can CONTINUE across a process
+    # boundary instead of being re-derived from a padded window. Absent (the default) reproduces the
+    # pre-S4 behaviour exactly, which is what keeps every existing caller and test unaffected.
+    #
+    # Only streams the guard already accepted are ever passed in; `stream_state.usable` does that
+    # filtering, so nothing here has to reason about clocks.
+    for st in (seed or {}).get("streams", ()):
+        b = _TxnBuilder()
+        b.open_pos = st["open_pos"]
+        for e in st["entries"]:
+            b.add(e)
+        key = (st["thread"], st["user_ctx"])
+        open_by_key[key] = b
+        if st["is_current"]:
+            current_by_thread[st["thread"]] = key
+    pending_reqs: list[LogEntry] = list((seed or {}).get("pending") or [])
     # S2: there is no `req_pos` map any more. It existed to remember where in the stream each pending
     # request arrived, which is a property of the ENTRY - so it is derived by `_stream_pos` rather than
     # stored. That also removed a leak: the old `req_pos.pop(id(r), -1)` left an orphaned key behind
@@ -980,6 +997,86 @@ def _regroup_pad() -> timedelta:
     return timedelta(seconds=max(settings.log_regroup_pad_seconds, settings.log_seal_window_seconds))
 
 
+async def _shadow_compare(db: AsyncSession, customer_code: str, rows: list[LogEntry],
+                          authoritative: list[_TxnBuilder], window_lo: datetime,
+                          s4_mode: str) -> dict:
+    """S4a. Group the same entries a second time from the STORED state, and report the difference.
+
+    What is compared is the PARTITION - which entries ended up together - not builder identity, since
+    those are new objects on both sides. Compared as a set of frozensets so a different iteration order
+    is not mistaken for a different grouping.
+
+    The point of shadow mode is not "do they match" but "how, and how often, do they not". So the
+    refusal reasons the guard produced are reported too: "the guard declined 900 times because the
+    tenant was idle" and "declined 900 times because the clock went backwards" are the same number and
+    completely different problems.
+
+    Then the state is saved from the AUTHORITATIVE grouping, not from the seeded one. That matters: the
+    stored state has to describe what was actually written, or the next window would seed from a
+    grouping nobody persisted.
+    """
+    state = await stream_state.load(db, customer_code, window_lo)
+    seed = {"streams": [
+        {"thread": r.thread, "user_ctx": r.user_ctx, "is_current": r.is_current,
+         "open_pos": (r.open_ts_is_null, r.open_ts, r.open_source_file, r.open_line_number),
+         "entries": state["entries_by_txn"].get(r.transaction_id, [])}
+        for r in state["streams"]],
+        "pending": state["pending"]}
+
+    seeded = _group(rows, seed=seed)
+
+    def partition(bs):
+        return {frozenset(str(e.id) for e in b.entries) for b in bs}
+
+    a, b = partition(authoritative), partition(seeded)
+    agreed = a == b
+    report = {"mode": s4_mode, "agreed": agreed,
+              "stored_streams": state["stored_streams"], "seeded_streams": len(state["streams"]),
+              "refusals": state["refusals"],
+              "groups_authoritative": len(authoritative), "groups_seeded": len(seeded)}
+    if not agreed:
+        # Logged at WARNING with counts rather than contents: a divergence report that dumps entry ids
+        # is unreadable at the volume this runs at, and the counts are what decides whether to promote.
+        report["only_authoritative"] = len(a - b)
+        report["only_seeded"] = len(b - a)
+        logger.warning("Stage 2 [%s]: S4 shadow DIVERGED - %d grouping(s) only in the re-derive, "
+                       "%d only in the seeded run. Not promoting. %s",
+                       customer_code, len(a - b), len(b - a), report)
+
+    # Save from the authoritative grouping. `_group` leaves finished builders in its return, so an OPEN
+    # stream is one whose transaction is still receiving entries - which after S3 is precisely a row
+    # that is not sealed. Recomputed here rather than tracked, because the sealer is the authority on
+    # what is settled and duplicating that decision is how the two drift apart.
+    # KEYED, not appended, and the unique constraint is what taught me that. `_group`'s `open_by_key`
+    # is a dict, so at most ONE stream per (thread, user_ctx) can be open at a time - but the list this
+    # iterates holds FINISHED builders too, and a thread that flipped A -> B -> A contributes two
+    # builders under the same key. Appending both violated `uq_log_open_stream_key` immediately.
+    #
+    # The newest wins, which is also the right answer rather than merely a way to satisfy the
+    # constraint: the most recent activity on a key IS the stream a following entry would join.
+    by_key: dict[tuple, dict] = {}
+    for bldr in authoritative:
+        if not bldr.entries:
+            continue
+        last = max((e.timestamp for e in bldr.entries if e.timestamp is not None), default=None)
+        if last is None or (window_lo - last) >= timedelta(seconds=settings.log_open_gap_seconds):
+            continue          # already past the gap, so it can never receive another entry
+        anchor = bldr.entries[0]
+        key = (anchor.thread, anchor.user_ctx)
+        prior = by_key.get(key)
+        if prior is not None and prior["last_entry_ts"] >= last:
+            continue
+        by_key[key] = {
+            "thread": anchor.thread, "user_ctx": anchor.user_ctx,
+            "transaction_id": _txn_id(bldr.entries), "has_request": any(
+                e.entry_type.value == "request" for e in bldr.entries),
+            "last_entry_ts": last, "open_pos": bldr.open_pos, "is_current": True}
+    open_streams = list(by_key.values())
+    await stream_state.save(db, customer_code, streams=open_streams, pending=[])
+    report["saved_streams"] = len(open_streams)
+    return report
+
+
 async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi: datetime,
                          commit: bool = True) -> dict:
     """SCOPED rebuild for ONE customer over the time range a recent ingest touched ([lo, hi] = the
@@ -1120,7 +1217,27 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
         return {**stats, "customers": 0, "entries_scanned": 0,
                 "transactions_created": 0, "transactions_sealed": 0}
     seal_cutoff, abandon_cutoff = await _cutoffs(db, customer_code)
-    result = await _persist(db, _group(rows), customer_code, seal_cutoff, abandon_cutoff,
+    # S4. The re-derive is what actually persists, in every mode. Shadow mode additionally SEEDS a
+    # second grouping from the stored stream state and compares the two, so divergence is measured on
+    # real traffic before anything is promoted.
+    #
+    # The re-derive stays authoritative because S3 made the six known miss modes PERMANENT: nothing
+    # revisits a row whose fingerprint matched, so a split that should have merged never heals. Before
+    # S3 it healed on the next of 22 rebuilds, which is exactly why none has ever been observed.
+    groups = _group(rows)
+    s4_mode = stream_state.mode()
+    if s4_mode != stream_state.OFF:
+        try:
+            stats["s4"] = await _shadow_compare(db, customer_code, rows, groups, lo_p, s4_mode)
+        except Exception:
+            # Swallowed on purpose, and only here. Shadow mode is a MEASUREMENT; a fault in it must
+            # never fail a stitch that would otherwise have succeeded. In `on` mode this would be
+            # different, which is one more reason `on` is not the default yet.
+            logger.exception("Stage 2 [%s]: S4 shadow comparison failed; stitching continues",
+                             customer_code)
+            stats["s4"] = {"error": True}
+
+    result = await _persist(db, groups, customer_code, seal_cutoff, abandon_cutoff,
                             cont, stored=stored)
     if commit:
         await db.commit()

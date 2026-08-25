@@ -172,7 +172,13 @@ def _derivation_digest() -> str:
 #: Regenerate ONLY together with a `_DERIVE_VERSION` bump. If this test fails, the question to answer
 #: is "does my change alter what a transaction's columns say?" - if yes, bump the version AND this
 #: constant; if no (a comment, a rename), update this constant alone.
-_EXPECTED_DERIVATION = "cba942a8ebe602bb"
+#:
+#: S4 changed this digest by adding `_group`'s `seed` parameter, and `_DERIVE_VERSION` was deliberately
+#: NOT bumped: with no seed the added loop iterates an empty tuple, so every existing row derives
+#: exactly as before and every stored fingerprint stays valid. Verified by
+#: `test_an_unseeded_group_is_byte_identical_to_the_pre_s4_behaviour` rather than reasoned about,
+#: because "my change is a no-op" is precisely the belief that makes an unbumped version dangerous.
+_EXPECTED_DERIVATION = "13dd934f33a1ef47"
 
 
 def test_the_derivation_is_pinned_to_the_derive_version():
@@ -230,3 +236,38 @@ def test_the_update_is_addressed_by_the_full_partition_key():
     src = inspect.getsource(dt._update_transaction)
     assert "LogTransaction.started_at" in src, "the update must key on the partition column"
     assert "is_(None)" in src, "the NULL started_at case needs IS NULL, not = NULL"
+
+
+def test_an_unseeded_group_is_byte_identical_to_the_pre_s4_behaviour():
+    """The claim that let S4 update the pinned digest WITHOUT bumping `_DERIVE_VERSION`.
+
+    S4 added a `seed` parameter to `_group`, so the derivation's source changed and the pin fired -
+    which is the safeguard working. The question it forces is "does this alter what a transaction's
+    columns SAY?", and the answer is no: with no seed the added loop iterates an empty tuple, so every
+    existing row derives exactly as before and every stored fingerprint stays valid.
+
+    Asserted rather than reasoned about, because "my change is a no-op" is precisely the belief that
+    makes an unbumped version dangerous.
+    """
+    import uuid as _u
+    from datetime import timedelta as _td
+    from app.persistence.models.log_entry import LogEntry, LogEntryType
+
+    def _e(kind, at, line, reqid=None):
+        return LogEntry(id=_u.uuid4(), customer_code="c59", job_id=_JOB, timestamp=at,
+                        source_file="a.log", line_number=line, level="INFO", raw_body="x",
+                        message="x", entry_hash=_u.uuid4().hex, entry_type=kind,
+                        thread="T1", user_ctx="amin",
+                        fields={"reqid": reqid} if reqid else {})
+
+    entries = [_e(LogEntryType.request, T0, 1, "R1"),
+               _e(LogEntryType.info, T0 + _td(seconds=1), 2),
+               _e(LogEntryType.response, T0 + _td(seconds=2), 3, "R1")]
+
+    def shape(groups):
+        return [(sorted(str(e.id) for e in g.entries), g.open_pos) for g in groups]
+
+    assert shape(dt._group(entries)) == shape(dt._group(entries, seed=None))
+    assert shape(dt._group(entries)) == shape(dt._group(entries, seed={}))
+    assert shape(dt._group(entries)) == shape(
+        dt._group(entries, seed={"streams": [], "pending": []}))

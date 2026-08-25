@@ -104,6 +104,22 @@ class Settings(BaseSettings):
     # SHOULD have been rewritten and was not - which is invisible until somebody questions a number.
     # Turning this off is the fastest way to rule S3 out while looking at something else.
     stage2_fingerprint_skip: bool = True
+    # S4's mode, and it is a THREE-valued switch rather than a boolean on purpose.
+    #
+    #   "off"     the state tables are not written or read at all. Pre-S4 behaviour.
+    #   "shadow"  state is written and read, the seeded grouping is COMPARED against the re-derive,
+    #             divergence is logged - and the RE-DERIVE stays authoritative.
+    #   "on"      the seeded grouping is used, with the re-derive kept as the fallback.
+    #
+    # It ships as "shadow" because S3 made the six known miss modes PERMANENT: nothing revisits a row
+    # whose fingerprint matched, so a split that should have merged never heals. Before S3 it healed on
+    # the next of 22 rebuilds, which is why none has ever been observed. Promoting without measuring
+    # divergence on real traffic would make a silent split unrecoverable.
+    stage2_stream_lookup: str = "shadow"
+    # TTL for the S4 state tables. Required rather than optional (section 18d): `evict_stale` closes a
+    # stream when an ENTRY ARRIVES, so a tenant that stops ingesting leaves its streams open forever
+    # and the rows leak. Derived state cannot leak; persisted state can.
+    stage2_stream_ttl_seconds: int = 86400
     # How far back `_cutoffs` probes for the newest entry before giving up and scanning unbounded.
     # Once log_entries is partitioned by UTC day, an unbounded max(timestamp) opens all 60 partitions
     # on every regroup cycle; this bound prunes it to the last few days. It must comfortably exceed
