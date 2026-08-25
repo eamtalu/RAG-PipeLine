@@ -1887,7 +1887,7 @@ What follows is what remains, in dependency order rather than in the order it wa
 |---|---|---|---|
 | **S1** | **BUILT 2026-08-24** - explicit sealer, `updated_at`, and the cursor moved onto it. See 18f. | nothing | done |
 | **R1** | **BUILT 2026-08-25** - both registry tables, the shared capture predicate in all three readers, `transactions` in the fold filter. See 18g. | nothing | done |
-| **R1b** | `attr:` dimension resolution, with `validate` checking the registry instead of `FACT_FIELDS` | R1 | no, but R3 is pointless without it |
+| **R1b** | **BUILT 2026-08-25** - `attr:` paths for dimensions and measures, registry-gated, numeric coercion. See 18h. | R1 | done |
 | **R3** | Response scalar capture, namespaced `resp.*` / `mi.*`, allowlist-gated, seeded from the 145 measured keys minus credentials | R1, R1b | **YES - 60 days** |
 | **R2** | Frontend registry screen: 7 transactions, three switches, the discovery list | R1, R3 | no |
 | **S2-S4** | The rest of the Stage 2 redesign | R-work landed first: both change `consume.py`, and S1 moves `_FRONTIER_COLUMN` off `created_at` | no |
@@ -2243,6 +2243,80 @@ The fixture now also clears state rows whose frontier is NULL, scoped so a genui
 `show` is expressible (`transaction_filter` on the definition, `transactions` beside `methods` in the stored filter) and is NOT yet wired to the registry's `show` column.
 A metric must currently name its transactions explicitly.
 Connecting the column to definition generation belongs with R2, the screen that sets it.
+
+## 18h. R1b as BUILT, 2026-08-25
+
+**Shipped.** No migration - R1b is pure code over R1's tables. 33 tests in
+`tests/test_analytics_attr_dimensions_chunk55.py`, full suite 1,141 passing.
+
+A metric may now name `attr:resp.BaseUoM` as a dimension or `attr:resp.QuantityOnHand` as a measure
+field, resolved out of `attributes`, gated by the field registry.
+That closes the gap 18b recorded: without it R3 captures response scalars that nothing can read.
+
+### One resolution point, because there were two read points
+
+```
+definition.fold:297      value = row.get(m.field)          measures
+rollups._dim_key:125     row.get(name) per dimension       dimensions
+```
+
+Both now go through `contract.resolve_field`, and both normalise through `contract.dimension_value`.
+Writing it twice is exactly how the same value ends up in two rollup buckets and one item's total
+silently halves - which is decision C's one hard requirement (18e), now enforced by a shared helper
+rather than by discipline.
+
+`read.py`'s ad-hoc live path needed no change: it builds facts as a flat column dict and routes through
+`group_fold`, so it inherits the resolution.
+The pre-aggregated path reads `dim1..dim4`, which already hold the resolved string.
+
+### The find: a JSONB measure value can be a string
+
+A typed measure field is already numeric - `quantity` is a `Decimal`, `duration_ms` an `int`.
+A value out of JSONB is whatever the WMS logged, and the measured M3 records carry `"STQT": "624"`.
+So `bucket[Role.sum_value] += value` would have raised `TypeError` on the first such row, inside the
+fold, inside the worker's transaction, rolling back a whole window because one field was quoted.
+
+`contract.numeric_or_none` coerces, and a value that cannot be coerced is SKIPPED under the existing
+"absent is never zero" rule rather than counted as zero.
+Skipping is the load-bearing half: a denominator drawn from rows that contributed no value makes every
+rate wrong in a way that looks entirely plausible.
+`bool` is rejected explicitly, because it subclasses `int` in Python and would otherwise fold a flag in
+as 1.
+
+### Purity kept, and it fails closed
+
+`definition.py` still has no database access - a test asserts it, checked against the CODE with comments
+and docstrings stripped, since `validate`'s docstring has to explain that the registry is the authority.
+`validate` takes `known_attributes` as an argument and the callers supply it:
+`registry.active_definitions` reads it once per tenant per fold, and `POST /metrics` reads it at save
+time so a typo is refused with a message naming the field.
+
+Omitting the argument refuses EVERY `attr:` path.
+A caller who forgot it must not accidentally accept any attribute, because that would make the
+allowlist optional for a table that is `KEEP_FOREVER`.
+
+**Discovered is not approved.** A field appears in the registry with `captured = false`, and `validate`
+reads only the rows where it is true. So discovery never authorises anything by itself, which is the
+property the whole allowlist-that-discovers design rests on.
+
+### E2E
+
+| Step | Result |
+|---|---|
+| nothing approved | validate REFUSES, 2 problems, each naming its field |
+| both fields discovered, `captured = false` | still refused |
+| both approved | accepted |
+| stored and reloaded via `active_definitions` | round-trips intact |
+| folded, `"1974.0"` and `26` and `"not a number"` | KG and EA are SEPARATE buckets; the string sums; the non-numeric row is skipped, not zero |
+
+Before R1b all three rows collapsed into one bucket keyed `None`.
+
+### Not done
+
+`show` is still not wired to the registry column - a metric names its transactions explicitly. That
+belongs with R2, the screen that sets it. Promotion to a typed column (the second half of decision C)
+is also not built; `attr:` is the explore half, and the shared `dimension_value` is what will make the
+promoted column agree with it.
 
 ## Also corrected while measuring
 

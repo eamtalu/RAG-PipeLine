@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.analytics_metric import AnalyticsMetric
+from app.services.analytics import capture
 from app.services.analytics import contract as c
 from app.services.analytics import definition as d
 
@@ -101,6 +102,12 @@ async def active_definitions(db: AsyncSession, customer_code: str
             AnalyticsMetric.customer_code == customer_code,
             AnalyticsMetric.status == d.Status.active.value))).scalars().all()
 
+    # R1b. Read ONCE for the whole tenant rather than per definition: it is a small indexed read, but
+    # per definition it would be N queries on the hot fold path for an answer that cannot differ
+    # between them. A definition naming an attribute nobody has approved is skipped and logged by the
+    # same path that skips a malformed one - it does not stop the tenant's other metrics folding.
+    known = await capture.approved_attributes(db, customer_code)
+
     out: list[tuple[uuid.UUID, d.MetricDefinition]] = []
     for row in rows:
         try:
@@ -109,7 +116,7 @@ async def active_definitions(db: AsyncSession, customer_code: str
             logger.error("Analytics: registry row %s (%r) for %s could not be read (%s) - skipped; "
                          "the tenant's other metrics still fold", row.id, row.name, customer_code, exc)
             continue
-        problems = d.validate(definition)
+        problems = d.validate(definition, known_attributes=known)
         if problems:
             logger.error("Analytics: definition %r for %s is invalid and will not be folded: %s",
                          row.name, customer_code, "; ".join(problems))

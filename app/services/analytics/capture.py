@@ -50,6 +50,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
 from app.persistence.models.log_transaction import LogTransaction
 
@@ -149,3 +150,22 @@ async def observe_names(db: AsyncSession, customer_code: str,
                     "capture=on/show=off, awaiting review: %s",
                     len(added), customer_code, ", ".join(sorted(added)))
     return added
+
+
+async def approved_attributes(db: AsyncSession, customer_code: str) -> frozenset[str]:
+    """The `attributes` keys this tenant has ticked for capture (R1b).
+
+    Fed to `definition.validate` as `known_attributes`, so a metric may group by or measure
+    `attr:resp.BaseUoM` only once somebody has approved that field. The registry is the authority and
+    `definition.py` never learns it exists - it takes the set as an argument, which is what keeps that
+    module free of database access.
+
+    Returns the FULL key including its namespace prefix (`resp.QuantityOnHand`, `mi.STQT`), because
+    that is what a definition names after `attr:` and matching a bare name across namespaces would let
+    an approved request field silently authorise an unapproved response one.
+    """
+    rows = (await db.execute(
+        select(AnalyticsFieldRegistry.field).where(
+            AnalyticsFieldRegistry.customer_code == customer_code,
+            AnalyticsFieldRegistry.captured.is_(True)))).scalars().all()
+    return frozenset(rows)

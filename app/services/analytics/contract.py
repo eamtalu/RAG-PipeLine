@@ -155,3 +155,99 @@ def usable_dimension_value(transaction_type: str | None) -> bool:
     rejecting the row would silently drop real stock counts.
     """
     return bool(transaction_type) and not is_placeholder_type(transaction_type)
+
+
+# ============================================================== R1b: attribute-backed fields
+#: The prefix that says "this name is a key inside `attributes`, not a typed fact column".
+#:
+#: A prefix rather than a bare name for two reasons. A bare `resp.BaseUoM` could not be told apart
+#: from a typed column that happened to contain a dot, so the resolver would have to guess. And in a
+#: stored definition the two read paths are then distinguishable at a glance, which matters when
+#: someone is reading a registry row months later trying to work out why a chart is empty.
+ATTR_PREFIX = "attr:"
+
+
+def is_attr_path(name: str) -> bool:
+    """Whether `name` addresses a key inside `attributes` rather than a typed column.
+
+    Checked on the full prefix INCLUDING the colon, so a legitimate column called `attr_like` is not
+    mistaken for a path. The colon cannot appear in a Python identifier, so no column name can collide
+    with this by accident.
+    """
+    return name.startswith(ATTR_PREFIX)
+
+
+def attr_key(name: str) -> str:
+    """The key inside `attributes` that `name` addresses. Only meaningful for an `attr:` path."""
+    return name[len(ATTR_PREFIX):]
+
+
+def resolve_field(row, name: str):
+    """One field of a fact row, whether it is a typed column or a key inside `attributes`.
+
+    THE single resolution point for both read paths - `definition.fold` for measures and
+    `rollups._dim_key` for dimensions. Written once here because those two resolving a name differently
+    is how the same value ends up in two rollup buckets, and one item's total silently halves.
+
+    A missing key is `None`, never an exception. A response that happens not to carry a field on one
+    call must not fail the whole window's fold; that is the existing "absent is never zero" rule
+    applied to a nested value.
+    """
+    if is_attr_path(name):
+        attributes = row.get("attributes")
+        if not isinstance(attributes, dict):
+            return None            # a fact assembled in memory may carry no `attributes` key at all
+        return attributes.get(attr_key(name))
+    return row.get(name)
+
+
+def numeric_or_none(raw) -> Decimal | None:
+    """`raw` as a Decimal, or None when it is not a number.
+
+    This exists because of a real difference between the two field kinds, not for symmetry. A typed
+    measure field is already numeric - `quantity` is a Decimal, `duration_ms` an int. A value out of
+    JSONB is whatever the WMS logged, and the live M3 records carry `"STQT": "624"`: a STRING. Without
+    coercion the first such row raises `TypeError` inside the fold, inside the worker's transaction,
+    rolling back a whole window because one field was quoted.
+
+    A value that cannot be coerced returns None, and `fold` then skips the row under the same "absent
+    is never zero" rule it already applies to a NULL quantity. Skipping rather than counting zero is
+    the load-bearing half: a denominator drawn from rows that contributed no value makes every rate
+    wrong in a way that looks entirely plausible.
+
+    `bool` is rejected explicitly. It is a subclass of `int` in Python, so a naive coercion would fold
+    a flag in as 1 and no test would notice until someone questioned a total.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, Decimal):
+        return raw
+    if isinstance(raw, int):
+        return Decimal(raw)
+    if isinstance(raw, float):
+        return Decimal(str(raw))       # via str, so 0.1 does not become 0.1000000000000000055511151
+    if isinstance(raw, str):
+        try:
+            return Decimal(raw.strip())
+        except (InvalidOperation, ValueError):
+            return None
+    return None
+
+
+def dimension_value(raw) -> str | None:
+    """`raw` as a dimension value: the ONE normalisation both read paths must share.
+
+    Decision C (section 18e) turns on this. Promotion copies rather than moves - `_FROM_ATTRIBUTES`
+    puts `attributes` on the fact and only then reads out of it - so for a while a value is reachable
+    both as `attr:resp.BaseUoM` and as a promoted `base_uom` column. If those two normalised
+    differently by so much as trimming or case, the same base UoM would land in two rollup rows and one
+    item's total would split in half, with both halves looking plausible.
+
+    Empty and whitespace-only collapse to None rather than to `""`. A JSONB field is frequently an
+    empty string where a typed column would be NULL, and two spellings of "no value" would split a
+    bucket exactly as two spellings of a real value would.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None

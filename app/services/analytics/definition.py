@@ -209,18 +209,44 @@ CONSUMPTION = MetricDefinition(
 _STATUSES = frozenset({"success", "soft", "error", "incomplete"})
 
 
-def validate(definition: MetricDefinition) -> list[str]:
+def validate(definition: MetricDefinition,
+             known_attributes: frozenset[str] | set[str] | None = None) -> list[str]:
     """Problems with `definition`, empty when it is registrable.
 
     Returns a list rather than raising: the interface shows all of them at once, and a half-valid
     definition should not be reported one error per save.
+
+    R1b. `known_attributes` are the `attributes` keys this tenant has APPROVED for capture, which in
+    practice is `analytics_field_registry` where `captured` is true. Passed in rather than queried
+    because this module has no database access and Phase 0 tests it without one - giving it a database
+    would end that property. The registry stays the authority; this module never learns it exists.
+
+    Omitting it refuses every `attr:` path. That is failing CLOSED, and it is deliberate: a caller who
+    forgot the argument must not accidentally accept any attribute path at all, because that would make
+    the allowlist optional for a table that is KEEP_FOREVER.
     """
     problems: list[str] = []
+    known = frozenset(known_attributes or ())
+
+    def _bad_field(name: str) -> str | None:
+        """Why `name` is not usable, or None when it is. Shared by dimensions and measure fields so
+        the two cannot drift into accepting different things."""
+        if contract.is_attr_path(name):
+            key = contract.attr_key(name)
+            if key not in known:
+                return (f"{name!r} names an attribute that is not approved: {key!r} is absent from "
+                        f"the field registry, so it is either a typo or a field nobody has ticked "
+                        f"for capture. Reading it would be silently empty rather than an error")
+            return None
+        if name not in contract.FACT_FIELDS:
+            return (f"{name!r} is not a field on the fact row: reading it would be silently empty "
+                    f"rather than an error")
+        return None
 
     for dim in definition.dimensions:
-        if dim not in contract.FACT_FIELDS:
-            problems.append(f"dimension {dim!r} is not a field on the fact row: a chart grouped by it "
-                            f"would be silently empty rather than an error")
+        bad = _bad_field(dim)
+        if bad:
+            problems.append(f"dimension {bad}")
 
     # Deliberately NOT validated against known transaction names. Unlike `dimensions`, which must name
     # a real fact field or the chart is silently empty, a transaction filter naming something not yet
@@ -231,8 +257,10 @@ def validate(definition: MetricDefinition) -> list[str]:
             problems.append(f"grain {grain!r} is not one of {', '.join(GRAINS)}")
 
     for m in definition.measures:
-        if m.field and m.field not in contract.FACT_FIELDS:
-            problems.append(f"measure {m.name!r} reads {m.field!r}, which is not on the fact row")
+        if m.field:
+            bad = _bad_field(m.field)
+            if bad:
+                problems.append(f"measure {m.name!r}: {bad}")
         if m.aggregation is not Aggregation.count and not m.field:
             problems.append(f"measure {m.name!r} is a {m.aggregation.value} but names no field")
         for st in sorted(m.statuses):
@@ -294,7 +322,14 @@ def fold(rows, definition: MetricDefinition) -> dict:
             if not _contributes(row, definition, m):
                 continue
             bucket = out[m.name]
-            value = row.get(m.field) if m.field else None
+            # R1b: resolved rather than read, so a measure may name `attr:resp.QuantityOnHand`, and
+            # coerced because a JSONB value is whatever the WMS logged - the live M3 records carry
+            # `"STQT": "624"`, a STRING, which would raise TypeError on `+=` below.
+            #
+            # A value that cannot be coerced is skipped by the SAME rule a NULL quantity already is.
+            # Skipping rather than counting zero is the load-bearing half: a denominator drawn from
+            # rows that contributed no value makes every rate wrong in a plausible-looking way.
+            value = contract.numeric_or_none(contract.resolve_field(row, m.field)) if m.field else None
             if m.field and value is None:
                 continue          # absent is never zero, so it contributes to nothing at all
             if Role.count_value in bucket:

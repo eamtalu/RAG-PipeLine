@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.persistence.models.analytics_fact import AnalyticsFact
 from app.persistence.models.analytics_rollup import (DIMENSION_SLOTS, AnalyticsDailyRollup,
                                                      AnalyticsHourlyRollup, AnalyticsMonthlyRollup)
+from app.services.analytics import contract as c
 from app.services.analytics import definition as d
 from app.services.analytics import diff as dd
 
@@ -121,10 +122,16 @@ def _dim_key(row: Mapping[str, Any], definition: d.MetricDefinition) -> DimKey:
 
     Padded rather than truncated-to-length so the tuple length is stable across definitions, which is
     what lets one insert path serve them all.
+
+    R1b: resolved through `contract.resolve_field`, so a dimension may name a key inside `attributes`
+    as `attr:resp.BaseUoM`. Normalised through `contract.dimension_value`, which is the SAME helper the
+    promoted-column path uses - if the two differed by so much as trimming, one item's total would
+    split across two buckets once a field was promoted (decision C, section 18e).
     """
-    values = [row.get(name) for name in definition.dimensions[:DIMENSION_SLOTS]]
+    values = [c.dimension_value(c.resolve_field(row, name))
+              for name in definition.dimensions[:DIMENSION_SLOTS]]
     values += [None] * (DIMENSION_SLOTS - len(values))
-    return tuple(None if v is None else str(v) for v in values)
+    return tuple(values)
 
 
 def group_fold(rows: Iterable[Mapping[str, Any]], definition: d.MetricDefinition, bucket_of

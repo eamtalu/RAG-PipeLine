@@ -36,6 +36,7 @@ from app.api.deps import get_current_customer
 from app.config.database import get_session
 from app.persistence.models.analytics_metric import AnalyticsMetric
 from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
+from app.services.analytics import capture
 from app.services.analytics import definition as d
 from app.services.analytics import read as n6
 from app.services.analytics import reconcile as rc
@@ -189,7 +190,11 @@ async def create_metric(payload: dict = Body(...),
     if not definition.measures:
         raise HTTPException(400, detail="at least one measure is required.")
 
-    problems = d.validate(definition)
+    # R1b. The field registry decides which `attr:` paths are usable, so a metric naming an
+    # unapproved or misspelled attribute is refused HERE, at save time, with a message naming the
+    # field - rather than being accepted and producing a silently empty chart.
+    problems = d.validate(definition,
+                          known_attributes=await capture.approved_attributes(db, customer))
     if problems:
         raise HTTPException(400, detail=problems)
 
