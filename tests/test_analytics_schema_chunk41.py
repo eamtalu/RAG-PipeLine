@@ -56,10 +56,17 @@ EXPECTED_GRAIN = {
     "analytics_hourly_rollups": pt.Grain.daily,
     "analytics_daily_rollups": pt.Grain.yearly,
     "analytics_quality_issues": pt.Grain.monthly,
+    # R4. Monthly for the same reason as the fact table it hangs off: kept forever, so the partition
+    # count has to stay bounded. Expansion is opt-in per transaction because the volume is not -
+    # measured at ~200k records/day on the deployed database.
+    "analytics_record_facts": pt.Grain.monthly,
 }
 
-#: The five kept forever, and the two with a finite window. Split exactly as section 6 states.
-EXPECTED_FOREVER = {"analytics_facts", "analytics_fact_ledger", "analytics_daily_rollups"}
+#: Kept forever versus a finite window. Split exactly as section 6 states, plus R4's record grain -
+#: whose raw source is `mi_result.records[]`, gone with the entries at 60 days, so a dropped partition
+#: here could not be rebuilt from anything either.
+EXPECTED_FOREVER = {"analytics_facts", "analytics_fact_ledger", "analytics_daily_rollups",
+                    "analytics_record_facts"}
 EXPECTED_RETENTION_DAYS = {"analytics_hourly_rollups": 90, "analytics_quality_issues": 365}
 
 

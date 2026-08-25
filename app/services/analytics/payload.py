@@ -185,3 +185,50 @@ def select(observed: dict, approved: frozenset[str]) -> tuple[dict, list[str]]:
         else:
             unknown.append(name)
     return captured, sorted(unknown)
+
+
+# ============================================================== R4: the per-record grain
+#: Prefix for a field taken from one `records[]` entry. A third namespace beside `resp.` and `mi.`, so
+#: a record's `ItemNumber` can never be confused with the response's or the request's - and so a metric
+#: addresses it unambiguously as `attr:rec.ITNO`.
+RECORD_PREFIX = "rec."
+
+#: A single transaction expanding beyond this is logged loudly. Measured: 2.3 records per `mi_result`
+#: entry on average, 26 at most - so this is far above anything normal and only fires when somebody has
+#: ticked `expand` on something that returns a catalogue. It is a WARNING rather than a cap: silently
+#: truncating would produce a record count that looks complete and is not.
+LOUD_EXPANSION = 500
+
+
+def records(entries) -> list[dict]:
+    """Every `records[]` entry across one transaction's `mi_result` entries, flattened and namespaced.
+
+    `entries` is an iterable of `(entry_type, fields)`, the same shape `extract` takes. Returns one dict
+    per record, in the order they appeared, each carrying the record's own scalars plus the `mi_program`
+    and `mi_transaction` they came from - because a transaction can hold several M3 calls and a record is
+    meaningless without knowing which one answered.
+
+    NOTHING is filtered here. Approval happens in `select`, exactly as for the scalar grain, so this
+    stays a pure description of what the WMS said.
+
+    Measured on live data: 3,765 record field values, ALL of them scalar. So a nested value inside a
+    record has never been observed - but one is dropped rather than flattened if it appears, because
+    inventing a key name no registry row could match would make the field permanently unapprovable.
+    """
+    out: list[dict] = []
+    for entry_type, fields in entries:
+        if entry_type != "mi_result" or not isinstance(fields, dict):
+            continue
+        recs = fields.get(_MI_RECORDS)
+        if not isinstance(recs, list):
+            continue
+        program = fields.get("program") if _is_scalar(fields.get("program")) else None
+        transaction = fields.get("transaction") if _is_scalar(fields.get("transaction")) else None
+        for rec in recs:
+            if not isinstance(rec, dict):
+                continue
+            out.append({
+                "mi_program": program, "mi_transaction": transaction,
+                "attributes": {f"{RECORD_PREFIX}{k}": v for k, v in rec.items() if _is_scalar(v)},
+            })
+    return out

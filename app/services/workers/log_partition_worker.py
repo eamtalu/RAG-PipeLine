@@ -71,6 +71,10 @@ KEEP_FOREVER: frozenset[str] = frozenset({
     "analytics_facts",
     "analytics_fact_ledger",
     "analytics_daily_rollups",
+    # R4. The reason to capture a record at all is a question somebody asks next year, and the raw
+    # entries it came from are gone in 60 days. Expansion is opt-in per transaction precisely because
+    # this is unbounded: measured at ~200k records/day on the deployed database.
+    "analytics_record_facts",
 })
 
 #: Retention in days for tables that do NOT follow `log_partition_retention_days`, keyed by table.

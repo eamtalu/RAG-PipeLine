@@ -1894,7 +1894,8 @@ What follows is what remains, in dependency order rather than in the order it wa
 | **S3** | **BUILT 2026-08-25** - fingerprint skip and UPDATE in place. 3 identical regroups now write 0 rows. See 18l. | S2 | done |
 | **S4a** | **BUILT 2026-08-25, SHADOW** - state persisted and compared; re-derive still authoritative. See 18m. | S3 | done |
 | **S4b** | Promote the lookup. Needs a week of `agreed: true` with `seeded_streams` non-zero on LIVE traffic. | S4a | no |
-| **R4** | Per-record expansion for transactions with `Expand` ticked | R3 | no |
+| **R4** | **BUILT 2026-08-25, CAPTURE ONLY** - `analytics_record_facts`, opt-in per transaction. The record-grain FOLD is not built. See 18n. | R3 | capture done |
+| **R4b** | The record-grain fold and read, so a record metric can be defined | R4 | no |
 | **M1** | ML: `analytics_feature_sets`, `analytics_predictions`, `ml:features-v1` | R3 | no |
 
 **Why R3 before R2**, which inverts the obvious order: the allowlist starts empty, so R3 alone would capture nothing.
@@ -2765,6 +2766,99 @@ the pin fired - working as intended. With no seed the added loop iterates an emp
 existing row derives exactly as before and every stored fingerprint stays valid. Asserted by a test
 rather than reasoned about, because "my change is a no-op" is the belief that makes an unbumped version
 dangerous.
+
+## 18n. R4 as BUILT, 2026-08-25 - capture only, the record fold is NOT built
+
+**Shipped.** Migration `a2d5f81c93e7` (`analytics_record_facts`), 23 tests in
+`tests/test_analytics_record_grain_chunk61.py`, full suite 1,294.
+
+### 18a's open question, settled by measurement
+
+18a left it open whether the record grain should be a new table or a second row type in
+`analytics_facts`, pending a read of `rollups.recompute`. It is not a matter of taste.
+
+`_read_dirty_facts` selects the whole table with no grain predicate, and `group_fold` has no notion of
+grain. So record rows fold into the SAME buckets as their parent. Feeding the seed definition one
+transaction plus three of its records inflated the quantity total from **10 to 40 - 4x, silently.**
+
+Avoiding that would require EVERY definition to carry a grain filter, and forgetting one on any single
+definition produces a plausible-looking wrong total. A separate table makes the mistake structurally
+impossible: the existing fold names `AnalyticsFact` and cannot see these rows. Both the inflation and
+the structural separation are now tests, so the question cannot be re-opened by accident.
+
+### What R4 does, and the one thing it does NOT
+
+**Does:** one `analytics_record_facts` row per `mi_result.records[]` entry, for transactions whose
+`expand` is ticked, namespaced `rec.` and gated by the same field allowlist as the scalar grain.
+
+**Does NOT: there is no record-grain fold or read.** A record metric cannot be defined or charted yet.
+That is the cost 18a named for this option - "doubles the fold path" - and it is deferred rather than
+done.
+
+The split is deliberate and follows the same reasoning as R3: **capture has a 60-day deadline and read
+does not.** `records[]` lives in `log_entries`, which drops at 60 days, so a record not captured today
+is gone. Once captured the table is KEEP_FOREVER and a fold can be built over it at any time from
+stored data. R1b's lesson - "capture without read is storage with no product" - applied to R3 because
+`validate` REFUSED the metric outright, making the feature unreachable. Here the data simply
+accumulates until the reader exists.
+
+### `expand` is the one switch that inverts the pattern
+
+| Switch | Direction | Default | Why |
+|---|---|---|---|
+| `capture` | exclusions | on | a name missing from the registry must still be captured |
+| `show` | exclusions | on | a name missing must still be shown, or charts under-count |
+| `expand` | **inclusions** | **off** | a name missing must NOT be expanded |
+
+~200k records a day on the deployed database against ~1,400 transaction facts. Defaulting on would grow
+a table by hundreds of thousands of rows a day that nobody asked for, so the volume is chosen rather
+than inherited - and silence has to mean no.
+
+**No record field is seeded either.** The seed list exists so the SCALAR grain produces history from day
+one without a screen. A record field only exists because somebody ticked `expand`, so they are already
+making a decision and can make this one too. Visible in the E2E: expansion writes the rows immediately
+and their attributes stay empty until a field is approved.
+
+### The measurement discrepancy, stated rather than smoothed over
+
+The doc cites 3,641,353 records from the deployed database. **This development database holds 8,614 in
+its entire retained window** - average 2.3 records per `mi_result` entry, maximum 26, 61 distinct keys,
+and all 3,765 sampled field values scalar.
+
+The smaller number is not evidence that the cost is small. It is evidence that this box holds far less
+data, and the deployed figure is the one to plan capacity against.
+
+`LOUD_EXPANSION = 500` logs a warning for any single transaction above it - far above anything measured,
+so it only fires when `expand` is ticked on something that returns a catalogue. A WARNING and not a cap:
+truncating would produce a record count that looks complete and is not.
+
+### It does not undo S3
+
+Expansion is driven by the DIFF's verdicts, not by the source rows. A transaction the diff called
+`unchanged` has records that are also unchanged, so re-expanding it would put back exactly the write S3
+removed. Verified: a settled window leaves the record-fact ids byte-identical.
+
+Replace-per-transaction rather than upsert-per-record, because a re-expansion can produce FEWER records
+than the last one and an upsert keyed on `(transaction, index)` would leave the previous tail behind
+forever. Verified: three records became one, with no orphan.
+
+### Three registrations that are silent if forgotten
+
+Partitioning (monthly on `event_time`), `KEEP_FOREVER`, and the tenant purge list. All three were caught
+by existing guards the moment the table was added - the partitioning set, the retention classification
+and the nullability split each failed and had to be updated deliberately. `event_time` is nullable
+because it is COPIED from the parent's, which is parsed from a log line, so a record whose transaction
+has no parsable timestamp stays insertable.
+
+### E2E on real shapes
+
+| Check | Result |
+|---|---|
+| `expand` off | **0** record facts; `mi.record_count = 3` still on the transaction fact |
+| `expand` on | **3** record facts, one per record |
+| approval | `rec.STQT` and `rec.ITNO` stored, `rec.BANO` absent |
+| settled window | record-fact ids **byte-identical** - S3's skip survives |
+| 3 records become 1 | **1** row, no orphan tail |
 
 ## Also corrected while measuring
 

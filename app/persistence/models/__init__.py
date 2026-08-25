@@ -1,6 +1,7 @@
 from app.persistence.models.consumer_cursor import ConsumerCursor  # noqa: F401
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry  # noqa: F401
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry  # noqa: F401
+from app.persistence.models.analytics_record_fact import AnalyticsRecordFact  # noqa: F401
 from app.persistence.models.log_open_stream import (LogOpenStream,  # noqa: F401
                                                     LogPendingRequest)
 from app.config.database import Base
@@ -79,6 +80,7 @@ __all__ = [
     # --- analytics registry (R1) ---
     "AnalyticsTransactionRegistry",
     "AnalyticsFieldRegistry",
+    "AnalyticsRecordFact",
     # --- stage 2 stream state (S4) ---
     "LogOpenStream",
     "LogPendingRequest",

@@ -144,18 +144,24 @@ def test_every_partitioned_table_declares_a_key_that_exists_on_its_model():
 
 
 def test_exactly_the_expected_tables_are_configured():
-    """Was "the three hot tables". Phase 1 added five analytics tables, so the set is eight.
+    """Was "the three hot tables". Phase 1 added five analytics tables and R4 added a sixth, so the set
+    is nine.
 
     Kept as an EXACT set rather than a subset check on purpose: a table appearing here without being
     considered is how one silently inherits the log tables' 60-day retention, which for the fact table
     and its ledger would mean the worker dropping the two things nothing can rebuild.
+
+    This is the test that made R4's registration deliberate rather than incidental - it failed the
+    moment the table was added, which is exactly what it is for.
     """
     assert {t.table for t in pt.PARTITIONED} == {
         # Stage 1 and 2, daily.
         "log_entries", "log_transactions", "log_entry_assignment",
         # Analytics (Phase 1). Grain and retention are asserted in test_analytics_schema_chunk41.
         "analytics_facts", "analytics_fact_ledger",
-        "analytics_hourly_rollups", "analytics_daily_rollups", "analytics_quality_issues"}
+        "analytics_hourly_rollups", "analytics_daily_rollups", "analytics_quality_issues",
+        # R4. Monthly and KEEP_FOREVER, matching the fact table it hangs off.
+        "analytics_record_facts"}
 
 
 def test_entries_and_their_assignments_are_co_partitioned_on_the_same_grain():
@@ -215,7 +221,11 @@ async def test_the_partition_key_stayed_nullable(db):
     outside the provisioned runway rather than against a NULL.
     """
     # Key nullable because it is parsed from a log line and may legitimately be absent.
-    FROM_LOG_DATA = {"log_entries", "log_transactions", "log_entry_assignment", "analytics_facts"}
+    # R4: `analytics_record_facts.event_time` is COPIED from its parent transaction's, which is parsed
+    # from a log line, so it inherits the same legitimate nullability. A record whose transaction has no
+    # parsable timestamp is a real case and must remain insertable.
+    FROM_LOG_DATA = {"log_entries", "log_transactions", "log_entry_assignment", "analytics_facts",
+                     "analytics_record_facts"}
     for t in pt.PARTITIONED:
         nullable = await db.scalar(text("""
             SELECT is_nullable FROM information_schema.columns

@@ -42,6 +42,7 @@ from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_source_object import LogSourceObject
 from app.persistence.models.analytics_pending_window import AnalyticsPendingWindow
 from app.persistence.models.analytics_fact import AnalyticsFact, AnalyticsFactLedger
+from app.persistence.models.analytics_record_fact import AnalyticsRecordFact
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_metric import AnalyticsMetric
@@ -137,7 +138,8 @@ async def purge_logspace(db: AsyncSession, customer_code: str) -> bool:
     for _analytics in (AnalyticsQualityIssue, AnalyticsMonthlyRollup, AnalyticsDailyRollup,
                        AnalyticsHourlyRollup, AnalyticsFactLedger, AnalyticsFact,
                        AnalyticsTenantState, AnalyticsMetric, AnalyticsPendingWindow,
-                       AnalyticsTransactionRegistry, AnalyticsFieldRegistry):
+                       AnalyticsTransactionRegistry, AnalyticsFieldRegistry,
+                       AnalyticsRecordFact):
         await db.execute(delete(_analytics).where(_analytics.customer_code == customer_code))
 
     # 2b) Jobs → cascades chunks, chunks_entity, embedding_queue, log_entries, log_transactions.

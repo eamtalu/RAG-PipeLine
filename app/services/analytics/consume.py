@@ -59,6 +59,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
 from app.persistence.models.analytics_fact import AnalyticsFact, AnalyticsFactLedger, FactColumns
+from app.persistence.models.analytics_record_fact import AnalyticsRecordFact
 from app.persistence.models.analytics_pending_window import AnalyticsPendingWindow
 from app.persistence.models.analytics_quality_issue import AnalyticsQualityIssue
 from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
@@ -378,6 +379,74 @@ async def _apply(db: AsyncSession, customer_code: str, outcomes: Sequence[dd.Out
     return stats
 
 
+async def _expand_records(db: AsyncSession, customer_code: str, *, outcomes,
+                          by_txn: dict, expanded: frozenset[str], approved: frozenset[str],
+                          discovered: dict) -> dict:
+    """R4. Write one `analytics_record_facts` row per M3 record, for expanded transactions only.
+
+    Driven by the DIFF's outcomes rather than by the source rows, which is what keeps S3's skip intact:
+    a transaction the diff reported `unchanged` has records that are also unchanged, so re-expanding it
+    would put back exactly the write S3 removed. Measured consequence - a settled window expands nothing
+    at all.
+
+    Replace-per-transaction rather than upsert-per-record. A re-expansion may produce FEWER records than
+    the last one (a shorter response), and an upsert keyed on `(transaction, index)` would leave the tail
+    of the previous expansion behind forever. Deleting the transaction's rows first makes the count
+    correct by construction.
+
+    Approval is the same allowlist the scalar grain uses, with `source = "record"`, so a record field is
+    reviewed on the same screen and by the same rule. An unapproved key is recorded by NAME and its value
+    never stored.
+    """
+    if not expanded:
+        return {"records": 0, "transactions": 0}
+
+    changed = [o for o in outcomes if o.action in (dd.Action.insert, dd.Action.update)]
+    if not changed:
+        return {"records": 0, "transactions": 0}
+
+    rows, touched = [], []
+    for o in changed:
+        fact = o.fact
+        if fact is None or fact.get("transaction_name") not in expanded:
+            continue
+        txn_id = fact["source_transaction_id"]
+        recs = pl.records(by_txn.get(txn_id, ()))
+        if not recs:
+            continue
+        if len(recs) > pl.LOUD_EXPANSION:
+            # A WARNING rather than a cap. Truncating would produce a record count that looks complete
+            # and is not, which is worse than a large table somebody was told about.
+            logger.warning("Analytics [%s]: transaction %s expanded to %d records, above the %d "
+                           "threshold - check whether `expand` is ticked on the right transaction",
+                           customer_code, txn_id, len(recs), pl.LOUD_EXPANSION)
+        touched.append((txn_id, fact.get("event_time")))
+        for index, rec in enumerate(recs):
+            kept, _unknown = pl.select(rec["attributes"], approved)
+            if rec["attributes"]:
+                discovered.setdefault(fact.get("method"), set()).update(rec["attributes"])
+            rows.append({
+                "id": uuid.uuid4(), "customer_code": customer_code,
+                "source_transaction_id": txn_id,
+                "source_started_at": fact.get("source_started_at"),
+                "record_index": index,
+                "event_time": fact.get("event_time"), "business_date": fact.get("business_date"),
+                "method": fact.get("method"), "transaction_name": fact.get("transaction_name"),
+                "mi_program": rec["mi_program"], "mi_transaction": rec["mi_transaction"],
+                "attributes": kept, "created_at": datetime.now(timezone.utc),
+            })
+
+    for txn_id, event_time in touched:
+        await db.execute(delete(AnalyticsRecordFact).where(
+            AnalyticsRecordFact.customer_code == customer_code,
+            AnalyticsRecordFact.source_transaction_id == txn_id,
+            AnalyticsRecordFact.event_time.is_(None) if event_time is None
+            else AnalyticsRecordFact.event_time == event_time))
+    if rows:
+        await db.execute(pg_insert(AnalyticsRecordFact), rows)
+    return {"records": len(rows), "transactions": len(touched)}
+
+
 async def _quarantine(db: AsyncSession, customer_code: str, issues: Sequence[Mapping[str, Any]],
                       detected_at: datetime) -> int:
     """Record rows that could not be normalised. A1: never halts the tenant.
@@ -650,6 +719,16 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
 
         now = datetime.now(timezone.utc)
         folded = await _apply(db, customer_code, outcomes, now)
+
+        # R4. After the facts, because it is driven by their diff verdicts, and inside the same
+        # transaction so a record set can never describe a fact that was rolled back.
+        expanded = await capture.expanded_names(db, customer_code)
+        record_stats = await _expand_records(
+            db, customer_code, outcomes=outcomes, by_txn=by_txn, expanded=expanded,
+            approved=approved, discovered=discovered)
+        # Discovery runs a second time because record fields were only just observed. Idempotent by
+        # ON CONFLICT DO NOTHING, so the scalar names offered again cost nothing.
+        await capture.observe_fields(db, customer_code, discovered, source="record")
         quarantined = await _quarantine(db, customer_code, issues, now)
         rolled = await _roll_up(db, customer_code, outcomes, now)
 

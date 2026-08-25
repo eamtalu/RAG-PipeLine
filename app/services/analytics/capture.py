@@ -120,6 +120,25 @@ async def hidden_names(db: AsyncSession, customer_code: str) -> frozenset[str]:
     return frozenset(rows)
 
 
+async def expanded_names(db: AsyncSession, customer_code: str) -> frozenset[str]:
+    """The transaction names this tenant has turned EXPAND on for (R4).
+
+    The only one of the three switches whose default is OFF, and the only one returned as an INCLUSION
+    rather than an exclusion. Both follow from the same fact: expansion is the expensive one, measured
+    at ~200k records/day on the deployed database, so it must be chosen rather than inherited.
+
+    An inclusion list is the safe direction HERE, which is the opposite of `capture` and `show`. For
+    those, a name missing from the registry must still be captured or shown, so exclusions are safe.
+    For this one a name missing from the registry must NOT be expanded - the failure of defaulting on
+    would be a table growing by hundreds of thousands of rows a day that nobody asked for.
+    """
+    rows = (await db.execute(
+        select(AnalyticsTransactionRegistry.transaction_name).where(
+            AnalyticsTransactionRegistry.customer_code == customer_code,
+            AnalyticsTransactionRegistry.expand.is_(True)))).scalars().all()
+    return frozenset(rows)
+
+
 def source_predicate(suppressed: frozenset[str]):
     """The capture gate as a SQLAlchemy predicate on `log_transactions`.
 
@@ -213,7 +232,8 @@ async def approved_attributes(db: AsyncSession, customer_code: str) -> frozenset
 
 
 async def observe_fields(db: AsyncSession, customer_code: str,
-                         seen: dict[str, set[str]]) -> list[str]:
+                         seen: dict[str, set[str]],
+                         source: str | None = None) -> list[str]:
     """Register every response field observed, at its seeded approval. Does NOT commit.
 
     `seen` maps method -> the namespaced field names seen on it. Returns the names newly registered, so
@@ -237,7 +257,13 @@ async def observe_fields(db: AsyncSession, customer_code: str,
             rows.append({
                 "id": uuid.uuid4(), "customer_code": customer_code,
                 "method": method or "(none)",
-                "source": "mi_result" if name.startswith(pl.MI_PREFIX) else "response",
+                # R4: derived from the namespace rather than passed, so a stored row cannot disagree
+                # with the prefix the field is addressed by. `source` only overrides the DEFAULT for a
+                # name that carries no recognised prefix.
+                "source": ("record" if name.startswith(pl.RECORD_PREFIX)
+                           else "mi_result" if name.startswith(pl.MI_PREFIX)
+                           else "response" if name.startswith(pl.RESPONSE_PREFIX)
+                           else (source or "response")),
                 "field": name, "captured": pl.seeded(name),
                 "first_seen_at": now, "last_seen_at": now, "seen_count": 1,
                 "created_at": now, "updated_at": now,

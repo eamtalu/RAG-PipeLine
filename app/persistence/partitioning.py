@@ -120,6 +120,12 @@ PARTITIONED: tuple[PartitionedTable, ...] = (
     PartitionedTable("analytics_daily_rollups", "business_date",
                      "the tenant-LOCAL day; yearly because it is kept forever and stays small",
                      grain=Grain.yearly),
+    # R4. Monthly for the same reason as the fact table: kept forever, so the partition count has to
+    # stay bounded. Registered here AND in log_partition_worker.KEEP_FOREVER in the same change - a
+    # partitioned table in neither retention collection silently inherits the log tables' 60 days.
+    PartitionedTable("analytics_record_facts", "event_time",
+                     "the parent transaction's start instant; monthly because it is kept forever",
+                     grain=Grain.monthly),
     PartitionedTable("analytics_quality_issues", "detected_at",
                      "when the row was quarantined; monthly, bounded at a year",
                      grain=Grain.monthly),
