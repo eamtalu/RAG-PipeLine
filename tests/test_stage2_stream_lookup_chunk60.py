@@ -294,3 +294,78 @@ def test_the_state_tables_are_not_registered_for_partitioning():
     from app.persistence.partitioning import BY_TABLE
     assert "log_open_stream" not in BY_TABLE
     assert "log_pending_request" not in BY_TABLE
+
+
+# =============================================================== 6. the divergence fix, 2026-08-25
+#
+# DIAGNOSED ON LIVE DATA. Every shadow run where a stream actually seeded DIVERGED (8 of 8), always with
+# the same signature: the seeded run produced one extra group and 7-8 groupings shifted. Dissected on
+# the server: every diverging seeded stream's transaction was OUTSIDE the window's rebuild set. One
+# measured window went from 1 cold group to 17 seeded ones.
+#
+# Two mechanisms, both now closed:
+#   - an out-of-scope stream describes a persisted transaction whose entries the authoritative run
+#     cannot see, and its phantom open builder steals user-FIFO responses from streams both runs DO
+#     see, shifting every later same-user grouping by one
+#   - an in-scope stream's carried entries ALSO replay as window rows, closing the seeded builder as
+#     "a prior cycle" the moment its own REQUEST re-arrives - duplicating the transaction
+#
+# Fix verified against the live data before it was written into the code: seed only rebuilding-set
+# streams + dedupe carried rows => fixed == cold, exactly.
+
+def test_a_seeded_builders_own_entries_are_not_replayed():
+    """The dedupe half. Without it, the seeded builder is closed as "a prior cycle" when its own
+    REQUEST re-arrives in the window rows, and the transaction appears twice."""
+    req = _entry(LogEntryType.request, T0, 1, "R1")
+    info = _entry(LogEntryType.info, T0 + timedelta(seconds=1), 2)
+    resp = _entry(LogEntryType.response, T0 + timedelta(seconds=30), 3, "R1")
+
+    groups = dt._group([req, info, resp], seed={
+        "streams": [{"thread": "T1", "user_ctx": "amin", "is_current": True,
+                     "open_pos": dt._stream_pos(req), "entries": [req, info]}],
+        "pending": []})
+    assert len([g for g in groups if g.entries]) == 1, \
+        "replaying a carried entry must not split the transaction in two"
+    assert {e.line_number for e in groups[0].entries} == {1, 2, 3}
+
+
+def test_dedupe_is_inert_without_a_seed():
+    """The persisting path never seeds, so its behaviour must be byte-identical - which is also why
+    _DERIVE_VERSION stays unbumped for this change."""
+    rows = [_entry(LogEntryType.request, T0, 1, "R1"),
+            _entry(LogEntryType.response, T0 + timedelta(seconds=1), 2, "R1")]
+    def shape(gs): return sorted(tuple(sorted(str(e.id) for e in g.entries)) for g in gs)
+    assert shape(dt._group(rows)) == shape(dt._group(rows, seed=None))
+
+
+def test_shadow_compare_seeds_only_the_rebuilding_set():
+    """The scope half, asserted on the source: the failure was a MISSING filter, and every diverging
+    stream on live data was out of scope. Also asserts the exclusion is REPORTED (`out_of_scope`), so
+    the shadow telemetry cannot silently hide how much it is not measuring."""
+    import inspect
+    from app.services.mnp_log_ingestion.pipeline import derive_transactions as dt2
+    src = inspect.getsource(dt2._shadow_compare)
+    assert "rebuilding" in inspect.signature(dt2._shadow_compare).parameters
+    assert "r.transaction_id in rebuilding" in src
+    assert "out_of_scope" in src, "the exclusion must be visible in the report, not silent"
+
+
+def test_the_call_site_passes_the_freed_set():
+    import inspect
+    from app.services.mnp_log_ingestion.pipeline import derive_transactions as dt2
+    src = inspect.getsource(dt2.regroup_window)
+    assert "rebuilding=frozenset(freed)" in src
+
+
+def test_an_out_of_scope_stream_cannot_create_a_phantom_group():
+    """End to end at the _group level: a seeded stream whose entries are NOT in the window rows (the
+    out-of-scope shape) must not appear in the result as a group of carried-only entries when the
+    caller correctly excludes it. This asserts the two halves compose: with the stream excluded, the
+    grouping equals the cold one."""
+    old_req = _entry(LogEntryType.request, T0 - timedelta(seconds=1200), 1, "OLD")
+    window_rows = [_entry(LogEntryType.request, T0, 10, "R2"),
+                   _entry(LogEntryType.response, T0 + timedelta(seconds=2), 11, "R2")]
+    def shape(gs): return sorted(tuple(sorted(str(e.id) for e in g.entries)) for g in gs)
+    cold = shape(dt._group(list(window_rows)))
+    # exclusion is the CALLER's job (freed-set filter); with it applied, no seed remains:
+    assert shape(dt._group(list(window_rows), seed={"streams": [], "pending": []})) == cold

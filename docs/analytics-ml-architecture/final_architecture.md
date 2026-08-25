@@ -1893,7 +1893,7 @@ What follows is what remains, in dependency order rather than in the order it wa
 | **S2** | **BUILT 2026-08-25** - durable stream position; `req_pos` deleted rather than persisted. See 18k. | S1 | done |
 | **S3** | **BUILT 2026-08-25** - fingerprint skip and UPDATE in place. 3 identical regroups now write 0 rows. See 18l. | S2 | done |
 | **S4a** | **BUILT 2026-08-25, SHADOW** - state persisted and compared; re-derive still authoritative. See 18m. | S3 | done |
-| **S4b** | Promote the lookup. Needs a week of `agreed: true` with `seeded_streams` non-zero on LIVE traffic. | S4a | no |
+| **S4b** | Promote the lookup. Gate unchanged: a week of `agreed: true` with `seeded_streams` > 0. Divergence diagnosed + fixed 2026-08-25 (18p); cross-pad joining needs its own `_persist` design first. | S4a | no |
 | **R4** | **BUILT 2026-08-25, CAPTURE ONLY** - `analytics_record_facts`, opt-in per transaction. The record-grain FOLD is not built. See 18n. | R3 | capture done |
 | **R4b** | The record-grain fold and read, so a record metric can be defined | R4 | no |
 | **M1** | **BUILT 2026-08-25** - reproducible training sets pinned to the ledger, plus the predictions table and the reserved cursor. See 18o. | R3 | done |
@@ -2963,6 +2963,58 @@ It builds training SETS and records model OUTPUTS. It does not train a model - t
 no fitting, no scoring. That is downstream work, and it is now unblocked in the only way that mattered:
 a training set built today can be rebuilt identically in a year, so a model's inputs are recoverable
 when somebody asks why it said what it said.
+
+## 18p. The S4 shadow divergence: diagnosed and fixed, 2026-08-25. Still in shadow.
+
+18m predicted the gate; the first night of live traffic failed it: **8 of 8 runs where a stream
+actually seeded DIVERGED**, always with the same signature - one extra group in the seeded run, 7-8
+groupings shifted. Diagnosed on the live data by replaying real windows read-only, then dissecting the
+one that diverged.
+
+### The mechanism, measured not theorised
+
+Every diverging seeded stream's transaction was **outside the window's rebuild set** (`in_freed=False`
+for all 11 in the dissected window). Two consequences compound:
+
+**A phantom open stream steals FIFO responses.** An out-of-scope stream describes a persisted
+transaction whose entries the authoritative run cannot even see. But its seeded builder sits in
+`open_by_key`, so when a user-scoped RESPONSE arrives with no thread match, the FIFO rule - "oldest
+open request for that user" - hands it to the phantom instead of the stream both runs see. Every later
+same-user grouping then shifts by one, which is exactly the 7-8-groups signature.
+
+**A carried entry replayed is a duplicated transaction.** An in-scope stream's entries are also
+eligible window rows. Re-processing the stream's own REQUEST closes the seeded builder as "a prior
+cycle", splitting one transaction into two groups.
+
+One measured window went from **1 cold group to 17 seeded ones** through these two together.
+
+### The fix, verified against the live data before it was written into the code
+
+| | |
+|---|---|
+| scope | `_shadow_compare` seeds only streams whose transaction is in `freed`, and reports the excluded count as `out_of_scope` so the exclusion is visible rather than silent |
+| dedupe | `_group` skips rows a seeded builder already carries |
+| result on the diverging window | `fixed == cold`, exactly |
+
+`_DERIVE_VERSION` stays unbumped a second time: the dedupe is behind `if seeded_ids and ...`, so the
+unseeded persisting path is byte-identical, and the same test that proved that for S4a proves it now.
+
+### What the exclusion means, honestly
+
+Joining a late response across the pad boundary to a NOT-rebuilt transaction is S4b's genuinely new
+capability - the plan calls it failure mode 1 and "the single most important test". It is now
+deliberately **out of the shadow measurement**, for a reason stronger than comparison hygiene: under
+`mode=on`, `_persist` would skip such a builder's id as an out-of-order clash, so the capability cannot
+even be persisted without its own `_persist` design. Measuring what cannot be persisted was
+manufacturing divergence.
+
+So shadow now measures the question it can answer - *does the seeded path reproduce the re-derive on
+identical inputs?* - and `out_of_scope` counts how often the bigger question is being deferred.
+
+### The gate, restated
+
+Unchanged: seven consecutive days of `agreed: true` with `seeded_streams > 0`, now measurable without
+structural false positives. `stage2_stream_lookup` remains `shadow`.
 
 ## Also corrected while measuring
 

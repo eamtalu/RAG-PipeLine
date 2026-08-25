@@ -271,11 +271,13 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
     #
     # Only streams the guard already accepted are ever passed in; `stream_state.usable` does that
     # filtering, so nothing here has to reason about clocks.
+    seeded_ids: set = set()
     for st in (seed or {}).get("streams", ()):
         b = _TxnBuilder()
         b.open_pos = st["open_pos"]
         for e in st["entries"]:
             b.add(e)
+            seeded_ids.add(e.id)
         key = (st["thread"], st["user_ctx"])
         open_by_key[key] = b
         if st["is_current"]:
@@ -357,6 +359,12 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
             builders.append(nb)
 
     for i, e in enumerate(entries):
+        # S4 fix: an entry a seeded builder already carries must not be processed again. Replaying it
+        # would close the seeded builder as "a prior cycle" the moment its own REQUEST re-arrived,
+        # duplicating the transaction as two groups. Measured on live data: one window went from 1
+        # cold group to 17 seeded ones through exactly this plus out-of-scope seeding.
+        if seeded_ids and e.id in seeded_ids:
+            continue
         et = e.entry_type.value
         th = e.thread
         if e.timestamp is not None:
@@ -999,7 +1007,7 @@ def _regroup_pad() -> timedelta:
 
 async def _shadow_compare(db: AsyncSession, customer_code: str, rows: list[LogEntry],
                           authoritative: list[_TxnBuilder], window_lo: datetime,
-                          s4_mode: str) -> dict:
+                          s4_mode: str, rebuilding: frozenset = frozenset()) -> dict:
     """S4a. Group the same entries a second time from the STORED state, and report the difference.
 
     What is compared is the PARTITION - which entries ended up together - not builder identity, since
@@ -1016,11 +1024,26 @@ async def _shadow_compare(db: AsyncSession, customer_code: str, rows: list[LogEn
     grouping nobody persisted.
     """
     state = await stream_state.load(db, customer_code, window_lo)
+
+    # DIAGNOSED 2026-08-25, on live divergence data. Only streams whose transaction this window is
+    # REBUILDING may be seeded. A stream outside `rebuilding` describes a persisted, owned transaction
+    # whose entries the authoritative run cannot even see - so seeding it makes the two runs group
+    # different universes, and worse: each phantom open stream steals user-FIFO responses from streams
+    # both runs DO see, cascading into the "one extra group, 7-8 shifted" signature the shadow logs
+    # showed on every seeded run. One measured window went from 1 cold group to 17 seeded ones.
+    #
+    # This is not only a shadow-comparison nicety. Under mode=on, `_persist` would skip such a
+    # builder's id as an out-of-order clash (the transaction exists and is not in `stored`), so an
+    # out-of-scope seed measures a capability the system cannot persist. Joining a late response
+    # across the pad boundary to a NOT-rebuilt transaction is S4b's genuinely new power, and it needs
+    # its own `_persist` design before it can be measured honestly - excluded until then, and counted
+    # in the report as `out_of_scope` so the exclusion is visible rather than silent.
+    in_scope = [r for r in state["streams"] if r.transaction_id in rebuilding]
     seed = {"streams": [
         {"thread": r.thread, "user_ctx": r.user_ctx, "is_current": r.is_current,
          "open_pos": (r.open_ts_is_null, r.open_ts, r.open_source_file, r.open_line_number),
          "entries": state["entries_by_txn"].get(r.transaction_id, [])}
-        for r in state["streams"]],
+        for r in in_scope],
         "pending": state["pending"]}
 
     seeded = _group(rows, seed=seed)
@@ -1031,7 +1054,8 @@ async def _shadow_compare(db: AsyncSession, customer_code: str, rows: list[LogEn
     a, b = partition(authoritative), partition(seeded)
     agreed = a == b
     report = {"mode": s4_mode, "agreed": agreed,
-              "stored_streams": state["stored_streams"], "seeded_streams": len(state["streams"]),
+              "stored_streams": state["stored_streams"], "seeded_streams": len(in_scope),
+              "out_of_scope": len(state["streams"]) - len(in_scope),
               "refusals": state["refusals"],
               "groups_authoritative": len(authoritative), "groups_seeded": len(seeded)}
     if not agreed:
@@ -1228,7 +1252,8 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
     s4_mode = stream_state.mode()
     if s4_mode != stream_state.OFF:
         try:
-            stats["s4"] = await _shadow_compare(db, customer_code, rows, groups, lo_p, s4_mode)
+            stats["s4"] = await _shadow_compare(db, customer_code, rows, groups, lo_p, s4_mode,
+                                                rebuilding=frozenset(freed))
         except Exception:
             # Swallowed on purpose, and only here. Shadow mode is a MEASUREMENT; a fault in it must
             # never fail a stitch that would otherwise have succeeded. In `on` mode this would be

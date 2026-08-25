@@ -178,7 +178,11 @@ def _derivation_digest() -> str:
 #: exactly as before and every stored fingerprint stays valid. Verified by
 #: `test_an_unseeded_group_is_byte_identical_to_the_pre_s4_behaviour` rather than reasoned about,
 #: because "my change is a no-op" is precisely the belief that makes an unbumped version dangerous.
-_EXPECTED_DERIVATION = "13dd934f33a1ef47"
+#:
+#: Changed again by the S4 divergence fix: seeded-entry dedupe in `_group`. Also behind
+#: `if seeded_ids and ...`, so the unseeded (persisting) path is byte-identical and the version again
+#: stays unbumped - the same byte-identical test proves it.
+_EXPECTED_DERIVATION = "203e95122ed80ec8"
 
 
 def test_the_derivation_is_pinned_to_the_derive_version():
