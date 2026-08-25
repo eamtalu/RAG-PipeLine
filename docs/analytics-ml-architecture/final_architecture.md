@@ -2076,20 +2076,32 @@ A permanently red check is worse than no check, because it trains you to ignore 
 
 ## 18e. Open decisions register
 
-Verified 2026-08-23 by auditing every decision reached in design against this document: **34 of 34 present**.
-The list below is what remains genuinely undecided.
-It is here rather than only in a conversation because an unanswered question that nobody can find is indistinguishable from a decision nobody made.
+Verified 2026-08-23 by auditing every decision reached in design against this document: **34 of 34
+present**. **Revised 2026-08-25**, because building S1-S4a, R1-R4 and M1 settled most of what was open -
+and a register that still lists resolved items is worse than no register at all.
+
+### Resolved by building
+
+| Question | How it was settled |
+|---|---|
+| `transaction_name IS NULL` | As proposed: always captured, never shown, no registry row. `capture.is_captured` returns True for NULL and the registry holds no row for it. |
+| a transaction seen for the first time | **CHANGED from the proposal.** `Capture` on and `Show` **ON**, not off. Show-off meant R1's discovery marked every existing transaction hidden and R2's rollup gate blanked every chart - 23 tests caught it. An under-counting total is the failure this architecture exists to prevent; the review is surfaced (`needs_review`) rather than enforced by hiding data. See 18j. |
+| the two registry table names | Built as proposed: `analytics_transaction_registry`, `analytics_field_registry`. |
+| R4's per-record grain | **A separate table**, and it was measured rather than argued. A second row type in `analytics_facts` inflated the seed definition's quantity from 10 to 40 - 4x, silently - because `_read_dirty_facts` has no grain predicate. See 18n. |
+| `analytics_feature_sets` / `analytics_predictions` partitioning | Neither is partitioned. One row per training run and one per (subject, horizon, model, target) are small next to the fact tables, so there is nothing worth pruning. See 18o. |
+
+### Still open
 
 | Question | Recommendation | Blocks | Why it matters |
-|---|---|---|---|
-| transaction_name IS NULL | always captured, never shown; no registry row | R1 | `CheckOperator`, `CheckServer` - 57 transactions. Connectivity probes, not warehouse activity. |
-| a transaction seen for the first time | `Capture` on, `Show` off | R1 | So it is never silently lost, nor silently added to a chart. |
-| the two registry table names | `analytics_transaction_registry`, `analytics_field_registry` | R1 | Proposed here, never agreed. Both are created by R1. |
-| may an ACTIVE definition's `dimensions` be edited | immutable once active; an edit forks a new definition | R2 | `dim1..dim4` are positional, so changing the list changes what stored rows mean while their values stay put. `status` and `backfilled_through` already exist to support forking. |
-| R4's per-record grain | undecided | R4 | A seventh table, or a second row type in `analytics_facts`. Depends on whether `rollups.recompute` folds two grains cleanly - that code has not been read. |
-| `analytics_feature_sets` / `analytics_predictions` partitioning | undecided | M1 | Deferred with M1. Neither table exists yet. |
+| may an ACTIVE definition's `dimensions` be edited | immutable once active; an edit forks a new definition | nothing shipped - R2 did not address it | `dim1..dim4` are positional, so changing the list changes what stored rollup rows MEAN while their values stay as they were. `status` and `backfilled_through` already exist to support forking. |
 
-Nothing in this list blocks S1, which is why S1 leads the staging.
+That is the only design question left. The two remaining STAGES are blocked on data rather than on
+decisions:
+
+| Stage | Blocked on |
+|---|---|
+| **S4b** promote the lookup | a week of `agreed: true` with `seeded_streams` non-zero on LIVE traffic. This development database cannot produce a stream that survives one window into the next - see 18m. |
+| **R4b** the record-grain fold | nothing but effort. Safe to defer because record data is `KEEP_FOREVER` once captured, so the reader can be built at any time from stored rows. |
 
 ### What the audit corrected
 
