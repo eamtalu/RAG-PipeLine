@@ -1,10 +1,432 @@
 # Warehouse analytics and ML platform: final architecture
 
 **This is the single canonical document for this work.**
-It merges the implementation plan and the low-level architecture into one place.
 Everything else on this subject is superseded and should not be implemented from.
 
-Last revised 2026-08-21, with iteration 2 added 2026-08-23.
+Last revised 2026-08-27.
+The document has two parts:
+
+- **PART I - The system as built.**
+  A plain-English, fact-checked guide to how the software works today, from the SSH pull to the ML pipeline.
+  Start here.
+- **PART II - The design history.**
+  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18r), preserved verbatim because code comments and tests cite these section numbers.
+
+# PART I. The system as built: a plain-English guide
+
+Written 2026-08-27, verified against the code and the running server on the same day.
+This part is the source of truth for how the software works TODAY.
+Part II below it is the design history: why each decision was made, in the order it was made, with its section numbers preserved because code comments and tests cite them.
+If Part I and Part II disagree, Part I wins; if either disagrees with the code, the code wins and this document must be fixed.
+
+Every claim here was checked in the source files named beside it.
+Nothing is recalled from memory.
+
+## 1. What this system is
+
+Warehouse scanner devices talk to an M3 WMS server, and those servers write plain text log files.
+This system turns those log files into three products:
+
+1. A searchable, replayable record of every conversation between a device and the server (a **transaction**).
+2. Live analytics: how many units were picked, counted or moved, per hour, day and month, sliced by item, user, warehouse or any approved field, on a dashboard that updates within about a minute of the physical scan.
+3. Reproducible machine-learning training sets, buildable months later and provably identical.
+
+The hard part is that log files are an unreliable narrator.
+One business action spans many lines; a response can arrive seconds after its request; files rotate and get re-read; two app servers interleave the same user's work; lines arrive late or out of order.
+Most of the design below exists to turn that mess into numbers that can be trusted, and to make every failure loud instead of silent.
+
+## 2. The big picture
+
+Five pipelines, connected by durable queues (never by memory), each with its own background worker:
+
+```
+ WMS app servers (TMP-AZ-BEC01, TMP-AZ-BEC02, ...) write log files
+      |
+      |  1. COLLECTION - pull the files            worker: ssh_log_fetcher (every ~60s/tenant)
+      v
+ [log_source_objects]  one downloaded byte range each, with a retry budget
+      |
+      |  2. STAGE 1 - parse lines into rows        worker: log_parse_worker (every 2s)
+      v
+ log_entries  (append-only; one row per log entry; deduped; partitioned daily)
+      |
+      |  ticket: [log_regroup_pending]  "this time range has new data"
+      |
+      |  3. STAGE 2 - stitch lines into transactions   worker: log_stitch_worker (every 1s)
+      v
+ log_transactions + log_entry_assignment  (the derived, updatable projection)
+      |
+      |  ticket: [analytics_pending_windows]  "transactions in this range changed"
+      |
+      |  4. ANALYTICS - fold transactions into facts   worker: analytics_worker (every 2s)
+      v
+ analytics_facts (current) + analytics_fact_ledger (every version, forever)
+      |                       |
+      v                       v
+ rollups (hour/day/month)   5. ML - training sets pinned to an instant of the ledger
+      |
+      v
+ FastAPI /api/v1/...  ->  the dashboard (a separate Next.js app, polls /status every 2s per tab)
+```
+
+Two rules hold everywhere:
+
+- **Every hop is a database queue.**
+  A ticket is written in the same database transaction as the data it describes, so a crash can never lose the "there is work to do" note.
+  Failed work retries with backoff and, after a cap, parks in a visible dead-letter state with its error message.
+  Nothing is ever silently dropped.
+- **Every derived layer can be rebuilt from the layer above it.**
+  Entries rebuild transactions; transactions rebuild facts; facts rebuild rollups.
+  Rebuilding is idempotent: doing it twice writes nothing the second time.
+
+## 3. Collection: getting the files
+
+Components: `app/services/workers/ssh_log_fetcher.py` (the supervisor), `app/services/mnp_log_ingestion/remote/remote_fetcher.py` (all the logic).
+
+Each tenant configures one row per WMS server in `log_ssh_sources`: host, credentials, a directory and a filename pattern.
+A supervisor keeps one polling loop per tenant (re-checked every 30 s), each pulling over SFTP roughly every 60 s.
+
+**How it avoids re-downloading**: `log_ssh_file_checkpoints` remembers, per file, how many bytes were already read (`last_offset`), plus the file's size, modified time and a fingerprint of its first 4 KB.
+On each poll a small decision table (`_plan_incremental`, remote_fetcher.py:354) chooses one of: unchanged (skip), append (read only the new bytes), rotated-and-already-consumed (skip - the same content was read under its old name), rotated-or-truncated (re-read from zero; Stage 1's dedupe drops the overlap), or new file.
+
+**The safety property**: the checkpoint is only an optimisation.
+If it is ever wrong the worst case is a re-download, because true dedupe happens in Stage 1.
+The downloaded byte range and its checkpoint advance are committed in ONE transaction, so there is no window where bytes are skipped forever or fetched twice.
+
+Each downloaded range becomes a row in `log_source_objects`: the durable handoff to Stage 1, with a lease, an attempt counter, exponential backoff (30/60/120 s), and an `abandoned` dead-letter state after 3 tries (re-armable via `POST /logs/ingest-queue/reset-abandoned`).
+
+Tables owned here: `log_ssh_sources`, `log_ssh_file_checkpoints`, `log_ssh_fetch_runs` (on-demand run tracking), `log_source_objects`.
+
+## 4. Stage 1: lines become rows
+
+Component: `app/services/mnp_log_ingestion/pipeline/parse_insert.py`, driven by `log_parse_worker` (claims queue rows with `FOR UPDATE SKIP LOCKED`, so one poison file can never block the queue).
+
+The parser (`parsers/m3_dotnet_parser.py`) groups a timestamped header line plus its continuation lines into one logical entry, then classifies it into one of eight types:
+`request`, `request_body`, `response`, `mi_call`, `mi_result`, `sql`, `error`, `info`.
+Timestamps are parsed as the tenant's local wall clock and converted to UTC at this single choke point.
+
+Each entry becomes one row in `log_entries` - the system's append-only ground truth.
+A row is never updated; corrections happen downstream.
+
+**Dedupe**: every row carries `entry_hash = sha256(the full raw text)`, and inserts use `ON CONFLICT DO NOTHING` on `(customer_code, entry_hash, timestamp)`.
+This is what makes file rotation and re-fetching safe: the same line can arrive five times and lands once.
+
+**The ticket to Stage 2**: after inserting, Stage 1 writes one row into `log_regroup_pending` saying "the range [oldest, newest] of what I just inserted is dirty".
+That ticket is written in the same transaction as the entries: if the entries commit, the ticket exists.
+
+Tables owned here: `log_entries` (partitioned by day), `jobs` (per-file status), `log_regroup_pending` (the ticket queue to Stage 2).
+
+## 5. Stage 2: rows become transactions
+
+This is the heart of the system, in `app/services/mnp_log_ingestion/pipeline/derive_transactions.py`, driven by `log_stitch_worker`.
+
+### 5.1 What a transaction is
+
+One conversation between a device and the server: a request, its body, the work it caused (info/mi_call/mi_result/sql lines) and its response.
+Stage 2's job is to decide which lines belong together and to summarise them into one row of `log_transactions` (who, what, when, status, duration, item, quantity and so on), plus one `log_entry_assignment` row per member line recording "this entry belongs to that transaction, at this position".
+
+A transaction's id is **deterministic**: a UUID derived from the content hash of its request line (`_anchor`, derive_transactions.py:469).
+Rebuild the same conversation tomorrow and it gets the same id, so saved links and citations never break.
+
+### 5.2 How one worker tick runs (the ticket walk)
+
+```
+ every second, per tenant with open tickets (log_stitch_worker._tick):
+
+ 1. SEAL   mark transactions final if they have been quiet long enough (sealer.py)
+ 2. REAP   delete expired grouper state (stream_state.reap, TTL 24h)
+ 3. DRAIN  finalize_pending:
+      claim   open tickets past their backoff (clock-based, dead-letter respected)
+      merge   tickets whose ranges are within 2x pad of each other -> one run
+      split   a run longer than 6 hours -> consecutive 6-hour windows
+      rebuild each window through regroup_window (below), one DB transaction each,
+              under a per-tenant advisory lock
+      stamp   the run's tickets consumed only after EVERY window committed
+      on failure: attempts+1, exponential backoff, dead-letter after 3 tries
+                  (permanent errors dead-letter immediately), always with last_error
+```
+
+### 5.3 The padded window: why rebuilds never cut a conversation in half
+
+A ticket says "minute X changed", but a conversation near minute X may have started before it or end after it.
+So `regroup_window` widens every rebuild by 15 minutes on each side (the **pad**, which is always at least the seal window).
+
+```
+ ticket range:              [13:00 ---------- 14:00]
+ what actually rebuilds: [12:45 ---------------- 14:15]
+
+ every transaction STARTING in [12:45, 14:00] is freed (sealed ones included),
+ every entry in [12:45, 14:15] that is new or belongs to a freed transaction
+ is re-grouped from scratch, and the results are written back.
+```
+
+**The cross-pad extension (18q/18r era)**: if a conversation ended just before 12:45 and a brand-new line inside the window could still belong to it, the floor moves back to that conversation's start (bounded at pad + gap = 20 minutes) so it rebuilds whole.
+If a joinable conversation starts beyond even that bound, the window refuses loudly (`CrossPadSpanExceeded`) and the ticket dead-letters, because rebuilding it partially would split it silently.
+Governed by `stage2_cross_pad` = off / shadow / on.
+
+### 5.4 The grouping logic: which lines belong together
+
+`_group` (derive_transactions.py) walks the window's entries in time order and maintains open "streams".
+Since chunk 67 a stream is keyed by **(server, thread, user)** - all three, because:
+
+- The **server** is the leading folder of the file path (`TMP-AZ-BEC01/...`).
+  Thread numbers are small integers reused by every server process, and one picker's two operations can hit both app servers within milliseconds.
+  No pairing rule may ever cross servers (that was the chimera-transaction bug, section 18r).
+- The **thread** is the server's processing thread for the request.
+- The **user** disambiguates, because .NET reuses a thread mid-request for another user's work.
+
+The pairing rules, all scoped inside one server:
+
+```
+ request        -> waits in a pending pool until its work appears
+ request_body   -> opens a stream; claims its request by ReqID (GET),
+                   or the most recent id-less pending request (POST)
+ info/mi_*/sql  -> joins its (server, thread, user) stream; a user-less line
+                   inherits whatever stream is live on that thread;
+                   the stream claims a pending GET request once the user is known
+ response       -> closes the OLDEST still-open stream of the SAME USER on the
+                   SAME SERVER (first-in-first-out), because responses carry
+                   no request id (verified: 0 of 18,090 live responses do)
+ quiet gap      -> a stream idle for more than 300s is closed as-is
+                   (log_open_gap_seconds; the longest real conversation
+                    measured is 363.7s TOTAL, with entries well inside 300s
+                    of each other)
+```
+
+### 5.5 Persisting: how update and insert actually happen
+
+`_persist` (derive_transactions.py:720) compares what the rebuild produced against what is stored, row by row, using two SHA-256 fingerprints per transaction:
+
+- `row_fingerprint`: what the row's columns say (status, times, item, quantity, ...).
+- `members_fingerprint`: which entries belong to it, in order.
+
+```
+ rebuild produced a transaction; is its id already stored?
+
+ NO  -> INSERT the row and its assignments                      "created"
+ YES, both fingerprints match     -> write NOTHING              "unchanged"  (the ~98.7% case)
+ YES, row differs, members same   -> UPDATE the row in place    "row_only"
+ YES, members differ              -> UPDATE row + rewrite its
+                                      assignment rows           "rewritten"
+ stored in this window but not
+ reproduced by the rebuild        -> DELETE row + assignments   "vanished"
+                                     (a merge or split absorbed it)
+ id exists but is OUTSIDE the
+ window's rebuild set             -> SKIP, warn, leave entries  "clash"
+                                     (out-of-order ingest; repair = full regroup)
+```
+
+This verdict table is what took write volume from 22.4 writes per surviving row (the old delete-everything-and-reinsert design) to about 1.
+The price of the skip-if-unchanged optimisation is a discipline: any change to the grouping or the computed columns must bump `_DERIVE_VERSION` (fingerprints.py), or stored rows would keep matching their own stale fingerprints and never receive the change.
+A pinned source-digest test fails loudly if someone forgets.
+
+### 5.6 Sealing: when a transaction becomes final
+
+A transaction with a response is **sealed** 15 minutes after its last entry; an incomplete one (no response yet) waits an hour before being sealed as permanently incomplete.
+Both cutoffs are measured against the tenant's newest LOG timestamp, not the wall clock, so backfilling old files seals correctly.
+Sealed means "this row will not change again" - the promise the dashboard's Provisional/Settled badge is built on.
+A dedicated sealer tick does this with an UPDATE (it used to happen only as a side effect of rebuilds, which left 2,516 rows unsealed forever - section 18f).
+
+### 5.7 The rebuild lane and the head lane
+
+Everything described above is the **rebuild lane**: any change, however small, is handled by re-deriving a padded window from scratch and writing only the difference.
+It is the only lane that exists today, and since S3 it is cheap (unchanged rows cost no writes).
+
+The **head lane** is the planned next step (section 18q, work package P4, NOT built):
+a fast path that would process only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`), appending one assignment per entry and updating the open transaction, with any surprise routed back to the rebuild lane.
+Its benefit is read cost and latency, not correctness; the rebuild lane remains the authority.
+
+Related: the S4 shadow (`stage2_stream_lookup = shadow`) already saves grouper state each window and measures whether a state-seeded regroup would agree with the from-scratch one.
+It changes nothing and is slated for replacement by the head lane's own shadow (P5).
+
+Tables owned here: `log_transactions` (partitioned by day), `log_entry_assignment` (partitioned by day, co-partitioned with entries), `log_open_stream` + `log_pending_request` (saved grouper state), `log_regroup_runs` (manual run tracking).
+
+## 6. Ticketing from Stage 2 to analytics
+
+Whenever Stage 2 frees and rebuilds a window, it writes a ticket into `analytics_pending_windows` covering the padded window, in the SAME database transaction as the rebuild (derive_transactions.py:1185 area).
+Five publish sites exist, one per code path that can change or delete transactions, and a test census asserts no sixth path can appear unnoticed.
+The contract (invariant 2): no transaction changes without a committed ticket whose range contains its start time.
+
+The analytics ticket queue mirrors the Stage 2 one: attempts, backoff (5 s base, 15 min cap), dead-letter after 5 tries, and a `last_error` on every failure.
+
+## 7. Analytics: transactions become facts, facts become charts
+
+Components: `app/services/analytics/` - `consume.py` (the fold), `normalizer.py`, `payload.py`, `capture.py`, `diff.py`, `rollups.py`, `read.py`, `reconcile.py`; worker `analytics_worker` (2 s poll).
+
+### 7.1 One fold cycle
+
+```
+ claim the tenant's due tickets
+ merge tickets that genuinely OVERLAP (gap=0)   } correctness: a boundary-crossing
+ split the merged range into 6-hour slices      } rebuild reverses+inserts in ONE diff,
+ for each slice (own transaction, 120s timeout):  but no job is ever unbounded
+   read source transactions in range   (no LIMIT - a truncated read would
+                                        look like mass deletion to the diff)
+   read stored facts in range
+   skip reading response entries for any transaction whose Stage 2
+     row_fingerprint is unchanged     (96% of the read cost, measured)
+   extract response fields -> register unknown names -> read approvals
+   normalise: one FACT per transaction (24 contract fields + attributes)
+   diff stored vs new     -> insert / update / reverse / unchanged
+   apply + append EVERY change as a new version in the LEDGER
+   expand records (R4) for transactions with the expand switch on
+   quarantine rows that cannot be normalised (never halt the tenant)
+   recompute exactly the dirty rollup buckets, from the facts
+   update the tenant state row (watermarks, freshness, counts, revision+1)
+   stamp the tickets consumed - same transaction, last
+```
+
+### 7.2 The two fact tables
+
+- `analytics_facts` holds the CURRENT version of each fact - one wide row per transaction, keyed `(customer, source_transaction_id, event_time)`, kept forever.
+- `analytics_fact_ledger` holds EVERY version, append-only, with a `reason` (insert / update / reverse) and a shared `recorded_at` per fold.
+  A reversal is a ledger row too, so "what did we believe at time T" is always answerable.
+  This table exists from day one specifically so ML training sets are reproducible.
+
+### 7.3 What one fact contains
+
+The normaliser is a pure function: 24 contract fields (ids, times, method, transaction name, status, item, locations, user, device, quantity, classification...) plus an `attributes` bag.
+Quantity comes only from an allow-list of quantity-carrying methods (`ConfirmPickLine -> QuantityPicked`, `ReportCount -> CountedQuantity`, `AddStockCountLine -> CountedQuantity`); an unreadable quantity quarantines the row rather than counting zero.
+`business_date` is the tenant's LOCAL day.
+Response payload scalars arrive namespaced (`resp.ItemNumber`, `mi.record_count`); string values are capped to their column width BEFORE fingerprinting (a production truncation outage taught that, section 18q).
+
+### 7.4 The registries: your on/off switches
+
+- `analytics_transaction_registry`: per transaction name, three independent switches.
+  `capture` (default on) gates whether facts exist at all; turning it off stops new history but deliberately does not delete old.
+  `show` (default on) gates the rollups (the charts).
+  `expand` (default off) turns on per-record capture into `analytics_record_facts`.
+- `analytics_field_registry`: every payload field name ever seen is recorded (name only, NEVER a value); a field's values are captured only after approval.
+  34 safe names are seeded in code; credential-shaped names (token, password, apikey, ...) are never auto-approved.
+
+One shared predicate (`capture.py`) is used by the source read, the stored read and the auditor, so the three can never disagree about what "captured" means.
+
+### 7.5 Rollups: the pre-computed charts
+
+Three grains: hourly (kept 90 days), daily (tenant-local, kept forever), monthly (kept forever).
+Rows store only additive ingredients (sum, count, sum of squares, min, max, histogram) in four dimension slots; averages and rates are finished at read time, so partial aggregates always combine correctly.
+Only DIRTY buckets are recomputed, from scratch, and a bucket whose facts vanish is deleted (a stale chart total is the bug class this prevents).
+Weekly charts derive from daily at read time.
+
+### 7.6 The status card and freshness
+
+`analytics_tenant_state` is one denormalised row per tenant - everything `GET /analytics/status` shows, readable in one indexed lookup because the dashboard polls it every 2 seconds per tab.
+Freshness has two separate meanings, deliberately:
+
+- `lag_seconds` / `stale`: is analytics BEHIND the source? (folded watermark vs source watermark, warn over 300 s)
+- `unsealed_share` / `provisional`: will the newest numbers still MOVE? (share of the last window's transactions not yet sealed - by design nonzero on a live system)
+
+### 7.7 The auditor
+
+A report-only reconcile worker re-checks a settled 48-hour window every hour: every transaction has a fact or a recorded reason; every rollup bucket equals a fresh fold of its facts (comparing only buckets the window covers WHOLE - chunk 66); no entry is left assigned to nothing.
+It never repairs on its own; `POST /analytics/reconcile` with `repair=true` publishes ordinary tickets / refolds instead of writing totals directly.
+
+Tables owned here: `analytics_pending_windows`, `analytics_facts`, `analytics_fact_ledger`, `analytics_metrics` (metric definitions as data), the three rollup tables, `analytics_tenant_state`, `analytics_quality_issues` (quarantine), `analytics_transaction_registry`, `analytics_field_registry`, `analytics_record_facts`.
+
+## 8. ML: reproducible training sets
+
+Component: `app/services/analytics_ml/features.py`; tables `analytics_feature_sets`, `analytics_predictions`.
+
+A training set is defined by two coordinates: an INSTANT (`pinned_at`) and a code version.
+Building one reads the LEDGER as it stood at that instant (newest version per transaction at or before the pin, reversals excluded), orders deterministically, and stores only the pin, the version, the row count and a SHA-256 content hash - never the rows, which are a pure function of the pin.
+`verify()` rebuilds at the same pin and compares hashes, making the reproducibility promise testable in production.
+Exceeding 500,000 rows raises instead of truncating: a model trained on an unchosen subset is worse than a build that refused.
+
+Honest status: the machinery is built and tested, but nothing in the application calls `build()` yet and nothing writes `analytics_predictions`; the ML consumer cursor therefore does not yet appear at runtime.
+
+## 9. Housekeeping that keeps it all alive
+
+- **Partitioning** (`app/persistence/partitioning.py`): nine tables are partitioned (entries/transactions/assignments daily; facts/ledger/records/quality monthly; hourly rollups daily; daily rollups yearly).
+  A worker pre-creates 14 days of runway every hour and alarms CRITICAL below 3 days.
+- **Retention**: log tables keep 60 days; facts, ledger, daily rollups and record facts keep forever; hourly rollups 90 days; quarantine 1 year.
+  A partition is dropped only when FOUR gates agree: past retention, no open stitch window overlaps it, every live consumer cursor has read past it, and analytics is healthy (or its hold has been capped at 14 days).
+- **Consumer cursors** (`consumer_cursors`): each incremental reader (analytics, notifications, ML when live) publishes "I have consumed everything before T"; retention respects the minimum.
+  A cursor silent for 24 h is excluded from the minimum and logged CRITICAL - losing one consumer's tail is survivable, filling the disk is not.
+- **Notifications**: rules read `log_transactions.updated_at` through per-rule cursors, publish deduped events (key: rule + transaction + status) into an outbox, and a delivery worker sends them to Teams/Slack/WhatsApp channels with rate limits, backoff, and a 50-attempt dead letter.
+
+## 10. The component map, with every table in its place
+
+```
++--- COLLECTION ------------------------------------------------------------+
+| ssh_log_fetcher -> remote_fetcher -> object storage                       |
+|   log_ssh_sources          config: one row per WMS server                 |
+|   log_ssh_file_checkpoints per-file byte cursor (optimisation only)       |
+|   log_ssh_fetch_runs       on-demand run status                           |
+|   log_source_objects       QUEUE -> Stage 1 (lease, retries, dead letter) |
++---------------------------------------------------------------------------+
+                                   |
++--- STAGE 1: PARSE --------------------------------------------------------+
+| log_parse_worker -> parse_insert -> m3_dotnet_parser                      |
+|   jobs                per-file status                                     |
+|   log_entries         GROUND TRUTH (append-only, deduped, daily parts)    |
+|   log_regroup_pending QUEUE -> Stage 2 (attempts, backoff, dead letter)   |
++---------------------------------------------------------------------------+
+                                   |
++--- STAGE 2: STITCH -------------------------------------------------------+
+| log_stitch_worker -> finalize_pending -> regroup_window -> _group/_persist|
+| + sealer (finality)  + stream_state (S4 shadow)  + cross-pad extension    |
+|   log_transactions      the PROJECTION (update-in-place, daily parts)     |
+|   log_entry_assignment  entry -> transaction membership (daily parts)     |
+|   log_open_stream       saved open-stream state (S4 / future head lane)   |
+|   log_pending_request   saved unmatched requests                          |
+|   log_regroup_runs      manual run status                                 |
+|   analytics_pending_windows  QUEUE -> analytics (backoff, dead letter)    |
++---------------------------------------------------------------------------+
+                                   |
++--- ANALYTICS -------------------------------------------------------------+
+| analytics_worker -> consume (fold) -> normalizer/payload/capture/diff     |
+| -> rollups -> tenant state       + reconcile worker (report-only audit)   |
+|   analytics_facts           CURRENT fact per transaction (monthly parts)  |
+|   analytics_fact_ledger     EVERY version, append-only (monthly parts)    |
+|   analytics_hourly_rollups  charts, hourly (daily parts, 90d)             |
+|   analytics_daily_rollups   charts, tenant-local day (yearly parts)       |
+|   analytics_monthly_rollups charts, monthly (unpartitioned)               |
+|   analytics_metrics         metric definitions as data                    |
+|   analytics_tenant_state    ONE status row per tenant                     |
+|   analytics_quality_issues  quarantine (monthly parts, 1y)                |
+|   analytics_transaction_registry  capture/show/expand switches            |
+|   analytics_field_registry  field allowlist (names only, never values)    |
+|   analytics_record_facts    per-record capture, R4 (monthly parts)        |
++---------------------------------------------------------------------------+
+                                   |
++--- ML --------------------------------------------------------------------+
+| analytics_ml/features (no producer wired yet)                             |
+|   analytics_feature_sets   pin + code version + content hash              |
+|   analytics_predictions    model outputs (no writer yet)                  |
++---------------------------------------------------------------------------+
+
++--- PLATFORM (crosses all pipelines) --------------------------------------+
+| log_partition_worker (runway + retention, 4 gates)                        |
+| notification_worker (rules -> outbox -> deliveries)                       |
+|   customers, customer_display_names, saved_views, logspace_presence,      |
+|   idempotency_keys, consumer_cursors,                                     |
+|   notification_rules/events/deliveries, customer_notification_channels   |
++---------------------------------------------------------------------------+
+| Separate RAG/document pipeline (not the log path):                        |
+|   chunks, chunks_entity, embedding_queue, embeddings (pgvector)           |
++---------------------------------------------------------------------------+
+```
+
+## 11. Known gaps register (verified 2026-08-27)
+
+Honest imperfections found while fact-checking this part; none is currently causing damage, each is a candidate work item.
+
+1. `analytics_tenant_state.last_error` is only ever written as NULL, so the retention gate's "last cycle failed" branch cannot fire; per-run errors live on the ticket rows instead.
+2. Nothing calls `analytics_ml.features.build` outside tests, so the `ml:features-v1` cursor never appears at runtime.
+3. The rollup read path serves only sum and count, so stats/extent/percentile aggregations fall back to fact scans even though the columns exist.
+4. The `show` (hidden) gate applies only where rollups are written; a live-tail or ad-hoc fact scan can still include hidden transactions.
+5. `GET /analytics/status` emits an ETag but the server never handles `If-None-Match` (no 304s); conditional requests are left to clients and proxies.
+6. A few docstrings still describe superseded behaviour (`capture.observe_names` says show defaults off; the transaction-registry model says R4 is not built), and the root CLAUDE.md still claims Stage 1 relaxes its statement timeout to 0 where the code uses a finite 120 s.
+7. The stored S4 stream state has no server column; two servers' same-numbered threads collide there (newest wins) - harmless while the state is shadow-only measurement, and the head-lane work replaces it.
+
+
+---
+
+# PART II. The design history
+
+Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18r).
+It explains WHY the system is shaped the way Part I describes.
+Where the two disagree, Part I is current and the section here records what was believed at the time.
 
 ## Read this first: which iteration you are looking at
 
