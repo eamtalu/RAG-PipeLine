@@ -660,7 +660,96 @@ This single case produced three symptoms that looked unrelated: a slow leak of o
 The rule that fixed it is one sentence: a thread only exists inside one server process, so no pairing rule - stream keys, request pools, the response FIFO - may ever match lines across two servers.
 The repair for the historical damage is the ordinary full rebuild: with everything freed, no id can clash, the chimeras dissolve, and every stranded line finds its home.
 
-## 12. Known gaps register (verified 2026-08-27)
+## 12. The workers: who actually runs each pipeline
+
+Verified on the live server (192.168.0.142) on 2026-08-27.
+
+### 12.1 Two operating-system services, one of which does all the background work
+
+```
+ +--------------------------------------------------------------------------+
+ |  SERVICE 1: fastapirag  (the WEB tier)                                   |
+ |  gunicorn -w 4  ->  four identical FastAPI processes                     |
+ |  serves every /api/v1/* request the dashboard makes                      |
+ |  runs NO background loops in this deployment                             |
+ +--------------------------------------------------------------------------+
+ +--------------------------------------------------------------------------+
+ |  SERVICE 2: fastapirag-worker  (the BACKGROUND tier)                     |
+ |  python -m app.worker  ->  ONE process holding a singleton advisory      |
+ |  lock in Postgres, so a second copy started by mistake refuses to run    |
+ |  hosts ALL TEN worker loops below as tasks inside this one process       |
+ +--------------------------------------------------------------------------+
+```
+
+Every loop must run in exactly one process: the loops assume they are the only writer of their queue, and the per-tenant advisory locks serialise the rest.
+Stopping `fastapirag-worker` pauses the whole factory (collection, stitching, analytics, notifications) while the web tier and the dashboard stay up, which is exactly what a full-history repair needs.
+
+### 12.2 The ten loops inside the worker process, mapped to the pipelines
+
+| # | Worker loop | Pipeline | Cadence | On this server | What it does |
+|---|---|---|---|---|---|
+| 1 | `ssh_log_fetcher` | collection | ~60 s per tenant | on (default) | pulls new log bytes from every enabled WMS server over SFTP, checkpointed per file |
+| 2 | `log_watcher` | collection | 5 s | on (always) | ingests files dropped by hand into the staging directory |
+| 3 | `log_parse_worker` | **Stage 1** | 2 s | on (default) | leases downloaded byte ranges and turns lines into `log_entries` rows |
+| 4 | `log_stitch_worker` | **Stage 2** | 1 s | on (default) | three phases per tick: seal due transactions, reap expired stream state, drain the stitch tickets through the rebuild lane |
+| 5 | `analytics_worker` | **analytics** | 2 s | **on (.env override; default off)** | drains analytics tickets: fold transactions into facts, ledger, rollups, tenant state |
+| 6 | `analytics_reconcile_worker` | analytics (audit) | 1 h | **on (.env override; default off)** | report-only audit of a settled 48-hour window; never repairs |
+| 7 | `log_partition_worker` | platform | 1 h | on (default) | pre-creates 14 days of partition runway; drops partitions past retention behind four gates |
+| 8 | `notification_worker` | notifications | 10 s | on (per-tenant switch) | runs rules, publishes deduped events, delivers to Teams/Slack/WhatsApp with backoff |
+| 9 | `embedding_worker` | RAG documents | 2 s | on (always) | embeds document chunks; not part of the log path at all |
+| 10 | `logspace_cleanup_worker` | platform | 1 h | off (default) | purges expired disposable log spaces |
+
+**There is no ML worker.**
+The ML pipeline (feature sets, predictions) is library code waiting for a caller; when it gets one, it will follow the same pattern: a loop in this process, a queue or a pin as its input, and a consumer cursor so retention respects it.
+
+### 12.3 One picture: which worker touches what
+
+```
+   WMS servers                     staging directory
+        |                                 |
+   [1 ssh_log_fetcher]              [2 log_watcher]
+        \_______________  ________________/
+                        \/
+              log_source_objects (queue)
+                        |
+              [3 log_parse_worker]  ......................... STAGE 1
+                        |
+                   log_entries
+                        |
+              log_regroup_pending (queue)
+                        |
+              [4 log_stitch_worker] ........................ STAGE 2
+                 |seal |reap |drain
+                        |
+        log_transactions + log_entry_assignment
+                        |
+              analytics_pending_windows (queue)
+                        |
+              [5 analytics_worker] ......................... ANALYTICS
+                        |
+        facts + ledger + rollups + tenant state
+                        |                  \
+              (dashboard reads)       [6 analytics_reconcile_worker]
+                                      hourly report-only audit
+
+   cross-cutting, on their own clocks:
+     [7 log_partition_worker]   runway + retention for all 9 partitioned tables
+     [8 notification_worker]    rules -> outbox -> channel deliveries
+     [9 embedding_worker]       the separate RAG document pipeline
+     [10 logspace_cleanup]      disabled here
+```
+
+### 12.4 How to read the server's state at a glance
+
+```
+ systemctl is-active fastapirag          -> the dashboard and API
+ systemctl is-active fastapirag-worker   -> the entire background factory
+ journalctl -u fastapirag-worker -f      -> every loop logs here, one process
+```
+
+The only two .env overrides on this server beyond the defaults are `ANALYTICS_WORKER_ENABLED=true` and `ANALYTICS_RECONCILE_WORKER_ENABLED=true`; everything else runs on the defaults listed above.
+
+## 13. Known gaps register (verified 2026-08-27)
 
 Honest imperfections found while fact-checking this part; none is currently causing damage, each is a candidate work item.
 

@@ -99,6 +99,7 @@
     <li><a href="#housekeeping">Housekeeping</a></li>
     <li><a href="#map">The component map, with every table in its place</a></li>
     <li><a href="#deep">Deep dives: the questions this design answers</a></li>
+    <li><a href="#workers">The workers: who actually runs each pipeline</a></li>
     <li><a href="#gaps">Known gaps register</a></li>
   </ol>
 </div>
@@ -628,7 +629,89 @@ One case, three symptoms that looked unrelated: a slow leak of orphaned lines (~
 <p>The rule that fixed it is one sentence: a thread only exists inside one server process, so no pairing rule may ever match lines across two servers.
 The repair for the historical damage is the ordinary full rebuild: with everything freed, no id can clash, the chimeras dissolve, and every stranded line finds its home.</p>
 
-<h2 id="gaps">12. Known gaps register (verified 2026-08-27)</h2>
+<h2 id="workers">12. The workers: who actually runs each pipeline</h2>
+<p>Verified on the live server (192.168.0.142) on 2026-08-27.</p>
+
+<h3>12.1 Two operating-system services, one of which does all the background work</h3>
+<pre>
+ +--------------------------------------------------------------------------+
+ |  SERVICE 1: fastapirag  (the WEB tier)                                   |
+ |  gunicorn -w 4  ->  four identical FastAPI processes                     |
+ |  serves every /api/v1/* request the dashboard makes                      |
+ |  runs NO background loops in this deployment                             |
+ +--------------------------------------------------------------------------+
+ +--------------------------------------------------------------------------+
+ |  SERVICE 2: fastapirag-worker  (the BACKGROUND tier)                     |
+ |  python -m app.worker  ->  ONE process holding a singleton advisory      |
+ |  lock in Postgres, so a second copy started by mistake refuses to run    |
+ |  hosts ALL TEN worker loops below as tasks inside this one process       |
+ +--------------------------------------------------------------------------+
+</pre>
+<p>Every loop must run in exactly one process: the loops assume they are the only writer of their queue.
+Stopping <code>fastapirag-worker</code> pauses the whole factory (collection, stitching, analytics, notifications) while the web tier and the dashboard stay up - exactly what a full-history repair needs.</p>
+
+<h3>12.2 The ten loops inside the worker process</h3>
+<table>
+  <tr><th>#</th><th>Worker loop</th><th>Pipeline</th><th>Cadence</th><th>On this server</th><th>What it does</th></tr>
+  <tr><td>1</td><td><code>ssh_log_fetcher</code></td><td>collection</td><td>~60 s/tenant</td><td>on (default)</td><td>pulls new log bytes from every enabled WMS server over SFTP, checkpointed per file</td></tr>
+  <tr><td>2</td><td><code>log_watcher</code></td><td>collection</td><td>5 s</td><td>on (always)</td><td>ingests files dropped by hand into the staging directory</td></tr>
+  <tr><td>3</td><td><code>log_parse_worker</code></td><td><strong>Stage 1</strong></td><td>2 s</td><td>on (default)</td><td>leases downloaded byte ranges and turns lines into <code>log_entries</code> rows</td></tr>
+  <tr><td>4</td><td><code>log_stitch_worker</code></td><td><strong>Stage 2</strong></td><td>1 s</td><td>on (default)</td><td>per tick: seal due transactions, reap expired stream state, drain the stitch tickets through the rebuild lane</td></tr>
+  <tr><td>5</td><td><code>analytics_worker</code></td><td><strong>analytics</strong></td><td>2 s</td><td><strong>on (.env override; default off)</strong></td><td>drains analytics tickets: fold transactions into facts, ledger, rollups, tenant state</td></tr>
+  <tr><td>6</td><td><code>analytics_reconcile_worker</code></td><td>analytics (audit)</td><td>1 h</td><td><strong>on (.env override; default off)</strong></td><td>report-only audit of a settled 48-hour window; never repairs</td></tr>
+  <tr><td>7</td><td><code>log_partition_worker</code></td><td>platform</td><td>1 h</td><td>on (default)</td><td>pre-creates 14 days of partition runway; drops partitions past retention behind four gates</td></tr>
+  <tr><td>8</td><td><code>notification_worker</code></td><td>notifications</td><td>10 s</td><td>on (per-tenant switch)</td><td>runs rules, publishes deduped events, delivers to Teams/Slack/WhatsApp with backoff</td></tr>
+  <tr><td>9</td><td><code>embedding_worker</code></td><td>RAG documents</td><td>2 s</td><td>on (always)</td><td>embeds document chunks; not part of the log path</td></tr>
+  <tr><td>10</td><td><code>logspace_cleanup_worker</code></td><td>platform</td><td>1 h</td><td>off (default)</td><td>purges expired disposable log spaces</td></tr>
+</table>
+<div class="warn"><strong>There is no ML worker.</strong>
+The ML pipeline (feature sets, predictions) is library code waiting for a caller; when it gets one, it will follow the same pattern: a loop in this process, a queue or a pin as its input, and a consumer cursor so retention respects it.</div>
+
+<h3>12.3 One picture: which worker touches what</h3>
+<pre>
+   WMS servers                     staging directory
+        |                                 |
+   [1 ssh_log_fetcher]              [2 log_watcher]
+        \_______________  ________________/
+                        \/
+              log_source_objects (queue)
+                        |
+              [3 log_parse_worker]  ......................... STAGE 1
+                        |
+                   log_entries
+                        |
+              log_regroup_pending (queue)
+                        |
+              [4 log_stitch_worker] ........................ STAGE 2
+                 |seal |reap |drain
+                        |
+        log_transactions + log_entry_assignment
+                        |
+              analytics_pending_windows (queue)
+                        |
+              [5 analytics_worker] ......................... ANALYTICS
+                        |
+        facts + ledger + rollups + tenant state
+                        |                  \
+              (dashboard reads)       [6 analytics_reconcile_worker]
+                                      hourly report-only audit
+
+   cross-cutting, on their own clocks:
+     [7 log_partition_worker]   runway + retention for all 9 partitioned tables
+     [8 notification_worker]    rules -> outbox -> channel deliveries
+     [9 embedding_worker]       the separate RAG document pipeline
+     [10 logspace_cleanup]      disabled here
+</pre>
+
+<h3>12.4 How to read the server's state at a glance</h3>
+<pre>
+ systemctl is-active fastapirag          -> the dashboard and API
+ systemctl is-active fastapirag-worker   -> the entire background factory
+ journalctl -u fastapirag-worker -f      -> every loop logs here, one process
+</pre>
+<p>The only two .env overrides on this server beyond the defaults are <code>ANALYTICS_WORKER_ENABLED=true</code> and <code>ANALYTICS_RECONCILE_WORKER_ENABLED=true</code>.</p>
+
+<h2 id="gaps">13. Known gaps register (verified 2026-08-27)</h2>
 <p>Honest imperfections found while fact-checking; none is currently causing damage, each is a candidate work item.</p>
 <ol>
   <li><code>analytics_tenant_state.last_error</code> is only ever written as NULL, so the retention gate's "last cycle failed" branch cannot fire; per-run errors live on the ticket rows instead.</li>
