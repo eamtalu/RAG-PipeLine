@@ -272,6 +272,7 @@ erDiagram
         uuid id PK
         string customer_code "soft tenant key"
         enum status "running/completed/failed"
+        string kind "finalize/full - a RUNNING full run pauses the tenant's workers"
         int windows
         int pending_consumed
         text error

@@ -31,6 +31,11 @@ class LogRegroupRun(Base):
     status: Mapped[LogRegroupRunStatus] = mapped_column(
         Enum(LogRegroupRunStatus), default=LogRegroupRunStatus.running, index=True
     )
+    # Chunk 69: which flavour of run this row tracks. "finalize" = the scoped regroup the frontend
+    # already polls; "full" = the tracked full rebuild that replaced the removed inline endpoint.
+    # A RUNNING "full" row doubles as the tenant's MAINTENANCE FLAG: both worker sweeps skip the
+    # tenant while one is fresh, which is what lets a rebuild run without racing the live stitcher.
+    kind: Mapped[str] = mapped_column(String(16), default="finalize", server_default="finalize")
     # outcome (NULL until finished)
     windows: Mapped[int | None] = mapped_column(Integer, nullable=True)            # time-windows rebuilt
     pending_consumed: Mapped[int | None] = mapped_column(Integer, nullable=True)   # pending rows cleared

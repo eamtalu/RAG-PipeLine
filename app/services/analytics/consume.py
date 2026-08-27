@@ -78,6 +78,7 @@ from app.services.analytics import registry
 from app.services.analytics import rollups as n5
 from app.services.mnp_log_ingestion.pipeline.time_bounds import UtcWindow
 from app.services.mnp_log_ingestion.pipeline.derive_transactions import _split_run
+from app.services.mnp_log_ingestion.pipeline import maintenance
 from app.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -193,12 +194,18 @@ def _open_and_due():
 
 
 async def customers_with_due_work(limit: int | None = None) -> list[str]:
-    """Tenants with at least one open, due ticket. Backed by ix_analytics_pending_due."""
+    """Tenants with at least one open, due ticket. Backed by ix_analytics_pending_due.
+
+    Chunk 69: a tenant with a fresh RUNNING full rebuild is EXCLUDED - folding mid-rebuild states
+    would restate facts against half-built transactions and then restate them again. Its tickets
+    wait; a stale flag stops excluding and alarms (see `pipeline.maintenance`)."""
     cap = limit if limit is not None else settings.analytics_max_customers_per_tick
     async with async_session() as db:
         return list((await db.execute(
             select(distinct(AnalyticsPendingWindow.customer_code))
-            .where(*_open_and_due()).limit(cap))).scalars().all())
+            .where(*_open_and_due(),
+                   maintenance.not_under_maintenance(AnalyticsPendingWindow.customer_code))
+            .limit(cap))).scalars().all())
 
 
 def _coalesce(tickets: Sequence[AnalyticsPendingWindow], gap: timedelta

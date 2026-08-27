@@ -134,6 +134,12 @@ class Settings(BaseSettings):
     # Ships as "shadow" so the (structurally rare) population is measured on real traffic before the
     # first floor ever moves.
     stage2_cross_pad: str = "shadow"
+    # How long a RUNNING kind='full' regroup run keeps pausing its tenant's workers (chunk 69).
+    # Past this age the flag is treated as stale - a crashed subprocess or a service restart mid-
+    # rebuild - and the tenant resumes, LOUDLY: a rebuild that needs re-running beats a silent
+    # permanent freeze of the tenant's pipelines. The 2026-08-27 rebuild of 3.2M entries took ~65
+    # minutes; six hours is generous headroom.
+    log_regroup_full_run_ttl_seconds: int = 21600
     # The analytics fold's own statement timeout, in ms. The web tier's 30 s guard is wrong for a
     # background worker - Stage 1's bulk insert relaxes it for the same reason. 120 s is comfortable
     # headroom over ONE ticket span (measured: 23.7 s of reads on a 10,400-transaction day) and stays

@@ -35,6 +35,7 @@ from app.settings import settings
 from app.config.database import async_session
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.services.mnp_log_ingestion.pipeline.derive_transactions import finalize_pending
+from app.services.mnp_log_ingestion.pipeline import maintenance
 from app.services.mnp_log_ingestion.pipeline import sealer
 from app.services.mnp_log_ingestion.pipeline import stream_state
 
@@ -59,12 +60,18 @@ def _open_and_due():
 
 
 async def customers_with_due_work(limit: int | None = None) -> list[str]:
-    """Tenants with at least one open, due window. Backed by ix_log_regroup_pending_due."""
+    """Tenants with at least one open, due window. Backed by ix_log_regroup_pending_due.
+
+    Chunk 69: a tenant with a fresh RUNNING full rebuild is EXCLUDED - stitching it mid-rebuild is
+    the collision that cost the 2026-08-27 repair four attempts. Its windows wait; a stale flag
+    stops excluding and alarms (see `maintenance`)."""
     cap = limit if limit is not None else settings.log_stitch_max_customers_per_tick
     async with async_session() as db:
+        await maintenance.alarm_on_stale(db)
         return list((await db.execute(
             select(distinct(LogRegroupPending.customer_code))
-            .where(*_open_and_due())
+            .where(*_open_and_due(),
+                   maintenance.not_under_maintenance(LogRegroupPending.customer_code))
             .limit(cap)
         )).scalars().all())
 

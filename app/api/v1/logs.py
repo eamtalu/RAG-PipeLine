@@ -5,25 +5,26 @@ exists. For now you can drop/upload a log file and query its parsed entries.
 """
 
 import asyncio
+import sys
 import uuid
-from datetime import date as date_type, datetime
+from datetime import date as date_type, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (func, select, delete, table as sa_table, column as sa_column,
-                        DateTime)
+                        DateTime, update)
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config.database import get_session
+from app.config.database import async_session, get_session
 from app.settings import settings
 from app.api.deps import get_current_customer, get_active_customer
 from app.persistence.models.job import Job
 from app.persistence.models.log_entry import LogEntry, LogEntryType
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.persistence.models.log_regroup_pending import LogRegroupPending
-from app.persistence.models.log_regroup_run import LogRegroupRun
+from app.persistence.models.log_regroup_run import LogRegroupRun, LogRegroupRunStatus
 from app.persistence.models.log_source_object import LogSourceObject, SourceObjectStatus
 from app.persistence import partitioning as pt
 from app.services.workers.log_partition_worker import db_today, days_of_runway
@@ -345,13 +346,70 @@ def _txn_summary(t: LogTransaction) -> dict:
     }
 
 
-# `POST /logs/regroup` (the inline full/incremental rebuild) was REMOVED on 2026-08-27 (chunk 68).
-# It ran a full tenant rebuild inside the web request: gunicorn kills the worker at 120 s, the
-# client gets ECONNRESET, and the phased commits leave the tenant PARTIALLY rebuilt with no run id
-# to resume from - all proven operationally during the 18r backlog repair. Until the tracked
-# asynchronous replacement ships (planned as POST /logs/regroup/full), a full rebuild is a
-# server-side operation: stop `fastapirag-worker`, run `regroup_all` via a script under
-# `PYTHONPATH`, restart the worker (see docs/HANDOFF-2026-08-26.md).
+# `POST /logs/regroup` (the inline full/incremental rebuild) was REMOVED on 2026-08-27 (chunk 68):
+# it ran a full tenant rebuild inside the web request - gunicorn kills the worker at 120 s and the
+# phased commits leave the tenant PARTIALLY rebuilt with no run id to resume from, all proven
+# operationally during the 18r backlog repair. `POST /logs/regroup/full` below (chunk 69) is the
+# tracked replacement.
+
+
+@router.post("/regroup/full", status_code=202)
+async def full_regroup(
+    customer: str = Depends(get_active_customer),
+    db: AsyncSession = Depends(get_session),
+):
+    """Rebuild this tenant's ENTIRE transaction history, safely. NON-BLOCKING.
+
+    Returns **202** with a `run_id` immediately; poll **GET /logs/regroup/runs/{run_id}** until
+    `completed` or `failed`. The rebuild runs in its OWN PROCESS (tens of minutes of grouping CPU
+    would freeze any shared event loop), and for its whole lifetime the run row acts as this
+    tenant's MAINTENANCE FLAG: the stitch and analytics workers skip the tenant, so the rebuild
+    cannot race them - their tickets simply wait and drain afterwards. Other tenants are unaffected.
+
+    Idempotent in effect (deterministic ids reproduce the same transactions) but expensive; the
+    analytics facts for the tenant restate afterwards through ordinary tickets derived from the
+    entries span. One at a time per tenant: a fresh run already in flight returns **409**.
+    """
+    ttl = timedelta(seconds=settings.log_regroup_full_run_ttl_seconds)
+    existing = (await db.execute(
+        select(LogRegroupRun).where(
+            LogRegroupRun.customer_code == customer,
+            LogRegroupRun.kind == "full",
+            LogRegroupRun.status == LogRegroupRunStatus.running,
+            LogRegroupRun.created_at > datetime.now(timezone.utc) - ttl))).scalars().first()
+    if existing is not None:
+        raise HTTPException(409, detail=f"a full rebuild is already running (run {existing.id}); "
+                                        f"poll /api/v1/logs/regroup/runs/{existing.id}")
+    run = LogRegroupRun(customer_code=customer, kind="full")
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "app.tools.full_regroup", str(run.id))
+    # Watch the exit code from a background task: the subprocess records its own outcome, but a hard
+    # crash (OOM, SIGKILL) cannot - this backstop marks the row failed so the maintenance flag lifts
+    # without waiting out the TTL. Strong reference kept in _finalize_tasks like the finalize tasks.
+    task = asyncio.create_task(_watch_full_regroup(proc, run.id))
+    _finalize_tasks.add(task)
+    task.add_done_callback(_finalize_tasks.discard)
+    return {"run_id": str(run.id), "status": run.status.value,
+            "poll": f"/api/v1/logs/regroup/runs/{run.id}"}
+
+
+async def _watch_full_regroup(proc, run_id: uuid.UUID) -> None:
+    """Mark the run failed if the subprocess dies without recording an outcome."""
+    code = await proc.wait()
+    if code == 0:
+        return
+    async with async_session() as db:
+        await db.execute(
+            update(LogRegroupRun)
+            .where(LogRegroupRun.id == run_id,
+                   LogRegroupRun.status == LogRegroupRunStatus.running)
+            .values(status=LogRegroupRunStatus.failed,
+                    error=f"rebuild subprocess exited with code {code} before recording an outcome",
+                    finished_at=datetime.now(timezone.utc)))
+        await db.commit()
 
 
 @router.post("/regroup/finalize", status_code=202)

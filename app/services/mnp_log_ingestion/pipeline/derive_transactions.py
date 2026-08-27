@@ -889,18 +889,40 @@ async def regroup_all(db: AsyncSession, customer_code: str | None = None) -> dic
     # the guard was killing the repair the 18r orphan-leak fix depends on. SET LOCAL lasts one
     # transaction, and this function commits between phases, so it is re-issued per phase below.
     await db.execute(sa_text("SET LOCAL statement_timeout = 0"))
+    # Chunk 69: serialise with any in-flight stitch window through the same per-tenant lock the
+    # stitcher holds. Belt and braces under the maintenance flag - the flag stops NEW windows being
+    # claimed, the lock waits out one already mid-flight.
+    if customer_code is not None:
+        await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(customer_code))))
     # Assignments first: the FK cascade is gone (it made partitions undroppable), so they must be
     # removed explicitly or every full regroup leaves orphans pointing at deleted transactions.
-    # N1, publish site 3 of 5. The span has to be read BEFORE the delete: this frees the tenant's whole
-    # history and commits, so afterwards there is nothing left to derive bounds from. One aggregate per
-    # tenant rather than every row, since only the extremes matter and `publish` splits by day.
-    span_stmt = select(LogTransaction.customer_code,
-                       func.min(LogTransaction.started_at),
-                       func.max(LogTransaction.started_at)).group_by(LogTransaction.customer_code)
+    # N1, publish site 3 of 5, over the UNION of two spans, both read BEFORE the delete:
+    #
+    #   - the TRANSACTIONS span upholds invariant 2 (every deleted row is inside a committed
+    #     ticket), including rows with no surviving entries;
+    #   - the ENTRIES span (chunk 69) covers what the rebuild will CREATE. The 2026-08-27 repair
+    #     started from a tenant whose transactions were already gone, so a transactions-only span
+    #     published nothing and eight days of facts stayed missing until a manual re-ticket.
+    #     Entries survive every rebuild.
+    #
+    # Two publishes per tenant at most; the consumer coalesces overlapping tickets into one run.
+    txn_span = select(LogTransaction.customer_code,
+                      func.min(LogTransaction.started_at),
+                      func.max(LogTransaction.started_at)).group_by(LogTransaction.customer_code)
+    entry_span = select(LogEntry.customer_code,
+                        func.min(LogEntry.timestamp),
+                        func.max(LogEntry.timestamp)).group_by(LogEntry.customer_code)
     if customer_code is not None:
-        span_stmt = span_stmt.where(LogTransaction.customer_code == customer_code)
-    for code, lo, hi in (await db.execute(span_stmt)).all():
+        txn_span = txn_span.where(LogTransaction.customer_code == customer_code)
+        entry_span = entry_span.where(LogEntry.customer_code == customer_code)
+    for code, lo, hi in (await db.execute(txn_span)).all():
+        # publish_for_transactions, not publish: it degrades an all-NULL span to a degenerate
+        # ticket rather than skipping, which invariant 2 requires for NULL-started rows.
         await analytics_tickets.publish_for_transactions(db, code, started_ats=[lo, hi])
+    for code, lo, hi in (await db.execute(entry_span)).all():
+        if lo is None:
+            continue
+        await analytics_tickets.publish(db, code, lo=lo, hi=hi)
 
     await assignments.delete_for_customer(db, customer_code)
     del_stmt = delete(LogTransaction)
@@ -917,8 +939,10 @@ async def regroup_all(db: AsyncSession, customer_code: str | None = None) -> dic
     stats = {"mode": "full", "customers": len(codes), "by_status": {}}
     for code in codes:
         # Fresh transaction after the commit above (and after each iteration's) - the relax must be
-        # re-issued or the whole-history read below dies on the web-tier guard again.
+        # re-issued or the whole-history read below dies on the web-tier guard again. The tenant
+        # lock likewise (chunk 69): xact locks release at every commit.
         await db.execute(sa_text("SET LOCAL statement_timeout = 0"))
+        await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(code))))
         rows = list((await db.execute(
             select(LogEntry).where(LogEntry.customer_code == code).order_by(
                 LogEntry.timestamp.asc().nullslast(),
@@ -1648,6 +1672,43 @@ async def reset_abandoned_windows(db: AsyncSession, customer_code: str) -> int:
         logger.info("Stage 2: re-armed %d abandoned window(s) for %s — they will be retried next finalize",
                     n, customer_code)
     return n
+
+
+async def run_full_regroup_tracked(run_id: uuid.UUID) -> None:
+    """Chunk 69: the subprocess entry point for a tracked FULL rebuild.
+
+    Runs `regroup_all` for the run row's tenant and records the outcome, mirroring
+    `run_finalize_tracked` below. Deliberately a separate PROCESS (`python -m app.tools.full_regroup
+    <run_id>`), never an in-process background task: the grouping of a full history is tens of
+    minutes of pure Python CPU, which would freeze whichever event loop hosted it - the web worker
+    until gunicorn kills it, or the background worker and every pipeline it runs. The RUNNING run row
+    is also the tenant's maintenance flag (see `pipeline.maintenance`), so both workers pause the
+    tenant for exactly the lifetime of this function.
+
+    Never raises; failures land on the row as status=failed with the error text, and a crash that
+    prevents even that leaves a `running` row the maintenance TTL treats as stale, loudly."""
+    async with async_session() as db:
+        run = (await db.execute(select(LogRegroupRun).where(
+            LogRegroupRun.id == run_id))).scalar_one_or_none()
+        if run is None or run.kind != "full":
+            logger.error("Tracked full regroup: run %s missing or not kind='full'; nothing done",
+                         run_id)
+            return
+        customer_code = run.customer_code
+    async with async_session() as db:
+        try:
+            stats = await regroup_all(db, customer_code)
+            values = dict(status=LogRegroupRunStatus.completed, result=stats,
+                          windows=stats.get("customers"),
+                          finished_at=datetime.now(timezone.utc))
+        except Exception as exc:
+            logger.exception("Tracked full regroup failed (run=%s customer=%s)",
+                             run_id, customer_code)
+            await db.rollback()
+            values = dict(status=LogRegroupRunStatus.failed, error=str(exc)[:2000],
+                          finished_at=datetime.now(timezone.utc))
+        await db.execute(update(LogRegroupRun).where(LogRegroupRun.id == run_id).values(**values))
+        await db.commit()
 
 
 async def run_finalize_tracked(run_id: uuid.UUID, customer_code: str) -> None:
