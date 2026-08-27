@@ -407,7 +407,163 @@ Honest status: the machinery is built and tested, but nothing in the application
 +---------------------------------------------------------------------------+
 ```
 
-## 11. Known gaps register (verified 2026-08-27)
+## 11. Deep dives: the questions this design answers, with pictures
+
+These are the questions that came up while reviewing the system, answered with the diagrams that made them click.
+Keep them: each one is a design decision someone will question again.
+
+### 11.1 Why a transaction row is UPDATED in place, yet no history is ever lost
+
+`log_transactions` cannot be append-only, because a transaction row is an AGGREGATE over its entries: its end time is the max, its status comes from the response, its duration is the difference.
+Adding one late entry necessarily changes the row.
+But "not append-only" never required losing history, because history lives one layer down, in the ledger:
+
+```
+ log_transactions (the PROJECTION - one row, edited in place)
+
+   txn 123:  status=incomplete  --later-->  status=success
+                                            (the old value is GONE from this table)
+
+ analytics_fact_ledger (the DIARY - a new row per version, never edited)
+
+   v1  txn 123  status=incomplete   recorded 14:03
+   v2  txn 123  status=success      recorded 14:05
+       both kept forever -> "rebuild the data exactly as it was at 14:04" works
+```
+
+And the deeper truth: mutability is not WHY recent data changes.
+The cause is physical - when a picker scans a request, its response simply has not happened yet.
+Even a fully append-only store would have to revise its answer five minutes later; it would just record the revision as a new row, which is exactly what the ledger does.
+
+### 11.2 Provisional is not slow: the sealing timeline
+
+The dashboard's yellow "Provisional" badge is about FINALITY, not speed.
+The data path is fast (a scan reaches the chart in about a minute); the badge says the newest numbers may still move, because their transactions are still inside the seal window:
+
+```
+ 14:02:11 request -- 14:02:14 response ---- silence ----> 14:17:14 SEALED
+                                  |<-------- 900 s ------->|
+ before sealing: counted, charted, but PROVISIONAL (could still change)
+ after sealing:  frozen forever -> the badge flips to green Settled
+```
+
+There were two honest designs, and this system deliberately picked the fast one:
+
+| | numbers appear | risk |
+|---|---|---|
+| only count sealed rows | 15 minutes late | none |
+| count immediately + badge (CHOSEN) | ~1 minute | recent figures may shift, and the badge says so |
+
+The share of unsealed contributors is measured over the LAST FOLDED WINDOW only (the live tail), so roughly "the last 15 minutes of activity"; older bars on the chart never move.
+
+### 11.3 How a late line rejoins its conversation: move the window floor, never attach by id
+
+When a line arrives whose conversation started just before a rebuild window's padded floor, the fix is NOT to look up the exact transaction and attach the line to it.
+The fix is one line of geometry: move the floor.
+
+```
+ today:   window floor is FIXED at  ticket_start - 900s
+          conversation started at floor - 50s -> invisible -> its late
+          response becomes an orphan, and the fingerprint skip makes
+          that permanent
+
+ with the cross-pad extension (built, ships in shadow):
+          one query asks "does an open conversation end just before my
+          floor, AND is there a brand-new line that could join it?"
+          if yes -> floor moves back to that conversation's start
+                    (bounded at pad + gap = 20 minutes)
+          -> the SAME rebuild now sees the whole conversation -> joins it
+          beyond the bound -> the window REFUSES loudly (dead letter),
+                    never a silent partial rebuild
+```
+
+Why the tempting alternative - "find the exact transaction id and attach the line" - was rejected, three facts deep:
+
+1. **An attach is a re-derivation, not an append.**
+   The row's columns are aggregates over ALL its entries, so attaching one line correctly means loading every prior entry anyway; the imagined read savings do not exist.
+2. **The id cannot tell you whether the line actually belongs to it.**
+   Ownership is decided by the grouping rules (FIFO per user, thread flips, gap limits), and only running the grouper over the combined lines answers correctly.
+   Two implementations of grouping is exactly what produced the measured shadow divergence (one from-scratch group became seventeen seeded ones).
+3. **Everything downstream comes free through the rebuild.**
+   Update by partition key, fingerprint recompute, membership rewrite, seal recompute, the analytics ticket - the rebuild path already does all of it, tested; a targeted attach would re-implement each as a second write authority that must agree with the first forever.
+
+### 11.4 "What if the line belongs to a window six hours older?"
+
+Two very different cases, both already handled - neither needs the extension to reach six hours back:
+
+```
+ CASE 1: the line's TIMESTAMP is 6h after the conversation's last entry
+   -> it can NEVER join it. The 300s stream gap rule refuses everywhere -
+      in the extension, in a full rebuild, in any design. Six hours of
+      silence means a new conversation, by the system's own definition.
+      (That is why the extension bound is 20 minutes and not more:
+       past pad + gap a join is arithmetically impossible.)
+
+ CASE 2: a BACKFILL - a file arrives NOW containing lines stamped 6h ago
+   -> no cross-pad involved at all, because WINDOWS FOLLOW ENTRY
+      TIMESTAMPS, not arrival time:
+
+      file arrives 20:00 containing lines stamped 14:02
+        -> Stage 1's ticket says "the range around 14:02 changed"
+        -> the rebuild window positions itself 6 hours back
+        -> the old conversation is INSIDE that window -> freed -> rebuilt
+        -> the late line joins through today's normal path
+      (this already works; it is why rebuilds free sealed rows too)
+```
+
+### 11.5 The rebuild lane and the head lane, side by side
+
+```
+ REBUILD LANE (built - the only lane today)      HEAD LANE (planned, 18q P4)
+ ---------------------------------------        ---------------------------------
+ ticket arrives                                  entry arrives at the stream head
+   -> pad the range +-15 min                       -> look up its open stream in
+   -> free every transaction in it                    saved state (log_open_stream)
+   -> re-group ALL its entries from                -> found: append ONE membership
+      scratch (the one trusted algorithm)             row, update the open txn
+   -> write only the DIFFERENCE                    -> not found: start a new txn
+      (fingerprints: ~98.7% unchanged,             -> ANY surprise (6 known miss
+       so ~1 write per surviving row)                 modes): route the range to
+                                                      the REBUILD LANE
+ cost: re-READS the window every tick            cost: reads only new entries
+ latency: bounded by the tick cadence            latency: near arrival
+ correctness: the authority, always              correctness: must always MATCH
+                                                 the rebuild lane (own shadow
+                                                 gate before it ever turns on)
+```
+
+The head lane is a read-cost and latency optimisation, never a correctness feature.
+The write side is already optimal in the rebuild lane (the S3 verdict table); what the head lane removes is re-reading a 30-to-45-minute window every second to discover that 98.7% of it did not change.
+
+### 11.6 Case study: the chimera transaction, or why grouping is server-scoped
+
+Reconstructed from live forensics (2026-08-27 12:09:35, one picker, two app servers, twenty milliseconds).
+This single case produced three symptoms that looked unrelated: a slow leak of orphaned lines (~300/day), hourly "skipped an already-sealed id" warnings, and an analytics undercount.
+
+```
+ what the two servers actually logged (one user, two operations):
+
+ BEC01:  request .113 --- body .134 --- work (thread 45) --- response .330
+ BEC02:  request .115 --- body .144 --- work (thread 33) --- response .338
+
+ what the grouper used to build (matching pools ignored the server):
+
+   CHIMERA txn:  [BEC01 request .113] + [BEC02 body .144 + BEC02 work]
+                 + [BEC01 response .330]        <- sealed, "success", WRONG
+   leftovers:    BEC02 request .115, BEC01 body .134
+                 -> minted the SAME deterministic id as the chimera
+                 -> skipped as a duplicate -> stranded UNASSIGNED forever
+
+ what it builds now (every key and pool carries the server):
+
+   txn A: [BEC01 request .113, body .134, work, response .330]   correct
+   txn B: [BEC02 request .115, body .144, work, response .338]   correct
+```
+
+The rule that fixed it is one sentence: a thread only exists inside one server process, so no pairing rule - stream keys, request pools, the response FIFO - may ever match lines across two servers.
+The repair for the historical damage is the ordinary full rebuild: with everything freed, no id can clash, the chimeras dissolve, and every stranded line finds its home.
+
+## 12. Known gaps register (verified 2026-08-27)
 
 Honest imperfections found while fact-checking this part; none is currently causing damage, each is a candidate work item.
 
