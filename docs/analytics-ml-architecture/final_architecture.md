@@ -235,6 +235,7 @@ It is the only lane that exists today, and since S3 it is cheap (unchanged rows 
 The **head lane** is the planned next step (section 18q, work package P4, NOT built):
 a fast path that would process only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`), appending one assignment per entry and updating the open transaction, with any surprise routed back to the rebuild lane.
 Its benefit is read cost and latency, not correctness; the rebuild lane remains the authority.
+Section 11.5 walks both lanes panel by panel, with a worked example - read that if this paragraph is not enough.
 
 Related: the S4 shadow (`stage2_stream_lookup = shadow`) already saves grouper state each window and measures whether a state-seeded regroup would agree with the from-scratch one.
 It changes nothing and is slated for replacement by the head lane's own shadow (P5).
@@ -511,29 +512,125 @@ Two very different cases, both already handled - neither needs the extension to 
       (this already works; it is why rebuilds free sealed rows too)
 ```
 
-### 11.5 The rebuild lane and the head lane, side by side
+### 11.5 The rebuild lane and the head lane: the full picture
+
+Two words, defined once:
+
+- The **rebuild lane** is how Stage 2 works TODAY: whenever anything changes, re-derive a whole padded window from scratch and write only the difference.
+- The **head lane** is the PLANNED fast path (section 18q, P4, not built): remember where processing got to, and handle only the brand-new lines at the head of the stream.
+
+**Panel 1 - what the rebuild lane does today, and what it wastes.**
+Every worker tick re-reads a window of recent history just to discover that almost none of it changed:
 
 ```
- REBUILD LANE (built - the only lane today)      HEAD LANE (planned, 18q P4)
- ---------------------------------------        ---------------------------------
- ticket arrives                                  entry arrives at the stream head
-   -> pad the range +-15 min                       -> look up its open stream in
-   -> free every transaction in it                    saved state (log_open_stream)
-   -> re-group ALL its entries from                -> found: append ONE membership
-      scratch (the one trusted algorithm)             row, update the open txn
-   -> write only the DIFFERENCE                    -> not found: start a new txn
-      (fingerprints: ~98.7% unchanged,             -> ANY surprise (6 known miss
-       so ~1 write per surviving row)                 modes): route the range to
-                                                      the REBUILD LANE
- cost: re-READS the window every tick            cost: reads only new entries
- latency: bounded by the tick cadence            latency: near arrival
- correctness: the authority, always              correctness: must always MATCH
-                                                 the rebuild lane (own shadow
-                                                 gate before it ever turns on)
+ the entry stream (time ->)
+ ────■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■□□□
+     older lines, already stitched                        new  NOW
+
+ tick 1:      [------- re-read ~30-45 min -------]   writes: only the diff
+ tick 2 (+1s):   [------- re-read again -------]     writes: ~0
+ tick 3 (+2s):     [------ re-read again ------]     writes: ~0
+
+ 98.7% of what each tick re-reads comes out UNCHANGED.
+ Since S3, the WRITES are already minimal (fingerprints skip them).
+ The re-READS are the remaining waste - that is all the head lane removes.
 ```
 
-The head lane is a read-cost and latency optimisation, never a correctness feature.
-The write side is already optimal in the rebuild lane (the S3 verdict table); what the head lane removes is re-reading a 30-to-45-minute window every second to discover that 98.7% of it did not change.
+**Panel 2 - what the head lane remembers instead.**
+Instead of re-deriving the recent past, it keeps two pieces of durable memory:
+
+```
+ the FRONTIER: "I have processed every line up to here"
+ ────■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■□□□
+                                                     ▲    new  NOW
+                                                 FRONTIER
+
+ the PARKED OPEN STREAMS (table: log_open_stream):
+   (BEC01, thread 45, user amin) -> transaction A, still open, last line 14:53:07
+   (BEC02, thread 33, user sara) -> transaction B, still open, last line 14:53:09
+
+ for each NEW line after the frontier:
+
+   continues a parked stream?   YES -> append ONE membership row,
+                                       UPDATE that one open transaction
+                                NO  -> INSERT a new transaction
+   anything surprising?         -> STOP GUESSING, hand the range to the
+      (older timestamp than the      REBUILD LANE - never improvise
+       frontier, gap exceeded,
+       anonymous stream, any of
+       the six known miss modes)
+```
+
+**Panel 3 - the router: how the two lanes will share the work.**
+
+```
+                        new work arrives
+                              |
+                 is it brand-new lines AT THE HEAD,
+                 and do ALL the safety guards pass?
+                   /                          \
+                 YES                           NO
+                  |                             |  (a backfilled file, a late
+             HEAD LANE                          |   line, a guard tripping,
+        append + update in place                |   a manual repair)
+        cheap, near-instant                     v
+                  |                        REBUILD LANE
+                  |                   pad +-15 min, free every
+                  |                   transaction in the window,
+                  |                   regroup from scratch,
+                  |                   write only the difference
+                   \                          /
+                    +------------------------+
+                    | both lanes MUST produce IDENTICAL results.      |
+                    | proven by a shadow phase (run both, compare)    |
+                    | before the head lane is ever allowed to write.  |
+                    | the REBUILD LANE is always the referee: any     |
+                    | disagreement means the head lane is wrong.      |
+                    +---------------------------------------------+
+```
+
+**Panel 4 - one worked example through both lanes.**
+Picker amin scans; three lines arrive over two fetches:
+
+```
+ 14:53:07  request  (BEC01, thread 45, amin)      arrives in fetch 1
+ 14:53:08  body     (BEC01, thread 45, amin)      arrives in fetch 1
+ 14:53:12  response (BEC01, thread 40, amin)      arrives in fetch 2 (late)
+
+ REBUILD LANE (today):
+   fetch 1 ticket -> re-derive [14:38..15:08]: builds txn A = [request, body],
+                     status incomplete. Plus re-reads ~40 min of neighbours
+                     to conclude they are all unchanged.
+   fetch 2 ticket -> re-derive the window AGAIN: txn A = [request, body,
+                     response], status success; one UPDATE. Neighbours:
+                     unchanged again.
+
+ HEAD LANE (planned):
+   fetch 1 -> two lines after the frontier; no parked stream matches ->
+              INSERT txn A [request, body]; park stream (BEC01, 45, amin);
+              advance frontier. Nothing else read.
+   fetch 2 -> one line; parked stream matches (same server, same user,
+              within the 300s gap) -> append membership, UPDATE txn A to
+              success; close and unpark the stream; advance frontier.
+
+ SAME final transaction, byte for byte. Different cost:
+   rebuild lane read  ~thousands of lines per tick to get there;
+   head lane read     exactly three.
+```
+
+Summary table:
+
+| | rebuild lane (today) | head lane (planned) |
+|---|---|---|
+| trigger | a ticket: "this time range changed" | a new line at the stream head |
+| reads | the whole padded window, every tick | only the new lines |
+| writes | only the difference (~1/row, S3) | one membership + one update per line |
+| handles | everything: backfills, repairs, late lines | only the clean common case |
+| on surprise | it IS the fallback | hands the range to the rebuild lane |
+| correctness | the authority, always | must match the rebuild lane, gated by its own shadow phase |
+| status | built, running | designed (18q P4), not built |
+
+The one-sentence takeaway: the head lane is a bookmark plus parked conversations, so the common case stops re-reading the past; the rebuild lane keeps existing untouched underneath it as the referee and the repair tool.
 
 ### 11.6 Case study: the chimera transaction, or why grouping is server-scoped
 
