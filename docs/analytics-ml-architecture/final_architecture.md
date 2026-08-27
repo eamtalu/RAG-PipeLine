@@ -1893,7 +1893,7 @@ What follows is what remains, in dependency order rather than in the order it wa
 | **S2** | **BUILT 2026-08-25** - durable stream position; `req_pos` deleted rather than persisted. See 18k. | S1 | done |
 | **S3** | **BUILT 2026-08-25** - fingerprint skip and UPDATE in place. 3 identical regroups now write 0 rows. See 18l. | S2 | done |
 | **S4a** | **BUILT 2026-08-25, SHADOW** - state persisted and compared; re-derive still authoritative. See 18m. | S3 | done |
-| **S4b** | Promote the lookup. Gate unchanged: a week of `agreed: true` with `seeded_streams` > 0. Divergence diagnosed + fixed 2026-08-25 (18p); cross-pad joining needs its own `_persist` design first. | S4a | no |
+| **S4b** | SUPERSEDED (18q, 2026-08-27): the 7-day gate proved unmeasurable (`seeded_streams` = 0 in all 1,411 post-fix runs, structurally) and cross-pad joining shipped instead as a bounded backward window extension - no `_persist` change, no lookup promotion. `stage2_stream_lookup` stays `shadow`; the streaming end-state is re-planned as a head-lane fast path (18q, P4). | S4a | superseded |
 | **R4** | **BUILT 2026-08-25, CAPTURE ONLY** - `analytics_record_facts`, opt-in per transaction. The record-grain FOLD is not built. See 18n. | R3 | capture done |
 | **R4b** | The record-grain fold and read, so a record metric can be defined | R4 | no |
 | **M1** | **BUILT 2026-08-25** - reproducible training sets pinned to the ledger, plus the predictions table and the reserved cursor. See 18o. | R3 | done |
@@ -3011,15 +3011,74 @@ manufacturing divergence.
 So shadow now measures the question it can answer - *does the seeded path reproduce the re-derive on
 identical inputs?* - and `out_of_scope` counts how often the bigger question is being deferred.
 
-### The gate, restated
+### The gate, restated - and then measured to death (see 18q)
 
-Unchanged: seven consecutive days of `agreed: true` with `seeded_streams > 0`, now measurable without
-structural false positives. `stage2_stream_lookup` remains `shadow`.
+As written on 2026-08-25: seven consecutive days of `agreed: true` with `seeded_streams > 0`.
+Measured on 2026-08-27 after ~24 hours of live traffic: 1,411 shadow runs, zero divergences, and `seeded_streams = 0` in EVERY run - the agreements were vacuous.
+The reason is structural, not bad luck: a stream may only seed when its transaction is in the rebuild set AND its last entry precedes the window floor, and a rebuilt transaction's entries are inside the window, so the two conditions are near mutually exclusive.
+The ~1 usable stream per run (1,401 in 24 h) is exactly the cross-pad population the fix correctly excludes as `out_of_scope`.
+This gate can therefore never accumulate evidence and is SUPERSEDED by 18q.
+`stage2_stream_lookup` remains `shadow` and is never promoted to `on`.
 
 ## Also corrected while measuring
 
 `settings.py:78-79` and `:110-112` claim "real transactions are ≤2 min".
 Measured over 151,757 live transactions: avg 1.7 s, p99 28.1 s, **max 363.7 s (6.1 min)** - longer than `log_open_gap_seconds` = 300 s.
 Both windows should be re-derived from measurement rather than from that note.
+(Done in 18q: both comments now carry the measured numbers, and the gap measurement itself - zero attributable splits over 7 days - is recorded there.)
 
 Full implementation plan, staging and verification gates: `~/.claude/plans/2026-08-23_22-06_stage2-incremental-state-machine.md`.
+
+## 18q. Cross-pad healing as BUILT, the S4b gate superseded, and the streaming end-state re-planned. 2026-08-27.
+
+Prompted by the owner's question "when can stream lookup go on?", answered by measurement, and redirected by design review.
+The full plan (gap analysis of the streaming goal per pipeline stage, two rejected designs, live measurements) is `~/.claude/plans/2026-08-27_01-30_stage2-streaming-endstate-and-crosspad.md`; this section records what shipped and what it supersedes.
+
+### The measurements that changed the plan (all live, 2026-08-27)
+
+1. **The S4b gate was unmeasurable.**
+1,411 shadow runs after the 18p fix, zero divergences, `seeded_streams = 0` in every single one - structural, as restated in 18p above.
+2. **The cross-pad case is structurally impossible at current settings.**
+A cross-pad join needs the old transaction to span more than pad - gap = 600 s; the measured maximum span is 363.7 s (and 354.5 s over the most recent 7 days).
+3. **Responses carry no identity.**
+0 of 18,090 response entries have any reqid-like field (their `fields` hold exactly one key, the payload), so an identity-based targeted lookup - the tempting alternative - cannot exist for the one entry type that arrives late.
+Requests and POST bodies DO carry `ReqID`; ask the WMS team whether M3 can log it on response lines, because a yes reopens identity joins from a position of strength.
+4. **The gap rule is not splitting anything.**
+7 days, ~54,000 transactions: 4 orphan-response fragments, none preceded by an incomplete transaction of the same user within 30 minutes.
+`log_open_gap_seconds` stays 300; the orphan-response-per-day count joins the health sweep as the standing alarm, and raising the gap ever requires a `_DERIVE_VERSION` bump.
+
+### What shipped instead of "cross-pad _persist" (chunk 65)
+
+A **bounded backward window extension** in `regroup_window` (`_cross_pad_floor`, `CrossPadSpanExceeded`), governed by `stage2_cross_pad` = off / shadow / **on** (ships as shadow).
+When a conversation ends within `gap` of the window's padded floor AND an ownerless entry could actually join it, the floor moves back to the conversation's start - bounded at pad + gap = 1200 s - and the EXISTING cold rebuild sees the conversation whole and joins it through the machinery already trusted: grouping, fingerprints, update-in-place, ticketing.
+`_persist`, `_group` and `_shadow_compare` are untouched; the chunk-59 derivation digest and the chunk-42 delete census pass unmodified, which was a design constraint, not an accident.
+A joinable conversation starting beyond even that bound RAISES, so the ticket retries and dead-letters loudly rather than the rebuild splitting it silently.
+
+Why not the original "attach to the exact transaction id in `_persist`" (design A): its own span guard refuses every genuine attachment by definition (the target starts before the floor, so the merged span always exceeds the pad), and persisting the seeded grouping re-opens the 18p phantom cascade.
+Why not "just find the record by identity": measurement 3.
+
+The three review amendments that made the extension shippable, each pinned by a chunk-65 test:
+the floor is pad + gap not pad (or healthy 600-900 s spans dead-letter);
+the ownerless-entry precondition is mandatory (or nearly every live tick would extend and re-free the freshly-sealed band, one pointless rewrite + notification re-entry per transaction fleet-wide);
+and the moved floor threads through every window-derived read via the single `lo_p` local (or an inherited id falls into the vanished DELETE - the citation-breaking churn `continuity` exists to prevent).
+
+### Also fixed, chunk 64: the two S3 follow-ups the doc mandated
+
+- `consume.py` `_FRONTIER_COLUMN` moved from `created_at` to `updated_at` - the constant had quietly become DEAD (the fold read the literal string), so the test pins both the binding and that the fold reads through it.
+This was a LIVE latent defect from the moment S3 deployed: Flow F's watch, fired.
+- The notification dedup key gained the status: `(rule, txn, status)`, so a status change - the correction the alert exists for - re-alerts, while a re-polled unchanged transaction still dedupes to one event.
+
+### What remains of the streaming end-state (the owner's goal)
+
+The goal ("update in place, insert if new, skip if same, append-only collection") is ~90% built and live; what is NOT streaming is the read side - every tick still re-reads the padded window and regroups it in memory.
+The remaining roadmap, in the plan file above:
+
+- **P4, head-lane streaming** (the true S4b, on the correct axis): a per-tenant durable frontier; entries at/after it processed incrementally against the `log_open_stream` state (continue → append one assignment + one UPDATE per open transaction per batch; new → INSERT); every one of the six miss modes routes to the rebuild lane; gated behind its OWN correctly-axised shadow comparing against the rebuild lane on the same new entries; promotion by manual review.
+Benefit: reads drop to new-entries-only and stitch latency drops from cadence-bound to near-arrival; writes are already ~1/row.
+- **P5**: once P4's shadow lands, retire the mis-axised S4a window-replay comparison and the `stage2_stream_lookup` setting (the state tables stay - P4 is their intended purpose).
+
+### Standing health additions
+
+- Orphan-response transactions per day (entry_count = 1, sole entry a response): expected ~0-1; a rise is the signal to revisit the gap rule or ingestion truncation.
+- `journalctl -u fastapirag-worker | grep "cross-pad"`: the shadow phase's review surface (candidates, would-extend seconds, would-raise counts).
+- Any `CrossPadSpanExceeded` dead letter is a genuine span-over-pad conversation: repair with a manual full regroup over its span, and investigate what produced it.

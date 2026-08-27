@@ -1005,6 +1005,102 @@ def _regroup_pad() -> timedelta:
     return timedelta(seconds=max(settings.log_regroup_pad_seconds, settings.log_seal_window_seconds))
 
 
+class CrossPadSpanExceeded(RuntimeError):
+    """18q. A conversation is joinable from this window but starts beyond the extension bound.
+
+    Rebuilding it PARTIALLY would split it silently — the exact losslessness violation the padded
+    window exists to prevent — so the window refuses instead. The raise propagates to
+    `finalize_pending`, which bumps the ticket's attempts and eventually abandons it to the
+    dead-letter queue with this message as `last_error`: loud, visible, and repairable by a manual
+    full regroup of the span, rather than a silent permanent fragment (S3 means nothing would ever
+    revisit it)."""
+
+
+async def _cross_pad_floor(db: AsyncSession, customer_code: str, lo_p: datetime,
+                           hi_p: datetime) -> tuple[datetime, dict]:
+    """18q. The bounded backward extension of a rebuild window's padded floor.
+
+    The case: a conversation STARTED before `lo_p` (so it is not freed) whose stream a NEW entry in
+    this window would genuinely continue — possible only when its span exceeds pad - gap, so this is
+    insurance for long-span transactions and backfill healing, not a live-traffic path. Instead of a
+    second persistence mechanism, the floor moves back to the conversation's start and the ordinary
+    cold rebuild sees it whole; every downstream read derives from the same `lo_p` local, so the
+    freed set, the owner map (id continuity!), the entry read, the S4 shadow and the analytics
+    ticket all follow automatically.
+
+    Three deliberate bounds, each from the design review:
+
+    - The extension band is `pad + gap`, NOT `pad`: a legal transaction ending within `gap` of
+      `lo_p` can start up to `pad + gap` back, and a tighter band would refuse the healthy spans
+      this exists to serve.
+    - The ownerless-entry probe is MANDATORY: something ends within `gap` of `lo_p` on nearly every
+      live tick, and extending for candidates nothing can join would re-free the freshly-sealed
+      band each tick (one pointless rewrite + notification re-entry per transaction, fleet-wide).
+      In steady state new entries sit a full pad above the band, so this probe is what makes the
+      steady-state cost exactly zero.
+    - A joinable candidate BELOW the band raises `CrossPadSpanExceeded` (mode `on`): its span
+      exceeds the pad, and a partial rebuild would split it silently. The candidate scan itself is
+      bounded at three bands (an in-band conversation can only have grown there through bounded,
+      gap-chained merges); anything older fragments exactly as it does today.
+
+    Returns `(floor, report)`. Shadow mode returns `lo_p` unchanged and reports what WOULD have
+    happened, so the population is measurable on real traffic before the first floor ever moves.
+    The report rides `stats["cross_pad"]` per window (not `_merge_stats` — it is a dict, and the
+    log lines below are the review surface for the shadow phase)."""
+    mode = (settings.stage2_cross_pad or "").strip().lower()
+    if mode not in ("shadow", "on"):
+        return lo_p, {}
+
+    gap = timedelta(seconds=settings.log_open_gap_seconds)
+    band = _regroup_pad() + gap
+    candidates = (await db.execute(
+        select(LogTransaction.id, LogTransaction.started_at, LogTransaction.ended_at)
+        .where(LogTransaction.customer_code == customer_code,
+               LogTransaction.started_at >= lo_p - 3 * band,
+               LogTransaction.started_at < lo_p,
+               LogTransaction.ended_at >= lo_p - gap))).all()
+    report = {"mode": mode, "candidates": len(candidates),
+              "extended_seconds": 0, "would_extend_seconds": 0}
+    if not candidates:
+        return lo_p, report
+
+    probe_hi = min(max(c.ended_at for c in candidates) + gap, hi_p)
+    joinable = probe_hi >= lo_p and (await db.scalar(
+        select(LogEntry.id).where(
+            LogEntry.customer_code == customer_code,
+            LogEntry.timestamp >= lo_p,
+            LogEntry.timestamp <= probe_hi,
+            assignments.is_unassigned()).limit(1))) is not None
+    if not joinable:
+        return lo_p, report
+
+    below = [c for c in candidates if c.started_at < lo_p - band]
+    if below:
+        detail = ", ".join(f"{c.id} started {c.started_at:%Y-%m-%d %H:%M:%SZ}" for c in below[:3])
+        if mode == "on":
+            raise CrossPadSpanExceeded(
+                f"Stage 2 [{customer_code}]: {len(below)} conversation(s) joinable from window "
+                f"{lo_p:%Y-%m-%d %H:%M:%SZ} start beyond the {int(band.total_seconds())}s extension "
+                f"bound ({detail}). Rebuilding them partially would split them silently; repair with "
+                f"a manual full regroup over the span.")
+        report["would_raise"] = len(below)
+
+    in_band = [c.started_at for c in candidates if c.started_at >= lo_p - band]
+    if not in_band:
+        return lo_p, report
+    seconds = int((lo_p - min(in_band)).total_seconds())
+    if mode == "on":
+        report["extended_seconds"] = seconds
+        logger.info("Stage 2 [%s]: cross-pad EXTENDED the window floor by %ds to %s to rebuild %d "
+                    "boundary conversation(s) whole", customer_code, seconds, min(in_band),
+                    len(in_band))
+        return min(in_band), report
+    report["would_extend_seconds"] = seconds
+    logger.info("Stage 2 [%s]: cross-pad (shadow) would extend the window floor by %ds for %d "
+                "boundary conversation(s); not extending", customer_code, seconds, len(in_band))
+    return lo_p, report
+
+
 async def _shadow_compare(db: AsyncSession, customer_code: str, rows: list[LogEntry],
                           authoritative: list[_TxnBuilder], window_lo: datetime,
                           s4_mode: str, rebuilding: frozenset = frozenset()) -> dict:
@@ -1112,12 +1208,14 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
     file into an already-grouped/sealed region lossless (regroup_incremental can't — it never frees
     sealed rows, so late entries there get orphaned or clash-skipped).
 
-    Lossless because the system guarantees no transaction spans more than pad: every transaction a new
-    entry can belong to has its start in [lo - pad, hi], so it is deleted and fully rebuilt here, and
-    every entry it owns lies in [lo - pad, hi + pad], so it is all read. Transactions outside that
-    band keep their entries assigned and are excluded by the `transaction_id IS NULL` filter, so they
-    are never touched. Deterministic ids mean any innocent neighbour caught in the pad rebuilds
-    identically (idempotent).
+    Lossless because a transaction's span is BOUNDED, and violations are loud rather than silent
+    (18q): a transaction inside one pad of the window is freed and fully rebuilt with every entry it
+    owns inside the read range; a longer conversation still joinable from this window moves the floor
+    back (`_cross_pad_floor`, bounded at pad + gap) so the same guarantee holds over the wider range;
+    and a joinable conversation beyond even that bound RAISES instead of being split by a partial
+    rebuild. Transactions outside the (possibly extended) band keep their entries assigned and are
+    excluded by the ownership filter, so they are never touched. Deterministic ids mean any innocent
+    neighbour caught in the pad rebuilds identically (idempotent).
 
     The delete + regroup run in ONE transaction (no intermediate commit): the cascaded entries.->NULL
     is visible to the same-transaction read, and readers see only the pre- or post-rebuild state, never
@@ -1125,6 +1223,11 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
     does this so a transaction-level advisory lock can guard the whole batch)."""
     pad = _regroup_pad()
     lo_p, hi_p = lo - pad, hi + pad
+
+    # 18q. The cross-pad extension decides the floor BEFORE anything reads it: freed set, owner map,
+    # stored digests, entry read, S4 shadow and the analytics ticket all derive from this one local,
+    # which is what makes the extension a single change instead of five.
+    lo_p, cross_pad = await _cross_pad_floor(db, customer_code, lo_p, hi_p)
 
     # 1. free every transaction anchored in [lo_p, hi] (sealed included).
     #    The assignment rows go with them: the FK cascades, but we delete them EXPLICITLY first so
@@ -1221,6 +1324,8 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
 
     stats = {"mode": "window", "customers": 1, "by_status": {},
              "window_start": lo_p.isoformat(), "window_end": hi_p.isoformat()}
+    if cross_pad:
+        stats["cross_pad"] = cross_pad
     if not rows:
         # S3. Before this stage the delete happened ABOVE, so reaching here with stored rows was
         # impossible - they were already gone. Now nothing has been deleted, so a window whose entries

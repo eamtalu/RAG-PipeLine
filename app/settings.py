@@ -76,7 +76,9 @@ class Settings(BaseSettings):
     # Stage 2 incremental grouping: a TERMINAL transaction (has a RESPONSE / hard error) whose end is
     # older than this (relative to the newest log timestamp) is SEALED — never recomputed, so its id
     # is permanent and each cycle only reprocesses the recent "live tail". Must be >> the longest real
-    # transaction (measured ≤2 min), to be safe against a late-arriving RESPONSE. 15 min default.
+    # transaction (measured over 151,757 live rows on 2026-08-25: avg 1.7 s, p99 28.1 s, max 363.7 s;
+    # re-measured 2026-08-27 over 7 days: max 354.5 s), to be safe against a late-arriving RESPONSE.
+    # 15 min default.
     log_seal_window_seconds: int = 900
     # An INCOMPLETE transaction (REQUEST seen, no RESPONSE yet) is kept unsealed far longer, so a
     # slow/late response can still join it; only after this long "abandon" window is it sealed as
@@ -120,6 +122,18 @@ class Settings(BaseSettings):
     # stream when an ENTRY ARRIVES, so a tenant that stops ingesting leaves its streams open forever
     # and the rows leak. Derived state cannot leak; persisted state can.
     stage2_stream_ttl_seconds: int = 86400
+    # Cross-pad window extension (section 18q), three-valued like the lookup and for the same reason.
+    #
+    #   "off"     today's behaviour: a conversation ending just before a window's padded floor cannot
+    #             receive a late entry, which fragments - permanently, because of S3.
+    #   "shadow"  the detector runs and the stats report what WOULD have been extended; nothing moves.
+    #   "on"      a joinable boundary conversation moves the window floor back (bounded at pad + gap)
+    #             so the ordinary cold rebuild sees it whole; a joinable candidate beyond that bound
+    #             RAISES and the ticket dead-letters loudly rather than splitting it silently.
+    #
+    # Ships as "shadow" so the (structurally rare) population is measured on real traffic before the
+    # first floor ever moves.
+    stage2_cross_pad: str = "shadow"
     # The analytics fold's own statement timeout, in ms. The web tier's 30 s guard is wrong for a
     # background worker - Stage 1's bulk insert relaxes it for the same reason. 120 s is comfortable
     # headroom over ONE ticket span (measured: 23.7 s of reads on a 10,400-transaction day) and stays
@@ -162,8 +176,13 @@ class Settings(BaseSettings):
     log_partition_min_runway_days: int = 3
     # Stage 2 grouping staleness guard: an open transaction idle longer than this is ABANDONED
     # (flushed as incomplete) so a far-later RESPONSE — especially a user-less one matched by FIFO —
-    # can't bind across a huge time gap and create a bloated multi-day transaction. Real
-    # transactions are ≤2 min, so 5 min is safe.
+    # can't bind across a huge time gap and create a bloated multi-day transaction. This is a
+    # CONSECUTIVE-entry bound, not a span bound: the longest measured whole transaction is 363.7 s,
+    # but its entries chain well inside 300 s of each other, and the 7-day live measurement on
+    # 2026-08-27 found ZERO orphan responses attributable to this gap (4 stray responses total, none
+    # preceded by an incomplete transaction of the same user). Watch that orphan-response count in
+    # the health sweep before ever changing this; raising it changes grouping behaviour and requires
+    # a _DERIVE_VERSION bump.
     log_open_gap_seconds: int = 300
     # Scoped (windowed) regroup PAD: a regroup of time range [lo, hi] actually rebuilds
     # [lo - pad, hi + pad] so a transaction straddling the range boundary is never split. Must be
@@ -371,8 +390,9 @@ class Settings(BaseSettings):
     # skipped.
     notification_candidate_limit: int = 2000
     # Require a transaction to be SEALED before any rule may alert on it. Off by default: an
-    # `incomplete` transaction is always gated (it routinely becomes `success`, and the stable
-    # dedup_key means that false alert could never be corrected), but error/soft/success alert
+    # `incomplete` transaction is always gated (it routinely becomes `success`, and alerting on a
+    # state that usually corrects itself would be noise; since chunk 64 the dedup_key carries the
+    # status, so a later genuine flip to `error` re-alerts), but error/soft/success alert
     # immediately so a real failure is not delayed by the 15-minute seal window. Turn this on to
     # close the remaining edge - a late error entry flipping an already-responded transaction - at
     # the cost of that delay on every alert.
