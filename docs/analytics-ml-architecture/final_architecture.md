@@ -3077,6 +3077,16 @@ The remaining roadmap, in the plan file above:
 Benefit: reads drop to new-entries-only and stitch latency drops from cadence-bound to near-arrival; writes are already ~1/row.
 - **P5**: once P4's shadow lands, retire the mis-axised S4a window-replay comparison and the `stage2_stream_lookup` setting (the state tables stay - P4 is their intended purpose).
 
+### Found during the post-deploy verification, fixed as chunk 66
+
+The reconcile worker had been reporting 127-463 `rollups_vs_facts` findings EVERY hourly pass since it was first enabled on 2026-08-25 - oscillating with traffic, never converging, and unread.
+Diagnosed from live finding samples: every one was a bucket the rolling window only PARTIALLY covered - the stored rollup was folded from the whole bucket, the recount only from the window's slice, so they disagree by construction ("differs" = bucket straddling an edge; "missing" = stored fetch clipped the bucket out; "orphaned" = the bucket's facts all in the clipped part).
+Fix: compare only buckets the window covers WHOLE (UTC hour for hourly, tenant-LOCAL day for daily), and widen `analytics_reconcile_window_hours` 24 → 48 because a 24 h window can never fully contain a local day - the daily grain was one fix away from being silently unauditable.
+The two guard tests pin the other direction: a real drift or a genuinely orphaned rollup in a fully covered bucket still reports.
+
+The constant `entries_vs_assignments = 6` findings are REAL and correct: ten entries from 2026-08-05 in two truncated files (`TMP-AZ-BEC01/eSmartServerLog.txt.12`, `TMP-AZ-BEC02/eSmartServerLog.txt.62`), never stitched, reported by design because the orphan nobody notices is precisely the old one.
+Repairable at will with a windowed regroup over 2026-08-05 05:30-05:45 UTC; until then they are the known baseline.
+
 ### Standing health additions
 
 - Orphan-response transactions per day (entry_count = 1, sole entry a response): expected ~0-1; a rise is the signal to revisit the gap rule or ingestion truncation.

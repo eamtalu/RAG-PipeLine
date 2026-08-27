@@ -55,9 +55,10 @@ writer calls, and both are idempotent. Nothing here writes a fact or a rollup va
 
 import logging
 from dataclasses import dataclass, field as dc_field
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,6 +70,7 @@ from app.persistence.models.analytics_rollup import (DIMENSION_SLOTS, AnalyticsD
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_transaction import LogTransaction
+from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.services.analytics import capture
 from app.services.analytics import definition as d
 from app.services.analytics import pending_windows as n1
@@ -204,6 +206,26 @@ async def rollups_vs_facts(db: AsyncSession, customer_code: str, *,
                  AnalyticsFact.customer_code == customer_code,
                  window.covers(AnalyticsFact.event_time, include_null=False)))).scalars().all()]
 
+    # Chunk 66. Only buckets the window covers WHOLE are comparable: the stored row was folded from
+    # the entire bucket, the recount above only from the window's slice, so a bucket straddling a
+    # window edge disagrees BY CONSTRUCTION. On the live tenant that construction produced 127-463
+    # findings per hourly pass (every one of the three kinds, all boundary clothes), which is the
+    # "always red" failure the worker's own docstring warns about. The daily bucket is the tenant's
+    # LOCAL day, so its UTC range needs the tenant timezone - and needs the window to be at least
+    # 48 h, or no local day is ever whole inside it (settings.analytics_reconcile_window_hours).
+    tenant_tz = ZoneInfo(await get_customer_timezone(db, customer_code))
+
+    def _covered(grain: str, bucket) -> bool:
+        if window.start is None or window.end is None:
+            return True   # an open window is the explicit full-history audit: everything is whole
+        if bucket is None:
+            return False  # no instant, no range, nothing to clip a comparison to
+        if grain == "hourly":
+            return bucket >= window.start and bucket + timedelta(hours=1) <= window.end
+        day = datetime.combine(bucket, time.min, tzinfo=tenant_tz)
+        nxt = datetime.combine(bucket + timedelta(days=1), time.min, tzinfo=tenant_tz)
+        return day >= window.start and nxt <= window.end
+
     findings: list[Finding] = []
     for definition_id, definition in await registry.active_definitions(db, customer_code):
         for grain, model, column, bucket_of, is_date in (
@@ -219,6 +241,10 @@ async def rollups_vs_facts(db: AsyncSession, customer_code: str, *,
             expected = n5.group_fold(facts, definition, bucket_of)
             stored = await _stored_rollups(db, customer_code, model, definition_id, column, window,
                                            is_date=is_date)
+            # Both sides clipped to whole buckets, or a partially covered stored row would surface as
+            # a false "orphaned" the moment its expected twin was skipped.
+            expected = {k: v for k, v in expected.items() if _covered(grain, k[0])}
+            stored = {k: v for k, v in stored.items() if _covered(grain, k[0])}
 
             for (bucket, dims), measures in expected.items():
                 for measure_name, roles in measures.items():

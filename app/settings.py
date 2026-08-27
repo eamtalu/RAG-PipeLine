@@ -244,7 +244,10 @@ class Settings(BaseSettings):
     # The span one pass covers, and how far back it ENDS. The lag matters as much as the span: records
     # are not final for 1.7 h on average, so a window reaching to now would report every still-unsealed
     # contributor as drift, and a check that is always red is a check nobody reads.
-    analytics_reconcile_window_hours: int = 24
+    # 48, not 24, since chunk 66: the reconciler only compares buckets its window covers WHOLE, and a
+    # 24 h rolling window can never fully contain a tenant-local day - the daily grain would silently
+    # never be audited.
+    analytics_reconcile_window_hours: int = 48
     analytics_reconcile_lag_hours: int = 6
 
     # Gate source retention on healthy analytics state (Phase 4).
