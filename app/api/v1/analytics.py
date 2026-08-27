@@ -301,7 +301,9 @@ async def analytics_breakdown(customer: str = Depends(get_current_customer),
             "rows": [{"value": k, **v} for k, v in ranked]}
 
 
-@router.post("/reconcile", status_code=202)
+# 200, not the original 202 (chunk 68): the checks run inline and the COMPLETE report is in this
+# very response - a 202 promises a poll that does not exist.
+@router.post("/reconcile", status_code=200)
 async def trigger_reconcile(customer: str = Depends(get_current_customer),
                            db: AsyncSession = Depends(get_session),
                            start: datetime | None = Query(default=None),

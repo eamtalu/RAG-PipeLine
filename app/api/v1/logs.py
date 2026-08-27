@@ -33,7 +33,7 @@ from app.services.logspace_cleanup import purge_source_objects_files
 from app.services.workers.log_parse_worker import reset_abandoned_objects
 from app.services.mnp_log_ingestion.LogIngestion import LogIngestion, get_log_ingestion, DOCUMENT_TYPE
 from app.services.mnp_log_ingestion.pipeline.derive_transactions import (
-    regroup_all, regroup_incremental, finalize_pending, run_finalize_tracked, reset_abandoned_windows,
+    regroup_incremental, finalize_pending, run_finalize_tracked, reset_abandoned_windows,
 )
 from app.services.mnp_log_ingestion.render import render_transaction
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc, active_timezone_name
@@ -345,19 +345,13 @@ def _txn_summary(t: LogTransaction) -> dict:
     }
 
 
-@router.post("/regroup")
-async def regroup_transactions(
-    customer: str = Depends(get_current_customer),
-    db: AsyncSession = Depends(get_session),
-    incremental: bool = Query(default=False, description="True = only regroup the unsealed live tail (fast, what the worker runs); False = full rebuild of all transactions (historical backfill / repair)."),
-):
-    """Run Stage 2 grouping FOR THIS CUSTOMER. Default is a FULL rebuild; `incremental=true` regroups
-    only the live tail.
-
-    Both produce DETERMINISTIC transaction ids (uuid5 of each transaction's anchor entry), so a
-    transaction keeps the same id across regroups — saved/cited ids stay valid.
-    """
-    return await (regroup_incremental(db, customer) if incremental else regroup_all(db, customer))
+# `POST /logs/regroup` (the inline full/incremental rebuild) was REMOVED on 2026-08-27 (chunk 68).
+# It ran a full tenant rebuild inside the web request: gunicorn kills the worker at 120 s, the
+# client gets ECONNRESET, and the phased commits leave the tenant PARTIALLY rebuilt with no run id
+# to resume from - all proven operationally during the 18r backlog repair. Until the tracked
+# asynchronous replacement ships (planned as POST /logs/regroup/full), a full rebuild is a
+# server-side operation: stop `fastapirag-worker`, run `regroup_all` via a script under
+# `PYTHONPATH`, restart the worker (see docs/HANDOFF-2026-08-26.md).
 
 
 @router.post("/regroup/finalize", status_code=202)

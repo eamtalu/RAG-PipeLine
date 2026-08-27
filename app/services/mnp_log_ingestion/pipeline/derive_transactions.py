@@ -850,7 +850,8 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
         await db.execute(delete(LogTransaction).where(LogTransaction.id.in_(vanished)))
     if skipped:
         logger.warning("Stage 2: skipped %d builder(s) with an already-sealed id (out-of-order/bulk "
-                       "ingest). Run a full regroup (POST /logs/regroup) to rebuild cleanly.", skipped)
+                       "ingest). Repair: the server-side full regroup runbook in docs/HANDOFF-2026-08-26.md "
+                       "(worker stopped, regroup_all, worker restarted).", skipped)
     return {"transactions_created": created, "transactions_sealed": sealed,
             "entries_assigned": assigned, "transactions_skipped": skipped, "by_status": by_status,
             # S3's own counters, so a run can be read for what it actually WROTE rather than inferred

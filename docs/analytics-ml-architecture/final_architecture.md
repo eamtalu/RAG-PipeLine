@@ -213,7 +213,8 @@ The pairing rules, all scoped inside one server:
                                      (a merge or split absorbed it)
  id exists but is OUTSIDE the
  window's rebuild set             -> SKIP, warn, leave entries  "clash"
-                                     (out-of-order ingest; repair = full regroup)
+                                     (out-of-order ingest; repair = the
+                                      server-side full-rebuild runbook)
 ```
 
 This verdict table is what took write volume from 22.4 writes per surviving row (the old delete-everything-and-reinsert design) to about 1.
