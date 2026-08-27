@@ -750,6 +750,13 @@ The ML pipeline (feature sets, predictions) is library code waiting for a caller
 
 The only two .env overrides on this server beyond the defaults are `ANALYTICS_WORKER_ENABLED=true` and `ANALYTICS_RECONCILE_WORKER_ENABLED=true`; everything else runs on the defaults listed above.
 
+### 12.5 The maintenance screen (chunk 69)
+
+Manage -> Maintenance in the frontend drives the repair operations that used to need SSH:
+a tracked full history rebuild (`POST /logs/regroup/full`, 202 + poll; runs in its own process, and a fresh RUNNING run automatically pauses that tenant's stitch and analytics workers until it finishes - a stale flag stops pausing after 6 hours and alarms),
+one-click re-arms for both dead-letter queues,
+and the consistency checker with optional repair.
+
 ## 13. Known gaps register (verified 2026-08-27)
 
 Honest imperfections found while fact-checking this part; none is currently causing damage, each is a candidate work item.
