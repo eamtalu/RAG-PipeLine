@@ -252,3 +252,14 @@ def test_the_full_regroup_relaxes_the_statement_guard():
     src = inspect.getsource(dt.regroup_all)
     assert src.count('SET LOCAL statement_timeout = 0') >= 2, (
         "the relax must be issued per transaction phase - regroup_all commits between phases")
+
+
+async def test_the_existence_check_survives_a_full_regroup_sized_batch():
+    """Found when the 18r backlog repair crashed in production: asyncpg refuses more than 32,767
+    bind parameters per statement, and a FULL regroup asks about every builder at once - 184k ids.
+    The ask must be batched; windowed rebuilds never came close to the limit."""
+    ids = [uuid.uuid4() for _ in range(40_000)]
+    async with async_session() as db:
+        found = await dt._existing_transaction_ids(
+            db, CC, ids, window=dt._clash_window([T0]))
+    assert found == set()

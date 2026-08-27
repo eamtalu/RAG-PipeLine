@@ -598,8 +598,14 @@ async def _existing_transaction_ids(db: AsyncSession, customer_code: str, ids, *
     ids = list(ids)
     if not ids:
         return set()
-    return set((await db.execute(_existing_ids_stmt(customer_code, ids, window=window)))
-               .scalars().all())
+    # Batched: asyncpg refuses more than 32,767 bind parameters per statement, and a FULL regroup
+    # asks about every builder at once (184k in production - the 18r backlog repair crashed on it).
+    # Windowed rebuilds never come close; they pay nothing here beyond the loop header.
+    found: set[uuid.UUID] = set()
+    for i in range(0, len(ids), 20_000):
+        found |= set((await db.execute(
+            _existing_ids_stmt(customer_code, ids[i:i + 20_000], window=window))).scalars().all())
+    return found
 
 
 def _recent_max_ts_stmt(customer_code: str):
