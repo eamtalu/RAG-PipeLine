@@ -580,13 +580,13 @@ Instead of re-deriving the recent past, it keeps two pieces of durable memory:
                   |                   regroup from scratch,
                   |                   write only the difference
                    \                          /
-                    +------------------------+
-                    | both lanes MUST produce IDENTICAL results.      |
-                    | proven by a shadow phase (run both, compare)    |
-                    | before the head lane is ever allowed to write.  |
-                    | the REBUILD LANE is always the referee: any     |
-                    | disagreement means the head lane is wrong.      |
-                    +---------------------------------------------+
+                    +-----------------------------------------------+
+                    | both lanes MUST produce IDENTICAL results,    |
+                    | proven by a shadow phase (run both, compare)  |
+                    | before the head lane is ever allowed to       |
+                    | write. the REBUILD LANE is always the referee:|
+                    | any disagreement means the head lane is wrong.|
+                    +-----------------------------------------------+
 ```
 
 **Panel 4 - one worked example through both lanes.**
