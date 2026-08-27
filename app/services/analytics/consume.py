@@ -37,7 +37,8 @@ crash leaves them open and the work is redone rather than skipped. Identical to 
 
 A known imprecision, recorded rather than hidden
 ------------------------------------------------
-F6 specifies the position as a `log_transactions.created_at` -- a WRITE time -- and that matches the
+F6 specifies the position as a `log_transactions` WRITE time (`_FRONTIER_COLUMN`, `updated_at` since
+S3 made rows update in place) -- and that matches the
 convention every other consumer follows (`NotificationRule.cursor_at` says so in its own comment). But
 `log_partition_worker.periods_blocked_by_consumers` compares that position against a partition's
 EVENT-TIME upper bound. Write times run ahead of event times, so the comparison releases partitions
@@ -85,10 +86,13 @@ logger = logging.getLogger(__name__)
 #: deferred upstream move to update-in-place has exactly one place to change.
 CONSUMER = "analytics:warehouse-v1"
 
-#: The source column the frontier is measured on. Named here for the same reason as `CONSUMER`: if
-#: `log_transactions` ever stops being delete-and-reinsert, this becomes `updated_at` and nothing else
-#: in the module needs to know.
-_FRONTIER_COLUMN = LogTransaction.created_at
+#: The source column the frontier is measured on. Named here for the same reason as `CONSUMER`, and
+#: the move the name existed for has happened: S3 made `log_transactions` UPDATE in place (2026-08-25),
+#: so a row's latest WRITE is `updated_at` and `created_at` froze into "first written". A frontier
+#: measured on `created_at` cannot see in-place rewrites - a rebuild-heavy tenant would report a
+#: stalled frontier and hold source partitions forever (Flow F's watch, fired). Chunk 64 pins both
+#: this binding and that the fold actually reads through it.
+_FRONTIER_COLUMN = LogTransaction.updated_at
 
 #: Distinct from the stitcher's `hashtext(customer_code)`. Analytics is a read-only consumer of the
 #: projection; making it contend with the write path would be a self-inflicted stall.
@@ -228,16 +232,16 @@ def _coalesce(tickets: Sequence[AnalyticsPendingWindow], gap: timedelta
 
 
 #: Source columns the normaliser needs, plus the two the cycle itself needs (`sealed` for F4's
-#: settledness, `created_at` for F6's frontier). Specific columns rather than whole ORM objects: a
-#: day's transactions as mapped instances would balloon the identity map for no benefit, since nothing
-#: here mutates them.
+#: settledness, `_FRONTIER_COLUMN` for F6's frontier). Specific columns rather than whole ORM objects:
+#: a day's transactions as mapped instances would balloon the identity map for no benefit, since
+#: nothing here mutates them.
 _SOURCE_COLUMNS = (
     LogTransaction.id, LogTransaction.started_at, LogTransaction.duration_ms, LogTransaction.method,
     LogTransaction.transaction_name, LogTransaction.transaction_type, LogTransaction.status,
     LogTransaction.item_number, LogTransaction.order_number, LogTransaction.delivery_number,
     LogTransaction.warehouse, LogTransaction.warehouse_id, LogTransaction.user_name,
     LogTransaction.device_id, LogTransaction.device_name, LogTransaction.attributes,
-    LogTransaction.sealed, LogTransaction.created_at,
+    LogTransaction.sealed, _FRONTIER_COLUMN,
     # S3's digests, read so the fold can tell "this transaction has not changed at all" without
     # touching its entries. That is what makes the response read (R3) skippable - see `_needs_entries`.
     LogTransaction.row_fingerprint, LogTransaction.members_fingerprint,
@@ -422,8 +426,8 @@ async def _apply(db: AsyncSession, customer_code: str, outcomes: Sequence[dd.Out
             stats["inserted"] += 1
         else:
             # The stored row's revision decides the new one, so a fact's versions are consecutive even
-            # across a worker restart. `created_at` is deliberately NOT touched: it is what F6's
-            # frontier reads, and refreshing it on every rebuild would make the frontier meaningless.
+            # across a worker restart. `created_at` is deliberately NOT touched: it means "first
+            # written", and the ledger's `recorded_at` is where every later version's instant lives.
             values["revision"] = int(o.stored.get("revision") or 1) + 1
             await db.execute(update(AnalyticsFact)
                              .where(_key_predicate(customer_code, o.key)).values(**values))
@@ -827,7 +831,8 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
             event_watermark=max((f["event_time"] for f in facts if f["event_time"]), default=None),
             history_start=min((f["event_time"] for f in facts if f["event_time"]), default=None),
             source_watermark=await _source_watermark(db, customer_code),
-            frontier=max((r["created_at"] for r in source_rows if r.get("created_at")), default=None),
+            frontier=max((r[_FRONTIER_COLUMN.key] for r in source_rows
+                          if r.get(_FRONTIER_COLUMN.key)), default=None),
             settledness=_settledness(source_rows), now=now)
         # Stamped BEFORE the counts are refreshed, and the order is not cosmetic: `_refresh_counts`
         # counts open tickets, so counting first would always include the tickets this run is in the

@@ -231,8 +231,9 @@ async def test_a_changed_quantity_updates_in_place_and_bumps_the_revision():
 
 
 async def test_an_update_does_not_touch_created_at():
-    """`created_at` is what F6's frontier reads. Refreshing it on every rebuild would make the frontier
-    track when analytics last ran rather than how far it has read."""
+    """A fact's `created_at` means "first written" and must survive updates. (It once doubled as the
+    frontier's source; chunk 64 moved the frontier to the source rows' `updated_at`, but the
+    first-written meaning stands on its own.)"""
     txn_id = uuid.uuid4()
     await _plant([{"at": T0, "qty": "10.0", "id": txn_id}])
     await n3.consume_tenant(CC)

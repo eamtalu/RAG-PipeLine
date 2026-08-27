@@ -61,9 +61,12 @@ def _txn_event(rule: NotificationRule, txn: LogTransaction, event_type: str) -> 
         severity=rule.severity,
         title=f"[{txn.customer_code}] {status}: {txn.method or 'transaction'}",
         summary=txn.error_text or None,
-        # stable per (rule, transaction) → alerts exactly once even though the worker polls and the
-        # transaction id is stable across regroups.
-        dedup_key=f"rule:{rule.id}:txn:{txn.id}",
+        # stable per (rule, transaction, STATUS) → an unchanged transaction alerts exactly once no
+        # matter how often the worker polls, while a status CHANGE - the correction the alert exists
+        # for, e.g. incomplete that later errors - mints a new key and re-alerts. Version-blind
+        # (rule, txn) was the accepted residual risk in stability.py while every rebuild re-inserted
+        # rows; S3's update-in-place made the status flip observable, so the key can carry it.
+        dedup_key=f"rule:{rule.id}:txn:{txn.id}:status:{status}",
         payload=transaction_payload(txn),
         target_channel_ids=_target_ids(rule),
         rule_id=str(rule.id),
