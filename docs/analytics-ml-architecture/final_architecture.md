@@ -3089,6 +3089,41 @@ Repairable at will with a windowed regroup over 2026-08-05 05:30-05:45 UTC; unti
 
 ### Standing health additions
 
+(See also 18r below - the orphan-leak diagnosis that the clean reconciler view made possible.)
+
 - Orphan-response transactions per day (entry_count = 1, sole entry a response): expected ~0-1; a rise is the signal to revisit the gap rule or ingestion truncation.
 - `journalctl -u fastapirag-worker | grep "cross-pad"`: the shadow phase's review surface (candidates, would-extend seconds, would-raise counts).
 - Any `CrossPadSpanExceeded` dead letter is a genuine span-over-pad conversation: repair with a manual full regroup over its span, and investigate what produced it.
+
+## 18r. The orphaned-entry leak: diagnosed and fixed. Server-scoped grouping, 2026-08-27. Chunk 67.
+
+The reconciler noise fix (chunk 66) left one real signal standing: 5,353 unassigned entries, growing ~300/day since ingestion began on 2026-08-10, plus hourly "skipped builder(s) with an already-sealed id" warnings.
+Diagnosed on live data, mechanism reconstructed line by line from the 2026-08-27 12:09:35 case (user OPRACHASUK).
+
+### The mechanism
+
+The tenant runs two app servers (TMP-AZ-BEC01, TMP-AZ-BEC02), each writing its own log file, and one picker's operations can hit both within milliseconds.
+The grouper keyed streams by (thread, user) and matched requests to work through user-scoped pools - but thread ids are small integers reused by every server process, and every one of the matching pools (POST body takes the most recent id-less pending request, GET work takes the oldest request of its user, a response FIFO-matches its user's open work) ignored which FILE the line came from.
+So the two servers' interleaved lines cross-bound into one CHIMERA transaction: the persisted, sealed, "success" row held BEC01's request, BEC02's body and work, and BEC01's response - two real operations counted as one, with mixed attributes.
+
+The strand then followed from identity: the fetcher delivers one server's file a tick before the other's, so the first stitch builds a transaction from the partial view (anchored at, say, BEC02's request - the id is minted from the request line's content hash).
+When the other file's lines arrive, the regroup re-deals the requests: the builder holding most of the old members INHERITS the old id by continuity plurality, while the displaced request MINTS the very same id from the same line - and `_persist` skips the collision, leaving the loser's entries unassigned.
+S3's fingerprint permanence means nothing ever revisits them: the leak.
+
+Three symptoms, one cause: the orphan growth, the clash warnings, and a silent analytics undercount.
+
+### The fix (chunk 67)
+
+Grouping is scoped to the SERVER - the leading path segment of `source_file` (`_entry_server`).
+Builder keys become (server, thread, user), the thread-inheritance map is keyed (server, thread), and all three pending-request pops plus the response FIFO match only within one server.
+Within one server nothing changes, which the chunk-67 guard tests pin; files with no directory are their own server, so single-server tenants and every existing fixture derive identically.
+`_DERIVE_VERSION` is bumped 1 -> 2 - the first real bump - because chimera groupings genuinely change what stored rows say; the chunk-59 digest is regenerated with it.
+The stored S4a stream state has no server column; seeded streams derive their server from their own reloaded entries, and a same-(thread,user) collision across servers in the state table stays newest-wins (shadow-only, and S4a is scheduled for retirement in P5).
+
+The flagship end-to-end test reproduces the exact live strand - two-phase per-file ingestion, two overlapping stitches - and asserts zero skips, zero unassigned entries, and two single-server transactions.
+
+### Backlog repair
+
+After deploying, run a FULL regroup for the tenant (`POST /logs/regroup`): every transaction is freed, so no clash is possible, the chimeras dissolve into their real per-server operations, all 5,353 orphans are stitched, and the per-tenant analytics ticket restates every affected fact through the ordinary diff (the ledger keeps the history, ML pins stay reproducible).
+Expect the version bump to rewrite each surviving row once, and the facts for affected days to shift SLIGHTLY UPWARD (operations that were mashed into one are now counted as two).
+The standing alarm afterwards: the unassigned-entry count and the clash warning should both flatline at zero; any recurrence is a new mechanism, not this one.

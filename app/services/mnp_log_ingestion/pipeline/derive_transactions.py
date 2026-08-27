@@ -237,33 +237,53 @@ def _entry_user(e: LogEntry) -> str | None:
     return None
 
 
+def _entry_server(e: LogEntry) -> str:
+    """The server a line was written by: the leading path segment of its source file.
+
+    The fetcher stores files as "HOST/eSmartServerLog.txt.N", so this is the host. A file with no
+    directory (single-server tenants, every existing test fixture) becomes its own server, which
+    preserves the pre-18r behaviour exactly for them.
+
+    18r: this exists because thread ids are small integers reused by EVERY server process - thread
+    33 on BEC01 and thread 33 on BEC02 are different worlds - and because the user-scoped matching
+    pools (POST body -> most recent id-less request, GET -> oldest request of the user, response ->
+    FIFO of the user's open work) must never pair lines across processes. One picker whose two
+    operations hit both servers within milliseconds used to cross-bind into a chimera transaction,
+    and the displaced request then minted the chimera's own id and was clash-skipped forever - the
+    5,353-entry orphan leak."""
+    return (e.source_file or "").split("/", 1)[0]
+
+
 def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilder]:
-    """Thread+user-aware grouping that demultiplexes concurrent requests.
+    """Server+thread+user-aware grouping that demultiplexes concurrent requests.
 
     The M3 server processes many users at once, so the timestamp-ordered stream interleaves them,
     and — because it's .NET async — a thread can even be reused MID-request to run another user's
     continuation, then resume the first. So thread alone is not a clean per-request lock. We key an
-    open transaction by **(thread, user)**: every log line carries the log4net context user
+    open transaction by **(server, thread, user)**: every log line carries the log4net context user
     (`user_ctx`, e.g. "(CPRICE)"), so two users sharing a thread get two separate open builders and
     a thread that flips A→B→A re-merges A's work correctly instead of mixing or fragmenting it.
+    The server comes first (18r): the tenant runs several app servers whose files interleave in the
+    stream, and nothing - keys, request pools, response FIFO - may ever match across two of them.
 
-    Rules:
-      - a line WITH a user routes to its (thread, user) builder (creating one if needed) and marks
-        that stream as the thread's current one;
+    Rules (all scoped WITHIN one server):
+      - a line WITH a user routes to its (server, thread, user) builder (creating one if needed) and
+        marks that stream as the thread's current one;
       - a line with NO user (some narration / mi bodies log as "(null)") inherits the thread's
         current stream — it belongs to whatever request is live on that thread right now;
       - a REQUEST is paired to its work by ReqID (GET) or, for a POST whose MoveNext has no id, to
         the body it immediately precedes; a GET REQUEST is bound by User once its work appears;
       - a RESPONSE (no payload user/id, but a header user) closes the OLDEST still-open request FOR
         THAT USER (FIFO within the user).
-    Net guarantee: a transaction can never contain two users' lines, and a response can never be
-    stitched onto another user's request.
+    Net guarantee: a transaction can never contain two users' lines, never contain two servers'
+    lines, and a response can never be stitched onto another user's or another server's request.
     """
     builders: list[_TxnBuilder] = []
-    # an open transaction is keyed by (thread, user). user is None only for anonymous streams that
-    # never saw a user (then the stream position is appended to keep them distinct).
+    # an open transaction is keyed by (server, thread, user). user is None only for anonymous
+    # streams that never saw a user (then the stream position is appended to keep them distinct).
     open_by_key: dict[tuple, _TxnBuilder] = {}
-    current_by_thread: dict[str | None, tuple] = {}  # thread -> its currently-active key (null inherit)
+    # (server, thread) -> its currently-active key (null inherit)
+    current_by_thread: dict[tuple, tuple] = {}
 
     # S4. `seed` is state read back from `log_open_stream`, so a stream can CONTINUE across a process
     # boundary instead of being re-derived from a padded window. Absent (the default) reproduces the
@@ -271,44 +291,53 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
     #
     # Only streams the guard already accepted are ever passed in; `stream_state.usable` does that
     # filtering, so nothing here has to reason about clocks.
+    #
+    # 18r: the stored state has no server column; the stream's own entries supply it. A stream with
+    # no reloadable entries cannot be placed on a server and is skipped - the fallback (the very
+    # rebuild this seeding runs inside) handles its rows correctly anyway.
     seeded_ids: set = set()
     for st in (seed or {}).get("streams", ()):
+        if not st["entries"]:
+            continue
         b = _TxnBuilder()
         b.open_pos = st["open_pos"]
         for e in st["entries"]:
             b.add(e)
             seeded_ids.add(e.id)
-        key = (st["thread"], st["user_ctx"])
+        srv = _entry_server(st["entries"][0])
+        key = (srv, st["thread"], st["user_ctx"])
         open_by_key[key] = b
         if st["is_current"]:
-            current_by_thread[st["thread"]] = key
+            current_by_thread[(srv, st["thread"])] = key
     pending_reqs: list[LogEntry] = list((seed or {}).get("pending") or [])
     # S2: there is no `req_pos` map any more. It existed to remember where in the stream each pending
     # request arrived, which is a property of the ENTRY - so it is derived by `_stream_pos` rather than
     # stored. That also removed a leak: the old `req_pos.pop(id(r), -1)` left an orphaned key behind
     # whenever a request was consumed by a path that did not pop it.
 
-    def take_by_reqid(reqid: str | None) -> LogEntry | None:
+    # 18r: every pop below is server-scoped. A pending request may only ever be consumed by lines
+    # from its own server - matching across servers is how the chimera transactions were built.
+    def take_by_reqid(reqid: str | None, srv: str) -> LogEntry | None:
         if reqid is None:
             return None
         for i, r in enumerate(pending_reqs):
-            if _entry_reqid(r) == reqid:
+            if _entry_server(r) == srv and _entry_reqid(r) == reqid:
                 return pending_reqs.pop(i)
         return None
 
-    def take_post_request() -> LogEntry | None:
+    def take_post_request(srv: str) -> LogEntry | None:
         # a POST's MoveNext has no ReqID; it's the most-recent id-less pending request (emitted
-        # immediately before its body).
+        # immediately before its body) ON THIS SERVER.
         for i in range(len(pending_reqs) - 1, -1, -1):
-            if _entry_reqid(pending_reqs[i]) is None:
+            if _entry_server(pending_reqs[i]) == srv and _entry_reqid(pending_reqs[i]) is None:
                 return pending_reqs.pop(i)
         return None
 
-    def take_by_user(user: str | None) -> LogEntry | None:
+    def take_by_user(user: str | None, srv: str) -> LogEntry | None:
         if not user:
             return None
         for i, r in enumerate(pending_reqs):
-            if req_user(r) == user:
+            if _entry_server(r) == srv and req_user(r) == user:
                 return pending_reqs.pop(i)
         return None
 
@@ -335,8 +364,9 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
 
     def close(key: tuple) -> _TxnBuilder | None:
         b = open_by_key.pop(key, None)
-        if b is not None and current_by_thread.get(key[0]) == key:
-            del current_by_thread[key[0]]
+        # key[:2] is (server, thread) for named and anonymous keys alike (18r).
+        if b is not None and current_by_thread.get(key[:2]) == key:
+            del current_by_thread[key[:2]]
         return b
 
     def last_ts(b: _TxnBuilder) -> datetime | None:
@@ -367,6 +397,7 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
             continue
         et = e.entry_type.value
         th = e.thread
+        srv = _entry_server(e)
         if e.timestamp is not None:
             evict_stale(e.timestamp)
 
@@ -376,42 +407,42 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
         elif et == "request_body":
             # the POST body line itself usually logs as "(null)"; its user is the JSON "User" field.
             u = e.user_ctx or _entry_user(e)
-            key = (th, u)
+            key = (srv, th, u)
             if key in open_by_key:
                 builders.append(close(key))  # prior cycle for this (thread,user): no RESPONSE
             b = _TxnBuilder()
-            req = take_by_reqid(_entry_reqid(e)) or take_post_request()
+            req = take_by_reqid(_entry_reqid(e), srv) or take_post_request(srv)
             if req is not None:
                 b.add(req)
             b.add(e)
             b.open_pos = _stream_pos(req) if req is not None else _stream_pos(e)
             open_by_key[key] = b
-            current_by_thread[th] = key
+            current_by_thread[(srv, th)] = key
 
         elif et in _INTERNAL:
             u = e.user_ctx
             if u is not None:
-                key = (th, u)
+                key = (srv, th, u)
                 b = open_by_key.get(key)
                 if b is None:
                     b = _TxnBuilder()
                     b.open_pos = _stream_pos(e)
                     open_by_key[key] = b
-                current_by_thread[th] = key
+                current_by_thread[(srv, th)] = key
             else:
                 # no user on this line -> it belongs to whatever stream is live on this thread now
-                key = current_by_thread.get(th)
+                key = current_by_thread.get((srv, th))
                 b = open_by_key.get(key) if key is not None else None
                 if b is None:
-                    key = (th, None, i)  # anonymous stream (no user seen yet on this thread)
+                    key = (srv, th, None, i)  # anonymous stream (no user seen yet on this thread)
                     b = _TxnBuilder()
                     b.open_pos = _stream_pos(e)
                     open_by_key[key] = b
-                    current_by_thread[th] = key
+                    current_by_thread[(srv, th)] = key
             b.add(e)
             bu = u or _entry_user(e)
             if bu and not has_request(b):  # bind a pending GET REQUEST now that we know the user
-                req = take_by_user(bu)
+                req = take_by_user(bu, srv)
                 if req is not None:
                     b.add(req)
                     b.open_pos = _stream_pos(req)  # opened when its REQUEST arrived
@@ -419,18 +450,22 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
         elif et == "response":
             # async: no payload user/id, but the log4net header carries the context user. Restrict
             # candidates to that user so a response can never close another user's request, then pick
-            # the OLDEST still-open request (FIFO). Candidates: open (thread,user) builders that did
-            # work AND pending requests with no work yet. If the user filter leaves nothing (user-less
-            # response, or its request isn't open), fall back to all candidates so it still lands.
+            # the OLDEST still-open request (FIFO). Candidates: open (server,thread,user) builders
+            # that did work AND pending requests with no work yet - ON THIS SERVER ONLY (18r): the
+            # process that wrote the response is the one that handled its request, so crossing
+            # servers fabricates conversations. If the user filter leaves nothing (user-less
+            # response, or its request isn't open), fall back to all of THIS SERVER's candidates so
+            # it still lands.
             ru = e.user_ctx
-            keys = list(open_by_key)
+            keys = [k for k in open_by_key if k[0] == srv]
+            srv_reqs = [r for r in pending_reqs if _entry_server(r) == srv]
             if ru is not None:
                 u_keys = [k for k in keys if txn_user(open_by_key[k]) == ru]
-                u_reqs = [r for r in pending_reqs if req_user(r) == ru]
+                u_reqs = [r for r in srv_reqs if req_user(r) == ru]
                 if not u_keys and not u_reqs:
-                    u_keys, u_reqs = keys, pending_reqs
+                    u_keys, u_reqs = keys, srv_reqs
             else:
-                u_keys, u_reqs = keys, pending_reqs
+                u_keys, u_reqs = keys, srv_reqs
 
             best_key = min(u_keys, key=lambda k: open_by_key[k].open_pos, default=None)
             best_key_pos = open_by_key[best_key].open_pos if best_key is not None else None

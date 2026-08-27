@@ -182,7 +182,14 @@ def _derivation_digest() -> str:
 #: Changed again by the S4 divergence fix: seeded-entry dedupe in `_group`. Also behind
 #: `if seeded_ids and ...`, so the unseeded (persisting) path is byte-identical and the version again
 #: stays unbumped - the same byte-identical test proves it.
-_EXPECTED_DERIVATION = "203e95122ed80ec8"
+#:
+#: Changed again by 18r (chunk 67): grouping is server-scoped, and this time `_DERIVE_VERSION` IS
+#: bumped (1 -> 2). The change alters what a transaction's columns say wherever two servers' lines
+#: interleave within one user's activity - the chimera transactions dissolve into their real
+#: per-server operations - so every stored row must be recomputed on its next rebuild. Single-server
+#: groupings derive identically (chunk 67 pins that), but "identical for most rows" is exactly the
+#: situation the version constant exists for.
+_EXPECTED_DERIVATION = "b6cb0f97d9644129"
 
 
 def test_the_derivation_is_pinned_to_the_derive_version():

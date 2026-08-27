@@ -55,7 +55,7 @@ from typing import Any, Iterable, Mapping
 #:
 #: `tests/test_stage2_fingerprints_chunk59.py` pins the derivation's source digest against this value,
 #: so editing one of those functions without bumping this fails loudly instead.
-_DERIVE_VERSION = 1
+_DERIVE_VERSION = 2  # 2 = 18r server-scoped grouping (chunk 67); 1 = S3 as shipped
 
 #: Columns of `log_transactions` that the row digest deliberately ignores. See the module docstring;
 #: every entry here is a decision rather than an omission.
