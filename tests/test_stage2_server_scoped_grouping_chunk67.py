@@ -239,3 +239,16 @@ async def test_the_orphan_leak_case_end_to_end():
             LogTransaction.customer_code == CC))).scalars().all()
     assert unassigned == [], f"{len(unassigned)} entries stranded - the leak lives"
     assert len(txns) == 2, f"expected the two real operations, got {len(txns)}"
+
+
+# ==================================================== 4. the repair path must be able to run
+
+def test_the_full_regroup_relaxes_the_statement_guard():
+    """Found running the 18r backlog repair in production: `regroup_all` reads a tenant's WHOLE
+    history in one SELECT, which legitimately exceeds the web tier's 30 s statement guard - the same
+    deliberate exception Stage 1's bulk insert and the analytics fold already make. Without the
+    relax, the one repair the orphan-leak fix depends on cannot run on production volume."""
+    import inspect
+    src = inspect.getsource(dt.regroup_all)
+    assert src.count('SET LOCAL statement_timeout = 0') >= 2, (
+        "the relax must be issued per transaction phase - regroup_all commits between phases")

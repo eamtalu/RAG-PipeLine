@@ -876,6 +876,12 @@ async def regroup_all(db: AsyncSession, customer_code: str | None = None) -> dic
 
     Pass `customer_code` to rebuild only one tenant (the manual API path); None rebuilds every
     customer (used for a full repair)."""
+    # The web tier's 30 s statement guard is wrong for this path, exactly as it is wrong for Stage
+    # 1's bulk insert (CLAUDE.md rule 8 names that as the deliberate exception) and for the analytics
+    # fold: a FULL-history read over millions of entries legitimately exceeds it, and in production
+    # the guard was killing the repair the 18r orphan-leak fix depends on. SET LOCAL lasts one
+    # transaction, and this function commits between phases, so it is re-issued per phase below.
+    await db.execute(sa_text("SET LOCAL statement_timeout = 0"))
     # Assignments first: the FK cascade is gone (it made partitions undroppable), so they must be
     # removed explicitly or every full regroup leaves orphans pointing at deleted transactions.
     # N1, publish site 3 of 5. The span has to be read BEFORE the delete: this frees the tenant's whole
@@ -903,6 +909,9 @@ async def regroup_all(db: AsyncSession, customer_code: str | None = None) -> dic
 
     stats = {"mode": "full", "customers": len(codes), "by_status": {}}
     for code in codes:
+        # Fresh transaction after the commit above (and after each iteration's) - the relax must be
+        # re-issued or the whole-history read below dies on the web-tier guard again.
+        await db.execute(sa_text("SET LOCAL statement_timeout = 0"))
         rows = list((await db.execute(
             select(LogEntry).where(LogEntry.customer_code == code).order_by(
                 LogEntry.timestamp.asc().nullslast(),
