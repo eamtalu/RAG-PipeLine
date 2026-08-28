@@ -10,7 +10,7 @@ The document has two parts:
   A plain-English, fact-checked guide to how the software works today, from the SSH pull to the ML pipeline.
   Start here.
 - **PART II - The design history.**
-  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18u), preserved verbatim because code comments and tests cite these section numbers.
+  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18v), preserved verbatim because code comments and tests cite these section numbers.
 
 # PART I. The system as built: a plain-English guide
 
@@ -266,7 +266,7 @@ Everything described above is the **rebuild lane**: any change, however small, i
 It is the only lane that exists today, and since S3 it is cheap (unchanged rows cost no writes).
 
 The **head lane** is BUILT and shipping in SHADOW (chunk 72):
-a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream, a parked stream that is already closed) routed back to the rebuild lane by name, and each declined window writes one journal line naming its reason (chunk 75).
+a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream, a parked stream that is already closed, a parked stream whose entries cannot be reloaded) routed back to the rebuild lane by name, and each declined window writes one journal line naming its reason (chunk 75).
 Governed by `stage2_head_lane` = off / shadow / on, shipped as shadow: the plan is built for every eligible window, the rebuild executes as the authority, and the two are compared - a DIVERGED line in the journal is what stops `on`.
 The comparison is HORIZON-AWARE (chunk 73, section 18s): the rebuild legitimately sees more than the plan (its padded read reaches 900 seconds past the window's high edge, and Stage 1 keeps committing lines between the plan and the rebuild), so the shadow asks two questions that are well-defined across that difference.
 First, ownership, always: every line the plan assigned must sit in the same transaction the authority put it in - the question promotion actually hangs on.
@@ -841,14 +841,14 @@ Honest imperfections found while fact-checking this part; none is currently caus
 4. The `show` (hidden) gate applies only where rollups are written; a live-tail or ad-hoc fact scan can still include hidden transactions.
 5. `GET /analytics/status` emits an ETag but the server never handles `If-None-Match` (no 304s); conditional requests are left to clients and proxies.
 6. A few docstrings still describe superseded behaviour (`capture.observe_names` says show defaults off; the transaction-registry model says R4 is not built), and the root CLAUDE.md still claims Stage 1 relaxes its statement timeout to 0 where the code uses a finite 120 s.
-7. The stored S4 stream state has no server column; two servers' same-numbered threads collide there (newest wins) - harmless while the state is shadow-only measurement, and the head-lane work replaces it.
+7. RESOLVED (18v, chunk 76): the stored stream state now carries a `server` column in its unique key, so two servers' same-numbered threads park side by side instead of newest-wins evicting one.
 
 
 ---
 
 # PART II. The design history
 
-Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18u).
+Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18v).
 It explains WHY the system is shaped the way Part I describes.
 Where the two disagree, Part I is current and the section here records what was believed at the time.
 
@@ -4043,3 +4043,28 @@ During the chunk-74 shadow watch, two consecutive windows produced no verdict an
 S4a solved the same problem with its refusal counts; the head lane now does the equivalent - one INFO line per declined window, from the head-lane module, naming tenant, window and reason (`fell back to the rebuild lane for <lo>..<hi> - <reason>`).
 Volume matches the existing per-window Stage 2 stats line, so it cannot flood the journal.
 Two tests pin it (`test_head_lane_fallback_logging_chunk75.py`): a declined window names its reason; an eligible window logs no fallback.
+
+## 18v. The state wipe: a wider save than the window could speak for, 2026-08-28. Chunk 76.
+
+The chunk-75 fallback logging and the 18s evidence format together made the next live DIVERGED pair fully diagnosable from the journal alone, and the diagnosis was reconstructed step by step:
+
+1. 12:49:15 - a window ending 11:49:08.893 stitched a new conversation (request 11:49:08.688) and parked it as an open stream. Correct.
+2. 12:49:23 - an OVERLAPPING, OLDER ticket (window ending 11:48:51.972, entirely behind the previous one; merged tickets overlap routinely) rebuilt next.
+   Its state save was a whole-tenant DELETE-then-INSERT, and since the step-1 conversation was outside its freed range, the save WIPED that parked stream.
+3. 12:50:34 - the head-lane plan built with the hole in its seed.
+   A response binds to its user's OLDEST open work, so with the front conversation missing every response for that user shifted one conversation over - the chained ownership mismatches in the DIVERGED evidence.
+
+The rebuild lane is immune by design ("the state is a cache, not the truth" - it re-derives from raw lines); the head lane is the first consumer that needs the cache to be COMPLETE, not merely non-stale.
+
+### The fix (chunk 76), three legs
+
+- **Scoped save.** `stream_state.save` now has two explicit contracts.
+  The head lane's apply still whole-replaces, because its plan re-parks every stream it still believes in - the plan IS the complete state.
+  The windowed rebuild passes the set of transactions it actually touched (freed or rebuilt); deletes are scoped to those, to genuine key collisions with the rows being written, and to consumed pending requests - every other row SURVIVES.
+- **The server joined the stream key** (migration `b5e19f7c3a84`).
+  Thread ids are small integers reused by every app server process (18r), so a key of (customer, thread, user) forced newest-wins across servers and silently dropped one server's open conversation - the same hole in another form, live on this two-server tenant.
+  Closes gaps-register item 7.
+- **`parked_unreadable`.** A loaded stream whose transaction has no reloadable entries was silently dropped from the plan's seed; the head lane now falls back by name instead of planning around a hole.
+  Alongside this, the rebuild-side save now derives each stream's transaction id from the SAME continuity assignment `_persist` uses (inherit-aware), instead of re-minting - so the stored pointer can no longer disagree with the persisted id.
+
+Four tests pin it (`test_stream_state_scope_chunk76.py`): the overlapping-older-window wipe survives; the full live strand end to end (the response still finds its conversation and the shadow AGREES); both servers' same-(thread,user) conversations park side by side; a broken stream pointer makes the plan fall back.

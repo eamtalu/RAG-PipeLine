@@ -1187,7 +1187,8 @@ async def _cross_pad_floor(db: AsyncSession, customer_code: str, lo_p: datetime,
 
 async def _shadow_compare(db: AsyncSession, customer_code: str, rows: list[LogEntry],
                           authoritative: list[_TxnBuilder], window_lo: datetime,
-                          s4_mode: str, rebuilding: frozenset = frozenset()) -> dict:
+                          s4_mode: str, rebuilding: frozenset = frozenset(),
+                          cont: continuity.Continuity = continuity.EMPTY) -> dict:
     """S4a. Group the same entries a second time from the STORED state, and report the difference.
 
     What is compared is the PARTITION - which entries ended up together - not builder identity, since
@@ -1256,14 +1257,23 @@ async def _shadow_compare(db: AsyncSession, customer_code: str, rows: list[LogEn
     # is always older than the fresh request beside the new response - so it stole every new
     # response for that user.
     # KEYED, not appended, and the unique constraint is what taught me that. `_group`'s `open_by_key`
-    # is a dict, so at most ONE stream per (thread, user_ctx) can be open at a time - but the list this
-    # iterates holds FINISHED builders too, and a thread that flipped A -> B -> A contributes two
-    # builders under the same key. Appending both violated `uq_log_open_stream_key` immediately.
+    # is a dict, so at most ONE stream per (server, thread, user_ctx) can be open at a time - but the
+    # list this iterates holds FINISHED builders too, and a thread that flipped A -> B -> A
+    # contributes two builders under the same key. Appending both violated `uq_log_open_stream_key`
+    # immediately. The newest wins WITHIN one key: the most recent activity on a key IS the stream a
+    # following entry would join. The SERVER is part of the key (18v): thread ids are reused by
+    # every app server process, and (thread, user) alone silently dropped one server's open
+    # conversation whenever both had the same pair open.
     #
-    # The newest wins, which is also the right answer rather than merely a way to satisfy the
-    # constraint: the most recent activity on a key IS the stream a following entry would join.
-    by_key: dict[tuple, dict] = {}
+    # Ids come from the SAME continuity assignment `_persist` uses (entries sorted first, exactly as
+    # `_resolve_ids` sorts them - idempotent, same list objects). Re-minting with `_txn_id` here
+    # would disagree with an INHERITED id, and a stream whose transaction_id points at nothing makes
+    # the head lane fall back (`parked_unreadable`) instead of planning.
     for bldr in authoritative:
+        bldr.entries.sort(key=_entry_stream_order)
+    assigned = continuity.assign([b.entries for b in authoritative], cont, fallback=_txn_id)
+    by_key: dict[tuple, dict] = {}
+    for bldr, tid in zip(authoritative, assigned):
         if not bldr.entries:
             continue
         if any(e.entry_type.value == "response" for e in bldr.entries):
@@ -1272,17 +1282,23 @@ async def _shadow_compare(db: AsyncSession, customer_code: str, rows: list[LogEn
         if last is None or (window_lo - last) >= timedelta(seconds=settings.log_open_gap_seconds):
             continue          # already past the gap, so it can never receive another entry
         anchor = bldr.entries[0]
-        key = (anchor.thread, anchor.user_ctx)
+        key = (_entry_server(anchor), anchor.thread, anchor.user_ctx)
         prior = by_key.get(key)
         if prior is not None and prior["last_entry_ts"] >= last:
             continue
         by_key[key] = {
-            "thread": anchor.thread, "user_ctx": anchor.user_ctx,
-            "transaction_id": _txn_id(bldr.entries), "has_request": any(
+            "server": key[0], "thread": anchor.thread, "user_ctx": anchor.user_ctx,
+            "transaction_id": tid, "has_request": any(
                 e.entry_type.value == "request" for e in bldr.entries),
             "last_entry_ts": last, "open_pos": bldr.open_pos, "is_current": True}
     open_streams = list(by_key.values())
-    await stream_state.save(db, customer_code, streams=open_streams, pending=[])
+    # 18v (chunk 76): the save is SCOPED to what this window touched. Merged tickets overlap, and a
+    # whole-tenant replace let an overlapping OLDER window wipe a parked stream it never saw - the
+    # next head-lane plan then shifted every response for that user one conversation over (the live
+    # DIVERGED evidence). Out-of-scope streams now survive.
+    await stream_state.save(db, customer_code, streams=open_streams, pending=[],
+                            touched=rebuilding | frozenset(assigned),
+                            consumed_entry_ids={e.id for e in rows})
     report["saved_streams"] = len(open_streams)
     return report
 
@@ -1448,7 +1464,7 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
     if s4_mode != stream_state.OFF:
         try:
             stats["s4"] = await _shadow_compare(db, customer_code, rows, groups, lo_p, s4_mode,
-                                                rebuilding=frozenset(freed))
+                                                rebuilding=frozenset(freed), cont=cont)
         except Exception:
             # Swallowed on purpose, and only here. Shadow mode is a MEASUREMENT; a fault in it must
             # never fail a stitch that would otherwise have succeeded. In `on` mode this would be

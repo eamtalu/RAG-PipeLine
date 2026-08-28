@@ -208,7 +208,7 @@ async def test_save_replaces_rather_than_merges():
     await _seed_rows(last_ts=T0, thread="old")
     async with async_session() as db:
         await ss.save(db, CC, streams=[{
-            "thread": "new", "user_ctx": "amin", "transaction_id": uuid.uuid4(),
+            "server": "S", "thread": "new", "user_ctx": "amin", "transaction_id": uuid.uuid4(),
             "has_request": False, "last_entry_ts": T0,
             "open_pos": (False, T0, "a.log", 1), "is_current": True}], pending=[])
         await db.commit()

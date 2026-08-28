@@ -274,6 +274,34 @@ erDiagram
         datetime updated_at
     }
 
+    log_open_stream {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string server "18v: part of the stream key - thread ids are reused per app server"
+        string thread "stream key, stored raw"
+        string user_ctx "stream key, stored raw; NULLS NOT DISTINCT in the unique key"
+        uuid transaction_id "soft -> log_transactions.id (no FK); entries reload via assignments"
+        bool has_request
+        datetime last_entry_ts "the reuse guard reads this"
+        bool open_ts_is_null "durable stream position, four comparable parts"
+        datetime open_ts
+        string open_source_file
+        int open_line_number
+        bool is_current "the thread's stream a user-less line inherits"
+        datetime created_at
+        datetime updated_at "reaper TTL keys on this"
+    }
+
+    log_pending_request {
+        uuid id PK
+        string customer_code "soft tenant key"
+        uuid entry_id "soft -> log_entries.id (no FK); the request line, re-read by id"
+        string reqid
+        string req_user
+        datetime timestamp
+        datetime created_at
+    }
+
     log_regroup_runs {
         uuid id PK
         string customer_code "soft tenant key"
@@ -291,7 +319,12 @@ erDiagram
 
     log_transactions ||..o{ log_entry_assignment : "groups (soft, no FK)"
     log_entries ||..o| log_entry_assignment : "currently assigned (soft, no FK)"
+    log_transactions ||..o| log_open_stream : "still open as (soft, no FK)"
+    log_entries ||..o| log_pending_request : "awaits its work (soft, no FK)"
 ```
+
+The grouper's saved state (`log_open_stream`, `log_pending_request`) is a self-cleaning cache, not truth: `log_transactions` and `log_entry_assignment` remain authoritative, every read of the cache is guarded, and a TTL reaper deletes rows the grouper stops touching.
+The unique stream key is `(customer_code, server, thread, user_ctx)` with `NULLS NOT DISTINCT` (migration `b5e19f7c3a84`): thread ids are small integers reused by every app server process, so the server must be part of the key or one server's open conversation silently evicts the other's (section 18v).
 
 ### `log_entry_assignment` - why `log_entries` is now append-only
 

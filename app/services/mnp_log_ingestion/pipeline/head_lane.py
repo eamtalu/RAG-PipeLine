@@ -143,6 +143,13 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
         if state["refusals"].get("clock_went_backwards"):
             return _fall("clock_went_backwards")
         parked = [r for r in state["streams"] if state["entries_by_txn"].get(r.transaction_id)]
+        # Chunk 76 (section 18v): a usable stream whose transaction has no reloadable entries is a
+        # broken pointer. The S4a shadow may silently skip it (its rebuild re-derives from raw lines
+        # anyway); the head lane may not - the authority WILL see that conversation, and a plan
+        # built around the hole shifts the response FIFO one conversation over (the live DIVERGED
+        # evidence). Never guess: fall back.
+        if len(parked) != len(state["streams"]):
+            return _fall("parked_unreadable")
         # Chunk 74 (section 18t): a parked stream whose entries already contain a RESPONSE is closed
         # - the grouper never lets a responded conversation receive another entry - so such a row is
         # STALE state (pre-fix leftovers, or a future save regression). Seeding it would offer it to
@@ -212,6 +219,7 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
                     # entry) writes nothing - but may still need re-parking below.
                     if is_open:
                         plan.open_streams.append({
+                            "server": dt._entry_server(anchor),
                             "thread": anchor.thread, "user_ctx": anchor.user_ctx,
                             "transaction_id": tid,
                             "has_request": any(e.entry_type.value == "request"
@@ -231,6 +239,7 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
 
             if is_open:
                 plan.open_streams.append({
+                    "server": dt._entry_server(anchor),
                     "thread": anchor.thread, "user_ctx": anchor.user_ctx, "transaction_id": tid,
                     "has_request": any(e.entry_type.value == "request" for e in b.entries),
                     "last_entry_ts": last, "open_pos": b.open_pos, "is_current": True})

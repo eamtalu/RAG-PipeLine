@@ -26,7 +26,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
@@ -133,21 +133,57 @@ async def load(db: AsyncSession, customer_code: str, window_lo: datetime) -> dic
 
 
 async def save(db: AsyncSession, customer_code: str, *, streams: list[dict],
-               pending: list[LogEntry]) -> None:
-    """Replace this tenant's state with `streams` and `pending`. Does NOT commit.
+               pending: list[LogEntry], touched: frozenset | None = None,
+               consumed_entry_ids: set | None = None) -> None:
+    """Write this tenant's state. Does NOT commit. Each stream dict carries its `server` (18v).
 
-    DELETE-then-INSERT rather than an upsert, and that is the point rather than laziness. The state is a
-    complete description of where the grouper got to, so a partial update would leave a stream row that
-    the new grouping does not believe in - and because the whole thing is a few hundred rows inside a
-    transaction that is already open, the cost is irrelevant next to the invariant.
+    Two contracts, chosen by `touched` (18v, chunk 76):
+
+    - `touched is None`: `streams` and `pending` are the tenant's COMPLETE state. Whole
+      DELETE-then-INSERT, as always. This is the head lane's apply: its plan re-parks every stream
+      it still believes in, so the plan IS the complete description.
+    - `touched` is a set of transaction ids: the caller is a WINDOWED rebuild, which can only speak
+      for the transactions it freed or rebuilt. Deletes are scoped to those, to key collisions with
+      the rows being written, and to pending requests among `consumed_entry_ids`; every other row
+      SURVIVES. The whole-replace here was chunk 76's live incident: merged tickets overlap, and an
+      overlapping older window's replace wiped a parked stream it never touched - the head lane
+      then handed that conversation's response to the wrong transaction (the response FIFO shifts
+      by one when the front conversation is missing).
+
+    Crash safety is unchanged either way: everything runs inside the caller's transaction, so the
+    state can never be AHEAD of the assignments.
     """
-    await db.execute(delete(LogOpenStream).where(LogOpenStream.customer_code == customer_code))
-    await db.execute(delete(LogPendingRequest).where(LogPendingRequest.customer_code == customer_code))
+    if touched is None:
+        await db.execute(delete(LogOpenStream).where(LogOpenStream.customer_code == customer_code))
+        await db.execute(delete(LogPendingRequest).where(
+            LogPendingRequest.customer_code == customer_code))
+    else:
+        if touched:
+            await db.execute(delete(LogOpenStream).where(
+                LogOpenStream.customer_code == customer_code,
+                LogOpenStream.transaction_id.in_(list(touched))))
+        for s in streams:
+            await db.execute(delete(LogOpenStream).where(
+                LogOpenStream.customer_code == customer_code,
+                LogOpenStream.server == s["server"],
+                LogOpenStream.thread.is_not_distinct_from(s["thread"]),
+                LogOpenStream.user_ctx.is_not_distinct_from(s["user_ctx"])))
+        # The new rows are the freshest activity on their threads, so any surviving stream on the
+        # same (server, thread) is no longer the one a user-less line should inherit.
+        for srv, th in {(s["server"], s["thread"]) for s in streams if s.get("is_current")}:
+            await db.execute(update(LogOpenStream).where(
+                LogOpenStream.customer_code == customer_code,
+                LogOpenStream.server == srv,
+                LogOpenStream.thread.is_not_distinct_from(th)).values(is_current=False))
+        if consumed_entry_ids:
+            await db.execute(delete(LogPendingRequest).where(
+                LogPendingRequest.customer_code == customer_code,
+                LogPendingRequest.entry_id.in_(list(consumed_entry_ids))))
     now = datetime.now(timezone.utc)
     for s in streams:
         pos = s["open_pos"]
         db.add(LogOpenStream(
-            id=uuid.uuid4(), customer_code=customer_code,
+            id=uuid.uuid4(), customer_code=customer_code, server=s["server"],
             thread=s["thread"], user_ctx=s["user_ctx"], transaction_id=s["transaction_id"],
             has_request=s["has_request"], last_entry_ts=s["last_entry_ts"],
             open_ts_is_null=bool(pos[0]), open_ts=pos[1] if not pos[0] else None,

@@ -72,7 +72,7 @@
     <strong>Rendered companion document.</strong>
     The authoritative source is
     <code>docs/analytics-ml-architecture/final_architecture.md</code>.
-    This file renders PART I (the system as built); the full design history (Part II, sections 1-18u) lives in the Markdown.
+    This file renders PART I (the system as built); the full design history (Part II, sections 1-18v) lives in the Markdown.
     If the two disagree, the Markdown wins.
   </div>
 </div>
@@ -291,7 +291,7 @@ Sealed means "this row will not change again" - the promise behind the dashboard
 <p>Everything above is the <strong>rebuild lane</strong>: any change is handled by re-deriving a padded window and writing only the difference.
 It is the only lane that exists today, and since S3 it is cheap.</p>
 <p>The <strong>head lane</strong> is built and shipping in SHADOW (chunk 72, <span class="tag g">built - in shadow</span>):
-a fast path processing only brand-new entries at the head of the stream against saved open-stream state (<code>log_open_stream</code>) and the per-tenant stitch checkpoint (<code>log_stitch_checkpoint</code>), planning one update per continued conversation and one insert per new one, with any surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream, a parked stream that is already closed) routed back to the rebuild lane by name, and each declined window writes one journal line naming its reason (chunk 75).
+a fast path processing only brand-new entries at the head of the stream against saved open-stream state (<code>log_open_stream</code>) and the per-tenant stitch checkpoint (<code>log_stitch_checkpoint</code>), planning one update per continued conversation and one insert per new one, with any surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream, a parked stream that is already closed, a parked stream whose entries cannot be reloaded) routed back to the rebuild lane by name, and each declined window writes one journal line naming its reason (chunk 75).
 Governed by <code>stage2_head_lane</code> = off / shadow / on: the plan is built for every eligible window, the rebuild executes as the authority, and the two are compared - a DIVERGED line in the journal is what stops <code>on</code>.</p>
 <p>The comparison is <strong>horizon-aware</strong> (chunk 73, section 18s): the rebuild legitimately sees more than the plan - its padded read reaches 900&nbsp;s past the window's high edge, and Stage&nbsp;1 keeps committing lines between the plan and the rebuild - so the shadow asks two questions that are well-defined across that difference.
 <em>Ownership, always:</em> every line the plan assigned must sit in the same transaction the authority put it in.
@@ -785,11 +785,11 @@ The rebuild's whole lifecycle, from click to notification:</p>
   <li>The <code>show</code> gate applies only where rollups are written; a live-tail or ad-hoc fact scan can still include hidden transactions.</li>
   <li><code>GET /analytics/status</code> emits an ETag but the server never handles <code>If-None-Match</code> (no 304s).</li>
   <li>A few docstrings describe superseded behaviour, and the root CLAUDE.md claims Stage 1 relaxes its statement timeout to 0 where the code uses a finite 120&nbsp;s.</li>
-  <li>The stored S4 stream state has no server column; two servers' same-numbered threads collide there (newest wins) - harmless while shadow-only.</li>
+  <li>RESOLVED (18v, chunk 76): the stream state now carries a <code>server</code> column in its unique key, so two servers' same-numbered threads park side by side.</li>
 </ol>
 
 <p style="margin-top:40px;color:var(--ink-3);font-size:13px;">
-For the full design history - iteration 1, the iteration-2 plan, every as-built record and incident (sections 1 to 18u) - read Part II of
+For the full design history - iteration 1, the iteration-2 plan, every as-built record and incident (sections 1 to 18v) - read Part II of
 <code>final_architecture.md</code>.
 </p>
 

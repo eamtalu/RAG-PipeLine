@@ -46,7 +46,12 @@ class LogOpenStream(Base):
         # nullable, and under the default NULL-distinct rule `(NULL, 'amin')` would never conflict
         # with itself - so one stream would accumulate several rows and the lookup would be
         # non-deterministic. Failure mode 5 in the plan's table.
-        UniqueConstraint("customer_code", "thread", "user_ctx",
+        # 18v: the SERVER is part of the key. Thread ids are small integers reused by every app
+        # server process (18r), so (thread, user) alone forces newest-wins across servers and
+        # silently drops one server's open conversation - the same hole as the chunk-76 wipe, in
+        # another form. The stream's entries still supply the server at seed time; the column
+        # exists so two servers' same-numbered threads can BOTH be parked.
+        UniqueConstraint("customer_code", "server", "thread", "user_ctx",
                          name="uq_log_open_stream_key", postgresql_nulls_not_distinct=True),
     )
 
@@ -56,6 +61,7 @@ class LogOpenStream(Base):
     #: The stream key. Stored RAW, byte for byte as the entry carried it - failure mode 4. If the
     #: writer normalised and the reader did not (or the reverse), the lookup would miss every time and
     #: silently fall back, turning S4 into a slower version of S3 with no error anywhere.
+    server: Mapped[str] = mapped_column(String(255), nullable=False, server_default="")
     thread: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_ctx: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
