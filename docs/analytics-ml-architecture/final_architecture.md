@@ -266,7 +266,7 @@ Everything described above is the **rebuild lane**: any change, however small, i
 It is the only lane that exists today, and since S3 it is cheap (unchanged rows cost no writes).
 
 The **head lane** is BUILT and shipping in SHADOW (chunk 72):
-a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant FRONTIER bookmark (`log_stream_frontier`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the frontier, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream) routed back to the rebuild lane by name.
+a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the frontier, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream) routed back to the rebuild lane by name.
 Governed by `stage2_head_lane` = off / shadow / on, shipped as shadow: the plan is built for every eligible window, the rebuild executes as the authority, and the two are compared - a DIVERGED line in the journal is what stops `on`.
 The equivalence bar is the strictest available: after a head-lane apply, a rebuild of the same window must report every transaction unchanged (byte-identical fingerprints), certified by the authority itself.
 Its benefit is read cost and latency, not correctness; the rebuild lane remains the authority.

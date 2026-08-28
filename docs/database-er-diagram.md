@@ -268,9 +268,9 @@ erDiagram
         datetime created_at
     }
 
-    log_stream_frontier {
+    log_stitch_checkpoint {
         string customer_code PK "one row per tenant"
-        datetime frontier_ts "head lane bookmark - greatest-wins, never backwards"
+        datetime stitched_through "head lane checkpoint - greatest-wins, never backwards"
         datetime updated_at
     }
 

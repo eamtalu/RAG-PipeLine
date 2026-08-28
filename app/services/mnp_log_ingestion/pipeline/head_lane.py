@@ -2,7 +2,7 @@
 
 The rebuild lane re-reads a padded window every tick to conclude ~98.7% of it did not change; since
 S3 the writes are already minimal, so the re-reads are the only remaining waste. This module removes
-them for the common case: a window whose range lies entirely beyond the tenant's FRONTIER is planned
+them for the common case: a window whose range lies entirely beyond the tenant's stitch CHECKPOINT is planned
 from just its own rows plus the parked open conversations (`log_open_stream`), producing one UPDATE
 per continued conversation and one INSERT per new one.
 
@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
 from app.persistence.models.log_entry import LogEntry
-from app.persistence.models.log_stream_frontier import LogStreamFrontier
+from app.persistence.models.log_stitch_checkpoint import LogStitchCheckpoint
 from app.persistence.models.log_transaction import LogTransaction
 from app.services.analytics import pending_windows as analytics_tickets
 from app.services.mnp_log_ingestion.pipeline import assignments, fingerprints, stream_state
@@ -50,20 +50,20 @@ def mode() -> str:
     return m if m in ("off", "shadow", "on") else "off"
 
 
-async def get_frontier(db: AsyncSession, customer_code: str) -> datetime | None:
-    return await db.scalar(select(LogStreamFrontier.frontier_ts).where(
-        LogStreamFrontier.customer_code == customer_code))
+async def get_checkpoint(db: AsyncSession, customer_code: str) -> datetime | None:
+    return await db.scalar(select(LogStitchCheckpoint.stitched_through).where(
+        LogStitchCheckpoint.customer_code == customer_code))
 
 
-async def advance_frontier(customer_code: str, hi: datetime) -> None:
+async def advance_checkpoint(customer_code: str, hi: datetime) -> None:
     """Greatest-wins upsert: both lanes call this after a committed window; a late backfill window
     must never drag the bookmark back."""
     async with async_session() as db:
-        stmt = pg_insert(LogStreamFrontier).values(
-            customer_code=customer_code, frontier_ts=hi)
+        stmt = pg_insert(LogStitchCheckpoint).values(
+            customer_code=customer_code, stitched_through=hi)
         await db.execute(stmt.on_conflict_do_update(
             index_elements=["customer_code"],
-            set_={"frontier_ts": func.greatest(LogStreamFrontier.frontier_ts, stmt.excluded.frontier_ts)}))
+            set_={"stitched_through": func.greatest(LogStitchCheckpoint.stitched_through, stmt.excluded.stitched_through)}))
         await db.commit()
 
 
@@ -110,11 +110,11 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
     from app.services.mnp_log_ingestion.pipeline import derive_transactions as dt
 
     async with async_session() as db:
-        frontier = await get_frontier(db, customer_code)
-        if frontier is None:
-            return _fallback("no_frontier")
-        if lo < frontier:
-            return _fallback("behind_frontier")
+        checkpoint = await get_checkpoint(db, customer_code)
+        if checkpoint is None:
+            return _fallback("no_checkpoint")
+        if lo < checkpoint:
+            return _fallback("behind_checkpoint")
 
         rows = list((await db.execute(
             select(LogEntry).where(
@@ -263,7 +263,7 @@ async def apply_plan(customer_code: str, plan: HeadPlan) -> dict:
         await analytics_tickets.publish_for_transactions(
             db, customer_code, started_ats=[min(s for s in starts if s is not None), plan.hi])
         await db.commit()
-    await advance_frontier(customer_code, plan.hi)
+    await advance_checkpoint(customer_code, plan.hi)
     stats = {"mode": "head", "customers": 1, "by_status": {},
              "transactions_created": len(plan.created),
              "transactions_row_only": 0, "transactions_rewritten": len(plan.continued),

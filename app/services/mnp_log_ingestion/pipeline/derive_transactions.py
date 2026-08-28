@@ -1571,7 +1571,7 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
                         if hl_mode != "off" else None)
                 if plan is not None and plan.ok and hl_mode == "on":
                     by_window.append(await head_lane.apply_plan(customer_code, plan))
-                    await head_lane.advance_frontier(customer_code, w_hi)
+                    await head_lane.advance_checkpoint(customer_code, w_hi)
                     continue
                 async with async_session() as wdb:
                     # serialize same-customer finalizes at window granularity, then rebuild + COMMIT
@@ -1587,8 +1587,8 @@ async def finalize_pending(db: AsyncSession, customer_code: str) -> dict:
                     by_window.append(await regroup_window(wdb, customer_code, w_lo, w_hi, commit=True))
                 if plan is not None and plan.ok and hl_mode == "shadow":
                     await head_lane.shadow_compare(customer_code, plan)
-                # both lanes advance the bookmark, so the NEXT window can be head-eligible.
-                await head_lane.advance_frontier(customer_code, w_hi)
+                # both lanes advance the stitch checkpoint, so the NEXT window can be head-eligible.
+                await head_lane.advance_checkpoint(customer_code, w_hi)
             # only now that every sub-window of this run committed, mark the run's pending consumed
             async with async_session() as cdb:
                 await cdb.execute(

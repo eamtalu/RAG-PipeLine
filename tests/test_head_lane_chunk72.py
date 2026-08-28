@@ -2,7 +2,7 @@
 
 The rebuild lane re-reads a padded window every tick to discover that ~98.7% of it did not change;
 since S3 the WRITES are already minimal, so the re-READS are the only remaining waste. The head lane
-removes them: a durable FRONTIER marks "processed up to here", parked open conversations live in
+removes them: a durable stitch CHECKPOINT marks "processed up to here", parked open conversations live in
 `log_open_stream` (maintained since S4a), and a window whose range lies entirely beyond the frontier
 can be processed from just its own rows - continue a parked conversation with one update, start new
 ones with inserts, park what is still open, advance the frontier.
@@ -36,7 +36,7 @@ from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_open_stream import LogOpenStream, LogPendingRequest
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun
-from app.persistence.models.log_stream_frontier import LogStreamFrontier
+from app.persistence.models.log_stitch_checkpoint import LogStitchCheckpoint
 from app.persistence.models.log_transaction import LogTransaction
 from app.services.mnp_log_ingestion.pipeline import derive_transactions as dt
 from app.services.mnp_log_ingestion.pipeline import head_lane
@@ -49,7 +49,7 @@ T0 = datetime(2026, 8, 17, 8, 0, tzinfo=timezone.utc)
 async def _wipe():
     async with async_session() as db:
         for cc in (CC, CC2):
-            for model in (LogStreamFrontier, LogOpenStream, LogPendingRequest,
+            for model in (LogStitchCheckpoint, LogOpenStream, LogPendingRequest,
                           AnalyticsPendingWindow, LogRegroupPending, LogRegroupRun,
                           LogEntryAssignment, LogTransaction, LogEntry):
                 await db.execute(delete(model).where(model.customer_code == cc))
@@ -91,7 +91,7 @@ async def _window_one(*, cc=CC) -> LogTransaction:
     await _plant(_OPENING, cc=cc)
     async with async_session() as db:
         await dt.regroup_window(db, cc, T0, T0 + timedelta(seconds=5))
-    await head_lane.advance_frontier(cc, T0 + timedelta(seconds=5))
+    await head_lane.advance_checkpoint(cc, T0 + timedelta(seconds=5))
     async with async_session() as db:
         txn = (await db.execute(select(LogTransaction).where(
             LogTransaction.customer_code == cc))).scalar_one()
@@ -101,13 +101,13 @@ async def _window_one(*, cc=CC) -> LogTransaction:
 
 # ==================================================== 1. the frontier
 
-async def test_the_frontier_only_moves_forward():
+async def test_the_checkpoint_only_moves_forward():
     """The bookmark: both lanes advance it, nothing may drag it back - a late backfill window is a
     normal event and must not make the head lane think history ended earlier than it did."""
-    await head_lane.advance_frontier(CC, T0)
-    await head_lane.advance_frontier(CC, T0 - timedelta(hours=1))
+    await head_lane.advance_checkpoint(CC, T0)
+    await head_lane.advance_checkpoint(CC, T0 - timedelta(hours=1))
     async with async_session() as db:
-        assert await head_lane.get_frontier(db, CC) == T0
+        assert await head_lane.get_checkpoint(db, CC) == T0
 
 
 # ==================================================== 2. the plan
@@ -141,11 +141,11 @@ async def test_the_plan_creates_a_new_conversation():
     assert len(plan.created) == 1 and len(plan.continued) == 0
 
 
-async def test_a_window_behind_the_frontier_falls_back():
+async def test_a_window_behind_the_checkpoint_falls_back():
     """Out-of-order and backfilled data is the rebuild lane's job, always."""
     await _window_one()
     plan = await head_lane.build_plan(CC, T0 - timedelta(hours=2), T0 - timedelta(hours=1))
-    assert not plan.ok and plan.fallback == "behind_frontier"
+    assert not plan.ok and plan.fallback == "behind_checkpoint"
 
 
 async def test_a_timestampless_row_is_ignored_like_the_rebuild_lane_ignores_it():
@@ -217,9 +217,9 @@ async def test_applying_the_plan_matches_the_rebuild_exactly():
             AnalyticsPendingWindow.range_end >= before.started_at))).scalars().all()
     assert covering, "the continued transaction's facts must be restated"
 
-    # and the frontier moved
+    # and the checkpoint moved
     async with async_session() as db:
-        assert (await head_lane.get_frontier(db, CC)) >= resp_at
+        assert (await head_lane.get_checkpoint(db, CC)) >= resp_at
 
 
 async def test_apply_refuses_when_the_parked_row_changed_underneath():

@@ -16,7 +16,7 @@ from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_regroup_pending import LogRegroupPending
 from app.persistence.models.log_regroup_run import LogRegroupRun
-from app.persistence.models.log_stream_frontier import LogStreamFrontier
+from app.persistence.models.log_stitch_checkpoint import LogStitchCheckpoint
 from app.persistence.models.log_ssh_source import LogSshSource
 from app.persistence.models.log_ssh_file_checkpoint import LogSshFileCheckpoint
 from app.persistence.models.log_ssh_fetch_run import LogSshFetchRun
@@ -53,7 +53,7 @@ __all__ = [
     "LogEntryAssignment",
     "LogRegroupPending",
     "LogRegroupRun",
-    "LogStreamFrontier",
+    "LogStitchCheckpoint",
     "LogSshSource",
     "LogSshFileCheckpoint",
     "LogSshFetchRun",
