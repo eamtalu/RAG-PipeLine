@@ -69,6 +69,7 @@ def to_row(definition: d.MetricDefinition, *, customer_code: str,
         "filter": {"methods": list(definition.method_filter),
                    "transactions": list(definition.transaction_filter)},
         "grains": list(definition.grains),
+        "source": definition.source,
         "status": definition.status.value,
         "created_by": created_by,
     }
@@ -80,6 +81,8 @@ def from_row(row: AnalyticsMetric) -> d.MetricDefinition:
         dimensions=tuple(row.dimensions or ()),
         measures=tuple(measure_from_json(m) for m in (row.measures or ())),
         grains=tuple(row.grains or ()),
+        # getattr keeps from_row total over fakes and pre-migration rows alike.
+        source=getattr(row, "source", None) or "transaction",
         method_filter=tuple((row.filter or {}).get("methods") or ()),
         transaction_filter=tuple((row.filter or {}).get("transactions") or ()),
         status=d.Status(row.status),

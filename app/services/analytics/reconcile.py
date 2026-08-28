@@ -55,7 +55,7 @@ writer calls, and both are idempotent. Nothing here writes a fact or a rollup va
 
 import logging
 from dataclasses import dataclass, field as dc_field
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -64,6 +64,7 @@ from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.analytics_fact import AnalyticsFact
+from app.persistence.models.analytics_record_fact import AnalyticsRecordFact
 from app.persistence.models.analytics_quality_issue import AnalyticsQualityIssue
 from app.persistence.models.analytics_rollup import (DIMENSION_SLOTS, AnalyticsDailyRollup,
                                                      AnalyticsHourlyRollup)
@@ -83,7 +84,8 @@ logger = logging.getLogger(__name__)
 
 #: Named in one place so the worker can report per check, and an operator can see WHICH one is firing
 #: rather than a single healthy/unhealthy bit.
-CHECKS: tuple[str, ...] = ("facts_vs_transactions", "rollups_vs_facts", "entries_vs_assignments")
+CHECKS: tuple[str, ...] = ("facts_vs_transactions", "rollups_vs_facts", "entries_vs_assignments",
+                           "record_rollups_vs_record_facts", "records_vs_facts")
 
 #: Cap on the rows any single finding enumerates. A window that is wholly unfolded would otherwise
 #: produce a report the size of the window, and the first hundred identify the cause just as well as ten
@@ -100,12 +102,16 @@ _EPSILON = Decimal("0.000001")
 #: is marked dirty, and N5 never recomputes. The corruption survives its own repair, silently.
 #:
 #: A MISSING FACT is a change, and only the diff can derive a fact, so a ticket is exactly right.
-_TICKET_REPAIRABLE: frozenset[str] = frozenset({"facts_vs_transactions"})
+_TICKET_REPAIRABLE: frozenset[str] = frozenset({"facts_vs_transactions",
+                                                # 18y: missing record rows ARE repairable by ticket
+                                                # since 18x - the presence diff re-expands them.
+                                                "records_vs_facts"})
 
 #: A DRIFTED BUCKET is not a change to any fact, so the repair is to re-fold that bucket. That is not a
 #: second way to change a total: it calls the same folder the writer calls, and recompute-and-replace is
 #: idempotent by construction, so repairing twice is indistinguishable from repairing once.
-_REFOLD_REPAIRABLE: frozenset[str] = frozenset({"rollups_vs_facts"})
+_REFOLD_REPAIRABLE: frozenset[str] = frozenset({"rollups_vs_facts",
+                                                "record_rollups_vs_record_facts"})
 
 #: Neither repair helps an orphaned entry. It was never stitched into a transaction, so re-diffing the
 #: range reads the same projection and re-folding aggregates the same facts. It needs a Stage 2 regroup,
@@ -205,6 +211,33 @@ async def rollups_vs_facts(db: AsyncSession, customer_code: str, *,
              for f in (await db.execute(select(AnalyticsFact).where(
                  AnalyticsFact.customer_code == customer_code,
                  window.covers(AnalyticsFact.event_time, include_null=False)))).scalars().all()]
+    # 18y: only TRANSACTION-source definitions. A record definition folded against transaction facts
+    # produces non-empty expectations (record metrics carry no status/classification filters, so
+    # every fact "contributes") while its real rollup rows surface as orphaned - permanently red,
+    # and under repair=true the refold would REPLACE record rollups with transaction-fact folds.
+    definitions = [(i, dfn) for i, dfn in await registry.active_definitions(db, customer_code)
+                   if dfn.source == "transaction"]
+    return await _compare_rollups(db, customer_code, window=window, facts=facts,
+                                  definitions=definitions, check="rollups_vs_facts")
+
+
+async def record_rollups_vs_record_facts(db: AsyncSession, customer_code: str, *,
+                                         window: UtcWindow) -> list[Finding]:
+    """18y: the record grain's own rollup audit - the same comparator, fed record rows and
+    record-source definitions, so the two grains cannot drift in what "audited" means."""
+    facts = [{c.name: getattr(f, c.name) for c in AnalyticsRecordFact.__table__.columns}
+             for f in (await db.execute(select(AnalyticsRecordFact).where(
+                 AnalyticsRecordFact.customer_code == customer_code,
+                 window.covers(AnalyticsRecordFact.event_time, include_null=False)))).scalars().all()]
+    definitions = [(i, dfn) for i, dfn in await registry.active_definitions(db, customer_code)
+                   if dfn.source == "record"]
+    return await _compare_rollups(db, customer_code, window=window, facts=facts,
+                                  definitions=definitions,
+                                  check="record_rollups_vs_record_facts")
+
+
+async def _compare_rollups(db: AsyncSession, customer_code: str, *, window: UtcWindow,
+                           facts: list[dict], definitions, check: str) -> list[Finding]:
 
     # Chunk 66. Only buckets the window covers WHOLE are comparable: the stored row was folded from
     # the entire bucket, the recount above only from the window's slice, so a bucket straddling a
@@ -227,7 +260,7 @@ async def rollups_vs_facts(db: AsyncSession, customer_code: str, *,
         return day >= window.start and nxt <= window.end
 
     findings: list[Finding] = []
-    for definition_id, definition in await registry.active_definitions(db, customer_code):
+    for definition_id, definition in definitions:
         for grain, model, column, bucket_of, is_date in (
             ("hourly", AnalyticsHourlyRollup, "bucket_start",
              lambda r: n5.hour_of(r["event_time"]) if r.get("event_time") else None, False),
@@ -255,20 +288,77 @@ async def rollups_vs_facts(db: AsyncSession, customer_code: str, *,
                     got = getattr(row, "sum_value", None) if row is not None else None
                     if row is None:
                         findings.append(_drift(grain, definition, measure_name, bucket, dims,
-                                               None, want, "missing"))
+                                               None, want, "missing", check=check))
                     elif want is not None and abs(Decimal(str(got or 0)) - want) > _EPSILON:
                         findings.append(_drift(grain, definition, measure_name, bucket, dims,
-                                               got, want, "differs"))
+                                               got, want, "differs", check=check))
             # Anything left in `stored` has no facts behind it at all.
             for (bucket, measure_name, dims), row in list(stored.items())[:_SAMPLE]:
                 findings.append(_drift(grain, definition, measure_name, bucket, dims,
-                                        row.sum_value, None, "orphaned"))
+                                        row.sum_value, None, "orphaned", check=check))
     return findings
 
 
-def _drift(grain, definition, measure_name, bucket, dims, stored, recomputed, kind) -> Finding:
+async def records_vs_facts(db: AsyncSession, customer_code: str, *,
+                           window: UtcWindow) -> list[Finding]:
+    """18y: every expanded fact that PREDICTS records (`mi.record_count` > 0 - the same gate the
+    18x presence diff uses, without which every no-record response would be permanently red) must
+    have record rows. The one check that can catch a destructive re-expansion that dropped rows.
+
+    Repairable by ticket since 18x: the presence diff re-expands the range - PROVIDED the raw
+    entries still exist. Beyond entry retention the rows are unrecoverable and the finding says so
+    instead of promising a repair that would do nothing.
+    """
+    expanded = await capture.expanded_names(db, customer_code)
+    if not expanded:
+        return []
+    facts = (await db.execute(
+        select(AnalyticsFact.source_transaction_id, AnalyticsFact.event_time,
+               AnalyticsFact.attributes, AnalyticsFact.transaction_name)
+        .where(AnalyticsFact.customer_code == customer_code,
+               window.covers(AnalyticsFact.event_time, include_null=False),
+               AnalyticsFact.transaction_name.in_(sorted(expanded))))).all()
+    predicted = {}
+    for f in facts:
+        count = (f.attributes or {}).get("mi.record_count")
+        try:
+            if int(count or 0) > 0:
+                predicted[f.source_transaction_id] = f
+        except (TypeError, ValueError):
+            continue
+    if not predicted:
+        return []
+    present = set((await db.execute(
+        select(AnalyticsRecordFact.source_transaction_id).distinct()
+        .where(AnalyticsRecordFact.customer_code == customer_code,
+               window.covers(AnalyticsRecordFact.event_time, include_null=False),
+               AnalyticsRecordFact.source_transaction_id.in_(
+                   sorted(predicted, key=str))))).scalars().all())
+    missing = [predicted[t] for t in predicted if t not in present]
+    if not missing:
+        return []
+    retention_floor = datetime.now(timezone.utc) - timedelta(
+        days=settings.log_partition_retention_days)
+    findings = []
+    for f in missing[:_SAMPLE]:
+        recoverable = f.event_time is not None and f.event_time >= retention_floor
+        findings.append(Finding(
+            check="records_vs_facts",
+            summary=(f"expanded transaction {f.source_transaction_id} ({f.transaction_name}) "
+                     f"predicts records (mi.record_count) but has no record rows"
+                     + ("" if recoverable else " - beyond entry retention, unrecoverable")),
+            detail={"transaction_name": f.transaction_name,
+                    "source_transaction_id": str(f.source_transaction_id),
+                    "recoverable": recoverable},
+            repair_range=((f.event_time, f.event_time + timedelta(seconds=1))
+                          if recoverable else None)))
+    return findings
+
+
+def _drift(grain, definition, measure_name, bucket, dims, stored, recomputed, kind,
+           check: str = "rollups_vs_facts") -> Finding:
     return Finding(
-        check="rollups_vs_facts",
+        check=check,
         summary=(f"{grain} rollup for {definition.name}/{measure_name} at {bucket} is {kind}: "
                  f"stored {stored}, recomputed {recomputed}"),
         detail={"grain": grain, "definition": definition.name, "measure": measure_name,
@@ -353,20 +443,31 @@ async def _repair_by_refold(db: AsyncSession, customer_code: str, findings) -> i
     buckets, so re-folding the same hour three times because three measures drifted would do identical
     work three times.
     """
-    hours = {b for f in findings
-             if f.check in _REFOLD_REPAIRABLE and f.refold and f.refold[0] == "hourly"
-             for b in [f.refold[1]]}
-    dates = {b for f in findings
-             if f.check in _REFOLD_REPAIRABLE and f.refold and f.refold[0] == "daily"
-             for b in [f.refold[1]]}
-    if not hours and not dates:
+    def _buckets(check: str, grain: str) -> set:
+        return {f.refold[1] for f in findings
+                if f.check == check and f.refold and f.refold[0] == grain}
+
+    txn_hours, txn_dates = _buckets("rollups_vs_facts", "hourly"), _buckets("rollups_vs_facts", "daily")
+    rec_hours = _buckets("record_rollups_vs_record_facts", "hourly")
+    rec_dates = _buckets("record_rollups_vs_record_facts", "daily")
+    if not (txn_hours or txn_dates or rec_hours or rec_dates):
         return 0
     # A drifted hour implies its local day may be drifted too, and monthly folds from daily -- so the
     # day is included rather than left to the next pass to notice.
-    dates |= {h.date() for h in hours}
+    txn_dates |= {h.date() for h in txn_hours}
+    rec_dates |= {h.date() for h in rec_hours}
+    # 18y: routed by the definition's source. Un-routed, the repair would DELETE a record
+    # definition's rollup buckets and REPLACE them with transaction-fact folds - corruption through
+    # the repair path, which is worse than the drift it was fixing.
     for definition_id, definition in await registry.active_definitions(db, customer_code):
-        await n5.recompute(db, customer_code, definition_id, definition, hours=hours, dates=dates)
-    return len(hours) + len(dates)
+        if definition.source == "record":
+            if rec_hours or rec_dates:
+                await n5.recompute_records(db, customer_code, definition_id, definition,
+                                           hours=rec_hours, dates=rec_dates)
+        elif txn_hours or txn_dates:
+            await n5.recompute(db, customer_code, definition_id, definition,
+                               hours=txn_hours, dates=txn_dates)
+    return len(txn_hours | rec_hours) + len(txn_dates | rec_dates)
 
 
 async def reconcile_tenant(db: AsyncSession, customer_code: str, *, window: UtcWindow,
@@ -380,6 +481,8 @@ async def reconcile_tenant(db: AsyncSession, customer_code: str, *, window: UtcW
     findings: list[Finding] = []
     findings += await facts_vs_transactions(db, customer_code, window=window)
     findings += await rollups_vs_facts(db, customer_code, window=window)
+    findings += await record_rollups_vs_record_facts(db, customer_code, window=window)
+    findings += await records_vs_facts(db, customer_code, window=window)
     findings += await orphaned_entries(db, customer_code)
 
     published, recomputed = 0, 0

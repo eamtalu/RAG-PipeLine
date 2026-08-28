@@ -351,7 +351,8 @@ async def test_reconcile_reports_per_check():
     async with async_session() as db:
         body = await api.trigger_reconcile(customer=CC, db=db, start=None, end=None, repair=False)
     assert set(body["by_check"]) == {"facts_vs_transactions", "rollups_vs_facts",
-                                     "entries_vs_assignments"}
+                                     "entries_vs_assignments",
+                                     "record_rollups_vs_record_facts", "records_vs_facts"}
 
 
 async def test_the_live_half_adds_every_dimension_combo_in_a_bucket():

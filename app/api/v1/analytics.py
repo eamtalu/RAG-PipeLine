@@ -151,7 +151,7 @@ async def list_metrics(customer: str = Depends(get_current_customer),
         .order_by(AnalyticsMetric.name).limit(limit))).scalars().all()
     return {"metrics": [{
         "id": str(r.id), "name": r.name, "status": r.status,
-        "dimensions": r.dimensions, "grains": r.grains,
+        "dimensions": r.dimensions, "grains": r.grains, "source": r.source,
         "measures": [m.get("name") for m in (r.measures or [])],
         "filter": r.filter,
         # NULL means no history has been built, which after D8 is the permanent state for every metric.
@@ -189,6 +189,9 @@ async def create_metric(payload: dict = Body(...),
         method_filter=tuple((payload.get("filter") or {}).get("methods") or ()),
         # R1: accepted here so the interface can write a per-transaction metric without a deploy.
         transaction_filter=tuple((payload.get("filter") or {}).get("transactions") or ()),
+        # 18y: which fact table the metric folds and reads. Validate() is source-aware, so a wrong
+        # value or a cross-grain field mix is a 400 with the reasons listed, never a silent chart.
+        source=payload.get("source") or "transaction",
         status=d.Status(payload.get("status") or d.Status.draft.value),
     )
     if not definition.name:
@@ -213,7 +216,7 @@ async def create_metric(payload: dict = Body(...),
                                             created_by=payload.get("created_by") or "api"))
     db.add(row)
     await db.commit()
-    return {"id": str(row.id), "name": row.name, "status": row.status,
+    return {"id": str(row.id), "name": row.name, "status": row.status, "source": row.source,
             "dimensions": row.dimensions, "grains": row.grains,
             "measures": [m.get("name") for m in (row.measures or [])],
             # D8 again: no history exists for it until a range is re-folded.

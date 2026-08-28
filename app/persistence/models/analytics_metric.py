@@ -65,6 +65,10 @@ class AnalyticsMetric(Base):
     filter: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     #: Which grains to maintain: hourly, daily, weekly, monthly. Weekly has no table — ISO Monday weeks
     #: derive from daily at read time, because a week is not a partition boundary anywhere.
+    #: 18y: which fact table this metric folds and reads. A promoted column rather than a `filter`
+    #: key, per this model's own rule - the fold partitions definitions by it every cycle.
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="transaction",
+                                        server_default="transaction")
     grains: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
 
     # --- lifecycle ---

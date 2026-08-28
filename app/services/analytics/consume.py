@@ -641,7 +641,8 @@ async def _quarantine(db: AsyncSession, customer_code: str, issues: Sequence[Map
 
 
 async def _roll_up(db: AsyncSession, customer_code: str, outcomes: Sequence[dd.Outcome],
-                   computed_at: datetime) -> dict:
+                   computed_at: datetime,
+                   record_buckets: tuple[set, set] = (frozenset(), frozenset())) -> dict:
     """N5: recompute every rollup bucket this diff dirtied, for every ACTIVE definition.
 
     In the SAME transaction as the facts, deliberately. A chart that disagrees with the fact table for
@@ -656,7 +657,13 @@ async def _roll_up(db: AsyncSession, customer_code: str, outcomes: Sequence[dd.O
     consequence of any failure.
     """
     hours, dates = n5.dirty_buckets(outcomes)
-    if not hours and not dates:
+    # 18y: the record grain's dirty buckets are the UNION of the fact diff's and the expansion
+    # driver's own (a backfill window's fact diff is all-unchanged, so without the union the
+    # expand-on backfill would write record rows and never roll them up). Transaction rollups keep
+    # using only the fact diff's buckets - a record-only refresh changes no transaction rollup.
+    rec_hours = hours | record_buckets[0]
+    rec_dates = dates | record_buckets[1]
+    if not rec_hours and not rec_dates:
         # The 98.7% rebuild case, free all the way through rather than only as far as the fact table.
         return {"definitions": 0, "buckets": 0}
 
@@ -665,12 +672,17 @@ async def _roll_up(db: AsyncSession, customer_code: str, outcomes: Sequence[dd.O
     # exactly where they are; only the rollups exclude them, which is what makes the switch instant to
     # reverse - the next fold of the range refills complete history from facts that never left.
     hidden = await capture.hidden_names(db, customer_code)
-    stats = {"definitions": 0, "buckets": len(hours) + len(dates)}
+    stats = {"definitions": 0, "buckets": len(rec_hours) + len(rec_dates)}
     for definition_id, definition in await registry.active_definitions(db, customer_code):
+        d_hours, d_dates = ((rec_hours, rec_dates) if definition.source == "record"
+                            else (hours, dates))
+        fold = n5.recompute_records if definition.source == "record" else n5.recompute
+        if not d_hours and not d_dates:
+            continue
         try:
-            await n5.recompute(db, customer_code, definition_id, definition,
-                               hours=hours, dates=dates, computed_at=computed_at,
-                               hidden=hidden)
+            await fold(db, customer_code, definition_id, definition,
+                       hours=d_hours, dates=d_dates, computed_at=computed_at,
+                       hidden=hidden)
             stats["definitions"] += 1
         except Exception:
             # Deliberately NOT swallowed beyond logging: this re-raises, failing the whole run. A
@@ -951,7 +963,8 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         # ON CONFLICT DO NOTHING, so the scalar names offered again cost nothing.
         await capture.observe_fields(db, customer_code, discovered, source="record")
         quarantined = await _quarantine(db, customer_code, issues, now)
-        rolled = await _roll_up(db, customer_code, outcomes, now)
+        rolled = await _roll_up(db, customer_code, outcomes, now,
+                                record_buckets=(record_stats["hours"], record_stats["dates"]))
 
         await _update_state(
             db, customer_code, folded=folded, quarantined=quarantined,

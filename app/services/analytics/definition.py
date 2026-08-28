@@ -158,6 +158,12 @@ class MetricDefinition:
     #: "one on, the other off". Empty means every transaction, matching `method_filter`'s convention.
     transaction_filter: tuple[str, ...] = ()
     status: Status = Status.draft
+    #: 18y: which fact table this metric folds and reads - "transaction" (the default, every metric
+    #: before R4b) or "record" (one row per M3 record, R4). A promoted column on the registry row,
+    #: because the fold partitions definitions by it every cycle. Deliberately NOT called "grain":
+    #: `grains` already means time resolution, and one name for two axes is how a thing gets built
+    #: twice.
+    source: str = "transaction"
 
 
 #: The classifications that represent a usable confirmation on a quantity-carrying method. A row that
@@ -228,19 +234,33 @@ def validate(definition: MetricDefinition,
     problems: list[str] = []
     known = frozenset(known_attributes or ())
 
+    record_grain = definition.source == "record"
+    if definition.source not in ("transaction", "record"):
+        problems.append(f"source {definition.source!r} is not 'transaction' or 'record'")
+
     def _bad_field(name: str) -> str | None:
         """Why `name` is not usable, or None when it is. Shared by dimensions and measure fields so
-        the two cannot drift into accepting different things."""
+        the two cannot drift into accepting different things. Source-aware since 18y, failing closed
+        in BOTH directions: a transaction metric naming `attr:rec.*` used to validate fine and chart
+        silently empty (record attributes never appear on a fact row), and a record metric naming a
+        fact-only column or a `resp.`/`mi.` attribute would do the same one table over."""
         if contract.is_attr_path(name):
             key = contract.attr_key(name)
+            if record_grain and not key.startswith("rec."):
+                return (f"{name!r} is not a record attribute: a record metric reads "
+                        f"`analytics_record_facts`, whose attributes are all `rec.`-prefixed")
+            if not record_grain and key.startswith("rec."):
+                return (f"{name!r} is a record attribute, which never appears on a transaction "
+                        f"fact row - define the metric with source='record' instead")
             if key not in known:
                 return (f"{name!r} names an attribute that is not approved: {key!r} is absent from "
                         f"the field registry, so it is either a typo or a field nobody has ticked "
                         f"for capture. Reading it would be silently empty rather than an error")
             return None
-        if name not in contract.FACT_FIELDS:
-            return (f"{name!r} is not a field on the fact row: reading it would be silently empty "
-                    f"rather than an error")
+        fields = contract.RECORD_FIELDS if record_grain else contract.FACT_FIELDS
+        if name not in fields:
+            return (f"{name!r} is not a field on the {definition.source} row: reading it would be "
+                    f"silently empty rather than an error")
         return None
 
     for dim in definition.dimensions:
@@ -263,12 +283,18 @@ def validate(definition: MetricDefinition,
                 problems.append(f"measure {m.name!r}: {bad}")
         if m.aggregation is not Aggregation.count and not m.field:
             problems.append(f"measure {m.name!r} is a {m.aggregation.value} but names no field")
+        if record_grain and m.statuses:
+            problems.append(f"measure {m.name!r} filters on status, but record rows carry no "
+                            f"status - the filter would exclude every row and look like no data")
+        if record_grain and m.only:
+            problems.append(f"measure {m.name!r} filters on quantity classification, but record "
+                            f"rows carry none - the filter would exclude every row")
         for st in sorted(m.statuses):
-            if st not in _STATUSES:
+            if not record_grain and st not in _STATUSES:
                 problems.append(f"measure {m.name!r} filters on status {st!r}, which log_transactions "
                                 f"never emits; it would contribute nothing and look like no data")
         # N4's first rule. Summing a quantity over methods that carry none yields a confident zero.
-        if m.field == "quantity":
+        if m.field == "quantity" and not record_grain:
             methods = definition.method_filter or ()
             if not methods or any(not contract.carries_quantity(x) for x in methods):
                 problems.append(

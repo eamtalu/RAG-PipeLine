@@ -507,9 +507,11 @@ def test_the_folder_does_not_commit():
 
 def test_monthly_is_folded_after_daily_has_been_replaced():
     """Monthly reads the level below, so folding it from a stale daily level would produce a month that
-    disagrees with its own days."""
+    disagrees with its own days. 18y moved the grain cascade into `_fold_grains`, SHARED by
+    `recompute` (transaction grain) and `recompute_records` (record grain), so this ordering pin now
+    protects both grains at once."""
     import inspect
-    src = inspect.getsource(n5.recompute)
+    src = inspect.getsource(n5._fold_grains)
     assert src.index('"daily" in definition.grains') < src.index('"monthly" in definition.grains')
 
 

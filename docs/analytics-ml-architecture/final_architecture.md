@@ -10,7 +10,7 @@ The document has two parts:
   A plain-English, fact-checked guide to how the software works today, from the SSH pull to the ML pipeline.
   Start here.
 - **PART II - The design history.**
-  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18x), preserved verbatim because code comments and tests cite these section numbers.
+  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18y), preserved verbatim because code comments and tests cite these section numbers.
 
 # PART I. The system as built: a plain-English guide
 
@@ -852,7 +852,7 @@ Honest imperfections found while fact-checking this part; none is currently caus
 
 # PART II. The design history
 
-Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18x).
+Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18y).
 It explains WHY the system is shaped the way Part I describes.
 Where the two disagree, Part I is current and the section here records what was believed at the time.
 
@@ -2745,7 +2745,7 @@ What follows is what remains, in dependency order rather than in the order it wa
 | **S4a** | **BUILT 2026-08-25, SHADOW** - state persisted and compared; re-derive still authoritative. See 18m. | S3 | done |
 | **S4b** | SUPERSEDED (18q, 2026-08-27): the 7-day gate proved unmeasurable (`seeded_streams` = 0 in all 1,411 post-fix runs, structurally) and cross-pad joining shipped instead as a bounded backward window extension - no `_persist` change, no lookup promotion. `stage2_stream_lookup` stays `shadow`; the streaming end-state is re-planned as a head-lane fast path (18q, P4). | S4a | superseded |
 | **R4** | **BUILT 2026-08-25, CAPTURE ONLY** - `analytics_record_facts`, opt-in per transaction. The record-grain FOLD is not built. See 18n. | R3 | capture done |
-| **R4b** | The record-grain fold and read, so a record metric can be defined | R4 | no |
+| **R4b** | The record-grain fold and read, so a record metric can be defined | R4 | fold built (18y); read = chunk 80 |
 | **M1** | **BUILT 2026-08-25** - reproducible training sets pinned to the ledger, plus the predictions table and the reserved cursor. See 18o. | R3 | done |
 
 **Why R3 before R2**, which inverts the obvious order: the allowlist starts empty, so R3 alone would capture nothing.
@@ -4116,3 +4116,28 @@ All were fixed test-first, on an empty live table (`expand` had never been ticke
 - **No DB primary key on `analytics_record_facts`, documented as impossible rather than fixed**: `event_time` is nullable by partitioning-test mandate (copied from a parsed log line), a partitioned PK must include it, and a PK cannot contain a nullable column.
   The NULLS-NOT-DISTINCT unique constraint `(source_transaction_id, record_index, event_time)` IS the identity.
 - Chunk 61's "expansion is driven by the diff, not the source rows" pin is AMENDED, not repealed: the two new drivers (reverse deletes, presence diff) never re-read what the diff called unchanged for its own sake, and the byte-identical settled-window pin moved into chunk 78's suite.
+
+## 18y. The record-grain fold, 2026-08-28. Chunk 79.
+
+Metric definitions gained a SOURCE - `"transaction"` (the default, every pre-R4b metric via `server_default`) or `"record"` - as a promoted column on `analytics_metrics` (migration `e7a92d4f1c58`), because the fold partitions definitions by it every cycle.
+Deliberately not named "grain": `grains` already means time resolution, and one name for two axes is how a thing gets built twice.
+
+### The fold
+
+- `contract.RECORD_FIELDS` is the record row's counterpart of `FACT_FIELDS` - identity, time, and the M3 call; the real payload lives in `rec.*` attributes.
+- `rollups._read_dirty_record_facts` and `rollups.recompute_records` are PARALLEL to their transaction twins, never parameterised: each reader names exactly one table, pinned by source inspection in both directions - 18n's structural guarantee held bidirectionally.
+  Everything downstream of the read is shared (`_fold_grains`, extracted from `recompute`), so the two grains cannot drift in arithmetic, and the daily-before-monthly ordering pin now protects both at once.
+- Record definitions fold into the SAME definition-keyed rollup tables - no new tables, no new retention/purge/partition registrations, invariant 8 stays structural via `RollupColumns`.
+- The record grain's dirty buckets are the UNION of the fact diff's and the 18x expansion driver's own, and `_roll_up`'s empty-guard tests that union - without it, the expand-on backfill (windows whose fact diff is all-unchanged) would write record rows and never roll them up.
+- The `show` gate applies to both grains: a hidden transaction vanishes from record charts too.
+
+### Validation fails closed in both directions
+
+A record metric may name `RECORD_FIELDS` columns and `attr:rec.*` paths only, and may not filter on status or quantity classification (records carry neither - the filter would exclude every row and look like no data).
+A TRANSACTION metric may no longer name `attr:rec.*`: that combination used to validate fine and chart silently empty, the exact failure mode `validate` exists to prevent.
+
+### Reconciliation
+
+The existing checks are PARTITIONED by source - un-partitioned, `rollups_vs_facts` folds record definitions against transaction facts and flags every record rollup "orphaned" forever, and `repair=true` would have DELETED record rollups and replaced them with transaction-fact folds: corruption through the repair path.
+Two new checks: `record_rollups_vs_record_facts` (the same comparator fed record rows and record definitions, with the same chunk-66 whole-bucket clipping) and `records_vs_facts` (an expanded fact that predicts records via `mi.record_count` must have record rows - the one check that can catch a destructive re-expansion; ticket-repairable inside entry retention, reported as unrecoverable beyond it).
+The refold repair routes buckets to the matching grain's recompute.

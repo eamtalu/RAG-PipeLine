@@ -380,7 +380,9 @@ def test_reconciliation_does_not_commit():
 def test_every_check_is_named_in_one_place():
     """So the worker can report per check and an operator can see which one is firing, rather than a
     single healthy/unhealthy bit."""
-    assert set(rc.CHECKS) == {"facts_vs_transactions", "rollups_vs_facts", "entries_vs_assignments"}
+    # 18y added the record grain's two checks - the same one-name-per-check rule.
+    assert set(rc.CHECKS) == {"facts_vs_transactions", "rollups_vs_facts", "entries_vs_assignments",
+                              "record_rollups_vs_record_facts", "records_vs_facts"}
 
 
 async def test_a_tenant_with_no_data_at_all_is_healthy_not_broken():

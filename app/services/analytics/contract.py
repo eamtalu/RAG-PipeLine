@@ -83,6 +83,17 @@ FACT_FIELDS: tuple[str, ...] = (
     "quantity", "quantity_classification",
 )
 
+#: 18y: every plain field an `analytics_record_facts` row carries. The record grain's counterpart of
+#: `FACT_FIELDS`, and deliberately much shorter: a record's real payload lives in its `rec.*`
+#: attributes (addressed as `attr:rec.STQT`), and the plain columns are only the parent's identity
+#: and the M3 call that answered. No `status`, no `quantity_classification` - records carry neither,
+#: which is why `validate` refuses those filters on record metrics.
+RECORD_FIELDS: tuple[str, ...] = (
+    "source_transaction_id", "source_started_at", "record_index",
+    "event_time", "business_date",
+    "method", "transaction_name", "mi_program", "mi_transaction",
+)
+
 
 class Classification(str, enum.Enum):
     """What one row's quantity means. Five outcomes, because collapsing any two loses a real event."""

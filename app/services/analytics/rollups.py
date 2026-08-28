@@ -48,6 +48,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.analytics_fact import AnalyticsFact
+from app.persistence.models.analytics_record_fact import AnalyticsRecordFact
 from app.persistence.models.analytics_rollup import (DIMENSION_SLOTS, AnalyticsDailyRollup,
                                                      AnalyticsHourlyRollup, AnalyticsMonthlyRollup)
 from app.services.analytics import contract as c
@@ -241,6 +242,36 @@ async def _read_dirty_facts(db: AsyncSession, customer_code: str, hours: set[dat
     return [{c.name: getattr(r, c.name) for c in AnalyticsFact.__table__.columns} for r in rows]
 
 
+async def _read_dirty_record_facts(db: AsyncSession, customer_code: str, hours: set[datetime],
+                                   dates: set[date_type],
+                                   hidden: frozenset[str] = frozenset()) -> list[dict]:
+    """18y: the record grain's own reader - `_read_dirty_facts`' mirror, and deliberately a PARALLEL
+    function rather than a parameterised one. The 18n structural guarantee ("an existing metric
+    cannot see a record row even if somebody forgets a filter") is held by each reader naming
+    exactly one table, and it is pinned by source inspection in both directions.
+
+    Same shape end to end: two OR-ed range predicates (an hour and a business date are different
+    axes), exact filtering in Python, and the same `show` gate - a hidden transaction vanishes from
+    BOTH grains, because records still charting while their transaction is hidden would be a silent
+    inconsistency."""
+    conditions = []
+    if hours:
+        conditions.append(and_(AnalyticsRecordFact.event_time >= min(hours),
+                               AnalyticsRecordFact.event_time < max(hours) + timedelta(hours=1)))
+    if dates:
+        conditions.append(and_(AnalyticsRecordFact.business_date >= min(dates),
+                               AnalyticsRecordFact.business_date <= max(dates)))
+    if not conditions:
+        return []
+    gate = ([AnalyticsRecordFact.transaction_name.is_(None)
+             | AnalyticsRecordFact.transaction_name.notin_(sorted(hidden))] if hidden else [])
+    rows = (await db.execute(
+        select(AnalyticsRecordFact).where(AnalyticsRecordFact.customer_code == customer_code,
+                                          or_(*conditions), *gate))).scalars().all()
+    return [{c.name: getattr(r, c.name) for c in AnalyticsRecordFact.__table__.columns}
+            for r in rows]
+
+
 async def _fold_monthly(db: AsyncSession, customer_code: str, definition_id: uuid.UUID,
                         definition: d.MetricDefinition, months: set[date_type],
                         computed_at: datetime) -> dict:
@@ -302,6 +333,29 @@ async def recompute(db: AsyncSession, customer_code: str, definition_id: uuid.UU
     # Recomputed from scratch every time, so flipping `show` back on refills complete history on the
     # next fold of the range. That is the "one recompute" the switch promises.
     facts = await _read_dirty_facts(db, customer_code, hours, dates, hidden)
+    return await _fold_grains(db, customer_code, definition_id, definition, facts,
+                              hours=hours, dates=dates, now=now)
+
+
+async def recompute_records(db: AsyncSession, customer_code: str, definition_id: uuid.UUID,
+                            definition: d.MetricDefinition, *, hours: set[datetime],
+                            dates: set[date_type], computed_at: datetime | None = None,
+                            hidden: frozenset[str] = frozenset()) -> dict:
+    """18y: `recompute`'s record-grain twin - reads `analytics_record_facts` through the parallel
+    reader and folds through the SAME grain cascade into the same definition-keyed rollup tables.
+    Everything downstream of the read is shared (`_fold_grains`), so the two grains cannot drift in
+    arithmetic; only the readers are grain-specific, by 18n's structural rule."""
+    if not hours and not dates:
+        return {"hourly": {}, "daily": {}, "monthly": {}}
+    now = computed_at or datetime.now(timezone.utc)
+    facts = await _read_dirty_record_facts(db, customer_code, hours, dates, hidden)
+    return await _fold_grains(db, customer_code, definition_id, definition, facts,
+                              hours=hours, dates=dates, now=now)
+
+
+async def _fold_grains(db: AsyncSession, customer_code: str, definition_id: uuid.UUID,
+                       definition: d.MetricDefinition, facts: list[dict], *,
+                       hours: set[datetime], dates: set[date_type], now: datetime) -> dict:
     stats: dict[str, dict] = {}
 
     if "hourly" in definition.grains:

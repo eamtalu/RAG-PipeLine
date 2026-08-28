@@ -831,6 +831,7 @@ erDiagram
         datetime reviewed_at
         string reviewed_by
     }
+    %% 18y: + source column (transaction | record) - which fact table the metric folds and reads
     analytics_metrics {
         uuid id PK
         string customer_code "soft tenant key"
