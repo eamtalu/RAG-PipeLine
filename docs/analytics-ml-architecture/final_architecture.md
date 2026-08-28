@@ -10,7 +10,7 @@ The document has two parts:
   A plain-English, fact-checked guide to how the software works today, from the SSH pull to the ML pipeline.
   Start here.
 - **PART II - The design history.**
-  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18y), preserved verbatim because code comments and tests cite these section numbers.
+  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18z), preserved verbatim because code comments and tests cite these section numbers.
 
 # PART I. The system as built: a plain-English guide
 
@@ -852,7 +852,7 @@ Honest imperfections found while fact-checking this part; none is currently caus
 
 # PART II. The design history
 
-Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18y).
+Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18z).
 It explains WHY the system is shaped the way Part I describes.
 Where the two disagree, Part I is current and the section here records what was believed at the time.
 
@@ -2745,7 +2745,7 @@ What follows is what remains, in dependency order rather than in the order it wa
 | **S4a** | **BUILT 2026-08-25, SHADOW** - state persisted and compared; re-derive still authoritative. See 18m. | S3 | done |
 | **S4b** | SUPERSEDED (18q, 2026-08-27): the 7-day gate proved unmeasurable (`seeded_streams` = 0 in all 1,411 post-fix runs, structurally) and cross-pad joining shipped instead as a bounded backward window extension - no `_persist` change, no lookup promotion. `stage2_stream_lookup` stays `shadow`; the streaming end-state is re-planned as a head-lane fast path (18q, P4). | S4a | superseded |
 | **R4** | **BUILT 2026-08-25, CAPTURE ONLY** - `analytics_record_facts`, opt-in per transaction. The record-grain FOLD is not built. See 18n. | R3 | capture done |
-| **R4b** | The record-grain fold and read, so a record metric can be defined | R4 | fold built (18y); read = chunk 80 |
+| **R4b** | The record-grain fold and read, so a record metric can be defined | R4 | built: fold 18y, read 18z |
 | **M1** | **BUILT 2026-08-25** - reproducible training sets pinned to the ledger, plus the predictions table and the reserved cursor. See 18o. | R3 | done |
 
 **Why R3 before R2**, which inverts the obvious order: the allowlist starts empty, so R3 alone would capture nothing.
@@ -4141,3 +4141,24 @@ A TRANSACTION metric may no longer name `attr:rec.*`: that combination used to v
 The existing checks are PARTITIONED by source - un-partitioned, `rollups_vs_facts` folds record definitions against transaction facts and flags every record rollup "orphaned" forever, and `repair=true` would have DELETED record rollups and replaced them with transaction-fact folds: corruption through the repair path.
 Two new checks: `record_rollups_vs_record_facts` (the same comparator fed record rows and record definitions, with the same chunk-66 whole-bucket clipping) and `records_vs_facts` (an expanded fact that predicts records via `mi.record_count` must have record rows - the one check that can catch a destructive re-expansion; ticket-repairable inside entry retention, reported as unrecoverable beyond it).
 The refold repair routes buckets to the matching grain's recompute.
+
+## 18z. The record read - and the ad-hoc grouping bug it exposed, 2026-08-28. Chunk 80.
+
+### Record metrics are readable
+
+`read.resolve` is source-aware (a record metric's group-bys validate against `RECORD_FIELDS`) and `attr:` paths are legal group-bys - a record metric's natural dimensions ARE `attr:rec.*`, and the same change unlocks `attr:resp.*` grouping for transaction metrics.
+An attr path of the wrong namespace for the source is refused exactly as `validate` refuses it on the definition.
+An ad-hoc attr path must be APPROVED (the API layer checks the registry; the definition's own dimensions were checked at creation).
+The live scan reads the record table for record definitions through an explicit two-entry model map, mirroring the fold's parallel readers.
+`/breakdown` now validates `measure` exactly as `/series` always did (a typo used to return empty rows).
+
+### The pre-existing bug, verified live before fixing
+
+`/analytics/breakdown?dimension=item_number` on the seed metric returned ONE row, value null, holding the tenant's entire sum - 32,009 units lumped into a single unlabeled group.
+Mechanism, two halves:
+
+1. The live fold keyed by the DEFINITION's dimensions and then narrowed to the requested ones - any requested field that was not already a dimension was silently discarded from the key.
+2. The rollup tier contributed points keyed by () while the live tier grouped, so even a correct live fold would have merged with ungrouped settled points.
+
+The fix: the live tier folds by the REQUESTED group-by (`contract.resolve_field` reads plain columns and `attr:` paths alike, so one line serves both grains), and an ad-hoc request is served ENTIRELY from the bounded live scan - no rollup is keyed by the requested field, so none may contribute.
+The dashboard's default breakdown (by item, by warehouse, by user - none of them seed-metric dimensions) had been affected since the read API shipped; the padded dim-slot arity is trimmed to the requested arity so live and rollup keys merge instead of doubling buckets on the non-ad-hoc path.

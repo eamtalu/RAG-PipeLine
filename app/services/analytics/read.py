@@ -218,10 +218,27 @@ def resolve(definition: d.MetricDefinition, *, group_by: tuple[str, ...]) -> Res
     which reads as "no data" rather than "you asked for a field that does not exist" -- and the second is
     the only one anybody can act on.
     """
-    unknown = [g for g in group_by if g not in contract.FACT_FIELDS]
-    if unknown:
-        raise ValueError(f"{', '.join(unknown)} is not a field on the fact row, so no query can group "
-                         f"by it; the fact row's fields are fixed in analytics.contract")
+    # 18y/chunk 80: source-aware, and `attr:` paths are legal group-bys. An attr path of the WRONG
+    # namespace for the source is refused exactly as validate() refuses it on the definition - it
+    # can only ever be silently empty. Approval of ad-hoc attr paths is the API layer's check (it
+    # has the registry); this stays pure.
+    record_grain = definition.source == "record"
+    fields = contract.RECORD_FIELDS if record_grain else contract.FACT_FIELDS
+    row_name = "record row" if record_grain else "fact row"
+    for g in group_by:
+        if contract.is_attr_path(g):
+            key = contract.attr_key(g)
+            if record_grain and not key.startswith("rec."):
+                raise ValueError(f"{g!r} is not a record attribute; a record metric's attributes "
+                                 f"are all rec.-prefixed")
+            if not record_grain and key.startswith("rec."):
+                raise ValueError(f"{g!r} is a record attribute, which never appears on a "
+                                 f"transaction fact row")
+        elif g not in fields:
+            raise ValueError(f"{g!r} is not a field on the {row_name}, so no query can group "
+                             f"by it; the {row_name}'s fields are fixed in analytics.contract")
+    if len(group_by) > 4:
+        raise ValueError("group_by is capped at 4 fields (the rollup dimension slots)")
 
     outside = [g for g in group_by if g not in definition.dimensions]
     if outside:
@@ -313,23 +330,36 @@ async def _live_points(db, customer_code: str, definition: d.MetricDefinition,
     the same `definition.fold` the writer uses -- so a live edge and a settled bucket cannot disagree
     about what the metric means, only about how fresh they are.
     """
+    import dataclasses
+
     from sqlalchemy import or_, and_, select
 
     from app.persistence.models.analytics_fact import AnalyticsFact
+    from app.persistence.models.analytics_record_fact import AnalyticsRecordFact
     from app.services.analytics import rollups as n5
 
     if not spans:
         return {}
-    conditions = [and_(AnalyticsFact.event_time >= lo, AnalyticsFact.event_time < hi)
+    # 18y: an explicit two-entry map, mirroring the fold's parallel readers - a record definition
+    # scans the record table and nothing else.
+    model = AnalyticsRecordFact if definition.source == "record" else AnalyticsFact
+    conditions = [and_(model.event_time >= lo, model.event_time < hi)
                   for lo, hi in spans]
-    rows = (await db.execute(select(AnalyticsFact).where(
-        AnalyticsFact.customer_code == customer_code, or_(*conditions))
+    rows = (await db.execute(select(model).where(
+        model.customer_code == customer_code, or_(*conditions))
         .limit(AD_HOC_MAX_ROWS))).scalars().all()
-    facts = [{c.name: getattr(r, c.name) for c in AnalyticsFact.__table__.columns} for r in rows]
+    facts = [{c.name: getattr(r, c.name) for c in model.__table__.columns} for r in rows]
 
     bucket_of = ((lambda r: n5.hour_of(r["event_time"]) if r.get("event_time") else None)
                  if grain == "hourly" else (lambda r: r.get("business_date")))
-    folded = n5.group_fold(facts, definition, bucket_of)
+    # Chunk 80: fold by the REQUESTED group-by, not the definition's dimensions. The old shape
+    # folded by the definition's dimensions and then narrowed to the requested ones - any requested
+    # field that was not already a dimension was silently DISCARDED from the key, which is how an
+    # ad-hoc breakdown lumped every row into one unlabeled group (verified live). `resolve_field`
+    # reads plain columns and attr: paths alike, so the same line serves both grains and both kinds
+    # of field; measures and filters still come from the real definition.
+    folded = n5.group_fold(facts, dataclasses.replace(definition, dimensions=tuple(group_by)),
+                           bucket_of)
 
     # ACCUMULATED, not comprehended. `group_fold` keys by the definition's FULL dimension
     # tuple, and the requested `group_by` is usually narrower -- with no grouping at all it
@@ -346,15 +376,17 @@ async def _live_points(db, customer_code: str, definition: d.MetricDefinition,
     for (bucket, dims), measures in folded.items():
         if measure not in measures:
             continue
-        key = (bucket, tuple(dims[definition.dimensions.index(g)] for g in group_by
-                             if g in definition.dimensions))
+        # `_dim_key` pads to the four rollup slots; trim to the requested arity so a live key and a
+        # rollup key for the same group are identical and merge instead of doubling the bucket.
+        key = (bucket, tuple(dims[:len(group_by)]))
         out[key] = d.add_roles(out.get(key, {}), measures[measure])
     return out
 
 
 async def series(db, customer_code: str, definition_id, definition: d.MetricDefinition, *,
                  window: UtcWindow, measure: str, group_by: tuple[str, ...] = (),
-                 watermark: datetime | None, rows_per_bucket: int = 20) -> dict:
+                 watermark: datetime | None, rows_per_bucket: int = 20,
+                 ad_hoc: bool = False) -> dict:
     """One measure over time, two-tier. The watermark is passed in, never fetched here (see plan_read).
 
     Returns additive ROLE values per bucket, never a finished answer: the caller divides a sum by a count
@@ -364,6 +396,27 @@ async def series(db, customer_code: str, definition_id, definition: d.MetricDefi
 
     grain = choose_grain(window, available=definition.grains, rows_per_bucket=rows_per_bucket)
     plan = plan_read(window, grain, watermark=watermark)
+
+    # Chunk 80: an ad-hoc group-by cannot be answered by rollups AT ALL - no rollup is keyed by the
+    # requested field, so the rollup tier would contribute points keyed by () while the live tier
+    # groups properly, and the merge lumps the settled majority into one unlabeled row. Verified
+    # live before this chunk: /breakdown by item_number returned ONE null row holding the tenant's
+    # whole sum. Ad-hoc is therefore served entirely from the bounded live scan.
+    if ad_hoc:
+        live = ([(window.start, window.end)] if window.start and window.end else plan.live_windows)
+        points = dict(await _live_points(db, customer_code, definition, live,
+                                         grain=grain, measure=measure, group_by=group_by))
+        return {
+            "grain": grain, "measure": measure, "group_by": list(group_by),
+            "from_rollups": False,
+            "live_spans": [[s0.isoformat(), e0.isoformat()] for s0, e0 in live],
+            "reason": "ad-hoc group-by: served entirely from a bounded fact scan",
+            "points": [{"bucket": str(bucket), "dimensions": list(dims),
+                        "roles": {r.value: (str(v) if isinstance(v, Decimal) else v)
+                                  for r, v in roles.items()}}
+                       for (bucket, dims), roles in sorted(points.items(),
+                                                           key=lambda kv: str(kv[0][0]))],
+        }
 
     points: dict = {}
     if plan.rollup_window.start is not None:

@@ -233,6 +233,20 @@ async def _definition(db: AsyncSession, customer: str, name: str):
                                     f"GET /analytics/metrics lists what exists.")
 
 
+async def _refuse_unapproved_ad_hoc_attrs(db, customer: str, definition, dims: tuple):
+    """Chunk 80: an ad-hoc `attr:` group-by must name an APPROVED field. The definition's own
+    dimensions were checked at creation; an ad-hoc path bypasses that, and an unapproved (or
+    typo'd) one would scan and return nothing - "no data" instead of the 400 someone can act on."""
+    from app.services.analytics import contract as c
+    ad_hoc_attrs = [g for g in dims if c.is_attr_path(g) and g not in definition.dimensions]
+    if not ad_hoc_attrs:
+        return
+    known = await capture.approved_attributes(db, customer)
+    for g in ad_hoc_attrs:
+        if c.attr_key(g) not in known:
+            raise HTTPException(400, detail=f"{g!r} names an attribute that is not approved for "
+                                            f"capture, so grouping by it would be silently empty")
+
 @router.get("/series")
 async def analytics_series(customer: str = Depends(get_current_customer),
                           db: AsyncSession = Depends(get_session),
@@ -257,10 +271,11 @@ async def analytics_series(customer: str = Depends(get_current_customer),
         decision = n6.resolve(definition, group_by=dims)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from None
+    await _refuse_unapproved_ad_hoc_attrs(db, customer, definition, dims)
 
     state = await _state(db, customer)
     out = await n6.series(db, customer, definition_id, definition, window=window, measure=measure,
-                          group_by=dims,
+                          group_by=dims, ad_hoc=decision.ad_hoc,
                           watermark=state.analytics_watermark if state else None)
     return {**out, "metric": metric, "ad_hoc": decision.ad_hoc, "resolution": decision.reason,
             "window": {"start": window.start.isoformat(), "end": window.end.isoformat()}}
@@ -278,14 +293,19 @@ async def analytics_breakdown(customer: str = Depends(get_current_customer),
     """Top-N by one dimension for a window. Bounded by `top`, capped at _MAX_TOP_N."""
     window = _window(start, end)
     definition_id, definition = await _definition(db, customer, metric)
+    if measure not in {m.name for m in definition.measures}:
+        # Chunk 80: /series always refused a wrong measure; /breakdown silently returned empty rows.
+        raise HTTPException(400, detail=f"{metric!r} has no measure {measure!r}; it has "
+                                        f"{sorted(m.name for m in definition.measures)}.")
     try:
         decision = n6.resolve(definition, group_by=(dimension,))
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from None
+    await _refuse_unapproved_ad_hoc_attrs(db, customer, definition, (dimension,))
 
     state = await _state(db, customer)
     out = await n6.series(db, customer, definition_id, definition, window=window, measure=measure,
-                          group_by=(dimension,),
+                          group_by=(dimension,), ad_hoc=decision.ad_hoc,
                           watermark=state.analytics_watermark if state else None)
 
     totals: dict = {}
