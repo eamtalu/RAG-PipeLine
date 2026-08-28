@@ -136,3 +136,23 @@ def test_the_endpoint_accepts_the_optional_range():
             for m, op in methods.items()}[("POST", "/api/v1/logs/regroup/full")]
     params = {p["name"] for p in spec.get("parameters", [])}
     assert {"start", "end"} <= params
+
+
+async def test_unchanged_members_are_not_reported_as_orphans():
+    """Found reading the first live ranged run: it reported `orphan_entries: 3435` for a range that
+    was already perfectly stitched. The stat was `scanned - newly_assigned`, which was right while
+    every rebuild re-wrote everything - but since the fingerprint skip, an unchanged transaction's
+    members are scanned, owned, and deliberately NOT re-written, so the old formula labels the
+    healthiest possible outcome as a pile of orphans. The honest number is the entries of SKIPPED
+    builders - work the rebuild genuinely left unassigned - and a clean re-run must report zero."""
+    await _plant(DAY_A)
+    stats1 = None
+    async with async_session() as db:
+        stats1 = await dt.regroup_window(db, CC, DAY_A, DAY_A + timedelta(minutes=1))
+    async with async_session() as db:
+        stats2 = await dt.regroup_window(db, CC, DAY_A, DAY_A + timedelta(minutes=1))
+
+    assert stats1.get("orphan_entries", 0) == 0, "first stitch assigns everything - no orphans"
+    assert stats2.get("entries_scanned", 0) > 0, "the re-run must actually have scanned the members"
+    assert stats2.get("orphan_entries", 0) == 0, (
+        "unchanged members are owned, not orphaned - the stat must say 0 on a clean re-run")

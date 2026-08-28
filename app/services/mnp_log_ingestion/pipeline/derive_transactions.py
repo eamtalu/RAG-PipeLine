@@ -779,7 +779,7 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
         st = values["status"]
         return st.value if hasattr(st, "value") else str(st)
 
-    created = sealed = assigned = skipped = 0
+    created = sealed = assigned = skipped = entries_skipped = 0
     unchanged = row_only = rewritten = 0
     by_status: dict[str, int] = {}
     seen: set[uuid.UUID] = set()
@@ -789,6 +789,7 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
     for b, tid in zip(builders, ids):
         if tid in seen:
             skipped += 1
+            entries_skipped += len(b.entries)
             continue
         # S3: a stored row this window is rebuilding is NOT a clash - it is the row being compared
         # against. Before S3 every such row had already been deleted, so `existing` could only mean a
@@ -796,6 +797,7 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
         # collision the warning below is about.
         if tid in existing and tid not in stored:
             skipped += 1
+            entries_skipped += len(b.entries)
             continue
         seen.add(tid)
         values = _cap_over_length(b.compute(), customer_code)
@@ -853,7 +855,13 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
                        "ingest). Repair: the server-side full regroup runbook in docs/HANDOFF-2026-08-26.md "
                        "(worker stopped, regroup_all, worker restarted).", skipped)
     return {"transactions_created": created, "transactions_sealed": sealed,
-            "entries_assigned": assigned, "transactions_skipped": skipped, "by_status": by_status,
+            "entries_assigned": assigned, "transactions_skipped": skipped,
+            # The entries of SKIPPED builders - the only work a run genuinely leaves unassigned.
+            # This, not `scanned - assigned`, is what callers report as `orphan_entries`: since S3 an
+            # unchanged transaction's members are scanned, owned and deliberately not re-written, and
+            # the old formula labelled that healthiest outcome as a pile of orphans (first seen on a
+            # live ranged rebuild reporting 3,435 "orphans" for a perfectly stitched range).
+            "entries_skipped": entries_skipped, "by_status": by_status,
             # S3's own counters, so a run can be read for what it actually WROTE rather than inferred
             # from row counts. `transactions_unchanged` is the one to watch: it should be the large
             # majority, and a run where it is zero means the skip is not working.
@@ -864,7 +872,7 @@ async def _persist(db: AsyncSession, builders: list[_TxnBuilder], customer_code:
 def _merge_stats(into: dict, part: dict) -> None:
     """Accumulate one customer's _persist result into the running totals."""
     for k in ("transactions_created", "transactions_sealed", "entries_assigned",
-              "transactions_skipped", "entries_scanned", "orphan_entries",
+              "transactions_skipped", "entries_skipped", "entries_scanned", "orphan_entries",
               # S3's counters. Added here rather than only returned by `_persist`, because the E2E
               # found them silently absent from every caller's result: the numbers that say whether the
               # skip is working were computed and then dropped one function short of anywhere they
@@ -954,7 +962,7 @@ async def regroup_all(db: AsyncSession, customer_code: str | None = None) -> dic
         result = await _persist(db, _group(rows), code, seal_cutoff, abandon_cutoff)
         await db.commit()
         _merge_stats(stats, {**result, "entries_scanned": len(rows),
-                             "orphan_entries": len(rows) - result["entries_assigned"]})
+                             "orphan_entries": result.get("entries_skipped", 0)})
     logger.info("Stage 2 regroup (full): %s", stats)
     return stats
 
@@ -1069,7 +1077,7 @@ async def regroup_incremental(db: AsyncSession, customer_code: str | None = None
         result = await _persist(db, _group(rows), code, seal_cutoff, abandon_cutoff)
         await db.commit()
         _merge_stats(stats, {**result, "entries_scanned": len(rows),
-                             "orphan_entries": len(rows) - result["entries_assigned"]})
+                             "orphan_entries": result.get("entries_skipped", 0)})
     logger.info("Stage 2 regroup (incremental): %s", stats)
     return stats
 
@@ -1447,7 +1455,7 @@ async def regroup_window(db: AsyncSession, customer_code: str, lo: datetime, hi:
     if commit:
         await db.commit()
     _merge_stats(stats, {**result, "entries_scanned": len(rows),
-                         "orphan_entries": len(rows) - result["entries_assigned"]})
+                         "orphan_entries": result.get("entries_skipped", 0)})
     logger.info("Stage 2 regroup (window): %s", stats)
     return stats
 
