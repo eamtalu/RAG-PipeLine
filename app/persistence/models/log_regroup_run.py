@@ -36,6 +36,11 @@ class LogRegroupRun(Base):
     # A RUNNING "full" row doubles as the tenant's MAINTENANCE FLAG: both worker sweeps skip the
     # tenant while one is fresh, which is what lets a rebuild run without racing the live stitcher.
     kind: Mapped[str] = mapped_column(String(16), default="finalize", server_default="finalize")
+    # Chunk 70: a kind='full' run may be RANGED - rebuild only [range_start, range_end] instead of
+    # the whole history. NULL/NULL (the default) means everything. Stored on the row because the
+    # rebuild executes in a separate process, and the row is the only thing that crosses it.
+    range_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    range_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # outcome (NULL until finished)
     windows: Mapped[int | None] = mapped_column(Integer, nullable=True)            # time-windows rebuilt
     pending_consumed: Mapped[int | None] = mapped_column(Integer, nullable=True)   # pending rows cleared

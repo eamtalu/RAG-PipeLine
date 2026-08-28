@@ -273,6 +273,8 @@ erDiagram
         string customer_code "soft tenant key"
         enum status "running/completed/failed"
         string kind "finalize/full - a RUNNING full run pauses the tenant's workers"
+        datetime range_start "NULL = whole history (chunk 70 ranged rebuild)"
+        datetime range_end
         int windows
         int pending_consumed
         text error

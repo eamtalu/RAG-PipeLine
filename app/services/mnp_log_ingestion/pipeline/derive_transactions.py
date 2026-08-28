@@ -1674,6 +1674,26 @@ async def reset_abandoned_windows(db: AsyncSession, customer_code: str) -> int:
     return n
 
 
+async def ranged_regroup(customer_code: str, lo: datetime, hi: datetime) -> dict:
+    """Chunk 70: rebuild ONE explicit time range, in the same bounded slices finalize uses.
+
+    Nothing here is new machinery: each slice is `regroup_window` - the padded, lossless,
+    fingerprint-skipping rebuild the live worker runs every second - executed in its own transaction
+    under the tenant advisory lock, with the same statement-timeout relax finalize applies. A slice
+    failure fails the whole run loudly (the caller records it); slices already committed stay
+    committed and are idempotent to redo."""
+    stats = {"mode": "ranged", "customers": 1, "by_status": {}}
+    for sub_lo, sub_hi in _split_run(lo, hi, settings.log_regroup_max_window_seconds):
+        async with async_session() as db:
+            await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(customer_code))))
+            await db.execute(sa_text(
+                f"SET LOCAL statement_timeout = {int(settings.log_worker_statement_timeout_ms)}"))
+            result = await regroup_window(db, customer_code, sub_lo, sub_hi, commit=True)
+        _merge_stats(stats, result)
+    logger.info("Stage 2 regroup (ranged) %s..%s [%s]: %s", lo, hi, customer_code, stats)
+    return stats
+
+
 async def run_full_regroup_tracked(run_id: uuid.UUID) -> None:
     """Chunk 69: the subprocess entry point for a tracked FULL rebuild.
 
@@ -1695,9 +1715,13 @@ async def run_full_regroup_tracked(run_id: uuid.UUID) -> None:
                          run_id)
             return
         customer_code = run.customer_code
+        run_range = (run.range_start, run.range_end)
     async with async_session() as db:
         try:
-            stats = await regroup_all(db, customer_code)
+            if run_range[0] is not None and run_range[1] is not None:
+                stats = await ranged_regroup(customer_code, run_range[0], run_range[1])
+            else:
+                stats = await regroup_all(db, customer_code)
             values = dict(status=LogRegroupRunStatus.completed, result=stats,
                           windows=stats.get("customers"),
                           finished_at=datetime.now(timezone.utc))

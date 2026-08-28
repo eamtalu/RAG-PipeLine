@@ -357,8 +357,14 @@ def _txn_summary(t: LogTransaction) -> dict:
 async def full_regroup(
     customer: str = Depends(get_active_customer),
     db: AsyncSession = Depends(get_session),
+    start: datetime | None = Query(default=None, description="Optional range start (with `end`): rebuild only this range instead of the whole history."),
+    end: datetime | None = Query(default=None, description="Optional range end (with `start`)."),
 ):
-    """Rebuild this tenant's ENTIRE transaction history, safely. NON-BLOCKING.
+    """Rebuild this tenant's transaction history, safely. NON-BLOCKING.
+
+    Without params: the ENTIRE retained history. With `start` AND `end`: only that range, in the
+    same bounded slices the live worker uses - the right tool for a backfill into a known-bad week.
+    Both-or-neither; a half-open range is a 400.
 
     Returns **202** with a `run_id` immediately; poll **GET /logs/regroup/runs/{run_id}** until
     `completed` or `failed`. The rebuild runs in its OWN PROCESS (tens of minutes of grouping CPU
@@ -370,6 +376,10 @@ async def full_regroup(
     analytics facts for the tenant restate afterwards through ordinary tickets derived from the
     entries span. One at a time per tenant: a fresh run already in flight returns **409**.
     """
+    if (start is None) != (end is None):
+        raise HTTPException(400, detail="start and end must be given together")
+    if start is not None and end is not None and start >= end:
+        raise HTTPException(400, detail="start must be before end")
     ttl = timedelta(seconds=settings.log_regroup_full_run_ttl_seconds)
     existing = (await db.execute(
         select(LogRegroupRun).where(
@@ -380,7 +390,7 @@ async def full_regroup(
     if existing is not None:
         raise HTTPException(409, detail=f"a full rebuild is already running (run {existing.id}); "
                                         f"poll /api/v1/logs/regroup/runs/{existing.id}")
-    run = LogRegroupRun(customer_code=customer, kind="full")
+    run = LogRegroupRun(customer_code=customer, kind="full", range_start=start, range_end=end)
     db.add(run)
     await db.commit()
     await db.refresh(run)
@@ -469,6 +479,8 @@ async def get_regroup_run(
         "result": run.result,
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "range_start": run.range_start.isoformat() if run.range_start else None,
+        "range_end": run.range_end.isoformat() if run.range_end else None,
     }
 
 
