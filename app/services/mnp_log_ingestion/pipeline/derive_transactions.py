@@ -1702,6 +1702,35 @@ async def ranged_regroup(customer_code: str, lo: datetime, hi: datetime) -> dict
     return stats
 
 
+async def _announce_rebuild_outcome(run_id: uuid.UUID, customer_code: str, *, status: str,
+                                    detail: dict, error: str | None = None) -> None:
+    """Chunk 71: publish the rebuild's terminal state through the notification pipeline.
+
+    Enqueue-only - two committed rows in the outbox, no HTTP - which is what makes it safe from the
+    rebuild's subprocess; the notification worker's drain owns delivery, pacing and the tenant gate.
+    Deduped on (run id, status), so a re-recorded outcome can never double-announce. A failure here
+    must never fail the rebuild whose outcome is already durable on the run row - the announcement is
+    a courtesy, the row is the record."""
+    from app.services.notifications import dispatcher
+    from app.services.notifications.events import NotificationEvent
+
+    failed = status == "failed"
+    try:
+        await dispatcher.enqueue(NotificationEvent(
+            event_type="rebuild_completed" if not failed else "rebuild_failed",
+            customer_code=customer_code,
+            severity="error" if failed else "info",
+            title=(f"[{customer_code}] history rebuild "
+                   f"{'FAILED' if failed else 'completed'}"),
+            summary=error if failed else None,
+            dedup_key=f"rebuild:{run_id}:{status}",
+            payload={"run_id": str(run_id), **detail},
+        ))
+    except Exception:
+        logger.exception("Rebuild %s: outcome recorded but the notification could not be enqueued",
+                         run_id)
+
+
 async def run_full_regroup_tracked(run_id: uuid.UUID) -> None:
     """Chunk 69: the subprocess entry point for a tracked FULL rebuild.
 
@@ -1741,6 +1770,15 @@ async def run_full_regroup_tracked(run_id: uuid.UUID) -> None:
                           finished_at=datetime.now(timezone.utc))
         await db.execute(update(LogRegroupRun).where(LogRegroupRun.id == run_id).values(**values))
         await db.commit()
+    stats_out = values.get("result") or {}
+    await _announce_rebuild_outcome(
+        run_id, customer_code, status=values["status"].value,
+        detail={"transactions_created": stats_out.get("transactions_created"),
+                "transactions_unchanged": stats_out.get("transactions_unchanged"),
+                "orphan_entries": stats_out.get("orphan_entries"),
+                "range_start": run_range[0].isoformat() if run_range[0] else None,
+                "range_end": run_range[1].isoformat() if run_range[1] else None},
+        error=values.get("error"))
 
 
 async def run_finalize_tracked(run_id: uuid.UUID, customer_code: str) -> None:

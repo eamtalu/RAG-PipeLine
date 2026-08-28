@@ -407,19 +407,27 @@ async def full_regroup(
 
 
 async def _watch_full_regroup(proc, run_id: uuid.UUID) -> None:
-    """Mark the run failed if the subprocess dies without recording an outcome."""
+    """Mark the run failed if the subprocess dies without recording an outcome - and announce it,
+    because a hard crash is precisely the outcome the poller cannot see and the operator most needs
+    to hear about (chunk 71)."""
     code = await proc.wait()
     if code == 0:
         return
+    error = f"rebuild subprocess exited with code {code} before recording an outcome"
     async with async_session() as db:
-        await db.execute(
+        marked = await db.execute(
             update(LogRegroupRun)
             .where(LogRegroupRun.id == run_id,
                    LogRegroupRun.status == LogRegroupRunStatus.running)
-            .values(status=LogRegroupRunStatus.failed,
-                    error=f"rebuild subprocess exited with code {code} before recording an outcome",
-                    finished_at=datetime.now(timezone.utc)))
+            .values(status=LogRegroupRunStatus.failed, error=error,
+                    finished_at=datetime.now(timezone.utc))
+            .returning(LogRegroupRun.customer_code))
+        row = marked.first()
         await db.commit()
+    if row is not None:
+        from app.services.mnp_log_ingestion.pipeline.derive_transactions import (
+            _announce_rebuild_outcome)
+        await _announce_rebuild_outcome(run_id, row[0], status="failed", detail={}, error=error)
 
 
 @router.post("/regroup/finalize", status_code=202)

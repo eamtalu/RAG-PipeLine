@@ -750,12 +750,49 @@ The ML pipeline (feature sets, predictions) is library code waiting for a caller
 
 The only two .env overrides on this server beyond the defaults are `ANALYTICS_WORKER_ENABLED=true` and `ANALYTICS_RECONCILE_WORKER_ENABLED=true`; everything else runs on the defaults listed above.
 
-### 12.5 The maintenance screen (chunk 69)
+### 12.5 The maintenance screen and the rebuild lifecycle (chunks 69-71)
 
 Manage -> Maintenance in the frontend drives the repair operations that used to need SSH:
-a tracked full history rebuild (`POST /logs/regroup/full`, 202 + poll; runs in its own process, and a fresh RUNNING run automatically pauses that tenant's stitch and analytics workers until it finishes - a stale flag stops pausing after 6 hours and alarms),
-one-click re-arms for both dead-letter queues,
-and the consistency checker with optional repair.
+a tracked rebuild - full history, or aimed at one date range - one-click re-arms for both dead-letter queues, and the consistency checker with optional repair.
+
+The rebuild's whole lifecycle, from click to notification:
+
+```
+ operator clicks "Rebuild..."  (whole history, or From/To for one range)
+      |
+      v
+ POST /logs/regroup/full[?start&end]  -> 202 + run id   (409 if one is running)
+      |
+      |            the RUN ROW (log_regroup_runs, kind='full', status=running)
+      |            is simultaneously three things:
+      |              1. the poll target the screen watches
+      |              2. the MAINTENANCE FLAG - stitch + analytics workers
+      |                 skip THIS tenant while it is fresh (other tenants
+      |                 and this tenant's collection/parsing keep flowing)
+      |              3. the crash detector - stale past 6h -> resume + CRITICAL
+      v
+ a SEPARATE PROCESS runs the rebuild      (an event loop would freeze under
+   whole history -> regroup_all            tens of minutes of grouping CPU)
+   date range    -> the same 6h-sliced
+                    windowed rebuilds the live worker uses
+      |
+      v
+ outcome recorded on the run row  (completed + stats | failed + error;
+      |                            a hard subprocess crash is caught by an
+      |                            exit watcher and recorded as failed too)
+      v
+ NOTIFICATION published through the ordinary pipeline (chunk 71):
+   completed -> info, failed -> error; deduped per (run, outcome);
+   delivered to the tenant's Teams/Slack/WhatsApp channels by the
+   notification worker, honouring the tenant gate and rate pacing
+      |
+      v
+ workers notice the flag is gone on their next tick (1-2s) and drain
+ the queued work; analytics restates the rebuilt range via the ordinary
+ tickets the rebuild published (union of the transactions + entries spans)
+```
+
+Nobody stops or starts anything, and nobody owes the browser tab their attention: the pause, the resume, the re-fold and the announcement are all mechanisms, not procedures.
 
 ## 13. Known gaps register (verified 2026-08-27)
 
