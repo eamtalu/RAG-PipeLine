@@ -163,6 +163,28 @@ A decision table then chooses: unchanged (skip), append (read only the new bytes
 If it is ever wrong, the worst case is a re-download, because true dedupe happens in Stage 1.
 The downloaded byte range and its checkpoint advance commit in ONE transaction.</p>
 <p>Each downloaded range becomes a row in <code>log_source_objects</code>: the durable handoff to Stage 1, with a lease, an attempt counter, backoff (30/60/120&nbsp;s) and an <code>abandoned</code> dead-letter state after 3 tries.</p>
+<h3>3.1 Turning auto-poll on: the three start points</h3>
+<p>Enabling auto-poll for a server asks one question: where should history begin?
+The three choices map to three fetch modes:</p>
+<pre>
+ from now (recommended)   -> one "seed" fetch: stamps every current file as
+                             already-read, ingests NOTHING, then enables.
+                             Polling continues with only NEW bytes.
+
+ from a specific date     -> one "timestamp" fetch from the chosen instant:
+ & hour                      reads qualifying files, parses, dedupes, tickets;
+                             auto-poll turns on ONLY if that backfill completes.
+
+ all existing history     -> enables immediately; the first poll reads every
+                             file from byte zero - the full backfill.
+</pre>
+<div class="good"><strong>A backfill cannot conflict with a rebuild.</strong>
+Fetching locks per HOST while stitching locks per TENANT (disjoint, nothing can deadlock); during a running rebuild the maintenance flag pauses only stitching and analytics, so the backfill's downloads and parsing continue and their tickets queue until it finishes; and duplicates are impossible by construction (content-hash dedupe, fingerprints, the diff), so the two converge to the identical result in either order.
+A backfill never needs a rebuild afterwards: tickets position the stitching windows at the data's own timestamps (deep dive 11.4).</div>
+<div class="warn"><strong>Three sharp edges of "from a specific date &amp; hour":</strong>
+(1) it silently does nothing if the chosen date is not older than the oldest existing entry - the arming fetch short-circuits as <code>already_local</code>; force a re-pull with the manual Fetch in mode <code>full</code>.
+(2) files are selected by remote last-modified time, and a file modified BEFORE the chosen instant is stamped fully-read without ingesting - permanently, unless a later full fetch re-pulls it.
+(3) backdating beyond the oldest existing day-partition drops rows into the DEFAULT partition (readable, but never reclaimable by retention, and the partition health counter goes amber); beyond the 60-day retention it is doubly pointless.</div>
 <p><span class="tbl-own">Tables</span> <code>log_ssh_sources</code> · <code>log_ssh_file_checkpoints</code> · <code>log_ssh_fetch_runs</code> · <span class="tag q">queue</span><code>log_source_objects</code></p>
 </div>
 

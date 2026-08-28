@@ -95,6 +95,38 @@ The downloaded byte range and its checkpoint advance are committed in ONE transa
 
 Each downloaded range becomes a row in `log_source_objects`: the durable handoff to Stage 1, with a lease, an attempt counter, exponential backoff (30/60/120 s), and an `abandoned` dead-letter state after 3 tries (re-armable via `POST /logs/ingest-queue/reset-abandoned`).
 
+### 3.1 Turning auto-poll on: the three start points
+
+Enabling auto-poll for a server asks one question: where should history begin?
+The three choices map to three fetch modes (frontend `SshSourcesPanel.tsx:355-385`, backend `remote_fetcher.py`):
+
+```
+ from now (recommended)   -> one "seed" fetch: stamps every current file as
+                             already-read, ingests NOTHING, then enables.
+                             Polling continues with only NEW bytes.
+
+ from a specific date     -> one "timestamp" fetch from the chosen instant:
+ & hour                      reads qualifying files, parses, dedupes, tickets;
+                             auto-poll turns on ONLY if that backfill completes.
+
+ all existing history     -> enables immediately; the first poll reads every
+                             file from byte zero - the full backfill.
+```
+
+**A backfill cannot conflict with a rebuild**, verified mechanism by mechanism:
+fetching locks per HOST while stitching locks per TENANT (disjoint namespaces, nothing can deadlock);
+during a running rebuild the maintenance flag pauses only stitching and analytics, so the backfill's downloads and parsing continue and their tickets simply queue until the rebuild finishes;
+and duplicates are impossible by construction - lines dedupe on their content hash, transactions on their fingerprints, facts through the diff - so backfill and rebuild converge to the identical result in either order.
+A backfill also never NEEDS a rebuild afterwards: tickets position the stitching windows at the data's own timestamps (section 11.4).
+
+**Three sharp edges of "from a specific date & hour"** (all in `remote_fetcher.py`):
+
+1. It silently does nothing if the chosen date is not older than the tenant's oldest existing entry - the arming fetch short-circuits as `already_local` (`:648-652`) and just switches polling on.
+   Forcing a re-pull over an existing range is the manual Fetch with mode `full`.
+2. Files are selected by their remote last-modified time, and a file modified BEFORE the chosen instant is stamped fully-read without ingesting (`:449-452`) - permanently, unless a later full fetch re-pulls it.
+3. Backdating beyond the oldest existing day-partition drops the rows into the DEFAULT partition: readable, but retention can never reclaim them and the partition health counter goes amber.
+   Beyond the 60-day retention it is doubly pointless - those days would be dropped anyway.
+
 Tables owned here: `log_ssh_sources`, `log_ssh_file_checkpoints`, `log_ssh_fetch_runs` (on-demand run tracking), `log_source_objects`.
 
 ## 4. Stage 1: lines become rows
