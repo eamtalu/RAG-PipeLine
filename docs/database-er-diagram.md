@@ -268,6 +268,12 @@ erDiagram
         datetime created_at
     }
 
+    log_stream_frontier {
+        string customer_code PK "one row per tenant"
+        datetime frontier_ts "head lane bookmark - greatest-wins, never backwards"
+        datetime updated_at
+    }
+
     log_regroup_runs {
         uuid id PK
         string customer_code "soft tenant key"

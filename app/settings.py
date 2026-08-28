@@ -140,6 +140,14 @@ class Settings(BaseSettings):
     # permanent freeze of the tenant's pipelines. The 2026-08-27 rebuild of 3.2M entries took ~65
     # minutes; six hours is generous headroom.
     log_regroup_full_run_ttl_seconds: int = 21600
+    # P4 (chunk 72): the head lane - process only NEW lines against parked state, three-valued like
+    # every risky switch here.
+    #   "off"     the rebuild lane alone, exactly as before.
+    #   "shadow"  the head lane PLANS every eligible window and is compared against the rebuild
+    #             (which stays the authority); divergences log at WARNING. No head-lane writes.
+    #   "on"      eligible windows are applied by the head lane; everything surprising still falls
+    #             back to the rebuild lane. Flip only after the shadow has earned trust.
+    stage2_head_lane: str = "shadow"
     # The analytics fold's own statement timeout, in ms. The web tier's 30 s guard is wrong for a
     # background worker - Stage 1's bulk insert relaxes it for the same reason. 120 s is comfortable
     # headroom over ONE ticket span (measured: 23.7 s of reads on a 10,400-transaction day) and stays

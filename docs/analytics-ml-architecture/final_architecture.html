@@ -524,7 +524,7 @@ A scan reaches the chart in about a minute; the badge says the newest numbers ma
 <h3>11.5 The rebuild lane and the head lane: the full picture</h3>
 <p>Two words, defined once.
 The <strong>rebuild lane</strong> is how Stage 2 works TODAY: whenever anything changes, re-derive a whole padded window from scratch and write only the difference.
-The <strong>head lane</strong> is the PLANNED fast path (18q P4, <span class="tag p">not built</span>): remember where processing got to, and handle only the brand-new lines at the head of the stream.</p>
+The <strong>head lane</strong> is the fast path (chunk 72, <span class="tag g">built - in shadow</span>): remember where processing got to, and handle only the brand-new lines at the head of the stream.</p>
 
 <p><strong>Panel 1 - what the rebuild lane does today, and what it wastes.</strong></p>
 <pre>
@@ -615,14 +615,14 @@ Picker amin scans; three lines arrive over two fetches:</p>
    head lane read     exactly three.
 </pre>
 <table>
-  <tr><th></th><th>rebuild lane (today)</th><th>head lane (planned)</th></tr>
+  <tr><th></th><th>rebuild lane (today)</th><th>head lane (built, in shadow)</th></tr>
   <tr><td>trigger</td><td>a ticket: "this time range changed"</td><td>a new line at the stream head</td></tr>
   <tr><td>reads</td><td>the whole padded window, every tick</td><td>only the new lines</td></tr>
   <tr><td>writes</td><td>only the difference (~1/row, S3)</td><td>one membership + one update per line</td></tr>
   <tr><td>handles</td><td>everything: backfills, repairs, late lines</td><td>only the clean common case</td></tr>
   <tr><td>on surprise</td><td>it IS the fallback</td><td>hands the range to the rebuild lane</td></tr>
   <tr><td>correctness</td><td>the authority, always</td><td>must match the rebuild lane, gated by its own shadow phase</td></tr>
-  <tr><td>status</td><td>built, running</td><td>designed (18q P4), not built</td></tr>
+  <tr><td>status</td><td>built, running</td><td>built (chunk 72), running in SHADOW; on is the manual flip</td></tr>
 </table>
 <p><strong>The one-sentence takeaway:</strong> the head lane is a bookmark plus parked conversations, so the common case stops re-reading the past; the rebuild lane keeps existing untouched underneath it as the referee and the repair tool.</p>
 

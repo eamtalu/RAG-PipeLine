@@ -265,8 +265,10 @@ A dedicated sealer tick does this with an UPDATE (it used to happen only as a si
 Everything described above is the **rebuild lane**: any change, however small, is handled by re-deriving a padded window from scratch and writing only the difference.
 It is the only lane that exists today, and since S3 it is cheap (unchanged rows cost no writes).
 
-The **head lane** is the planned next step (section 18q, work package P4, NOT built):
-a fast path that would process only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`), appending one assignment per entry and updating the open transaction, with any surprise routed back to the rebuild lane.
+The **head lane** is BUILT and shipping in SHADOW (chunk 72):
+a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant FRONTIER bookmark (`log_stream_frontier`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the frontier, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream) routed back to the rebuild lane by name.
+Governed by `stage2_head_lane` = off / shadow / on, shipped as shadow: the plan is built for every eligible window, the rebuild executes as the authority, and the two are compared - a DIVERGED line in the journal is what stops `on`.
+The equivalence bar is the strictest available: after a head-lane apply, a rebuild of the same window must report every transaction unchanged (byte-identical fingerprints), certified by the authority itself.
 Its benefit is read cost and latency, not correctness; the rebuild lane remains the authority.
 Section 11.5 walks both lanes panel by panel, with a worked example - read that if this paragraph is not enough.
 
@@ -550,7 +552,7 @@ Two very different cases, both already handled - neither needs the extension to 
 Two words, defined once:
 
 - The **rebuild lane** is how Stage 2 works TODAY: whenever anything changes, re-derive a whole padded window from scratch and write only the difference.
-- The **head lane** is the PLANNED fast path (section 18q, P4, not built): remember where processing got to, and handle only the brand-new lines at the head of the stream.
+- The **head lane** is the fast path (chunk 72, shipped in SHADOW): remember where processing got to, and handle only the brand-new lines at the head of the stream.
 
 **Panel 1 - what the rebuild lane does today, and what it wastes.**
 Every worker tick re-reads a window of recent history just to discover that almost none of it changed:
@@ -653,7 +655,7 @@ Picker amin scans; three lines arrive over two fetches:
 
 Summary table:
 
-| | rebuild lane (today) | head lane (planned) |
+| | rebuild lane (today) | head lane (built, in shadow) |
 |---|---|---|
 | trigger | a ticket: "this time range changed" | a new line at the stream head |
 | reads | the whole padded window, every tick | only the new lines |
@@ -661,7 +663,7 @@ Summary table:
 | handles | everything: backfills, repairs, late lines | only the clean common case |
 | on surprise | it IS the fallback | hands the range to the rebuild lane |
 | correctness | the authority, always | must match the rebuild lane, gated by its own shadow phase |
-| status | built, running | designed (18q P4), not built |
+| status | built, running | built (chunk 72), running in SHADOW; `on` is the manual flip |
 
 The one-sentence takeaway: the head lane is a bookmark plus parked conversations, so the common case stops re-reading the past; the rebuild lane keeps existing untouched underneath it as the referee and the repair tool.
 
