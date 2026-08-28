@@ -10,7 +10,7 @@ The document has two parts:
   A plain-English, fact-checked guide to how the software works today, from the SSH pull to the ML pipeline.
   Start here.
 - **PART II - The design history.**
-  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18t), preserved verbatim because code comments and tests cite these section numbers.
+  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18u), preserved verbatim because code comments and tests cite these section numbers.
 
 # PART I. The system as built: a plain-English guide
 
@@ -266,7 +266,7 @@ Everything described above is the **rebuild lane**: any change, however small, i
 It is the only lane that exists today, and since S3 it is cheap (unchanged rows cost no writes).
 
 The **head lane** is BUILT and shipping in SHADOW (chunk 72):
-a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream, a parked stream that is already closed) routed back to the rebuild lane by name.
+a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream, a parked stream that is already closed) routed back to the rebuild lane by name, and each declined window writes one journal line naming its reason (chunk 75).
 Governed by `stage2_head_lane` = off / shadow / on, shipped as shadow: the plan is built for every eligible window, the rebuild executes as the authority, and the two are compared - a DIVERGED line in the journal is what stops `on`.
 The comparison is HORIZON-AWARE (chunk 73, section 18s): the rebuild legitimately sees more than the plan (its padded read reaches 900 seconds past the window's high edge, and Stage 1 keeps committing lines between the plan and the rebuild), so the shadow asks two questions that are well-defined across that difference.
 First, ownership, always: every line the plan assigned must sit in the same transaction the authority put it in - the question promotion actually hangs on.
@@ -848,7 +848,7 @@ Honest imperfections found while fact-checking this part; none is currently caus
 
 # PART II. The design history
 
-Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18t).
+Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18u).
 It explains WHY the system is shaped the way Part I describes.
 Where the two disagree, Part I is current and the section here records what was believed at the time.
 
@@ -4036,3 +4036,10 @@ Both sides of the contract:
 Legacy stale rows on the server self-heal: the very next rebuild of any window replaces the tenant's whole state (save is DELETE-then-INSERT per tenant), so `parked_closed` fallbacks fade within seconds of deployment.
 
 Three tests pin it (`test_head_lane_seed_chunk74.py`): a finished conversation is not parked while a genuinely open one still is; the exact live strand end to end (window one completes conversation A, window two's new response for the same user must not be stolen by A - plan builds the new conversation whole and the shadow AGREES); and a hand-planted legacy stale row makes the plan fall back `parked_closed` instead of guessing.
+
+## 18u. Declined windows became visible, 2026-08-28. Chunk 75.
+
+During the chunk-74 shadow watch, two consecutive windows produced no verdict and the journal could not say why: `build_plan`'s fallbacks returned a named reason to the caller but logged nothing, so a quiet shadow was ambiguous between "the tenant is idle" and "every window trips a guard".
+S4a solved the same problem with its refusal counts; the head lane now does the equivalent - one INFO line per declined window, from the head-lane module, naming tenant, window and reason (`fell back to the rebuild lane for <lo>..<hi> - <reason>`).
+Volume matches the existing per-window Stage 2 stats line, so it cannot flood the journal.
+Two tests pin it (`test_head_lane_fallback_logging_chunk75.py`): a declined window names its reason; an eligible window logs no fallback.

@@ -110,12 +110,20 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
     """Read-only: what the head lane WOULD write for this window, or a named fallback reason."""
     from app.services.mnp_log_ingestion.pipeline import derive_transactions as dt
 
+    def _fall(reason: str) -> HeadPlan:
+        # Chunk 75: one INFO line per declined window. Without it, "the shadow is quiet because the
+        # tenant is idle" and "the shadow is quiet because every window trips a guard" are
+        # indistinguishable in the journal - the reason was named precisely so it could be seen.
+        logger.info("Stage 2 head lane [%s]: fell back to the rebuild lane for %s..%s - %s",
+                    customer_code, lo, hi, reason)
+        return _fallback(reason)
+
     async with async_session() as db:
         checkpoint = await get_checkpoint(db, customer_code)
         if checkpoint is None:
-            return _fallback("no_checkpoint")
+            return _fall("no_checkpoint")
         if lo < checkpoint:
-            return _fallback("behind_checkpoint")
+            return _fall("behind_checkpoint")
 
         rows = list((await db.execute(
             select(LogEntry).where(
@@ -126,14 +134,14 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
             ).order_by(LogEntry.timestamp.asc().nullslast(),
                        LogEntry.source_file.asc(), LogEntry.line_number.asc()))).scalars().all())
         if not rows:
-            return _fallback("no_rows")
+            return _fall("no_rows")
         # NULL-timestamp entries never enter a windowed read - `timestamp >= lo` excludes them in
         # the REBUILD lane too (same predicate in regroup_window's entry read), so ignoring them
         # here is parity, not a gap. Only a full rebuild reaches them, in both lanes.
 
         state = await stream_state.load(db, customer_code, lo)
         if state["refusals"].get("clock_went_backwards"):
-            return _fallback("clock_went_backwards")
+            return _fall("clock_went_backwards")
         parked = [r for r in state["streams"] if state["entries_by_txn"].get(r.transaction_id)]
         # Chunk 74 (section 18t): a parked stream whose entries already contain a RESPONSE is closed
         # - the grouper never lets a responded conversation receive another entry - so such a row is
@@ -142,7 +150,7 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
         # divergence chunk 73's shadow caught. Never guess: route the window to the rebuild lane.
         if any(any(e.entry_type.value == "response" for e in state["entries_by_txn"][r.transaction_id])
                for r in parked):
-            return _fallback("parked_closed")
+            return _fall("parked_closed")
         txn_of_entry = {e.id: r.transaction_id
                         for r in parked for e in state["entries_by_txn"][r.transaction_id]}
         seed = {"streams": [
@@ -171,22 +179,22 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
                        LogTransaction.row_fingerprint, LogTransaction.members_fingerprint)
                 .where(LogTransaction.id.in_([r.transaction_id for r in parked])))).all()}
             if len(parked_rows) != len(parked):
-                return _fallback("parked_vanished")
+                return _fall("parked_vanished")
             if any(r.sealed for r in parked_rows.values()):
-                return _fallback("parked_sealed")
+                return _fall("parked_sealed")
 
         for b in builders:
             b.entries.sort(key=dt._entry_stream_order)
             owners = {txn_of_entry[e.id] for e in b.entries if e.id in seeded_ids}
             if len(owners) > 1:
-                return _fallback("parked_merge")
+                return _fall("parked_merge")
 
             # still-open builders are parked, not persisted as final - mirror the S4a save rule
             last = max((e.timestamp for e in b.entries if e.timestamp is not None), default=None)
             is_open = last is not None and (hi - last) < gap
             anchor = b.entries[0]
             if is_open and anchor.user_ctx is None and dt._entry_user(anchor) is None:
-                return _fallback("anonymous_open")
+                return _fall("anonymous_open")
 
             values = dt._cap_over_length(b.compute(), customer_code)
             is_sealed = dt._is_sealed(values, seal_cutoff, abandon_cutoff)
@@ -197,7 +205,7 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
                 tid = owners.pop()
                 stored = parked_rows[tid]
                 if values.get("started_at") != stored.started_at:
-                    return _fallback("started_at_moved")
+                    return _fall("started_at_moved")
                 if r_fp == stored.row_fingerprint and m_fp == stored.members_fingerprint:
                     # The unchanged verdict, same as _persist's: a parked conversation this window
                     # merely re-derived (e.g. closed by a same-key successor without gaining an
@@ -232,7 +240,7 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
                 db, customer_code, created_ids,
                 window=dt._clash_window([e.timestamp for b2 in builders for e in b2.entries]))
             if existing:
-                return _fallback("id_clash")
+                return _fall("id_clash")
         return plan
 
 
