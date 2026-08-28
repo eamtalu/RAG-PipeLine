@@ -847,6 +847,8 @@ erDiagram
         datetime updated_at
     }
 
+    %% chunk 77: ix_analytics_facts_customer_txn_event (customer_code, transaction_name, event_time)
+    %% serves the registry console's per-transaction fact count and span
     analytics_facts {
         uuid id "ORM row identity only, NOT a PK"
         string customer_code "soft tenant key"

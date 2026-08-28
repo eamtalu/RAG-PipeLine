@@ -138,6 +138,10 @@ class AnalyticsFact(FactColumns, Base):
         Index("ix_analytics_facts_customer_event", "customer_code", "event_time"),
         # The rollup folder groups by tenant and local day.
         Index("ix_analytics_facts_customer_date", "customer_code", "business_date"),
+        # Chunk 77: the registry console's detail page counts a NAME's facts and reads their
+        # event-time span; without this, that is a full per-partition scan of the tenant's facts.
+        Index("ix_analytics_facts_customer_txn_event",
+              "customer_code", "transaction_name", "event_time"),
         # The retention cursor (F6) tracks the maximum created_at among fully processed rows.
         Index("ix_analytics_facts_created", "created_at"),
         {"postgresql_partition_by": "RANGE (event_time)"},

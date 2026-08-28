@@ -54,3 +54,12 @@ def test_reconcile_declares_the_status_code_it_actually_has():
     spec = _surface()[("POST", "/api/v1/analytics/reconcile")]
     assert "200" in spec["responses"] and "202" not in spec["responses"], (
         "202 promises a poll that does not exist; the report is in this very response")
+
+
+def test_the_registry_console_endpoints_exist():
+    """Chunk 77: the console's two read endpoints - counts at a glance, and the per-transaction
+    drill-down. Membership-checked here so removing either silently breaks a named test, the same
+    guarantee the rest of this file gives the maintenance surface."""
+    surface = _surface()
+    assert ("GET", "/api/v1/analytics/registry/summary") in surface
+    assert ("GET", "/api/v1/analytics/registry/transactions/{transaction_name}") in surface

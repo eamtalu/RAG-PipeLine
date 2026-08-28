@@ -29,7 +29,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
@@ -501,3 +501,126 @@ async def set_field_capture(field_id: str, payload: dict = Body(...),
     await db.commit()
     return {"id": str(row.id), "field": row.field, "captured": row.captured,
             "tickets_published": published}
+
+
+@router.get("/registry/summary")
+async def registry_summary(customer: str = Depends(get_current_customer),
+                           db: AsyncSession = Depends(get_session)):
+    """Counts at a glance for the registry console (chunk 77, section 18w).
+
+    Three blocks, each a handful of single-table indexed counts over small tenant-scoped tables
+    (the transaction registry holds tens of rows, the field registry ~1,000, metrics a handful) -
+    nothing here can grow with fact volume, so counting at request time is fine where it would not
+    be on the fact tables.
+    """
+    def _count(model, *conds):
+        return db.scalar(select(func.count()).select_from(model)
+                         .where(model.customer_code == customer, *conds))
+
+    t = AnalyticsTransactionRegistry
+    f = AnalyticsFieldRegistry
+    m = AnalyticsMetric
+    return {
+        "transactions": {
+            "total": await _count(t) or 0,
+            "capture_on": await _count(t, t.capture.is_(True)) or 0,
+            "show_on": await _count(t, t.show.is_(True)) or 0,
+            "expand_on": await _count(t, t.expand.is_(True)) or 0,
+            "needs_review": await _count(t, t.reviewed_at.is_(None)) or 0,
+        },
+        "fields": {
+            "total": await _count(f) or 0,
+            "captured": await _count(f, f.captured.is_(True)) or 0,
+            "needs_review": await _count(f, f.reviewed_at.is_(None)) or 0,
+        },
+        "metrics": {
+            "total": await _count(m) or 0,
+            "active": await _count(m, m.status == "active") or 0,
+        },
+    }
+
+
+@router.get("/registry/transactions/{transaction_name}")
+async def transaction_registry_detail(transaction_name: str,
+                                      customer: str = Depends(get_current_customer),
+                                      db: AsyncSession = Depends(get_session)):
+    """Everything the registry knows about ONE transaction (chunk 77, section 18w).
+
+    Fields are registered per M3 METHOD while transactions are registered per NAME, and the two are
+    many-to-many - so the detail first resolves the name to the methods that actually served it
+    (from `log_transactions`, which carries both columns), then lists those methods' fields.
+
+    The fact count is a real `count(*)`, and that is fine HERE for the reason logs.py's day counts
+    are fine: one name at a time on a detail page nobody polls, index-only since
+    `ix_analytics_facts_customer_txn_event` - not a list endpoint multiplying the cost per row.
+
+    Metrics are read whole (a tenant has a handful; the list endpoint caps at 200) and split in
+    Python, matching how metric filters are read everywhere else: `referencing` names this
+    transaction in `filter -> transactions`; `apply_to_all` counts metrics whose transaction filter
+    is EMPTY, which by the fold's gate means they cover this transaction too. Reported separately
+    because "mentions this name" and "covers everything anyway" answer different questions.
+    """
+    from app.persistence.models.analytics_fact import AnalyticsFact
+    from app.persistence.models.log_transaction import LogTransaction
+
+    row = await db.scalar(
+        select(AnalyticsTransactionRegistry).where(
+            AnalyticsTransactionRegistry.customer_code == customer,
+            AnalyticsTransactionRegistry.transaction_name == transaction_name))
+    if row is None:
+        # same rule as the PATCH: a name analytics has never seen is almost always a typo
+        raise HTTPException(404, f"analytics has not seen a transaction named "
+                                 f"{transaction_name!r} for this logspace")
+
+    methods = list((await db.execute(
+        select(LogTransaction.method).distinct()
+        .where(LogTransaction.customer_code == customer,
+               LogTransaction.transaction_name == transaction_name,
+               LogTransaction.method.is_not(None))
+        .limit(50))).scalars().all())
+
+    fields = []
+    if methods:
+        fields = (await db.execute(
+            select(AnalyticsFieldRegistry)
+            .where(AnalyticsFieldRegistry.customer_code == customer,
+                   AnalyticsFieldRegistry.method.in_(methods))
+            .order_by(AnalyticsFieldRegistry.method, AnalyticsFieldRegistry.field)
+            .limit(500))).scalars().all()
+
+    facts = (await db.execute(
+        select(func.count(), func.min(AnalyticsFact.event_time),
+               func.max(AnalyticsFact.event_time))
+        .where(AnalyticsFact.customer_code == customer,
+               AnalyticsFact.transaction_name == transaction_name))).one()
+
+    metric_rows = (await db.execute(
+        select(AnalyticsMetric).where(AnalyticsMetric.customer_code == customer)
+        .order_by(AnalyticsMetric.name).limit(200))).scalars().all()
+    referencing = [{"id": str(mr.id), "name": mr.name, "status": mr.status}
+                   for mr in metric_rows
+                   if transaction_name in ((mr.filter or {}).get("transactions") or [])]
+    apply_to_all = sum(1 for mr in metric_rows
+                       if not ((mr.filter or {}).get("transactions") or []))
+
+    return {
+        "transaction_name": row.transaction_name,
+        "capture": row.capture, "show": row.show, "expand": row.expand,
+        "first_seen_at": _iso(row.first_seen_at),
+        "reviewed_at": _iso(row.reviewed_at), "reviewed_by": row.reviewed_by,
+        "needs_review": row.reviewed_at is None,
+        "methods": methods,
+        "fields": [{
+            "id": str(r.id), "method": r.method, "source": r.source, "field": r.field,
+            "captured": r.captured,
+            "credential_shaped": pl.never_auto_approve(r.field),
+            "seeded": pl.seeded(r.field),
+            "first_seen_at": _iso(r.first_seen_at), "last_seen_at": _iso(r.last_seen_at),
+            "reviewed_at": _iso(r.reviewed_at), "reviewed_by": r.reviewed_by,
+            "needs_review": r.reviewed_at is None,
+        } for r in fields],
+        "field_count": len(fields),
+        "facts": {"count": facts[0] or 0,
+                  "first_event_at": _iso(facts[1]), "last_event_at": _iso(facts[2])},
+        "metrics": {"referencing": referencing, "apply_to_all": apply_to_all},
+    }

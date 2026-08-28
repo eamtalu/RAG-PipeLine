@@ -10,7 +10,7 @@ The document has two parts:
   A plain-English, fact-checked guide to how the software works today, from the SSH pull to the ML pipeline.
   Start here.
 - **PART II - The design history.**
-  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18v), preserved verbatim because code comments and tests cite these section numbers.
+  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18w), preserved verbatim because code comments and tests cite these section numbers.
 
 # PART I. The system as built: a plain-English guide
 
@@ -339,6 +339,10 @@ Response payload scalars arrive namespaced (`resp.ItemNumber`, `mi.record_count`
   34 safe names are seeded in code; credential-shaped names (token, password, apikey, ...) are never auto-approved.
 
 One shared predicate (`capture.py`) is used by the source read, the stored read and the auditor, so the three can never disagree about what "captured" means.
+
+The registries are managed from the console (chunk 77, section 18w): Manage -> Registry shows the counts at a glance (`GET /analytics/registry/summary`) and a per-transaction drill-down (`GET /analytics/registry/transactions/{name}`) with the switches and review audit, the fields observed for it, how many facts it has produced, and which metric definitions reference it.
+Fields are registered per M3 METHOD while transactions are registered per NAME (many-to-many); the drill-down bridges the two through `log_transactions`, which carries both columns.
+The flat field review queue stays at Manage -> Analytics settings.
 
 ### 7.5 Rollups: the pre-computed charts
 
@@ -848,7 +852,7 @@ Honest imperfections found while fact-checking this part; none is currently caus
 
 # PART II. The design history
 
-Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18v).
+Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18w).
 It explains WHY the system is shaped the way Part I describes.
 Where the two disagree, Part I is current and the section here records what was believed at the time.
 
@@ -4068,3 +4072,17 @@ The rebuild lane is immune by design ("the state is a cache, not the truth" - it
   Alongside this, the rebuild-side save now derives each stream's transaction id from the SAME continuity assignment `_persist` uses (inherit-aware), instead of re-minting - so the stored pointer can no longer disagree with the persisted id.
 
 Four tests pin it (`test_stream_state_scope_chunk76.py`): the overlapping-older-window wipe survives; the full live strand end to end (the response still finds its conversation and the shadow AGREES); both servers' same-(thread,user) conversations park side by side; a broken stream pointer makes the plan fall back.
+
+## 18w. The registry console, 2026-08-28. Chunk 77.
+
+The registries had write endpoints and a minimal review screen since R2; what was missing was the reading side - counts at a glance and one place that answers "tell me everything about this registered transaction".
+Two read endpoints and a console screen (Manage -> Registry, list + per-transaction detail page), with the toggles reusing the R2 PATCH calls unchanged.
+
+Two data-model facts shaped it:
+
+- `analytics_field_registry.method` is the M3 endpoint, NOT the transaction name, and the two are many-to-many.
+  The detail endpoint resolves the name to its methods through `log_transactions` (which carries both columns) and lists those methods' fields.
+- `analytics_facts` had no index on `transaction_name`, so the per-transaction fact count would have been a full per-partition scan.
+  Migration `c8d24e6f1a97` adds `ix_analytics_facts_customer_txn_event (customer_code, transaction_name, event_time)` - a plain CREATE INDEX, because a partitioned parent cannot be indexed CONCURRENTLY and migrations run with the worker stopped.
+
+A metric references a transaction only via `filter -> transactions`, and an empty list means "applies to every transaction" - so the detail reports `referencing` and `apply_to_all` separately, because "mentions this name" and "covers everything anyway" answer different questions.
