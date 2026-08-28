@@ -10,7 +10,7 @@ The document has two parts:
   A plain-English, fact-checked guide to how the software works today, from the SSH pull to the ML pipeline.
   Start here.
 - **PART II - The design history.**
-  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18s), preserved verbatim because code comments and tests cite these section numbers.
+  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18t), preserved verbatim because code comments and tests cite these section numbers.
 
 # PART I. The system as built: a plain-English guide
 
@@ -266,7 +266,7 @@ Everything described above is the **rebuild lane**: any change, however small, i
 It is the only lane that exists today, and since S3 it is cheap (unchanged rows cost no writes).
 
 The **head lane** is BUILT and shipping in SHADOW (chunk 72):
-a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream) routed back to the rebuild lane by name.
+a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream, a parked stream that is already closed) routed back to the rebuild lane by name.
 Governed by `stage2_head_lane` = off / shadow / on, shipped as shadow: the plan is built for every eligible window, the rebuild executes as the authority, and the two are compared - a DIVERGED line in the journal is what stops `on`.
 The comparison is HORIZON-AWARE (chunk 73, section 18s): the rebuild legitimately sees more than the plan (its padded read reaches 900 seconds past the window's high edge, and Stage 1 keeps committing lines between the plan and the rebuild), so the shadow asks two questions that are well-defined across that difference.
 First, ownership, always: every line the plan assigned must sit in the same transaction the authority put it in - the question promotion actually hangs on.
@@ -848,7 +848,7 @@ Honest imperfections found while fact-checking this part; none is currently caus
 
 # PART II. The design history
 
-Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18s).
+Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18t).
 It explains WHY the system is shaped the way Part I describes.
 Where the two disagree, Part I is current and the section here records what was believed at the time.
 
@@ -4007,3 +4007,32 @@ The `rebuilt ids missing from the plan` check was retired: on a live tenant the 
 
 Four tests pin it (`test_head_lane_shadow_chunk73.py`): the beyond-horizon fold and the late-arrival race must AGREE; a wrongly-grouped entry and a digest that differs on identical members must DIVERGE.
 The apply-path equivalence bar (a rebuild after a head-lane apply must report all-unchanged) is untouched.
+
+## 18t. The stale parked stream: finished conversations saved as open, 2026-08-28. Chunk 74.
+
+The horizon-aware shadow (18s) earned its keep on its very first live window: a DIVERGED line whose evidence showed the head-lane plan binding two brand-new responses to conversations from ~3 minutes earlier that were already complete (success, sealed pending).
+The authority was right; the plan's SEED was wrong.
+
+### The mechanism, three facts long
+
+1. `regroup_window`'s save loop parked every builder still inside the quiet gap - including FINISHED ones.
+   The comment above it claimed "an OPEN stream is one whose transaction is still receiving entries", but the code checked only the gap, never closure, so a responded conversation was written to `log_open_stream` as open.
+2. `_group` seeds every parked stream into `open_by_key` - which is, by definition, open work.
+3. A RESPONSE binds to its user's OLDEST open work (FIFO by `open_pos`).
+   A wrongly-parked finished conversation is always older than the fresh request sitting beside the new response, so it stole every new response for that user.
+
+The chapter-13 gaps register had flagged the state table as imprecise and called it "harmless while the state is shadow-only measurement".
+The head lane is the first consumer that depends on the state being precise, and the improved shadow caught the imprecision on its first window - which is the shadow working, not failing.
+
+### The fix (chunk 74)
+
+Both sides of the contract:
+
+- **Save** (`derive_transactions.py`, the stream-state save loop): a builder whose entries contain a response is closed - `_group` closes it the moment the response binds and never lets it receive another entry - so it is no longer saved as an open stream.
+  The misleading comment is corrected to state the real rule.
+- **Plan** (`head_lane.build_plan`): the head lane never TRUSTS state it can cheaply disprove.
+  A parked stream whose reloaded entries already contain a response is stale by definition (legacy rows written before this fix, or any future save regression), and the window routes to the rebuild lane with the new named fallback `parked_closed` - never guess, fall back.
+
+Legacy stale rows on the server self-heal: the very next rebuild of any window replaces the tenant's whole state (save is DELETE-then-INSERT per tenant), so `parked_closed` fallbacks fade within seconds of deployment.
+
+Three tests pin it (`test_head_lane_seed_chunk74.py`): a finished conversation is not parked while a genuinely open one still is; the exact live strand end to end (window one completes conversation A, window two's new response for the same user must not be stolen by A - plan builds the new conversation whole and the shadow AGREES); and a hand-planted legacy stale row makes the plan fall back `parked_closed` instead of guessing.

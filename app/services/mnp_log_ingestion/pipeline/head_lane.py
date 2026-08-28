@@ -135,6 +135,14 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
         if state["refusals"].get("clock_went_backwards"):
             return _fallback("clock_went_backwards")
         parked = [r for r in state["streams"] if state["entries_by_txn"].get(r.transaction_id)]
+        # Chunk 74 (section 18t): a parked stream whose entries already contain a RESPONSE is closed
+        # - the grouper never lets a responded conversation receive another entry - so such a row is
+        # STALE state (pre-fix leftovers, or a future save regression). Seeding it would offer it to
+        # the response FIFO as the user's oldest open work, stealing new responses; the live
+        # divergence chunk 73's shadow caught. Never guess: route the window to the rebuild lane.
+        if any(any(e.entry_type.value == "response" for e in state["entries_by_txn"][r.transaction_id])
+               for r in parked):
+            return _fallback("parked_closed")
         txn_of_entry = {e.id: r.transaction_id
                         for r in parked for e in state["entries_by_txn"][r.transaction_id]}
         seed = {"streams": [

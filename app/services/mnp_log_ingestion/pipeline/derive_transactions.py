@@ -1247,10 +1247,14 @@ async def _shadow_compare(db: AsyncSession, customer_code: str, rows: list[LogEn
                        "%d only in the seeded run. Not promoting. %s",
                        customer_code, len(a - b), len(b - a), report)
 
-    # Save from the authoritative grouping. `_group` leaves finished builders in its return, so an OPEN
-    # stream is one whose transaction is still receiving entries - which after S3 is precisely a row
-    # that is not sealed. Recomputed here rather than tracked, because the sealer is the authority on
-    # what is settled and duplicating that decision is how the two drift apart.
+    # Save from the authoritative grouping. `_group` leaves finished builders in its return, so an
+    # OPEN stream must be RE-DERIVED here: a builder whose entries contain a RESPONSE is closed -
+    # `_group` closes it the moment the response binds and never lets it receive another entry - and
+    # parking it anyway stores a claim the grouper itself does not believe. That claim was chunk 74's
+    # live divergence (section 18t): the seeded run treats every parked stream as open work, a
+    # response FIFO-binds to its user's OLDEST open work, and a wrongly-parked finished conversation
+    # is always older than the fresh request beside the new response - so it stole every new
+    # response for that user.
     # KEYED, not appended, and the unique constraint is what taught me that. `_group`'s `open_by_key`
     # is a dict, so at most ONE stream per (thread, user_ctx) can be open at a time - but the list this
     # iterates holds FINISHED builders too, and a thread that flipped A -> B -> A contributes two
@@ -1262,6 +1266,8 @@ async def _shadow_compare(db: AsyncSession, customer_code: str, rows: list[LogEn
     for bldr in authoritative:
         if not bldr.entries:
             continue
+        if any(e.entry_type.value == "response" for e in bldr.entries):
+            continue          # closed by its response, so it can never receive another entry
         last = max((e.timestamp for e in bldr.entries if e.timestamp is not None), default=None)
         if last is None or (window_lo - last) >= timedelta(seconds=settings.log_open_gap_seconds):
             continue          # already past the gap, so it can never receive another entry
