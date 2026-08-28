@@ -200,15 +200,23 @@ async def test_toggling_show_publishes_tickets_in_both_directions():
     assert on["show"] is True and on["tickets_published"] > 0
 
 
-async def test_toggling_expand_alone_publishes_nothing():
-    """R4 is not built, so `expand` changes no stored data. Publishing here would re-fold the whole
-    retention window for a switch that currently does nothing."""
+async def test_toggling_expand_follows_the_capture_asymmetry():
+    """AMENDED by 18x (chunk 78) - this used to pin "expand publishes nothing" because R4 did not
+    exist. It does now, and a late `expand` flip must BACKFILL: ON re-examines the retention range
+    (the presence diff expands settled windows through ordinary tickets), OFF publishes nothing
+    because existing record rows are deliberately kept - the same asymmetry as `capture`."""
     await _seed()
     before = await _tickets()
     r = await _patch_txn("Full Stock Count", {"expand": True})
     assert r["expand"] is True
-    assert r["tickets_published"] == 0
-    assert await _tickets() == before
+    assert r["tickets_published"] > 0, "expand ON must re-examine the retention range"
+
+    published_on = await _tickets()
+    r = await _patch_txn("Full Stock Count", {"expand": False})
+    assert r["expand"] is False
+    assert r["tickets_published"] == 0, "expand OFF keeps existing rows; nothing to re-fold"
+    assert await _tickets() == published_on
+    assert published_on > before
 
 
 async def test_a_patch_changes_only_the_keys_it_names():

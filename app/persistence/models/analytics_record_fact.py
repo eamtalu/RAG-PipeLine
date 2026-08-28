@@ -12,8 +12,9 @@ Avoiding that would need EVERY definition to carry a grain filter, and forgettin
 definition produces a plausible-looking wrong total. A separate table makes the mistake structurally
 impossible instead: the existing fold cannot see these rows at all.
 
-The cost 18a named for this option was "doubles the fold path". That is real and it is the reason the
-record-grain fold is NOT built yet - see the module note at the bottom.
+The cost 18a named for this option was "doubles the fold path". R4b paid it (chunks 78-79, 18x):
+the record grain has its own parallel reader and recompute, and this table is folded into the shared
+definition-keyed rollup tables.
 
 Why it is opt-in, with the arithmetic
 -------------------------------------
@@ -26,14 +27,14 @@ window, average 2.3 per `mi_result` entry, maximum 26. The two numbers are far a
 one is NOT evidence that the cost is small - it is evidence that this box holds much less data.
 
 KEEP_FOREVER, matching `analytics_facts`, because the reason to capture a record at all is a question
-somebody asks next year and raw entries are gone in 60 days. `_LOUD_EXPANSION` in the capture path
+somebody asks next year and raw entries are gone in 60 days. `payload.LOUD_EXPANSION` in the capture path
 makes a careless tick visible in the log immediately rather than in a disk alert three weeks later.
 """
 
 import uuid
 from datetime import date as date_type, datetime, timezone
 
-from sqlalchemy import DateTime, Date, Integer, String, UniqueConstraint
+from sqlalchemy import DateTime, Date, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -51,6 +52,14 @@ class AnalyticsRecordFact(Base):
         # nullable, exactly as on `analytics_facts`.
         UniqueConstraint("source_transaction_id", "record_index", "event_time",
                          name="uq_analytics_record_facts_id", postgresql_nulls_not_distinct=True),
+        # 18x: the record fold's reads. Dirty-bucket reads scan by tenant + time (both axes), the
+        # presence diff probes by tenant + window, and the registry console counts a NAME's records;
+        # the original single-column indexes served none of those, and without the event index the
+        # presence diff would probe every partition of a KEEP_FOREVER table forever.
+        Index("ix_analytics_record_facts_customer_event", "customer_code", "event_time"),
+        Index("ix_analytics_record_facts_customer_date", "customer_code", "business_date"),
+        Index("ix_analytics_record_facts_customer_txn_event",
+              "customer_code", "transaction_name", "event_time"),
         {"postgresql_partition_by": "RANGE (event_time)"},
     )
 

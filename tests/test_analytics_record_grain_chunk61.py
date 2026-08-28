@@ -238,7 +238,13 @@ def test_expansion_is_driven_by_the_diff_not_the_source_rows():
     import inspect
     from app.services.analytics import consume
     src = inspect.getsource(consume._expand_records)
-    assert "dd.Action.insert" in src and "dd.Action.update" in src, \
+    assert "dd.Action.insert" in src and "dd.Action.update" in src
+    # 18x amends this pin rather than replacing it: reversals now DELETE their record rows (a
+    # vanished parent must take its records with it - invariant 5 one grain down), and a presence
+    # diff re-expands settled transactions whose rows are missing or stale. Neither reads source
+    # rows the diff called unchanged for its own sake, so the original property - S3's skip
+    # survives - still holds and is pinned byte-identically in chunk 78.
+    assert "dd.Action.reverse" in src, \
         "expansion must key off the diff's verdicts, or it re-writes what S3 skipped"
 
 

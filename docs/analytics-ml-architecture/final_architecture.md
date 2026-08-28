@@ -10,7 +10,7 @@ The document has two parts:
   A plain-English, fact-checked guide to how the software works today, from the SSH pull to the ML pipeline.
   Start here.
 - **PART II - The design history.**
-  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18w), preserved verbatim because code comments and tests cite these section numbers.
+  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18x), preserved verbatim because code comments and tests cite these section numbers.
 
 # PART I. The system as built: a plain-English guide
 
@@ -852,7 +852,7 @@ Honest imperfections found while fact-checking this part; none is currently caus
 
 # PART II. The design history
 
-Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18w).
+Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18x).
 It explains WHY the system is shaped the way Part I describes.
 Where the two disagree, Part I is current and the section here records what was believed at the time.
 
@@ -3334,7 +3334,8 @@ read time - the information is gone by then. Gating the rollup read means:
 | `capture` ON | **yes** | the transaction has no facts for the range it was off |
 | `capture` OFF | **no** | existing facts are deliberately left alone, so a fold would find nothing to change |
 | `show` either way | **yes** | rollups genuinely have to be recomputed in both directions |
-| `expand` | **no** | R4 does not exist, so it changes no stored data |
+| `expand` ON | **yes** | 18x: the record grain backfills - the presence diff expands settled windows through ordinary tickets |
+| `expand` OFF | **no** | existing record rows are deliberately kept, the same reasoning as `capture` OFF |
 
 Publishing unconditionally would re-fold the whole retention window every time somebody ticked a switch
 that does nothing yet.
@@ -4086,3 +4087,32 @@ Two data-model facts shaped it:
   Migration `c8d24e6f1a97` adds `ix_analytics_facts_customer_txn_event (customer_code, transaction_name, event_time)` - a plain CREATE INDEX, because a partitioned parent cannot be indexed CONCURRENTLY and migrations run with the worker stopped.
 
 A metric references a transaction only via `filter -> transactions`, and an empty list means "applies to every transaction" - so the detail reports `referencing` and `apply_to_all` separately, because "mentions this name" and "covers everything anyway" answer different questions.
+
+## 18x. Record capture hardened before the record fold exists, 2026-08-28. Chunk 78.
+
+R4b's exploration audited the R4 capture path before building the fold over it, and found holes the fold would have amplified into plausible wrong numbers.
+All were fixed test-first, on an empty live table (`expand` had never been ticked), so no repair pass was needed.
+
+### The holes, and the fixes
+
+1. **Reversal orphans (invariant 5, one grain down).** A parent fact that vanished (merge, split, delete) was reversed by the diff, but its record rows survived forever - `_expand_records` filtered reversals out.
+   Reverse deletes now run UNCONDITIONALLY, before and regardless of the `expanded` gate, because a name whose expand was later turned off must still have its orphans cleaned.
+   An event-time move is reverse+insert at the diff (the key carries `event_time`), so the same fix covers the duplicate-under-two-times shape.
+2. **No backfill.** Ticking `expand` published no ticket (the code comment still said "changes nothing until R4 exists"), and even with a ticket a settled window expanded nothing: the diff says `unchanged` and the entries are never read.
+   The record grain now has its own presence/staleness diff: every row carries `attributes._exp_v` = hash(`_EXPAND_VERSION`, the tenant's approved `rec.*` set); a stored fact that PREDICTS records (`mi.record_count` > 0, a seed-approved attribute) whose rows are missing or stale joins the entry read and re-expands.
+   Late `expand` flips and late field approvals therefore BACKFILL through ordinary tickets - S3's `__norm_v` pattern, one grain down.
+   The `mi.record_count` gate is what stops zero-record transactions re-expanding forever: `expand` covers a NAME, and a name spans methods that legitimately return no records.
+   Accepted residual: a `records[]` of all non-dict entries counts but expands to nothing, costing a bounded re-read per fold - never observed live.
+3. **The one-way door.** `analytics_record_facts` was missing from `_DESTINATION_TABLES`, so a historic fold sank rows into the DEFAULT partition, after which the period's real partition can never be created.
+   Added, and the chunk-48 guard now DERIVES the expected set (every partitioned analytics table) instead of hardcoding the list that let this slip.
+4. **Invisible volume.** `record_stats` was computed and discarded; it now reaches the run's return, the tenant tick's stats, `analytics_tenant_state.record_facts_total` (incremental, like `facts_total`), `/analytics/status`'s volume block (same single-row read), and the registry console's transaction detail (`records.count`).
+5. **Read paths for the fold** (migration `d4f81b2c9e63`): composite indexes `(customer_code, event_time)`, `(customer_code, business_date)`, `(customer_code, transaction_name, event_time)` - the original single-column indexes served neither the dirty-bucket reads nor the presence diff, which would otherwise probe every partition of a KEEP_FOREVER table forever.
+
+### Decisions recorded
+
+- **No record ledger.** Rollups are recompute-and-replace from current rows and need none; ML pinning stays transaction-grain-only.
+  The F10 argument applies with full force: record-grain training sets are NOT reproducible until a ledger exists, and adding one later means the history before that day simply does not exist.
+  Accepted deliberately at ~200k rows/day for a reader that does not yet exist; revisit before any record-grain ML work.
+- **No DB primary key on `analytics_record_facts`, documented as impossible rather than fixed**: `event_time` is nullable by partitioning-test mandate (copied from a parsed log line), a partitioned PK must include it, and a PK cannot contain a nullable column.
+  The NULLS-NOT-DISTINCT unique constraint `(source_transaction_id, record_index, event_time)` IS the identity.
+- Chunk 61's "expansion is driven by the diff, not the source rows" pin is AMENDED, not repealed: the two new drivers (reverse deletes, presence diff) never re-read what the diff called unchanged for its own sake, and the byte-identical settled-window pin moved into chunk 78's suite.

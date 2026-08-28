@@ -223,11 +223,12 @@ async def test_the_analytics_worker_does_not_provision_log_tables():
 
 
 async def test_every_partitioned_table_analytics_writes_is_provisioned():
-    """The complement, and the one that catches a table added later. A destination missing from this
-    tuple reintroduces the whole bug for that table alone."""
-    written = {"analytics_facts", "analytics_fact_ledger", "analytics_quality_issues",
-               "analytics_hourly_rollups", "analytics_daily_rollups"}
-    assert written <= set(n3._DESTINATION_TABLES)
+    """The complement, and the one that catches a table added later. DERIVED rather than hardcoded
+    since chunk 78: the hardcoded list was exactly how `analytics_record_facts` went unprovisioned
+    for three days - every partitioned analytics table is a fold destination, so the sets must be
+    EQUAL, and a new partitioned analytics table fails this test until it is provisioned."""
+    partitioned_analytics = {t.table for t in pt.PARTITIONED if t.table.startswith("analytics_")}
+    assert set(n3._DESTINATION_TABLES) == partitioned_analytics
 
 
 def test_the_ddl_runs_in_its_own_session_not_the_runs_transaction():

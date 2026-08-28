@@ -88,6 +88,10 @@ class AnalyticsTenantState(Base):
     open_tickets: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     abandoned_tickets: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     quarantined_rows: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    #: 18x: the record grain's own volume counter, moved incrementally by the fold exactly as
+    #: `facts_total` is (insert-minus-delete from the run's own counters; N3 is the only writer).
+    record_facts_total: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0,
+                                                    server_default="0")
     facts_total: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
 
     #: A5: ONE authoritative revision per tenant, bumped in the same commit as the work it describes.

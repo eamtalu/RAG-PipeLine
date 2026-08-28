@@ -813,7 +813,7 @@ erDiagram
         string transaction_name "NOT NULL; the unnamed probes get no row, their rule is in code"
         bool capture "gates whether a fact exists at all; irreversible, defaults TRUE"
         bool show "gates whether facts reach charts; free and retroactive, defaults FALSE"
-        bool expand "gates R4 per-record rows, defaults FALSE"
+        bool expand "gates R4 per-record rows, defaults FALSE; ON backfills via tickets (18x)"
         datetime first_seen_at
         datetime reviewed_at "NULL = still at defaults, needs review"
         string reviewed_by
@@ -965,6 +965,7 @@ erDiagram
         int abandoned_tickets
         bigint quarantined_rows
         bigint facts_total
+        bigint record_facts_total "18x: record grain volume, incremental"
         bigint revision "ONE authoritative revision, for cache validation"
         datetime last_cycle_at
         text last_error

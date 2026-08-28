@@ -48,6 +48,7 @@ not something introduced here, and deviating for one consumer would make the MIN
 comparison between two different units. Implemented as specified; flagged as a real finding for E4/F6.
 """
 
+import hashlib
 import logging
 import uuid
 from datetime import date as date_type, datetime, timedelta, timezone
@@ -123,6 +124,10 @@ _FACT_COLUMNS: tuple[str, ...] = tuple(
 _DESTINATION_TABLES: tuple[str, ...] = (
     "analytics_facts", "analytics_fact_ledger", "analytics_hourly_rollups",
     "analytics_daily_rollups", "analytics_quality_issues",
+    # 18x: was missing, and the omission was the one-way door - a historic fold (a rotated file, a
+    # regroup_all, a late transaction) sank record rows into the DEFAULT partition, after which that
+    # period's real partition can never be created.
+    "analytics_record_facts",
 )
 
 #: How far past the run's UTC range to provision, so the tenant-LOCAL `business_date` is covered.
@@ -447,36 +452,133 @@ async def _apply(db: AsyncSession, customer_code: str, outcomes: Sequence[dd.Out
     return stats
 
 
-async def _expand_records(db: AsyncSession, customer_code: str, *, outcomes,
-                          by_txn: dict, expanded: frozenset[str], approved: frozenset[str],
-                          discovered: dict) -> dict:
-    """R4. Write one `analytics_record_facts` row per M3 record, for expanded transactions only.
+#: Bookkeeping key inside each record row's `attributes` (18x): the expansion version the row was
+#: written under. Underscore-prefixed like the fact grain's `__src_fp`, so it can never collide with
+#: a `rec.*` field and readers can strip bookkeeping by prefix.
+_EXP_V_KEY = "_exp_v"
 
-    Driven by the DIFF's outcomes rather than by the source rows, which is what keeps S3's skip intact:
-    a transaction the diff reported `unchanged` has records that are also unchanged, so re-expanding it
-    would put back exactly the write S3 removed. Measured consequence - a settled window expands nothing
-    at all.
+#: Static half of the expansion version. Bump when `_expand_records` changes WHAT a row contains,
+#: exactly as `_NORMALISE_VERSION` works for the fact grain - every stored record row goes stale at
+#: once and the presence diff restates them through ordinary tickets.
+_EXPAND_VERSION = 1
 
-    Replace-per-transaction rather than upsert-per-record. A re-expansion may produce FEWER records than
-    the last one (a shorter response), and an upsert keyed on `(transaction, index)` would leave the tail
-    of the previous expansion behind forever. Deleting the transaction's rows first makes the count
-    correct by construction.
 
-    Approval is the same allowlist the scalar grain uses, with `source = "record"`, so a record field is
-    reviewed on the same screen and by the same rule. An unapproved key is recorded by NAME and its value
-    never stored.
+def _expansion_version(approved_record_fields: frozenset[str]) -> str:
+    """The expansion version: code version + the tenant's approved `rec.*` set (18x).
+
+    A stored row whose `_exp_v` differs was written under different rules - most commonly a field
+    approved AFTER the row was written (rows are always written before anyone can approve their
+    fields, because discovery precedes review) - and must be re-expanded to pick the change up.
+    """
+    digest = hashlib.sha256(
+        (f"v{_EXPAND_VERSION}:" + ",".join(sorted(approved_record_fields))).encode()).hexdigest()
+    return digest[:16]
+
+
+def _predicts_records(stored_fact: Mapping | None) -> bool:
+    """Whether the stored fact says its response carried records: `mi.record_count` > 0.
+
+    This is what stops zero-record transactions re-expanding forever: `expand` covers a NAME, a name
+    spans methods that legitimately return no records, and `_expand_records` writes nothing for them
+    - so "no rows stored" alone would mean "expand again" on every fold. `mi.record_count` is on the
+    seed list, so every captured fact carries it. Residual edge, accepted and pinned: a records list
+    whose entries are all non-dicts counts here but expands to nothing, costing a bounded re-read
+    per fold of that window - never observed live (every sampled record is a dict of scalars).
+    """
+    attrs = (stored_fact or {}).get("attributes") or {}
+    try:
+        return int(attrs.get("mi.record_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+async def _records_needing_expansion(db: AsyncSession, customer_code: str, window: UtcWindow,
+                                     expanded: frozenset[str], stored_by_txn: dict,
+                                     exp_v: str) -> set:
+    """The record grain's own presence/staleness diff (18x): stored facts that predict records but
+    whose record rows are MISSING or carry a stale `_exp_v`.
+
+    This is what makes a late `expand` flip and a late field approval BACKFILL through ordinary
+    tickets: the fact diff says `unchanged` for a settled window, but the record grain's stored
+    state can still disagree with what the switches now demand. One bounded aggregate per window,
+    pruned by the `event_time` predicate (record event_time is copied from the in-window parent),
+    served by `ix_analytics_record_facts_customer_event`.
     """
     if not expanded:
-        return {"records": 0, "transactions": 0}
+        return set()
+    candidates = {tid for tid, r in stored_by_txn.items()
+                  if r.get("transaction_name") in expanded and _predicts_records(r)}
+    if not candidates:
+        return set()
+    present = {row.txn: row.v for row in (await db.execute(
+        select(AnalyticsRecordFact.source_transaction_id.label("txn"),
+               func.min(AnalyticsRecordFact.attributes[_EXP_V_KEY].astext).label("v"))
+        .where(AnalyticsRecordFact.customer_code == customer_code,
+               window.covers(AnalyticsRecordFact.event_time, include_null=True),
+               AnalyticsRecordFact.source_transaction_id.in_(sorted(candidates, key=str)))
+        .group_by(AnalyticsRecordFact.source_transaction_id))).all()}
+    return {tid for tid in candidates if present.get(tid) != exp_v}
 
-    changed = [o for o in outcomes if o.action in (dd.Action.insert, dd.Action.update)]
-    if not changed:
-        return {"records": 0, "transactions": 0}
+
+async def _expand_records(db: AsyncSession, customer_code: str, *, outcomes,
+                          by_txn: dict, expanded: frozenset[str], approved: frozenset[str],
+                          discovered: dict, stored_by_txn: dict, refresh: set,
+                          exp_v: str) -> dict:
+    """R4/18x. Write one `analytics_record_facts` row per M3 record, for expanded transactions.
+
+    Two drivers, one hygiene rule:
+
+    - The DIFF's insert/update outcomes, as always - a transaction the diff reported `unchanged`
+      has records that are also unchanged (S3's skip, one grain down).
+    - The presence/staleness `refresh` set (18x) - settled transactions whose record rows are
+      missing or stale because `expand` or a field approval arrived AFTER the window folded. Their
+      facts did not change, so the row values come from `stored_by_txn`.
+    - REVERSALS delete their record rows UNCONDITIONALLY - before and regardless of the `expanded`
+      gate - because a parent fact that vanishes must take its records with it even when expand was
+      turned off in between (invariant 5, one grain down; the alternative is permanent orphans in a
+      KEEP_FOREVER table that a record rollup would silently count). An event-time move is
+      reverse+insert at the diff (the key carries event_time), so this covers it too.
+
+    Replace-per-transaction rather than upsert-per-record. A re-expansion may produce FEWER records
+    than the last one, and an upsert keyed on `(transaction, index)` would leave the tail of the
+    previous expansion behind forever.
+
+    Approval is the same allowlist the scalar grain uses (`source = "record"`); every row is stamped
+    with the expansion version it was written under (`_exp_v`), which is what lets the next fold
+    prove it current without reading entries.
+    """
+    deleted = 0
+    hours: set = set()
+    dates: set = set()
+    for o in outcomes:
+        if o.action is not dd.Action.reverse or not o.stored:
+            continue
+        event_time = o.stored.get("event_time")
+        result = await db.execute(delete(AnalyticsRecordFact).where(
+            AnalyticsRecordFact.customer_code == customer_code,
+            AnalyticsRecordFact.source_transaction_id == o.stored["source_transaction_id"],
+            AnalyticsRecordFact.event_time.is_(None) if event_time is None
+            else AnalyticsRecordFact.event_time == event_time))
+        if result.rowcount:
+            deleted += result.rowcount
+            if event_time is not None:
+                hours.add(event_time)
+            if o.stored.get("business_date") is not None:
+                dates.add(o.stored["business_date"])
+
+    if not expanded:
+        return {"records": 0, "transactions": 0, "deleted": deleted,
+                "hours": hours, "dates": dates}
+
+    changed_facts = [o.fact for o in outcomes
+                     if o.action in (dd.Action.insert, dd.Action.update) and o.fact is not None]
+    processed = {f["source_transaction_id"] for f in changed_facts}
+    refresh_facts = [stored_by_txn[tid] for tid in refresh
+                     if tid not in processed and tid in stored_by_txn]
 
     rows, touched = [], []
-    for o in changed:
-        fact = o.fact
-        if fact is None or fact.get("transaction_name") not in expanded:
+    for fact in (*changed_facts, *refresh_facts):
+        if fact.get("transaction_name") not in expanded:
             continue
         txn_id = fact["source_transaction_id"]
         recs = pl.records(by_txn.get(txn_id, ()))
@@ -489,6 +591,10 @@ async def _expand_records(db: AsyncSession, customer_code: str, *, outcomes,
                            "threshold - check whether `expand` is ticked on the right transaction",
                            customer_code, txn_id, len(recs), pl.LOUD_EXPANSION)
         touched.append((txn_id, fact.get("event_time")))
+        if fact.get("event_time") is not None:
+            hours.add(fact["event_time"])
+        if fact.get("business_date") is not None:
+            dates.add(fact["business_date"])
         for index, rec in enumerate(recs):
             kept, _unknown = pl.select(rec["attributes"], approved)
             if rec["attributes"]:
@@ -501,7 +607,8 @@ async def _expand_records(db: AsyncSession, customer_code: str, *, outcomes,
                 "event_time": fact.get("event_time"), "business_date": fact.get("business_date"),
                 "method": fact.get("method"), "transaction_name": fact.get("transaction_name"),
                 "mi_program": rec["mi_program"], "mi_transaction": rec["mi_transaction"],
-                "attributes": kept, "created_at": datetime.now(timezone.utc),
+                "attributes": {**kept, _EXP_V_KEY: exp_v},
+                "created_at": datetime.now(timezone.utc),
             })
 
     for txn_id, event_time in touched:
@@ -512,7 +619,8 @@ async def _expand_records(db: AsyncSession, customer_code: str, *, outcomes,
             else AnalyticsRecordFact.event_time == event_time))
     if rows:
         await db.execute(pg_insert(AnalyticsRecordFact), rows)
-    return {"records": len(rows), "transactions": len(touched)}
+    return {"records": len(rows), "transactions": len(touched), "deleted": deleted,
+            "hours": hours, "dates": dates}
 
 
 async def _quarantine(db: AsyncSession, customer_code: str, issues: Sequence[Mapping[str, Any]],
@@ -607,6 +715,7 @@ async def _source_watermark(db: AsyncSession, customer_code: str) -> datetime | 
 
 
 async def _update_state(db: AsyncSession, customer_code: str, *, folded: dict, quarantined: int,
+                        records_net: int,
                         event_watermark: datetime | None, history_start: datetime | None,
                         source_watermark: datetime | None, frontier: datetime | None,
                         settledness: tuple[Decimal | None, datetime | None],
@@ -632,6 +741,7 @@ async def _update_state(db: AsyncSession, customer_code: str, *, folded: dict, q
         "source_write_frontier": frontier,
         "unsealed_share": share, "oldest_unsealed_at": oldest_unsealed,
         "facts_total": max(net_facts, 0), "quarantined_rows": quarantined,
+        "record_facts_total": max(records_net, 0),
         "revision": 1, "last_cycle_at": now, "last_error": None, "updated_at": now,
     }
     stmt = pg_insert(AnalyticsTenantState).values(**values)
@@ -655,6 +765,7 @@ async def _update_state(db: AsyncSession, customer_code: str, *, folded: dict, q
             "unsealed_share": stmt.excluded.unsealed_share,
             "oldest_unsealed_at": stmt.excluded.oldest_unsealed_at,
             "facts_total": AnalyticsTenantState.facts_total + net_facts,
+            "record_facts_total": AnalyticsTenantState.record_facts_total + records_net,
             "quarantined_rows": AnalyticsTenantState.quarantined_rows + quarantined,
             # A5: one authoritative revision per tenant, bumped in the same commit as the work it
             # describes. Cache validation keys off it, so a revision that moved without the data
@@ -757,8 +868,16 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         stored = await _read_stored(db, customer_code, window, suppressed)
         stored_by_txn = {r["source_transaction_id"]: r for r in stored}
 
+        # R4/18x. MOVED above the entry read (it used to sit just before `_expand_records`), because
+        # the record grain's presence diff decides which SETTLED transactions need their entries
+        # re-read - and a switch is read once per run (the race rule at the top of this block).
+        expanded = await capture.expanded_names(db, customer_code)
+        exp_v = _expansion_version(await capture.approved_record_fields(db, customer_code))
+        refresh = await _records_needing_expansion(db, customer_code, window, expanded,
+                                                   stored_by_txn, exp_v)
+
         needs = {row["id"] for row in source_rows
-                 if _needs_entries(row, stored_by_txn.get(row["id"]))}
+                 if _needs_entries(row, stored_by_txn.get(row["id"]))} | refresh
         by_txn = await _read_response_entries(db, customer_code, window, only=needs)
 
         # Extract FIRST, register SECOND, read the approvals THIRD. The order is load-bearing and was
@@ -822,11 +941,12 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         folded = await _apply(db, customer_code, outcomes, now)
 
         # R4. After the facts, because it is driven by their diff verdicts, and inside the same
-        # transaction so a record set can never describe a fact that was rolled back.
-        expanded = await capture.expanded_names(db, customer_code)
+        # transaction so a record set can never describe a fact that was rolled back. (`expanded`
+        # itself was read once, above the entry read - the presence diff needed it there.)
         record_stats = await _expand_records(
             db, customer_code, outcomes=outcomes, by_txn=by_txn, expanded=expanded,
-            approved=approved, discovered=discovered)
+            approved=approved, discovered=discovered, stored_by_txn=stored_by_txn,
+            refresh=refresh, exp_v=exp_v)
         # Discovery runs a second time because record fields were only just observed. Idempotent by
         # ON CONFLICT DO NOTHING, so the scalar names offered again cost nothing.
         await capture.observe_fields(db, customer_code, discovered, source="record")
@@ -835,6 +955,7 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
 
         await _update_state(
             db, customer_code, folded=folded, quarantined=quarantined,
+            records_net=record_stats["records"] - record_stats["deleted"],
             event_watermark=max((f["event_time"] for f in facts if f["event_time"]), default=None),
             history_start=min((f["event_time"] for f in facts if f["event_time"]), default=None),
             source_watermark=await _source_watermark(db, customer_code),
@@ -853,7 +974,9 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
 
     return {**folded, "quarantined": quarantined, "source_rows": len(source_rows),
             "consumed": len(tickets), "definitions_rolled": rolled["definitions"],
-            "buckets_rolled": rolled["buckets"]}
+            "buckets_rolled": rolled["buckets"],
+            "record_facts": record_stats["records"],
+            "record_facts_deleted": record_stats["deleted"]}
 
 
 async def _record_failure(customer_code: str, tickets: Sequence[AnalyticsPendingWindow],
@@ -898,7 +1021,8 @@ async def consume_tenant(customer_code: str) -> dict:
 
     stats = {"runs": 0, "inserted": 0, "updated": 0, "unchanged": 0, "reversed": 0,
              "quarantined": 0, "source_rows": 0, "consumed": 0, "failed": 0, "abandoned": 0,
-             "definitions_rolled": 0, "buckets_rolled": 0}
+             "definitions_rolled": 0, "buckets_rolled": 0,
+             "record_facts": 0, "record_facts_deleted": 0}
     if not tickets:
         return stats
 

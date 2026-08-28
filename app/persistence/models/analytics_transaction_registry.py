@@ -18,7 +18,7 @@ Three switches, because they have opposite economics
              Free and fully reversible: the facts were captured all along, so switching it on fills in
              complete history at the cost of one recompute.
 
-    expand   gates per-record expansion of `mi_result.records[]` (R4, not built).
+    expand   gates per-record expansion of `mi_result.records[]` into `analytics_record_facts` (R4; fold and read since R4b, 18x/18y).
              This is the ~200k rows/day one, so it is opt-in per transaction.
 
 `transaction_name IS NULL` gets NO ROW

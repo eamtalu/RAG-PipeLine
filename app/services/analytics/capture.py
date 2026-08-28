@@ -298,3 +298,20 @@ async def hidden_names_for(customer_code: str) -> frozenset[str]:
     """`hidden_names` for a caller with no session of its own."""
     async with async_session() as db:
         return await hidden_names(db, customer_code)
+
+
+async def approved_record_fields(db: AsyncSession, customer_code: str) -> frozenset[str]:
+    """The approved `rec.*` subset only, for the record grain's expansion-version hash (18x).
+
+    Read SEPARATELY from `approved_attributes`, and that is safe where a second read of a switch
+    would not be: no `rec.*` name is on the seed list (`payload.SEED_FIELDS`), and record fields are
+    only ever observed inside `_expand_records` with `captured=false`, so this subset cannot change
+    mid-run through seeding. The run-wide `approved_attributes` read stays the single source used to
+    SELECT values; this one only decides whether stored record rows are stale.
+    """
+    rows = (await db.execute(
+        select(AnalyticsFieldRegistry.field).where(
+            AnalyticsFieldRegistry.customer_code == customer_code,
+            AnalyticsFieldRegistry.captured.is_(True),
+            AnalyticsFieldRegistry.field.like("rec.%")))).scalars().all()
+    return frozenset(rows)

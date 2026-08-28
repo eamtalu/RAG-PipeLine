@@ -118,6 +118,7 @@ async def analytics_status(response: Response,
         "queue": {"open_tickets": state.open_tickets,
                   "abandoned_tickets": state.abandoned_tickets},
         "volume": {"facts_total": state.facts_total,
+                   "record_facts_total": state.record_facts_total,
                    "quarantined_rows": state.quarantined_rows},
         "last_cycle_at": _iso(state.last_cycle_at),
         "last_error": state.last_error,
@@ -387,7 +388,7 @@ async def set_transaction_switches(transaction_name: str, payload: dict = Body(.
         raise HTTPException(404, f"analytics has not seen a transaction named {transaction_name!r} "
                                  f"for this logspace, so there is nothing to configure")
 
-    before = (row.capture, row.show)
+    before = (row.capture, row.show, row.expand)
     for field in ("capture", "show", "expand"):
         if field in payload:
             setattr(row, field, bool(payload[field]))
@@ -396,12 +397,14 @@ async def set_transaction_switches(transaction_name: str, payload: dict = Body(.
     row.updated_at = datetime.now(timezone.utc)
 
     # A ticket only when a switch that changes stored data actually moved, and only in the direction
-    # that needs work. Publishing unconditionally would re-fold the retention window every time
-    # somebody ticked `expand`, which changes nothing until R4 exists.
+    # that needs work. `expand` ON needs the retention range re-examined so the record grain
+    # BACKFILLS (18x: the presence diff expands settled windows through ordinary tickets); OFF
+    # publishes nothing - existing record rows are deliberately kept, capture-off semantics.
     published = 0
     turned_capture_on = (not before[0]) and row.capture
     show_changed = before[1] != row.show
-    if turned_capture_on or show_changed:
+    turned_expand_on = (not before[2]) and row.expand
+    if turned_capture_on or show_changed or turned_expand_on:
         frontier = await db.scalar(
             select(AnalyticsTenantState.source_watermark).where(
                 AnalyticsTenantState.customer_code == customer))
@@ -561,6 +564,7 @@ async def transaction_registry_detail(transaction_name: str,
     because "mentions this name" and "covers everything anyway" answer different questions.
     """
     from app.persistence.models.analytics_fact import AnalyticsFact
+    from app.persistence.models.analytics_record_fact import AnalyticsRecordFact
     from app.persistence.models.log_transaction import LogTransaction
 
     row = await db.scalar(
@@ -594,6 +598,13 @@ async def transaction_registry_detail(transaction_name: str,
         .where(AnalyticsFact.customer_code == customer,
                AnalyticsFact.transaction_name == transaction_name))).one()
 
+    # 18x: the record grain's volume for this name - what `expand` has actually produced. Same
+    # index-only justification as the fact count (ix_analytics_record_facts_customer_txn_event).
+    record_count = await db.scalar(
+        select(func.count()).select_from(AnalyticsRecordFact)
+        .where(AnalyticsRecordFact.customer_code == customer,
+               AnalyticsRecordFact.transaction_name == transaction_name)) or 0
+
     metric_rows = (await db.execute(
         select(AnalyticsMetric).where(AnalyticsMetric.customer_code == customer)
         .order_by(AnalyticsMetric.name).limit(200))).scalars().all()
@@ -622,5 +633,6 @@ async def transaction_registry_detail(transaction_name: str,
         "field_count": len(fields),
         "facts": {"count": facts[0] or 0,
                   "first_event_at": _iso(facts[1]), "last_event_at": _iso(facts[2])},
+        "records": {"count": record_count},
         "metrics": {"referencing": referencing, "apply_to_all": apply_to_all},
     }
