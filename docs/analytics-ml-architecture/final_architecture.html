@@ -72,7 +72,7 @@
     <strong>Rendered companion document.</strong>
     The authoritative source is
     <code>docs/analytics-ml-architecture/final_architecture.md</code>.
-    This file renders PART I (the system as built); the full design history (Part II, sections 1-18r) lives in the Markdown.
+    This file renders PART I (the system as built); the full design history (Part II, sections 1-18s) lives in the Markdown.
     If the two disagree, the Markdown wins.
   </div>
 </div>
@@ -290,8 +290,12 @@ Sealed means "this row will not change again" - the promise behind the dashboard
 <h3>5.7 The rebuild lane and the head lane</h3>
 <p>Everything above is the <strong>rebuild lane</strong>: any change is handled by re-deriving a padded window and writing only the difference.
 It is the only lane that exists today, and since S3 it is cheap.</p>
-<p>The <strong>head lane</strong> is the planned next step (section 18q, P4, <span class="tag p">not built</span>):
-a fast path processing only brand-new entries at the head of the stream against saved open-stream state, appending one assignment per entry, with any surprise routed back to the rebuild lane.
+<p>The <strong>head lane</strong> is built and shipping in SHADOW (chunk 72, <span class="tag g">built - in shadow</span>):
+a fast path processing only brand-new entries at the head of the stream against saved open-stream state (<code>log_open_stream</code>) and the per-tenant stitch checkpoint (<code>log_stitch_checkpoint</code>), planning one update per continued conversation and one insert per new one, with any surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream) routed back to the rebuild lane by name.
+Governed by <code>stage2_head_lane</code> = off / shadow / on: the plan is built for every eligible window, the rebuild executes as the authority, and the two are compared - a DIVERGED line in the journal is what stops <code>on</code>.</p>
+<p>The comparison is <strong>horizon-aware</strong> (chunk 73, section 18s): the rebuild legitimately sees more than the plan - its padded read reaches 900&nbsp;s past the window's high edge, and Stage&nbsp;1 keeps committing lines between the plan and the rebuild - so the shadow asks two questions that are well-defined across that difference.
+<em>Ownership, always:</em> every line the plan assigned must sit in the same transaction the authority put it in.
+<em>Fingerprints, only on a shared horizon:</em> byte-identical digests are demanded exactly where the authority's final member set equals the planned set; a transaction the rebuild extended past the plan's horizon is checked by ownership alone.
 Its benefit is read cost and latency, not correctness; the rebuild lane stays the authority.</p>
 <p><span class="tbl-own">Tables</span> <code>log_transactions</code> (daily) · <code>log_entry_assignment</code> (daily) · <code>log_open_stream</code> · <code>log_pending_request</code> · <code>log_regroup_runs</code> · <span class="tag q">queue</span><code>analytics_pending_windows</code></p>
 
@@ -400,7 +404,7 @@ Exceeding 500,000 rows raises instead of truncating.</p>
 | + sealer (finality)  + stream_state (S4 shadow)  + cross-pad extension    |
 |   log_transactions      the PROJECTION (update-in-place, daily parts)     |
 |   log_entry_assignment  entry -> transaction membership (daily parts)     |
-|   log_open_stream       saved open-stream state (S4 / future head lane)   |
+|   log_open_stream       saved open-stream state (S4 / head lane)   |
 |   log_pending_request   saved unmatched requests                          |
 |   log_regroup_runs      manual run status                                 |
 |   analytics_pending_windows  QUEUE -> analytics (backoff, dead letter)    |
@@ -543,22 +547,22 @@ The <strong>head lane</strong> is the fast path (chunk 72, <span class="tag g">b
 
 <p><strong>Panel 2 - what the head lane remembers instead.</strong></p>
 <pre>
- the FRONTIER: "I have processed every line up to here"
+ the CHECKPOINT (table: log_stitch_checkpoint): "stitched through here"
  ────■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■□□□
                                                      ▲    new  NOW
-                                                 FRONTIER
+                                                CHECKPOINT
 
  the PARKED OPEN STREAMS (table: log_open_stream):
    (BEC01, thread 45, user amin) -> transaction A, still open, last 14:53:07
    (BEC02, thread 33, user sara) -> transaction B, still open, last 14:53:09
 
- for each NEW line after the frontier:
+ for each NEW line after the checkpoint:
    continues a parked stream?   YES -> append ONE membership row,
                                        UPDATE that one open transaction
                                 NO  -> INSERT a new transaction
    anything surprising?         -> STOP GUESSING, hand the range to the
       (older timestamp than the      REBUILD LANE - never improvise
-       frontier, gap exceeded,
+       checkpoint, gap exceeded,
        anonymous stream, any of
        the six known miss modes)
 </pre>
@@ -603,12 +607,12 @@ Picker amin scans; three lines arrive over two fetches:</p>
                      unchanged again.
 
  HEAD LANE (planned):
-   fetch 1 -> two lines after the frontier; no parked stream matches ->
+   fetch 1 -> two lines after the checkpoint; no parked stream matches ->
               INSERT txn A [request, body]; park stream (BEC01, 45, amin);
-              advance frontier. Nothing else read.
+              advance the checkpoint. Nothing else read.
    fetch 2 -> one line; parked stream matches (same server, same user,
               within the 300s gap) -> append membership, UPDATE txn A to
-              success; close and unpark the stream; advance frontier.
+              success; close and unpark the stream; advance the checkpoint.
 
  SAME final transaction, byte for byte. Different cost:
    rebuild lane read  ~thousands of lines per tick to get there;
@@ -785,7 +789,7 @@ The rebuild's whole lifecycle, from click to notification:</p>
 </ol>
 
 <p style="margin-top:40px;color:var(--ink-3);font-size:13px;">
-For the full design history - iteration 1, the iteration-2 plan, every as-built record and incident (sections 1 to 18r) - read Part II of
+For the full design history - iteration 1, the iteration-2 plan, every as-built record and incident (sections 1 to 18s) - read Part II of
 <code>final_architecture.md</code>.
 </p>
 

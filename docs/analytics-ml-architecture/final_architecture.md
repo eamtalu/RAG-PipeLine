@@ -10,7 +10,7 @@ The document has two parts:
   A plain-English, fact-checked guide to how the software works today, from the SSH pull to the ML pipeline.
   Start here.
 - **PART II - The design history.**
-  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18r), preserved verbatim because code comments and tests cite these section numbers.
+  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18s), preserved verbatim because code comments and tests cite these section numbers.
 
 # PART I. The system as built: a plain-English guide
 
@@ -266,9 +266,12 @@ Everything described above is the **rebuild lane**: any change, however small, i
 It is the only lane that exists today, and since S3 it is cheap (unchanged rows cost no writes).
 
 The **head lane** is BUILT and shipping in SHADOW (chunk 72):
-a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the frontier, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream) routed back to the rebuild lane by name.
+a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream) routed back to the rebuild lane by name.
 Governed by `stage2_head_lane` = off / shadow / on, shipped as shadow: the plan is built for every eligible window, the rebuild executes as the authority, and the two are compared - a DIVERGED line in the journal is what stops `on`.
-The equivalence bar is the strictest available: after a head-lane apply, a rebuild of the same window must report every transaction unchanged (byte-identical fingerprints), certified by the authority itself.
+The comparison is HORIZON-AWARE (chunk 73, section 18s): the rebuild legitimately sees more than the plan (its padded read reaches 900 seconds past the window's high edge, and Stage 1 keeps committing lines between the plan and the rebuild), so the shadow asks two questions that are well-defined across that difference.
+First, ownership, always: every line the plan assigned must sit in the same transaction the authority put it in - the question promotion actually hangs on.
+Second, fingerprints, only on a shared horizon: byte-identical digests are demanded exactly where the authority's final member set equals the planned set; a transaction the rebuild extended past the plan's horizon is checked by ownership alone, because its digests describe a different entry set by construction.
+The equivalence bar for writing stays the strictest available: after a head-lane apply, a rebuild of the same window must report every transaction unchanged (byte-identical fingerprints), certified by the authority itself.
 Its benefit is read cost and latency, not correctness; the rebuild lane remains the authority.
 Section 11.5 walks both lanes panel by panel, with a worked example - read that if this paragraph is not enough.
 
@@ -575,23 +578,23 @@ Every worker tick re-reads a window of recent history just to discover that almo
 Instead of re-deriving the recent past, it keeps two pieces of durable memory:
 
 ```
- the FRONTIER: "I have processed every line up to here"
+ the CHECKPOINT (table: log_stitch_checkpoint): "stitched through here"
  ────■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■□□□
                                                      ▲    new  NOW
-                                                 FRONTIER
+                                                CHECKPOINT
 
  the PARKED OPEN STREAMS (table: log_open_stream):
    (BEC01, thread 45, user amin) -> transaction A, still open, last line 14:53:07
    (BEC02, thread 33, user sara) -> transaction B, still open, last line 14:53:09
 
- for each NEW line after the frontier:
+ for each NEW line after the checkpoint:
 
    continues a parked stream?   YES -> append ONE membership row,
                                        UPDATE that one open transaction
                                 NO  -> INSERT a new transaction
    anything surprising?         -> STOP GUESSING, hand the range to the
       (older timestamp than the      REBUILD LANE - never improvise
-       frontier, gap exceeded,
+       checkpoint, gap exceeded,
        anonymous stream, any of
        the six known miss modes)
 ```
@@ -643,10 +646,10 @@ Picker amin scans; three lines arrive over two fetches:
  HEAD LANE (planned):
    fetch 1 -> two lines after the frontier; no parked stream matches ->
               INSERT txn A [request, body]; park stream (BEC01, 45, amin);
-              advance frontier. Nothing else read.
+              advance the checkpoint. Nothing else read.
    fetch 2 -> one line; parked stream matches (same server, same user,
               within the 300s gap) -> append membership, UPDATE txn A to
-              success; close and unpark the stream; advance frontier.
+              success; close and unpark the stream; advance the checkpoint.
 
  SAME final transaction, byte for byte. Different cost:
    rebuild lane read  ~thousands of lines per tick to get there;
@@ -845,7 +848,7 @@ Honest imperfections found while fact-checking this part; none is currently caus
 
 # PART II. The design history
 
-Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18r).
+Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18s).
 It explains WHY the system is shaped the way Part I describes.
 Where the two disagree, Part I is current and the section here records what was believed at the time.
 
@@ -3970,3 +3973,37 @@ The flagship end-to-end test reproduces the exact live strand - two-phase per-fi
 After deploying, run a FULL regroup for the tenant (`POST /logs/regroup`): every transaction is freed, so no clash is possible, the chimeras dissolve into their real per-server operations, all 5,353 orphans are stitched, and the per-tenant analytics ticket restates every affected fact through the ordinary diff (the ledger keeps the history, ML pins stay reproducible).
 Expect the version bump to rewrite each surviving row once, and the facts for affected days to shift SLIGHTLY UPWARD (operations that were mashed into one are now counted as two).
 The standing alarm afterwards: the unassigned-entry count and the clash warning should both flatline at zero; any recurrence is a new mechanism, not this one.
+
+## 18s. The head-lane shadow's false alarms: horizon-aware comparison, 2026-08-28. Chunk 73.
+
+The chunk-72 head lane deployed in shadow mode and immediately scored 4 DIVERGED out of 5 windows on live traffic, with both lanes demonstrably healthy (queues empty, zero orphans, facts flowing).
+Forensics on the diverged transactions found the comparison at fault, not the lanes - the same window-boundary artifact class chunk 66 removed from the reconciler.
+
+### The mechanism
+
+The shadow compared the plan's fingerprints per transaction id against the rows the rebuild persisted for the same window.
+But the two lanes never see the same world on a live tenant, for three structural reasons:
+
+1. The rebuild's padded read reaches 900 seconds PAST the window's high edge, so it folds in lines that belong to the NEXT window.
+   Live proof: transaction `6dfc0f04` persisted with 321 entries, of which 192 lay beyond the window hi the plan was built for.
+2. The rebuild frees and re-derives history below the window floor, folding freed below-floor entries into transactions the plan could only continue from parked state.
+3. Stage 1 keeps committing: in-window lines can land between `build_plan` and `regroup_window`, visible to the second and not the first.
+
+The plan is a claim about horizon `hi` over the entries that existed at plan time; the persisted row describes whatever the rebuild saw milliseconds-to-seconds later, up to `hi + 900s`.
+Fingerprints across those two horizons differ for perfectly healthy windows, so the shadow could never earn the promotion it exists to gate.
+Worse, the old comparison was simultaneously BLIND to the failure it should catch: it never looked at which entries a transaction held, so a plan that grouped an entry into the wrong conversation - the one divergence that would actually change the system's output - passed as long as the fingerprints it computed were self-consistent.
+
+### The fix (chunk 73)
+
+`shadow_compare` now asks two questions that are well-defined across the horizon difference:
+
+- **Ownership, always.** Every entry the plan assigned must sit in the SAME transaction the authority put it in (checked against `log_entry_assignment`).
+  This is the question promotion hangs on: would the head lane have grouped differently?
+- **Fingerprints, only on a shared horizon.** Byte-identical row/members digests are demanded exactly where the authority's final member set equals the planned set.
+  A transaction the rebuild extended past the plan's horizon is checked by ownership alone, and the AGREED line reports how many were extended so the coverage is visible rather than silent.
+
+The DIVERGED line now names the evidence (which entry went where, which digest differed on identical members) instead of an opaque id list.
+The `rebuilt ids missing from the plan` check was retired: on a live tenant the rebuild always creates transactions from entries the plan never saw (late-ingested, pad-folded, freed history), so the check was pure noise, and its intent - the plan must not miss work - is already guaranteed by construction (the plan reads EVERY unassigned entry in its window, and each one lands in a planned transaction, so the ownership check covers them all).
+
+Four tests pin it (`test_head_lane_shadow_chunk73.py`): the beyond-horizon fold and the late-arrival race must AGREE; a wrongly-grouped entry and a digest that differs on identical members must DIVERGE.
+The apply-path equivalence bar (a rebuild after a head-lane apply must report all-unchanged) is untouched.

@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
 from app.persistence.models.log_entry import LogEntry
+from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_stitch_checkpoint import LogStitchCheckpoint
 from app.persistence.models.log_transaction import LogTransaction
 from app.services.analytics import pending_windows as analytics_tickets
@@ -281,33 +282,62 @@ async def apply_plan(customer_code: str, plan: HeadPlan) -> dict:
 
 
 async def shadow_compare(customer_code: str, plan: HeadPlan) -> bool:
-    """After the rebuild (the authority) executed the same window: does the plan's world match?
+    """After the rebuild (the authority) executed the same window: did the head lane make the same
+    decisions for the entries it actually saw?
 
-    Fingerprint equality per planned id, plus 'no transaction the rebuild created in the window is
-    missing from the plan'. Logged either way; a DIVERGED line is the signal that stops `on`."""
+    The comparison is HORIZON-AWARE (chunk 73). The rebuild legitimately sees more than the plan:
+    its padded read reaches 900s past the window's high edge, it re-reads freed history below the
+    floor, and Stage 1 keeps committing in-window lines between the plan and the rebuild. Live
+    forensics showed 4 of 5 windows falsely DIVERGED on exactly that (one transaction had 192 of
+    321 entries beyond the window hi) - the same window-boundary artifact class the reconciler had
+    before chunk 66. Judging the plan against the authority's wider world flags healthy windows
+    forever, so the shadow asks two questions that ARE well-defined:
+
+    - **Ownership, always.** Every entry the plan assigned must sit in the SAME transaction the
+      authority put it in. This is the question promotion hangs on: would the head lane have
+      grouped differently?
+    - **Fingerprints, only on a shared horizon.** Byte-identical row/members digests are demanded
+      exactly where the authority's final member set equals the planned set. A transaction the
+      rebuild extended past the plan's horizon is checked by ownership alone - its digests
+      describe a different entry set by construction.
+
+    Logged either way; a DIVERGED line is the signal that stops `on`."""
+    planned_txns = list(plan.continued) + list(plan.created)
+    owner_of = {e.id: c.txn_id for c in planned_txns for e in c.entries}
+    txn_ids = [c.txn_id for c in planned_txns]
     async with async_session() as db:
-        planned = {c.txn_id: (c.row_fp, c.members_fp) for c in plan.continued} | {
-            c.txn_id: (c.row_fp, c.members_fp) for c in plan.created}
-        rows = {r.id: (r.row_fingerprint, r.members_fingerprint) for r in (await db.execute(
+        actual = {r.entry_id: r.transaction_id for r in (await db.execute(
+            select(LogEntryAssignment.entry_id, LogEntryAssignment.transaction_id)
+            .where(LogEntryAssignment.entry_id.in_(list(owner_of))))).all()} if owner_of else {}
+        member_counts = {r.transaction_id: r.n for r in (await db.execute(
+            select(LogEntryAssignment.transaction_id,
+                   func.count().label("n"))
+            .where(LogEntryAssignment.transaction_id.in_(txn_ids))
+            .group_by(LogEntryAssignment.transaction_id))).all()} if txn_ids else {}
+        stored_fps = {r.id: (r.row_fingerprint, r.members_fingerprint) for r in (await db.execute(
             select(LogTransaction.id, LogTransaction.row_fingerprint,
                    LogTransaction.members_fingerprint)
-            .where(LogTransaction.id.in_(list(planned))))).all()} if planned else {}
-        rebuilt_new = set((await db.execute(
-            select(LogTransaction.id).where(
-                LogTransaction.customer_code == customer_code,
-                LogTransaction.started_at >= plan.lo,
-                LogTransaction.started_at <= plan.hi))).scalars().all())
-    mismatched = [str(t) for t, fps in planned.items() if rows.get(t) != fps]
-    missing = [str(t) for t in rebuilt_new
-               if t not in planned and t not in {c.txn_id for c in plan.continued}]
-    agreed = not mismatched and not missing
+            .where(LogTransaction.id.in_(txn_ids)))).all()} if txn_ids else {}
+
+    wrong_owner = [f"entry {eid} planned {owner_of[eid]} actual {actual.get(eid, 'unassigned')}"
+                   for eid in owner_of if actual.get(eid) != owner_of[eid]]
+    same_horizon = [c for c in planned_txns
+                    if member_counts.get(c.txn_id, 0) == len(c.entries)
+                    and all(actual.get(e.id) == c.txn_id for e in c.entries)]
+    fp_mismatch = [f"txn {c.txn_id} row_fp {c.row_fp}!={stored_fps.get(c.txn_id, (None, None))[0]} "
+                   f"members_fp {c.members_fp}!={stored_fps.get(c.txn_id, (None, None))[1]}"
+                   for c in same_horizon if stored_fps.get(c.txn_id) != (c.row_fp, c.members_fp)]
+    extended = len(planned_txns) - len(same_horizon)
+
+    agreed = not wrong_owner and not fp_mismatch
     if agreed:
         logger.info("Stage 2 head lane [%s]: shadow AGREED for %s..%s - %d continuation(s), "
-                    "%d creation(s)", customer_code, plan.lo, plan.hi,
-                    len(plan.continued), len(plan.created))
+                    "%d creation(s), %d transaction(s) extended past the horizon by the rebuild "
+                    "(ownership-only)", customer_code, plan.lo, plan.hi,
+                    len(plan.continued), len(plan.created), extended)
     else:
-        logger.warning("Stage 2 head lane [%s]: shadow DIVERGED for %s..%s - %d fingerprint "
-                       "mismatch(es) %s, %d rebuilt id(s) missing from the plan %s. Not promoting.",
-                       customer_code, plan.lo, plan.hi, len(mismatched), mismatched[:3],
-                       len(missing), missing[:3])
+        logger.warning("Stage 2 head lane [%s]: shadow DIVERGED for %s..%s - %d entry "
+                       "ownership mismatch(es) %s, %d same-horizon fingerprint mismatch(es) %s. "
+                       "Not promoting.", customer_code, plan.lo, plan.hi,
+                       len(wrong_owner), wrong_owner[:3], len(fp_mismatch), fp_mismatch[:3])
     return agreed
