@@ -10,7 +10,7 @@ The document has two parts:
   A plain-English, fact-checked guide to how the software works today, from the SSH pull to the ML pipeline.
   Start here.
 - **PART II - The design history.**
-  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18z), preserved verbatim because code comments and tests cite these section numbers.
+  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18aa), preserved verbatim because code comments and tests cite these section numbers.
 
 # PART I. The system as built: a plain-English guide
 
@@ -266,7 +266,7 @@ Everything described above is the **rebuild lane**: any change, however small, i
 It is the only lane that exists today, and since S3 it is cheap (unchanged rows cost no writes).
 
 The **head lane** is BUILT and shipping in SHADOW (chunk 72):
-a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream, a parked stream that is already closed, a parked stream whose entries cannot be reloaded) routed back to the rebuild lane by name, and each declined window writes one journal line naming its reason (chunk 75).
+a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream, a parked stream that is already closed or request-less, a parked stream whose entries cannot be reloaded) routed back to the rebuild lane by name, and each declined window writes one journal line naming its reason (chunk 75).
 Governed by `stage2_head_lane` = off / shadow / on, shipped as shadow: the plan is built for every eligible window, the rebuild executes as the authority, and the two are compared - a DIVERGED line in the journal is what stops `on`.
 The comparison is HORIZON-AWARE (chunk 73, section 18s): the rebuild legitimately sees more than the plan (its padded read reaches 900 seconds past the window's high edge, and Stage 1 keeps committing lines between the plan and the rebuild), so the shadow asks two questions that are well-defined across that difference.
 First, ownership, always: every line the plan assigned must sit in the same transaction the authority put it in - the question promotion actually hangs on.
@@ -852,7 +852,7 @@ Honest imperfections found while fact-checking this part; none is currently caus
 
 # PART II. The design history
 
-Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18z).
+Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18aa).
 It explains WHY the system is shaped the way Part I describes.
 Where the two disagree, Part I is current and the section here records what was believed at the time.
 
@@ -4162,3 +4162,16 @@ Mechanism, two halves:
 
 The fix: the live tier folds by the REQUESTED group-by (`contract.resolve_field` reads plain columns and `attr:` paths alike, so one line serves both grains), and an ad-hoc request is served ENTIRELY from the bounded live scan - no rollup is keyed by the requested field, so none may contribute.
 The dashboard's default breakdown (by item, by warehouse, by user - none of them seed-metric dimensions) had been affected since the read API shipped; the padded dim-slot arity is trimmed to the requested arity so live and rollup keys merge instead of doubling buckets on the non-ad-hoc path.
+
+## 18aa. Three fixes from R4b's live verification, 2026-08-29. Chunk 82.
+
+1. **The daily live-edge seam (shared read planner, both grains).**
+   `plan_read`'s daily branch stated "daily buckets are keyed on the tenant-LOCAL business_date" and then computed UTC dates: the settled/live boundary sat at UTC midnight while the buckets turn over at LOCAL midnight, so the offset hour at the live edge was served by NEITHER tier.
+   Found by 18z's exact SQL cross-check - a midnight balance snapshot (18,673 units) vanished from the chart; it healed at the next day's settling, which is why nothing ever caught it.
+   `plan_read` now takes the tenant timezone as a parameter (still pure) and aligns the boundary to LOCAL day floors; a whole-local-day rule also corrects the start edge (a day beginning before the window is served live, not over-served from its rollup) and the exact-midnight watermark quirk (a day is settled only when the watermark has passed its END).
+   UTC tenants keep byte-identical plans, pinned.
+2. **Request-less parked streams (head lane fallback `parked_requestless`).**
+   A parked conversation with no request line is inheritance context, not open work - seeded as open work it is usually its user's OLDEST candidate, so the response FIFO handed it every new response for that user (34 DIVERGED in 24 h, all this shape).
+   Never guess: the window routes to the rebuild lane by name.
+3. **`record_facts_total` drift.** The counter missed the replace-per-transaction path's deletions, so every re-expansion double-counted (live: 1,730,110 counted vs 1,641,626 actual).
+   Deletions are now counted; the live counter needs one corrective UPDATE after deploy.

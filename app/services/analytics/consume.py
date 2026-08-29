@@ -612,11 +612,14 @@ async def _expand_records(db: AsyncSession, customer_code: str, *, outcomes,
             })
 
     for txn_id, event_time in touched:
-        await db.execute(delete(AnalyticsRecordFact).where(
+        replaced = await db.execute(delete(AnalyticsRecordFact).where(
             AnalyticsRecordFact.customer_code == customer_code,
             AnalyticsRecordFact.source_transaction_id == txn_id,
             AnalyticsRecordFact.event_time.is_(None) if event_time is None
             else AnalyticsRecordFact.event_time == event_time))
+        # Chunk 82: counted, or every re-expansion double-counts its rows in
+        # `record_facts_total` (live drift: 1,730,110 counted vs 1,641,626 actual).
+        deleted += replaced.rowcount or 0
     if rows:
         await db.execute(pg_insert(AnalyticsRecordFact), rows)
     return {"records": len(rows), "transactions": len(touched), "deleted": deleted,

@@ -158,6 +158,13 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
         if any(any(e.entry_type.value == "response" for e in state["entries_by_txn"][r.transaction_id])
                for r in parked):
             return _fall("parked_closed")
+        # Chunk 82: a parked stream with NO request line is inheritance context, not open work -
+        # seeded as open work it is usually its user's OLDEST candidate, so the response FIFO
+        # hands it every new response for that user (34 DIVERGED in 24h, all this shape). The
+        # authority, re-deriving from raw lines, binds those responses to their real
+        # conversations. Never guess: route the window to the rebuild lane.
+        if any(not r.has_request for r in parked):
+            return _fall("parked_requestless")
         txn_of_entry = {e.id: r.transaction_id
                         for r in parked for e in state["entries_by_txn"][r.transaction_id]}
         seed = {"streams": [

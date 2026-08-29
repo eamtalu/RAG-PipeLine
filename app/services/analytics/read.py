@@ -34,7 +34,8 @@ return nothing, which reads as "no data" rather than "that field does not exist"
 
 import logging
 from dataclasses import dataclass
-from datetime import date as date_type, datetime, timedelta, timezone
+from datetime import date as date_type, datetime, time as time_type, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from typing import Any
 
@@ -142,7 +143,8 @@ def _midnight(day: date_type) -> datetime:
     return datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
 
 
-def plan_read(window: UtcWindow, grain: str, *, watermark: datetime | None) -> ReadPlan:
+def plan_read(window: UtcWindow, grain: str, *, watermark: datetime | None,
+              tz: str | None = None) -> ReadPlan:
     """Split a request into a rollup half and a live half. PURE: no database, no clock.
 
     `watermark` is `analytics_tenant_state.analytics_watermark`, read ONCE by the caller. Everything at
@@ -167,19 +169,35 @@ def plan_read(window: UtcWindow, grain: str, *, watermark: datetime | None) -> R
         reason = "part of the window is past the analytics watermark and is read live"
 
     if grain == "daily":
-        # Daily buckets are keyed on the tenant-LOCAL business_date, so alignment is a DATE operation.
-        # Treating it as a UTC-midnight instant would mis-align every tenant that is not on UTC.
-        first = window.start.date() if window.start == _midnight(window.start.date()) \
-            else window.start.date() + timedelta(days=1)
+        # Daily buckets are keyed on the tenant-LOCAL business_date, so the settled/live boundary
+        # must sit at LOCAL midnight - expressed as a UTC instant through `tz`. The first version
+        # of this branch said exactly that in its comment and then computed UTC dates anyway, which
+        # left the offset hour at the live edge (23:00-00:00 UTC for London) served by NEITHER
+        # tier: its rows' business_date belongs to the first unsettled local day (outside the
+        # rollup read) while their event_time precedes the UTC-midnight live span. Found live in
+        # 18z's exact SQL cross-check - a midnight balance snapshot vanished from the chart. Still
+        # PURE: the zone arrives as a parameter, never fetched here.
+        zone = ZoneInfo(tz) if tz else timezone.utc
+
+        def day_floor(day: date_type) -> datetime:
+            return datetime.combine(day, time_type.min, tzinfo=zone).astimezone(timezone.utc)
+
+        start_date = window.start.astimezone(zone).date()
+        first = start_date if day_floor(start_date) >= window.start \
+            else start_date + timedelta(days=1)
         last_exclusive = min(settled_end, window.end)
-        last = last_exclusive.date() - timedelta(days=1) \
-            if last_exclusive != _midnight(last_exclusive.date()) else last_exclusive.date()
+        end_date = last_exclusive.astimezone(zone).date()
+        # A local day is settled only when the watermark has passed its END. (The UTC-era code
+        # also counted a day settled when the watermark sat exactly ON its start midnight - a day
+        # that had not happened yet; corrected here rather than preserved.)
+        last = end_date if day_floor(end_date + timedelta(days=1)) <= last_exclusive \
+            else end_date - timedelta(days=1)
         if first > last:
             return ReadPlan(grain, UtcWindow(None, None), None,
                             [(window.start, window.end)],
                             reason=reason or "no whole local day fits inside the request")
-        live = _edges(window, _midnight(first), _midnight(last) + timedelta(days=1))
-        return ReadPlan(grain, UtcWindow(_midnight(first), _midnight(last) + timedelta(days=1)),
+        live = _edges(window, day_floor(first), day_floor(last + timedelta(days=1)))
+        return ReadPlan(grain, UtcWindow(day_floor(first), day_floor(last + timedelta(days=1))),
                         (first, last), live, reason=reason)
 
     lo = _ceil_hour(window.start)
@@ -386,7 +404,7 @@ async def _live_points(db, customer_code: str, definition: d.MetricDefinition,
 async def series(db, customer_code: str, definition_id, definition: d.MetricDefinition, *,
                  window: UtcWindow, measure: str, group_by: tuple[str, ...] = (),
                  watermark: datetime | None, rows_per_bucket: int = 20,
-                 ad_hoc: bool = False) -> dict:
+                 ad_hoc: bool = False, tz: str | None = None) -> dict:
     """One measure over time, two-tier. The watermark is passed in, never fetched here (see plan_read).
 
     Returns additive ROLE values per bucket, never a finished answer: the caller divides a sum by a count
@@ -395,7 +413,7 @@ async def series(db, customer_code: str, definition_id, definition: d.MetricDefi
     from app.persistence.models.analytics_rollup import AnalyticsDailyRollup, AnalyticsHourlyRollup
 
     grain = choose_grain(window, available=definition.grains, rows_per_bucket=rows_per_bucket)
-    plan = plan_read(window, grain, watermark=watermark)
+    plan = plan_read(window, grain, watermark=watermark, tz=tz)
 
     # Chunk 80: an ad-hoc group-by cannot be answered by rollups AT ALL - no rollup is keyed by the
     # requested field, so the rollup tier would contribute points keyed by () while the live tier

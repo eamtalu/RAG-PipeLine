@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
 from app.api.deps import get_current_customer
+from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.config.database import get_session
 from app.persistence.models.analytics_metric import AnalyticsMetric
 from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
@@ -275,7 +276,7 @@ async def analytics_series(customer: str = Depends(get_current_customer),
 
     state = await _state(db, customer)
     out = await n6.series(db, customer, definition_id, definition, window=window, measure=measure,
-                          group_by=dims, ad_hoc=decision.ad_hoc,
+                          group_by=dims, ad_hoc=decision.ad_hoc, tz=await get_customer_timezone(db, customer),
                           watermark=state.analytics_watermark if state else None)
     return {**out, "metric": metric, "ad_hoc": decision.ad_hoc, "resolution": decision.reason,
             "window": {"start": window.start.isoformat(), "end": window.end.isoformat()}}
@@ -305,7 +306,7 @@ async def analytics_breakdown(customer: str = Depends(get_current_customer),
 
     state = await _state(db, customer)
     out = await n6.series(db, customer, definition_id, definition, window=window, measure=measure,
-                          group_by=(dimension,), ad_hoc=decision.ad_hoc,
+                          group_by=(dimension,), ad_hoc=decision.ad_hoc, tz=await get_customer_timezone(db, customer),
                           watermark=state.analytics_watermark if state else None)
 
     totals: dict = {}
