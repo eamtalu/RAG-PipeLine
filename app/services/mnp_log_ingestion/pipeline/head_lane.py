@@ -158,6 +158,17 @@ async def build_plan(customer_code: str, lo: datetime, hi: datetime) -> HeadPlan
         if any(any(e.entry_type.value == "response" for e in state["entries_by_txn"][r.transaction_id])
                for r in parked):
             return _fall("parked_closed")
+        # Chunk 83 (18ab): a parked stream whose conversation is a LONE REQUEST is the one shape
+        # the body-pop rule can split. In the raw grouper that request would sit in the PENDING
+        # pool and a later body would POP it so the two join; seeded as a stream, the body
+        # instead closes it as a prior cycle and mints a body-anchored transaction the authority
+        # never persists (reproduced from live before fixing). The pending round-trip that would
+        # make these windows head-laneable is deliberately deferred until this decline's RATE is
+        # measured - coverage is bought from numbers here, not assumptions (S4b's lesson).
+        if any(len(state["entries_by_txn"][r.transaction_id]) == 1
+               and state["entries_by_txn"][r.transaction_id][0].entry_type.value == "request"
+               for r in parked):
+            return _fall("parked_lone_request")
         # Chunk 82: a parked stream with NO request line is inheritance context, not open work -
         # seeded as open work it is usually its user's OLDEST candidate, so the response FIFO
         # hands it every new response for that user (34 DIVERGED in 24h, all this shape). The

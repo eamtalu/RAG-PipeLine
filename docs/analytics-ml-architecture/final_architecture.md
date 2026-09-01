@@ -10,7 +10,7 @@ The document has two parts:
   A plain-English, fact-checked guide to how the software works today, from the SSH pull to the ML pipeline.
   Start here.
 - **PART II - The design history.**
-  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18aa), preserved verbatim because code comments and tests cite these section numbers.
+  The original architecture, the iteration-2 plan, and every as-built record and incident (sections 1 to 18ab), preserved verbatim because code comments and tests cite these section numbers.
 
 # PART I. The system as built: a plain-English guide
 
@@ -266,7 +266,7 @@ Everything described above is the **rebuild lane**: any change, however small, i
 It is the only lane that exists today, and since S3 it is cheap (unchanged rows cost no writes).
 
 The **head lane** is BUILT and shipping in SHADOW (chunk 72):
-a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream, a parked stream that is already closed or request-less, a parked stream whose entries cannot be reloaded) routed back to the rebuild lane by name, and each declined window writes one journal line naming its reason (chunk 75).
+a fast path processing only brand-new entries at the head of the stream against saved open-stream state (`log_open_stream`) and the per-tenant stitch checkpoint (`log_stitch_checkpoint`), planning one update per continued conversation and one insert per new one, with every surprise (a window behind the checkpoint, disordered state, a would-be merge of parked conversations, an id clash, an anonymous open stream, a parked stream that is already closed, request-less, or a lone request, a parked stream whose entries cannot be reloaded) routed back to the rebuild lane by name, and each declined window writes one journal line naming its reason (chunk 75).
 Governed by `stage2_head_lane` = off / shadow / on, shipped as shadow: the plan is built for every eligible window, the rebuild executes as the authority, and the two are compared - a DIVERGED line in the journal is what stops `on`.
 The comparison is HORIZON-AWARE (chunk 73, section 18s): the rebuild legitimately sees more than the plan (its padded read reaches 900 seconds past the window's high edge, and Stage 1 keeps committing lines between the plan and the rebuild), so the shadow asks two questions that are well-defined across that difference.
 First, ownership, always: every line the plan assigned must sit in the same transaction the authority put it in - the question promotion actually hangs on.
@@ -852,7 +852,7 @@ Honest imperfections found while fact-checking this part; none is currently caus
 
 # PART II. The design history
 
-Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18aa).
+Everything below is the historical record: iteration 1 (sections 1 to 17), the iteration-2 plan and its as-built sections (18 to 18ab).
 It explains WHY the system is shaped the way Part I describes.
 Where the two disagree, Part I is current and the section here records what was believed at the time.
 
@@ -4175,3 +4175,25 @@ The dashboard's default breakdown (by item, by warehouse, by user - none of them
    Never guess: the window routes to the rebuild lane by name.
 3. **`record_facts_total` drift.** The counter missed the replace-per-transaction path's deletions, so every re-expansion double-counted (live: 1,730,110 counted vs 1,641,626 actual).
    Deletions are now counted; the live counter needs one corrective UPDATE after deploy.
+
+## 18ab. The lone-request straddle - and the standing verdict on the head lane. Chunk 83, 2026-09-01.
+
+Monday's first post-18aa tally: 641 AGREED, 60 `parked_requestless` declines (the 18aa fix working by name), 4 DIVERGED of a new class.
+Root cause, reproduced locally with the exact live signature before any fix was written:
+the raw grouper keeps a lone request in the PENDING pool for a later `request_body` to pop, but the saved state cannot represent "pending" - the request parks as an open STREAM, so the seeded plan's body closes it as a prior cycle and mints a body-anchored transaction the authority never persists, cascading through the user's response FIFO.
+
+The fix is the seventh named fallback, `parked_lone_request`: a parked stream whose conversation is a single request routes the window to the rebuild lane.
+The guard is precise (request+body parked together keeps planning, pinned by test).
+The pending ROUND-TRIP that would make these windows head-laneable is designed (state capture of the pending pool; seed it back; upgrade the id-clash to a continuation of the lone-request predecessor) and deliberately deferred until the shadow measures this decline's rate.
+
+### The standing verdict (owner + assistant, 2026-09-01, after measurement)
+
+The read churn the head lane exists to remove was MEASURED: ~8% of one core averaged (≈40% at peak, all worker duties included), 100.00% buffer-cache hit ratio (the re-reads never touch disk), zero stitch lag.
+Against that, six divergence classes in four days - all failures of saved-state fidelity - and the categorical asymmetry: the rebuild lane's wrongness heals by construction on the next pass, while a promoted head lane's wrongness would be permanent (S3 fingerprint permanence) and unaudited (the reconciler checks facts and rollups, not groupings).
+
+Decision: the REBUILD LANE remains the production path; the head lane stays in SHADOW as a canary.
+Promotion is reconsidered only when one of three measured triggers flips:
+1. the entries working set outgrows RAM (cache hit ratio falls materially below 100% - the cliff where read churn becomes disk churn);
+2. sustained worker CPU pressure (rule of thumb: >70% of a core through working hours);
+3. the stitch checkpoint starts lagging real time during peaks.
+Preconditions at that point: the pending round-trip, plus a grouping-level audit (periodic sampled rebuild-and-compare) so the promoted lane regains a healer.
