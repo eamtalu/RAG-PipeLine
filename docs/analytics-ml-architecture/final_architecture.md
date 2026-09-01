@@ -273,6 +273,8 @@ First, ownership, always: every line the plan assigned must sit in the same tran
 Second, fingerprints, only on a shared horizon: byte-identical digests are demanded exactly where the authority's final member set equals the planned set; a transaction the rebuild extended past the plan's horizon is checked by ownership alone, because its digests describe a different entry set by construction.
 The equivalence bar for writing stays the strictest available: after a head-lane apply, a rebuild of the same window must report every transaction unchanged (byte-identical fingerprints), certified by the authority itself.
 Its benefit is read cost and latency, not correctness; the rebuild lane remains the authority.
+**The standing decision (18ab, 2026-09-01, made after measuring):** the read churn the head lane would remove costs ~8% of one core averaged with a 100.00% buffer-cache hit ratio and zero stitch lag, so the REBUILD LANE remains the production path and the head lane stays in shadow as a canary.
+Promotion is reconsidered only when a measured trigger flips - the entries working set outgrowing RAM, sustained worker CPU pressure (>70% of a core through working hours), or the stitch checkpoint lagging real time - and then only with the pending round-trip (18ab) plus a grouping-level audit as preconditions.
 Section 11.5 walks both lanes panel by panel, with a worked example - read that if this paragraph is not enough.
 
 Related: the S4 shadow (`stage2_stream_lookup = shadow`) already saves grouper state each window and measures whether a state-seeded regroup would agree with the from-scratch one.
@@ -309,6 +311,11 @@ Components: `app/services/analytics/` - `consume.py` (the fold), `normalizer.py`
    diff stored vs new     -> insert / update / reverse / unchanged
    apply + append EVERY change as a new version in the LEDGER
    expand records (R4) for transactions with the expand switch on
+     - a presence/staleness diff (_exp_v, 18x) backfills late expand
+       flips and late field approvals through ordinary tickets
+   fold RECORD-source metric definitions from analytics_record_facts
+     into the same definition-keyed rollup tables (18y); the read API
+     serves them through the same /series and /breakdown (18z)
    quarantine rows that cannot be normalised (never halt the tenant)
    recompute exactly the dirty rollup buckets, from the facts
    update the tenant state row (watermarks, freshness, counts, revision+1)
@@ -670,7 +677,7 @@ Summary table:
 | handles | everything: backfills, repairs, late lines | only the clean common case |
 | on surprise | it IS the fallback | hands the range to the rebuild lane |
 | correctness | the authority, always | must match the rebuild lane, gated by its own shadow phase |
-| status | built, running | built (chunk 72), running in SHADOW; `on` is the manual flip |
+| status | built, running - THE PRODUCTION PATH (18ab) | built (chunk 72), in SHADOW as a canary; promotion gated on 18ab's measured triggers |
 
 The one-sentence takeaway: the head lane is a bookmark plus parked conversations, so the common case stops re-reading the past; the rebuild lane keeps existing untouched underneath it as the referee and the repair tool.
 
@@ -835,7 +842,7 @@ The rebuild's whole lifecycle, from click to notification:
 
 Nobody stops or starts anything, and nobody owes the browser tab their attention: the pause, the resume, the re-fold and the announcement are all mechanisms, not procedures.
 
-## 13. Known gaps register (verified 2026-08-27)
+## 13. Known gaps register (verified 2026-09-01)
 
 Honest imperfections found while fact-checking this part; none is currently causing damage, each is a candidate work item.
 
@@ -844,8 +851,11 @@ Honest imperfections found while fact-checking this part; none is currently caus
 3. The rollup read path serves only sum and count, so stats/extent/percentile aggregations fall back to fact scans even though the columns exist.
 4. The `show` (hidden) gate applies only where rollups are written; a live-tail or ad-hoc fact scan can still include hidden transactions.
 5. `GET /analytics/status` emits an ETag but the server never handles `If-None-Match` (no 304s); conditional requests are left to clients and proxies.
-6. A few docstrings still describe superseded behaviour (`capture.observe_names` says show defaults off; the transaction-registry model says R4 is not built), and the root CLAUDE.md still claims Stage 1 relaxes its statement timeout to 0 where the code uses a finite 120 s.
+6. Two stale claims remain: `capture.observe_names`' docstring says show defaults off, and the root CLAUDE.md says Stage 1 relaxes its statement timeout to 0 where the code uses a finite 120 s. (The transaction-registry model's "R4 is not built" was corrected in chunk 78.)
 7. RESOLVED (18v, chunk 76): the stored stream state now carries a `server` column in its unique key, so two servers' same-numbered threads park side by side instead of newest-wins evicting one.
+8. The record grain has NO LEDGER (decision recorded in 18x): record rows are current-state only, so a record-grain training set is not reproducible - F10's argument applies in full the day ML wants records. Revisit before any record-grain ML work.
+9. The head-lane shadow's fingerprint check applies only where both lanes saw identical member sets; a transaction the rebuild extended past the plan's horizon is verified by ownership alone (18s). A value-computation divergence confined to extended transactions would pass the shadow - mitigated by the shared grouper and the authority-certified apply test, but a real blind spot.
+10. The saved stream state still cannot represent the grouper's PENDING pool (18ab): lone-request windows decline (`parked_lone_request`) rather than plan. The round-trip is designed in 18ab and gated on this decline's measured rate.
 
 
 ---

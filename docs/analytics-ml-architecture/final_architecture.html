@@ -79,7 +79,7 @@
 <div class="wrap">
 
 <header>
-  <p class="kick">The system as built · verified 2026-08-27</p>
+  <p class="kick">The system as built · verified 2026-09-01</p>
   <h1>Warehouse analytics and ML platform</h1>
   <p class="sub">A plain-English guide to how the software works today, from the SSH pull to the ML pipeline.
   Every claim was checked in the source files named beside it; nothing is recalled from memory.</p>
@@ -297,6 +297,7 @@ Governed by <code>stage2_head_lane</code> = off / shadow / on: the plan is built
 <em>Ownership, always:</em> every line the plan assigned must sit in the same transaction the authority put it in.
 <em>Fingerprints, only on a shared horizon:</em> byte-identical digests are demanded exactly where the authority's final member set equals the planned set; a transaction the rebuild extended past the plan's horizon is checked by ownership alone.
 Its benefit is read cost and latency, not correctness; the rebuild lane stays the authority.</p>
+<p><strong>The standing decision (18ab, 2026-09-01, made after measuring):</strong> the read churn costs ~8% of one core averaged with a 100.00% buffer-cache hit ratio and zero stitch lag, so the <strong>rebuild lane remains the production path</strong> and the head lane stays in shadow as a canary. Promotion is reconsidered only when a measured trigger flips (working set vs RAM, sustained CPU pressure, stitch lag), with the pending round-trip and a grouping-level audit as preconditions.</p>
 <p><span class="tbl-own">Tables</span> <code>log_transactions</code> (daily) · <code>log_entry_assignment</code> (daily) · <code>log_open_stream</code> · <code>log_pending_request</code> · <code>log_regroup_runs</code> · <span class="tag q">queue</span><code>analytics_pending_windows</code></p>
 
 <h2 id="tickets">6. Ticketing from Stage 2 to analytics</h2>
@@ -776,7 +777,7 @@ The rebuild's whole lifecycle, from click to notification:</p>
 </pre>
 <p>The only two .env overrides on this server beyond the defaults are <code>ANALYTICS_WORKER_ENABLED=true</code> and <code>ANALYTICS_RECONCILE_WORKER_ENABLED=true</code>.</p>
 
-<h2 id="gaps">13. Known gaps register (verified 2026-08-27)</h2>
+<h2 id="gaps">13. Known gaps register (verified 2026-09-01)</h2>
 <p>Honest imperfections found while fact-checking; none is currently causing damage, each is a candidate work item.</p>
 <ol>
   <li><code>analytics_tenant_state.last_error</code> is only ever written as NULL, so the retention gate's "last cycle failed" branch cannot fire; per-run errors live on the ticket rows instead.</li>
