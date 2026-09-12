@@ -1,0 +1,1665 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Standalone copy of the "Matrix Pipeline Data Model" page, generated 2026-09-04 from the live schema on 192.168.0.142, docs/database-er-diagram.md and the ingestion code. Open directly in a browser; Mermaid loads from jsdelivr. -->
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  (function () {
+    var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: dark ? 'dark' : 'neutral',
+      er: { useMaxWidth: true, fontSize: 12 },
+      themeVariables: { fontFamily: '"IBM Plex Mono", ui-monospace, monospace' }
+    });
+  })();
+</script>
+</head>
+<body>
+<title>Matrix Pipeline Data Model</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #f5f7fa;
+    --surface: #ffffff;
+    --ink: #1b2230;
+    --muted: #5b6474;
+    --rule: #d6dbe3;
+    --accent: #0f6e8c;      /* flow arrows, keys */
+    --truth: #2f7d4f;       /* ground truth */
+    --queue: #b7791f;       /* ticket queues */
+    --cache: #7a6fa8;       /* saved-state cache */
+    --shadow: #b3462e;      /* the shadow lane */
+    --code-bg: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12161d; --surface: #191e27; --ink: #e6e9ef; --muted: #9aa3b2; --rule: #2c3442;
+      --accent: #5fb3cf; --truth: #6cc38f; --queue: #e0a84a; --cache: #b2a7e0; --shadow: #e57a5f; --code-bg: #212836;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12161d; --surface: #191e27; --ink: #e6e9ef; --muted: #9aa3b2; --rule: #2c3442;
+    --accent: #5fb3cf; --truth: #6cc38f; --queue: #e0a84a; --cache: #b2a7e0; --shadow: #e57a5f; --code-bg: #212836;
+  }
+  body { background: var(--bg); color: var(--ink); font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 16px; line-height: 1.55; }
+  main { max-width: 1040px; margin: 0 auto; padding: 40px 24px 80px; }
+  header { border-bottom: 1px solid var(--rule); padding-bottom: 20px; margin-bottom: 32px; }
+  .eyebrow { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  h1 { font-size: 34px; font-weight: 600; margin: 6px 0 10px; letter-spacing: -0.01em; text-wrap: balance; }
+  h2 { font-size: 22px; font-weight: 600; margin: 48px 0 8px; text-wrap: balance; }
+  h3 { font-size: 16px; font-weight: 600; margin: 24px 0 6px; }
+  p { max-width: 70ch; margin: 8px 0; }
+  .lead { font-size: 18px; color: var(--ink); max-width: 66ch; }
+  code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.92em; background: var(--code-bg); padding: 1px 5px; border-radius: 3px; }
+  figure { margin: 20px 0; }
+  figure svg { max-width: 100%; height: auto; display: block; color: var(--ink); }
+  figcaption { font-size: 14px; color: var(--muted); margin-top: 8px; max-width: 80ch; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 22px; font-size: 14px; color: var(--muted); margin: 14px 0 0; }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .swatch { width: 26px; height: 0; border-top: 3px solid var(--accent); display: inline-block; }
+  .swatch.dashed { border-top-style: dashed; }
+  .swatch.truth { border-color: var(--truth); }
+  .swatch.queue { border-color: var(--queue); }
+  .swatch.cache { border-color: var(--cache); }
+  .swatch.shadow { border-color: var(--shadow); }
+  .station { border-top: 1px solid var(--rule); padding-top: 8px; }
+  .station .eyebrow { color: var(--accent); }
+  .er { background: var(--surface); border: 1px solid var(--rule); border-radius: 4px; padding: 12px; overflow-x: auto; }
+  pre.mermaid { margin: 0; background: transparent; }
+  .notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px 28px; margin: 14px 0 0; padding: 0; list-style: none; }
+  .notes li { font-size: 15px; }
+  .notes li b { font-weight: 600; }
+  ol.steps { max-width: 78ch; padding-left: 22px; margin: 14px 0 6px; }
+  ol.steps li { margin: 6px 0; font-size: 15px; }
+  ol.steps li b { font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: 13px; letter-spacing: 0.03em; }
+  td.num { text-align: right; font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .tablewrap { overflow-x: auto; }
+  .example { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; margin-top: 16px; }
+  .example > div { padding: 14px 14px 16px; border-right: 1px solid var(--rule); background: var(--surface); }
+  .example > div:last-child { border-right: 0; }
+  .example .eyebrow { font-size: 11px; }
+  .example .big { font-size: 26px; font-weight: 600; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+  .example small { color: var(--muted); font-size: 13px; display: block; }
+  @media (max-width: 760px) { .example { grid-template-columns: 1fr; } .example > div { border-right: 0; border-bottom: 1px solid var(--rule); } }
+</style>
+
+<main>
+<header>
+  <div class="eyebrow">Matrix log explorer · Postgres 16 · schema as of 4 Sep 2026</div>
+  <h1>Matrix Pipeline Data Model</h1>
+  <p class="lead">The database is one assembly line with five stations. Each station reads the table the previous one wrote, writes its own table, and leaves a ticket in a small queue table for the next station. Only the raw log lines are ground truth. Everything after them can be rebuilt.</p>
+  <div class="legend">
+    <span><i class="swatch"></i> enforced foreign key</span>
+    <span><i class="swatch dashed"></i> soft reference, no constraint</span>
+    <span><i class="swatch truth"></i> ground truth, append-only</span>
+    <span><i class="swatch queue"></i> ticket queue between stations</span>
+    <span><i class="swatch cache"></i> saved-state cache, not truth</span>
+    <span><i class="swatch shadow dashed"></i> shadow lane, reads but never writes</span>
+  </div>
+</header>
+
+<figure>
+<svg viewBox="0 0 1180 470" role="img" aria-label="Five stations left to right: Collection writes log_source_objects, Stage 1 writes log_entries and a regroup ticket, Stage 2 writes log_transactions and assignments and an analytics ticket, Analytics writes facts and the ledger, Rollups write hourly daily and monthly tables read by the API. The shadow lane reads saved state beside Stage 2 and writes nothing.">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+    <marker id="arwq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b7791f"/></marker>
+  </defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+
+    <!-- source servers -->
+    <rect x="20" y="150" width="130" height="70" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="85" y="178" text-anchor="middle" font-weight="600">WMS servers</text>
+    <text x="85" y="196" text-anchor="middle" font-size="11" opacity="0.75">TMP-AZ-BEC01 / 02</text>
+    <text x="85" y="211" text-anchor="middle" font-size="11" opacity="0.75">write log files</text>
+
+    <!-- station headers -->
+    <g font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.08em" opacity="0.7">
+      <text x="240" y="60" text-anchor="middle">1 · COLLECTION</text>
+      <text x="470" y="60" text-anchor="middle">2 · STAGE 1 PARSE</text>
+      <text x="700" y="60" text-anchor="middle">3 · STAGE 2 STITCH</text>
+      <text x="930" y="60" text-anchor="middle">4 · ANALYTICS</text>
+      <text x="1110" y="60" text-anchor="middle">5 · ROLLUPS</text>
+    </g>
+    <g stroke="currentColor" stroke-width="0.6" opacity="0.25">
+      <line x1="355" y1="45" x2="355" y2="430"/><line x1="585" y1="45" x2="585" y2="430"/><line x1="815" y1="45" x2="815" y2="430"/><line x1="1045" y1="45" x2="1045" y2="430"/>
+    </g>
+
+    <!-- station 1 -->
+    <rect x="175" y="150" width="130" height="70" rx="3" fill="#b7791f" fill-opacity="0.12" stroke="#b7791f" stroke-width="1.4"/>
+    <text x="240" y="178" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_source_objects</text>
+    <text x="240" y="196" text-anchor="middle" font-size="11" opacity="0.75">one downloaded byte range</text>
+    <text x="240" y="211" text-anchor="middle" font-size="11" opacity="0.75">status, attempts, lease</text>
+    <rect x="175" y="250" width="130" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.7"/>
+    <text x="240" y="269" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">log_ssh_sources</text>
+    <text x="240" y="285" text-anchor="middle" font-size="11" opacity="0.75">4 servers to poll</text>
+    <rect x="175" y="306" width="130" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.7"/>
+    <text x="240" y="325" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">log_ssh_file_checkpoints</text>
+    <text x="240" y="341" text-anchor="middle" font-size="11" opacity="0.75">byte offset per remote file</text>
+
+    <!-- station 2 -->
+    <rect x="405" y="150" width="130" height="70" rx="3" fill="#2f7d4f" fill-opacity="0.12" stroke="#2f7d4f" stroke-width="1.8"/>
+    <text x="470" y="178" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_entries</text>
+    <text x="470" y="196" text-anchor="middle" font-size="11" opacity="0.75">one row per log line</text>
+    <text x="470" y="211" text-anchor="middle" font-size="11" opacity="0.75">GROUND TRUTH · 4.06 M rows</text>
+    <rect x="405" y="250" width="130" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.7"/>
+    <text x="470" y="269" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">jobs</text>
+    <text x="470" y="285" text-anchor="middle" font-size="11" opacity="0.75">per-file parse status</text>
+
+    <!-- station 3 -->
+    <rect x="635" y="120" width="130" height="62" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="700" y="145" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_transactions</text>
+    <text x="700" y="162" text-anchor="middle" font-size="11" opacity="0.75">one business action</text>
+    <text x="700" y="176" text-anchor="middle" font-size="11" opacity="0.75">250 k rows, rewritten often</text>
+    <rect x="635" y="192" width="130" height="46" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="700" y="211" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_entry_assignment</text>
+    <text x="700" y="227" text-anchor="middle" font-size="11" opacity="0.75">entry → transaction, 4.2 M</text>
+    <rect x="635" y="300" width="130" height="62" rx="3" fill="#7a6fa8" fill-opacity="0.10" stroke="#7a6fa8" stroke-width="1.2" stroke-dasharray="4 3"/>
+    <text x="700" y="322" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">log_open_stream</text>
+    <text x="700" y="338" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">log_stitch_checkpoint</text>
+    <text x="700" y="354" text-anchor="middle" font-size="11" opacity="0.75">saved state · cache only</text>
+    <!-- shadow lane -->
+    <rect x="635" y="392" width="130" height="40" rx="3" fill="none" stroke="#b3462e" stroke-width="1.2" stroke-dasharray="5 3"/>
+    <text x="700" y="409" text-anchor="middle" font-size="11.5" font-weight="600" fill="#b3462e">shadow head lane</text>
+    <text x="700" y="424" text-anchor="middle" font-size="11" fill="#b3462e">plans, compares, writes nothing</text>
+    <path d="M700,392 L700,362" stroke="#b3462e" stroke-width="1.2" stroke-dasharray="5 3" fill="none" marker-end="url(#arw)"/>
+    <text x="708" y="381" font-size="10.5" fill="#b3462e">reads</text>
+    <path d="M660,300 L660,238" stroke="#0f6e8c" stroke-width="1.1" fill="none" marker-end="url(#arw)" stroke-dasharray="2 3"/>
+    <text x="596" y="273" font-size="10.5" opacity="0.8" text-anchor="start">saves</text>
+    <text x="596" y="285" font-size="10.5" opacity="0.8" text-anchor="start">each</text>
+    <text x="596" y="297" font-size="10.5" opacity="0.8" text-anchor="start">window</text>
+
+    <!-- station 4 -->
+    <rect x="865" y="120" width="130" height="62" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="930" y="145" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_facts</text>
+    <text x="930" y="162" text-anchor="middle" font-size="11" opacity="0.75">CURRENT number per</text>
+    <text x="930" y="176" text-anchor="middle" font-size="11" opacity="0.75">transaction · 232 k</text>
+    <rect x="865" y="192" width="130" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="930" y="211" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_fact_ledger</text>
+    <text x="930" y="227" text-anchor="middle" font-size="11" opacity="0.75">EVERY version, forever · 502 k</text>
+    <rect x="865" y="250" width="130" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.7"/>
+    <text x="930" y="269" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">analytics_record_facts</text>
+    <text x="930" y="285" text-anchor="middle" font-size="11" opacity="0.75">one row per record inside</text>
+    <rect x="865" y="306" width="130" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.7"/>
+    <text x="930" y="325" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">analytics_metrics</text>
+    <text x="930" y="341" text-anchor="middle" font-size="11" opacity="0.75">user-defined metric recipes</text>
+
+    <!-- station 5 -->
+    <rect x="1055" y="120" width="110" height="118" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="1110" y="145" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">…_hourly_rollups</text>
+    <text x="1110" y="165" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">…_daily_rollups</text>
+    <text x="1110" y="185" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">…_monthly_rollups</text>
+    <text x="1110" y="210" text-anchor="middle" font-size="11" opacity="0.75">sum, count, min, max</text>
+    <text x="1110" y="225" text-anchor="middle" font-size="11" opacity="0.75">per bucket, pre-added</text>
+    <rect x="1055" y="300" width="110" height="52" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.7"/>
+    <text x="1110" y="321" text-anchor="middle" font-weight="600">FastAPI</text>
+    <text x="1110" y="338" text-anchor="middle" font-size="11" opacity="0.75">→ Next.js dashboard</text>
+    <path d="M1110,238 L1110,300" stroke="currentColor" stroke-width="1.1" fill="none" marker-end="url(#arw)"/>
+    <text x="1118" y="273" font-size="10.5" opacity="0.8">read</text>
+    <path d="M995,155 C1025,155 1025,140 1055,140" stroke="currentColor" stroke-width="1.1" fill="none" marker-end="url(#arw)"/>
+    <text x="1025" y="128" text-anchor="middle" font-size="10.5" opacity="0.8">fold</text>
+
+    <!-- main flow arrows -->
+    <path d="M150,185 L175,185" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#arw)"/>
+    <text x="162" y="140" text-anchor="middle" font-size="10.5" opacity="0.8">SSH</text>
+    <text x="162" y="152" text-anchor="middle" font-size="10.5" opacity="0.8">~60 s</text>
+
+    <path d="M305,185 L405,185" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#arw)"/>
+    <text x="355" y="172" text-anchor="middle" font-size="10.5" opacity="0.8">parse lines · every 2 s</text>
+
+    <!-- ticket queue 1 -->
+    <path d="M535,185 L635,185" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#arw)"/>
+    <rect x="530" y="86" width="110" height="34" rx="3" fill="#b7791f" fill-opacity="0.12" stroke="#b7791f" stroke-width="1.2"/>
+    <text x="585" y="100" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">log_regroup_pending</text>
+    <text x="585" y="114" text-anchor="middle" font-size="10" opacity="0.8">"range X..Y has new lines"</text>
+    <path d="M585,120 L585,178" stroke="#b7791f" stroke-width="1.1" fill="none" marker-end="url(#arwq)"/>
+    <text x="590" y="150" font-size="10" fill="#b7791f">ticket</text>
+
+    <!-- ticket queue 2 -->
+    <path d="M765,155 L865,155" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#arw)"/>
+    <rect x="760" y="86" width="110" height="34" rx="3" fill="#b7791f" fill-opacity="0.12" stroke="#b7791f" stroke-width="1.2"/>
+    <text x="815" y="100" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">analytics_pending_windows</text>
+    <text x="815" y="114" text-anchor="middle" font-size="10" opacity="0.8">"transactions in X..Y changed"</text>
+    <path d="M815,120 L815,148" stroke="#b7791f" stroke-width="1.1" fill="none" marker-end="url(#arwq)"/>
+    <text x="820" y="137" font-size="10" fill="#b7791f">ticket</text>
+
+    <!-- rebuild rule -->
+    <text x="590" y="455" text-anchor="middle" font-size="11.5" opacity="0.85">Every layer rebuilds from the one to its left. Only log_entries cannot be regenerated, so only log_entries is append-only.</text>
+  </g>
+</svg>
+<figcaption>Figure 1. The whole line at a glance. Data moves left to right. Every hop between stations is a database queue written in the same transaction as the data it describes. The shadow head lane sits beside Stage 2, reads the saved state, and is compared against the real rebuild. It never writes.</figcaption>
+</figure>
+
+<h2>Follow one action through the line</h2>
+<p>A warehouse picker confirms a pick on a handheld. The WMS server writes about 15 log lines for that one action. Here is what those lines become at each station.</p>
+<div class="example">
+  <div><div class="eyebrow">1 · Collection</div><div class="big">1</div><small>row in <code>log_source_objects</code>, a byte range containing the 15 lines</small></div>
+  <div><div class="eyebrow">2 · Stage 1</div><div class="big">15</div><small>rows in <code>log_entries</code>, same thread and user, milliseconds apart</small></div>
+  <div><div class="eyebrow">3 · Stage 2</div><div class="big">1 + 15</div><small>one <code>log_transactions</code> row, 15 <code>log_entry_assignment</code> rows pointing at it</small></div>
+  <div><div class="eyebrow">4 · Analytics</div><div class="big">1</div><small>row in <code>analytics_facts</code>. Each rewrite adds a version to <code>analytics_fact_ledger</code></small></div>
+  <div><div class="eyebrow">5 · Rollups</div><div class="big">+1</div><small>added to the hour, day and month buckets for its item, warehouse and user</small></div>
+</div>
+
+<section class="station">
+<h2><span class="eyebrow">Station 1</span><br>Collection: pulling files over SSH</h2>
+<p>One row in <code>log_ssh_sources</code> is one WMS server to poll. The fetcher downloads only the bytes that are new since the checkpoint, saves them to disk, and records that byte range in <code>log_source_objects</code>. The checkpoint moves forward in the same database transaction, so bytes are never skipped and never downloaded twice.</p>
+<figure>
+<svg viewBox="0 0 1120 560" role="img" aria-label="Data flow of the collection station. The per-customer poll loop reads log_ssh_sources and log_ssh_file_checkpoints, reads new bytes from the WMS server over SFTP, then in one transaction inserts a log_source_objects row and upserts the checkpoint. The parse worker leases log_source_objects rows and writes jobs and log_entries. A manual fetch from the dashboard writes log_ssh_fetch_runs and runs the same fetch.">
+  <defs>
+    <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+    <marker id="faq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b7791f"/></marker>
+  </defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+
+    <!-- row 1: actors -->
+    <rect x="40" y="30" width="170" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="125" y="55" text-anchor="middle" font-weight="600">WMS server</text>
+    <text x="125" y="72" text-anchor="middle" font-size="11" opacity="0.75">log files, SFTP</text>
+    <text x="125" y="86" text-anchor="middle" font-size="11" opacity="0.75">TMP-AZ-BEC01 / 02</text>
+
+    <rect x="420" y="30" width="230" height="64" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="535" y="55" text-anchor="middle" font-weight="600">poll loop, one per customer</text>
+    <text x="535" y="72" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">ssh_log_fetcher → remote_fetcher.fetch_now</text>
+    <text x="535" y="86" text-anchor="middle" font-size="11" opacity="0.75">incremental mode, every ~60 s</text>
+
+    <rect x="860" y="30" width="220" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="970" y="55" text-anchor="middle" font-weight="600">manual fetch from dashboard</text>
+    <text x="970" y="72" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">POST /logs/fetch-remote</text>
+    <text x="970" y="86" text-anchor="middle" font-size="11" opacity="0.75">runs the same fetch_now</text>
+
+    <!-- step 2: SFTP -->
+    <path d="M420,62 L210,62" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#fa)"/>
+    <circle cx="315" cy="48" r="9" fill="currentColor"/><text x="315" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#ffffff" style="fill:var(--bg)">2</text>
+    <text x="315" y="80" text-anchor="middle" font-size="11">list files, hash first bytes,</text>
+    <text x="315" y="93" text-anchor="middle" font-size="11">read only the new tail</text>
+
+    <!-- manual -> poll loop -->
+    <path d="M860,62 L650,62" stroke="currentColor" stroke-width="1.1" fill="none" stroke-dasharray="4 3" marker-end="url(#fa)"/>
+    <text x="755" y="52" text-anchor="middle" font-size="11" opacity="0.85">calls the same fetch</text>
+
+    <!-- row 2: tables -->
+    <rect x="40" y="230" width="200" height="80" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="140" y="253" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_ssh_sources</text>
+    <text x="140" y="271" text-anchor="middle" font-size="11" opacity="0.75">config: host, dir, glob, interval</text>
+    <text x="140" y="285" text-anchor="middle" font-size="11" opacity="0.75">health: last_ok_at, last_error</text>
+    <text x="140" y="299" text-anchor="middle" font-size="11" opacity="0.75">breaker: consecutive_failures</text>
+
+    <rect x="300" y="230" width="200" height="80" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="400" y="253" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_ssh_file_checkpoints</text>
+    <text x="400" y="271" text-anchor="middle" font-size="11" opacity="0.75">per remote file: last_offset,</text>
+    <text x="400" y="285" text-anchor="middle" font-size="11" opacity="0.75">last_size, last_mtime,</text>
+    <text x="400" y="299" text-anchor="middle" font-size="11" opacity="0.75">head_fingerprint</text>
+
+    <rect x="580" y="230" width="200" height="80" rx="3" fill="#b7791f" fill-opacity="0.12" stroke="#b7791f" stroke-width="1.6"/>
+    <text x="680" y="253" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_source_objects</text>
+    <text x="680" y="271" text-anchor="middle" font-size="11" opacity="0.75">QUEUE: one downloaded byte range</text>
+    <text x="680" y="285" text-anchor="middle" font-size="11" opacity="0.75">status pending → leased → ingested</text>
+    <text x="680" y="299" text-anchor="middle" font-size="11" opacity="0.75">attempts, available_at, lease</text>
+
+    <rect x="880" y="230" width="200" height="80" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="980" y="253" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_ssh_fetch_runs</text>
+    <text x="980" y="271" text-anchor="middle" font-size="11" opacity="0.75">one manual run: status, phase,</text>
+    <text x="980" y="285" text-anchor="middle" font-size="11" opacity="0.75">live progress, files, bytes</text>
+    <text x="980" y="299" text-anchor="middle" font-size="11" opacity="0.75">never written by the poller</text>
+
+    <!-- step 1: sources -->
+    <path d="M460,94 L160,230" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#fa)" marker-start="url(#fa)"/>
+    <circle cx="300" cy="150" r="9" fill="currentColor"/><text x="300" y="154" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">1</text>
+    <text x="255" y="178" text-anchor="middle" font-size="11">reads enabled sources</text>
+    <text x="255" y="191" text-anchor="middle" font-size="11">writes last_ok_at / breaker</text>
+
+    <!-- step 3: checkpoints -->
+    <path d="M500,94 L420,230" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#fa)" marker-start="url(#fa)"/>
+    <circle cx="470" cy="150" r="9" fill="currentColor"/><text x="470" y="154" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">3</text>
+    <text x="405" y="178" text-anchor="start" font-size="11">reads offsets before,</text>
+    <text x="405" y="191" text-anchor="start" font-size="11">upserts new offset after</text>
+
+    <!-- step 4: queue insert -->
+    <path d="M580,94 L660,230" stroke="#b7791f" stroke-width="1.4" fill="none" marker-end="url(#faq)"/>
+    <circle cx="640" cy="150" r="9" fill="#b7791f"/><text x="640" y="154" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">4</text>
+    <text x="660" y="178" text-anchor="start" font-size="11">INSERT one pending row</text>
+    <text x="660" y="191" text-anchor="start" font-size="11">per downloaded range</text>
+
+    <!-- same-transaction bracket -->
+    <path d="M330,215 L330,208 L740,208 L740,215" stroke="#b7791f" stroke-width="1.2" fill="none"/>
+    <text x="535" y="204" text-anchor="middle" font-size="11" fill="#b7791f" font-weight="600">3 + 4 commit together, both or neither</text>
+
+    <!-- step 7: manual -> runs -->
+    <path d="M970,94 L975,230" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#fa)"/>
+    <circle cx="1000" cy="150" r="9" fill="currentColor"/><text x="1000" y="154" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">7</text>
+    <text x="1015" y="178" text-anchor="start" font-size="11">creates run, writes</text>
+    <text x="1015" y="191" text-anchor="start" font-size="11">progress, marks done</text>
+
+    <!-- soft/FK relations between tables -->
+    <path d="M240,290 L300,290" stroke="currentColor" stroke-width="1.1" fill="none" marker-start="url(#fa)"/>
+    <text x="270" y="325" text-anchor="middle" font-size="10.5" opacity="0.8">source_id FK</text>
+    <text x="270" y="337" text-anchor="middle" font-size="10.5" opacity="0.8">cascade</text>
+    <path d="M580,300 C520,340 300,340 240,300" stroke="currentColor" stroke-width="1.1" fill="none" stroke-dasharray="4 3" marker-end="url(#fa)"/>
+    <text x="410" y="350" text-anchor="middle" font-size="10.5" opacity="0.8">source_id, soft: survives a source delete</text>
+    <path d="M880,300 C820,360 300,360 240,305" stroke="currentColor" stroke-width="1.1" fill="none" stroke-dasharray="4 3" marker-end="url(#fa)"/>
+    <text x="560" y="373" text-anchor="middle" font-size="10.5" opacity="0.8">source_id, soft: null means all sources</text>
+
+    <!-- row 3: parse worker and outputs -->
+    <rect x="580" y="410" width="200" height="64" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="680" y="435" text-anchor="middle" font-weight="600">parse worker</text>
+    <text x="680" y="452" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">log_parse_worker.drain_once</text>
+    <text x="680" y="466" text-anchor="middle" font-size="11" opacity="0.75">every 2 s, up to a batch</text>
+
+    <path d="M680,410 L680,310" stroke="#b7791f" stroke-width="1.4" fill="none" marker-end="url(#faq)" marker-start="url(#faq)"/>
+    <circle cx="680" cy="360" r="9" fill="#b7791f"/><text x="680" y="364" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">5</text>
+    <text x="695" y="345" text-anchor="start" font-size="11">lease oldest pending, SKIP LOCKED</text>
+    <text x="695" y="358" text-anchor="start" font-size="11">then mark ingested + entries_inserted,</text>
+    <text x="695" y="371" text-anchor="start" font-size="11">or back off, or abandon after 3</text>
+
+    <rect x="880" y="410" width="200" height="64" rx="3" fill="#2f7d4f" fill-opacity="0.10" stroke="#2f7d4f" stroke-width="1.4"/>
+    <text x="980" y="435" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">jobs  +  log_entries</text>
+    <text x="980" y="452" text-anchor="middle" font-size="11" opacity="0.75">one job per object, one row per line</text>
+    <text x="980" y="466" text-anchor="middle" font-size="11" opacity="0.75">Stage 1 output, next station</text>
+
+    <path d="M780,442 L880,442" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#fa)"/>
+    <circle cx="830" cy="428" r="9" fill="currentColor"/><text x="830" y="432" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">6</text>
+    <text x="830" y="462" text-anchor="middle" font-size="10.5">creates job, parses saved bytes</text>
+
+    <!-- local disk -->
+    <rect x="40" y="410" width="200" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.7"/>
+    <text x="140" y="435" text-anchor="middle" font-weight="600">local disk</text>
+    <text x="140" y="452" text-anchor="middle" font-size="11" opacity="0.75">downloaded bytes, at storage_key</text>
+    <text x="140" y="466" text-anchor="middle" font-size="11" opacity="0.75">deleted once ingested</text>
+    <path d="M420,94 C300,140 160,300 150,410" stroke="currentColor" stroke-width="1" fill="none" stroke-dasharray="2 3" marker-end="url(#fa)"/>
+    <text x="90" y="395" text-anchor="start" font-size="10.5" opacity="0.8">saves bytes</text>
+    <path d="M240,455 L580,455" stroke="currentColor" stroke-width="1" fill="none" stroke-dasharray="2 3" marker-end="url(#fa)"/>
+    <text x="410" y="448" text-anchor="middle" font-size="10.5" opacity="0.8">reads bytes by storage_key</text>
+
+    <text x="560" y="535" text-anchor="middle" font-size="11.5" opacity="0.85">Nobody here triggers stitching. Stage 1 writes its own ticket into log_regroup_pending when it inserts entries.</text>
+  </g>
+</svg>
+<figcaption>Figure 2. Who reads and writes what in the collection station, numbered in the order the code runs them. Solid arrows are the poll loop's own reads and writes. Amber marks the queue. Steps 3 and 4 are one database commit, which is the guarantee that bytes are never skipped and never downloaded twice.</figcaption>
+</figure>
+
+<ol class="steps">
+  <li><b>Pick the customers and sources.</b> The supervisor keeps one loop per customer that has an enabled source. Each tick reads the enabled sources and, afterwards, writes health and the circuit breaker back to the same rows. <code>ssh_log_fetcher.py:117</code>, <code>remote_fetcher.py:555</code></li>
+  <li><b>Look at the server.</b> Take a per-host lock, open SFTP, list files matching the glob, hash the first bytes of each file. <code>remote_fetcher.py:411</code></li>
+  <li><b>Decide per file from the checkpoint.</b> Unchanged: skip. Same content seen under another name after rotation: skip. Rotated or truncated: re-read from zero. Otherwise read from the saved offset. A pure function with no I/O. <code>remote_fetcher.py:354</code></li>
+  <li><b>Queue and checkpoint together.</b> Save the bytes to disk, insert one pending <code>log_source_objects</code> row, upsert the checkpoint to the new offset, commit once. <code>remote_fetcher.py:141</code></li>
+  <li><b>Lease.</b> The parse worker takes the oldest due pending row with a skip-locked update and a lease expiry, so a crashed worker's row is reclaimed later. <code>log_parse_worker.py:68</code></li>
+  <li><b>Parse.</b> Create a <code>jobs</code> row, run Stage 1 on the saved bytes, mark the object ingested with its entry count, delete the local file. Failures back off, and after the maximum attempts the row is abandoned with its error. <code>log_parse_worker.py:227</code></li>
+  <li><b>Manual fetch only.</b> The dashboard button creates a <code>log_ssh_fetch_runs</code> row, runs the same fetch in the background with progress written to that row, and marks it completed or failed. <code>remote_fetcher.py:733</code></li>
+</ol>
+
+<div class="er">
+<pre class="mermaid">
+erDiagram
+    log_ssh_sources {
+        uuid id PK
+        string customer_code "tenant, soft key"
+        string name "unique per tenant"
+        string host
+        string remote_log_dir
+        string file_glob
+        bool enabled
+        int consecutive_failures "circuit breaker"
+        datetime last_ok_at
+    }
+    log_ssh_file_checkpoints {
+        uuid id PK
+        uuid source_id FK "-> log_ssh_sources, cascade"
+        string remote_path "unique per source"
+        bigint last_offset "how far we have read"
+        bigint last_size
+        string head_fingerprint "detects file rotation"
+    }
+    log_ssh_fetch_runs {
+        uuid id PK
+        uuid source_id "soft, null = all sources"
+        enum mode "incremental / timestamp / full"
+        enum status "running / completed / failed"
+        int files_fetched
+        bigint bytes_fetched
+    }
+    log_source_objects {
+        uuid id PK
+        string customer_code
+        uuid source_id "soft, survives source delete"
+        string remote_path
+        bigint start_offset
+        bigint end_offset
+        string storage_key "where the bytes live on disk"
+        string status "pending / leased / ingested / abandoned"
+        int attempts
+        int max_attempts
+        datetime available_at "retry backoff gate"
+        datetime lease_expires_at "crashed worker recovery"
+        text last_error
+        int entries_inserted
+    }
+    log_ssh_sources ||--o{ log_ssh_file_checkpoints : "tracks one row per remote file"
+    log_ssh_sources ||..o{ log_ssh_fetch_runs : "fetched by"
+    log_ssh_sources ||..o{ log_source_objects : "downloaded from"
+</pre>
+</div>
+<ul class="notes">
+  <li><b>The queue is the last table.</b> <code>log_source_objects</code> is the handoff to Stage 1. A worker leases a row, parses it, and marks it ingested. Three failures park it as abandoned with the error text.</li>
+  <li><b>Why the source link is soft.</b> Deleting a server must never delete the evidence of what was ingested from it, so there is no foreign key from objects or runs back to sources.</li>
+</ul>
+</section>
+
+<section class="station">
+<h2><span class="eyebrow">Station 2</span><br>Stage 1: lines become rows</h2>
+<p>A worker picks up a byte range every two seconds, splits it into lines, and writes one row per line into <code>log_entries</code>. Then it drops a ticket into <code>log_regroup_pending</code> saying which time range now has new lines.</p>
+<figure>
+<svg viewBox="0 0 1120 600" role="img" aria-label="Data flow of Stage 1. The parse worker creates a jobs row, loads the saved bytes, splits them into entries on timestamp-prefixed lines, parses the header into user, thread, level, logger, method and message, classifies the entry type, attaches the customer timezone, inserts log_entries in batches of 200 with duplicate rows skipped, and in the same commit writes one log_regroup_pending ticket covering the inserted time range and marks the job completed.">
+  <defs>
+    <marker id="pa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+    <marker id="paq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b7791f"/></marker>
+    <marker id="pag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2f7d4f"/></marker>
+  </defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+
+    <!-- line anatomy inset -->
+    <rect x="40" y="24" width="1040" height="92" rx="3" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.5"/>
+    <text x="56" y="44" font-family="IBM Plex Mono, monospace" font-size="10.5" letter-spacing="0.08em" opacity="0.7">ONE LOG LINE, AS THE PARSER SEES IT</text>
+    <text x="56" y="70" font-family="IBM Plex Mono, monospace" font-size="13">2026-05-19 13:42:33,362 (BECWHLO) [94] INFO  Logger.Class MethodName - REQUEST: /api/pick?item=...</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="10" opacity="0.8">
+      <text x="56" y="90">└── timestamp ─────────┘</text>
+      <text x="245" y="90">└ user ┘</text>
+      <text x="320" y="90">└thr┘</text>
+      <text x="360" y="90">└lvl┘</text>
+      <text x="408" y="90">└─ logger ─┘</text>
+      <text x="505" y="90">└─ method ─┘</text>
+      <text x="600" y="90">└──── message → decides entry_type ────┘</text>
+    </g>
+    <text x="56" y="108" font-size="11" opacity="0.8">Lines that do not start with a timestamp are continuation lines of the entry above them. Request bodies and MI results span many lines.</text>
+
+    <!-- inputs -->
+    <rect x="40" y="170" width="190" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.7"/>
+    <text x="135" y="195" text-anchor="middle" font-weight="600">local disk</text>
+    <text x="135" y="212" text-anchor="middle" font-size="11" opacity="0.75">bytes at storage_key,</text>
+    <text x="135" y="226" text-anchor="middle" font-size="11" opacity="0.75">left there by station 1</text>
+
+    <rect x="40" y="280" width="190" height="64" rx="3" fill="#b7791f" fill-opacity="0.12" stroke="#b7791f" stroke-width="1.4"/>
+    <text x="135" y="305" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_source_objects</text>
+    <text x="135" y="322" text-anchor="middle" font-size="11" opacity="0.75">the leased row from station 1</text>
+    <text x="135" y="336" text-anchor="middle" font-size="11" opacity="0.75">marked ingested at the end</text>
+
+    <!-- actor -->
+    <rect x="330" y="170" width="260" height="174" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="460" y="195" text-anchor="middle" font-weight="600">parse worker, one leased object</text>
+    <text x="460" y="212" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">parse_insert.run_log_parse_insert</text>
+    <g font-size="11">
+      <text x="346" y="240">3  split on timestamp-prefixed lines</text>
+      <text x="346" y="256">    parse header → user, thread, level,</text>
+      <text x="346" y="272">    logger, method, message</text>
+      <text x="346" y="290">    classify entry_type by message prefix</text>
+      <text x="346" y="306">    and method: request, request_body,</text>
+      <text x="346" y="322">    response, mi_call, mi_result, sql,</text>
+      <text x="346" y="338">    error, info</text>
+    </g>
+
+    <!-- step 2: load bytes -->
+    <path d="M230,202 L330,202" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#pa)"/>
+    <circle cx="280" cy="188" r="9" fill="currentColor"/><text x="280" y="192" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">2</text>
+    <text x="280" y="222" text-anchor="middle" font-size="10.5">load + decode utf-8</text>
+
+    <!-- step 1: jobs -->
+    <rect x="330" y="400" width="260" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="460" y="425" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">jobs</text>
+    <text x="460" y="442" text-anchor="middle" font-size="11" opacity="0.75">one row per parsed object: filename,</text>
+    <text x="460" y="456" text-anchor="middle" font-size="11" opacity="0.75">status pending → parsing → completed, chunk_count</text>
+    <path d="M400,344 L400,400" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#pa)" marker-start="url(#pa)"/>
+    <circle cx="400" cy="372" r="9" fill="currentColor"/><text x="400" y="376" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">1</text>
+    <text x="415" y="368" text-anchor="start" font-size="10.5">create, set parsing</text>
+    <text x="415" y="381" text-anchor="start" font-size="10.5">later: completed + count</text>
+
+    <!-- step 4: customers timezone -->
+    <rect x="40" y="400" width="190" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.7"/>
+    <text x="135" y="425" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5">customers</text>
+    <text x="135" y="442" text-anchor="middle" font-size="11" opacity="0.75">timezone of this tenant</text>
+    <text x="135" y="456" text-anchor="middle" font-size="11" opacity="0.75">locked once entries exist</text>
+    <path d="M230,420 L340,344" stroke="currentColor" stroke-width="1.1" fill="none" marker-start="url(#pa)"/>
+    <circle cx="285" cy="382" r="9" fill="currentColor"/><text x="285" y="386" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">4</text>
+    <text x="250" y="410" text-anchor="start" font-size="10.5">naive wall clock → UTC</text>
+
+    <!-- step 5: entries -->
+    <rect x="700" y="170" width="380" height="110" rx="3" fill="#2f7d4f" fill-opacity="0.12" stroke="#2f7d4f" stroke-width="1.8"/>
+    <text x="890" y="195" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_entries</text>
+    <text x="890" y="213" text-anchor="middle" font-size="11" opacity="0.8">one row per entry: id, job_id, customer_code, entry_hash,</text>
+    <text x="890" y="227" text-anchor="middle" font-size="11" opacity="0.8">timestamp, thread, user_ctx, level, logger, method, entry_type,</text>
+    <text x="890" y="241" text-anchor="middle" font-size="11" opacity="0.8">mi_program, mi_transaction, message, raw_body, fields</text>
+    <text x="890" y="262" text-anchor="middle" font-size="11" font-weight="600" fill="#2f7d4f">GROUND TRUTH · append-only · partition per UTC day</text>
+    <path d="M590,225 L700,225" stroke="#2f7d4f" stroke-width="1.5" fill="none" marker-end="url(#pag)"/>
+    <circle cx="645" cy="210" r="9" fill="#2f7d4f"/><text x="645" y="214" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">5</text>
+    <text x="645" y="246" text-anchor="middle" font-size="10.5">INSERT in batches of 200</text>
+    <text x="645" y="259" text-anchor="middle" font-size="10.5">ON CONFLICT (customer, hash, ts)</text>
+    <text x="645" y="272" text-anchor="middle" font-size="10.5">DO NOTHING · RETURNING timestamp</text>
+
+    <!-- step 6: ticket -->
+    <rect x="700" y="340" width="380" height="72" rx="3" fill="#b7791f" fill-opacity="0.12" stroke="#b7791f" stroke-width="1.6"/>
+    <text x="890" y="365" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_regroup_pending</text>
+    <text x="890" y="383" text-anchor="middle" font-size="11" opacity="0.8">one ticket per parsed object: range_start = min, range_end = max</text>
+    <text x="890" y="397" text-anchor="middle" font-size="11" opacity="0.8">of the timestamps RETURNED by the inserts, so only real new rows count</text>
+    <path d="M590,300 C640,300 660,376 700,376" stroke="#b7791f" stroke-width="1.5" fill="none" marker-end="url(#paq)"/>
+    <circle cx="645" cy="330" r="9" fill="#b7791f"/><text x="645" y="334" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">6</text>
+    <text x="660" y="326" text-anchor="start" font-size="10.5">"this range has new lines"</text>
+
+    <!-- bracket: 5 + 6 + job completed commit together -->
+    <path d="M690,160 L690,150 L1090,150 L1090,160" stroke="#b7791f" stroke-width="1.2" fill="none"/>
+    <text x="890" y="145" text-anchor="middle" font-size="11" fill="#b7791f" font-weight="600">5 + 6 + job completed are ONE commit. Skipped duplicates never open a ticket.</text>
+    <path d="M1090,412 L1090,424 L690,424 L690,412" stroke="#b7791f" stroke-width="1.2" fill="none"/>
+
+    <!-- step 7: back to source object -->
+    <path d="M330,312 L230,312" stroke="#b7791f" stroke-width="1.3" fill="none" marker-end="url(#paq)"/>
+    <circle cx="280" cy="298" r="9" fill="#b7791f"/><text x="280" y="302" text-anchor="middle" font-size="11" font-weight="600" style="fill:var(--bg)">7</text>
+    <text x="280" y="332" text-anchor="middle" font-size="10.5">ingested, entries_inserted</text>
+
+    <!-- next station -->
+    <path d="M890,412 L890,470" stroke="#b7791f" stroke-width="1.3" fill="none" marker-end="url(#paq)"/>
+    <text x="898" y="446" text-anchor="start" font-size="10.5" opacity="0.85">drained by the stitch worker, station 3</text>
+
+    <text x="560" y="520" text-anchor="middle" font-size="11.5" opacity="0.85">A duplicate line, a re-downloaded file, or the same file under a rotated name all parse to the same hash and are skipped at the insert.</text>
+    <text x="560" y="538" text-anchor="middle" font-size="11.5" opacity="0.85">On any failure the whole batch rolls back, the job is marked failed, and the source object row records the error and retries later.</text>
+  </g>
+</svg>
+<figcaption>Figure 3. Stage 1 for one leased object. The parser never touches the database. The inserts, the regroup ticket and the job completion are one commit, so a ticket can only exist for rows that really landed.</figcaption>
+</figure>
+
+<ol class="steps">
+  <li><b>Create the job.</b> The parse worker inserts a <code>jobs</code> row for the object's saved bytes and sets it to parsing. <code>log_parse_worker.py:227</code>, <code>parse_insert.py:84</code></li>
+  <li><b>Load the bytes.</b> Read the file at the object's storage key and decode it as UTF-8, replacing bad bytes rather than failing. <code>parse_insert.py:88</code></li>
+  <li><b>Parse in two passes, no database.</b> Pass one splits the text into entries wherever a line starts with a timestamp. Pass two parses the header with one regular expression into user, thread, level, logger, method and message, then classifies the entry. ERROR level wins. Then the message prefix: REQUEST BODY, REQUEST, RESPONSE. Then the method: LogAPICall is an MI call, LogAPIResult is an MI result. A stored procedure text is sql. Everything else is info. Field extraction pulls the MI program, transaction, result and record count into columns and the request or response JSON into <code>fields</code>. <code>m3_dotnet_parser.py:60</code> and <code>:120</code></li>
+  <li><b>Attach the tenant timezone.</b> The log has naive local wall-clock times. The worker reads this customer's timezone and makes each timestamp a real UTC instant, with DST handled per date. This is the single choke point for every ingestion path. <code>parse_insert.py:98</code></li>
+  <li><b>Insert in batches of 200.</b> Each row gets a fresh id and a SHA-256 of its raw text as <code>entry_hash</code>. The insert is ON CONFLICT (customer_code, entry_hash, timestamp) DO NOTHING, RETURNING timestamp, so duplicates are skipped silently and only the rows that really landed report their time. <code>parse_insert.py:46</code></li>
+  <li><b>Write the ticket and finish the job in the same commit.</b> If anything was inserted, one <code>log_regroup_pending</code> row is added covering min to max of the returned timestamps, and the job is set to completed with the new-entry count. One commit for all of it. <code>parse_insert.py:186</code></li>
+  <li><b>Report back to station 1.</b> The source object is marked ingested with the entry count and its local file is deleted. On failure the batch rolls back, the job is marked failed, and the object row records the error for retry. <code>log_parse_worker.py:185</code></li>
+</ol>
+
+<div class="er">
+<pre class="mermaid">
+erDiagram
+    log_source_objects {
+        uuid id PK
+        uuid job_id "soft, transitional"
+        string status
+    }
+    jobs {
+        uuid id PK
+        string customer_code
+        string filename
+        enum status
+        datetime created_at
+    }
+    log_entries {
+        uuid id "unique with timestamp, not a PK"
+        uuid job_id FK "-> jobs, cascade"
+        string customer_code "tenant, soft key"
+        string entry_hash "sha256 of raw line, dedup key"
+        datetime timestamp "PARTITION KEY, one partition per UTC day"
+        string source_file
+        int line_number
+        string thread "grouping key in Stage 2"
+        string user_ctx "grouping key in Stage 2"
+        enum entry_type "request / mi_call / sql / response"
+        string method
+        string mi_program
+        string mi_transaction
+        text message
+        text raw_body "the line, untouched"
+        jsonb fields
+    }
+    log_regroup_pending {
+        uuid id PK
+        string customer_code
+        datetime range_start "time range with new lines"
+        datetime range_end
+        datetime consumed_at "null = still open"
+        int attempts
+        datetime available_at "backoff gate"
+        datetime abandoned_at "dead letter after max attempts"
+        text last_error
+    }
+    log_source_objects ||..o| jobs : "parsed into"
+    jobs ||--o{ log_entries : "produced"
+    log_entries }o..|| log_regroup_pending : "range covered by ticket"
+</pre>
+</div>
+<ul class="notes">
+  <li><b>This is the only ground truth.</b> Rows are inserted and never updated. Five regroups of the same window perform zero updates here. Duplicates are rejected on (customer, hash, timestamp).</li>
+  <li><b>No primary key, on purpose.</b> A partitioned table needs the partition column inside every unique constraint, and the timestamp can be null when a line fails to parse. Identity is a unique constraint on (id, timestamp) instead.</li>
+  <li><b>Retention is a file unlink.</b> Old days are removed by dropping the day's partition, never by DELETE. Today the table holds 46 days and 4.9 GB.</li>
+</ul>
+</section>
+
+<section class="station">
+<h2><span class="eyebrow">Station 3</span><br>Stage 2: rows become transactions</h2>
+<p>Stage 2 reads a padded time window of entries, groups them by server, thread and user, and writes one row per group. The group is the business action: when it started, how long it took, which user, warehouse and item, and whether it succeeded. The membership lives in its own table so that re-grouping never touches <code>log_entries</code>.</p>
+<figure>
+<svg viewBox="0 0 1120 760" role="img" aria-label="Data flow of Stage 2. Every second the stitch worker seals due transactions, reaps stale saved state, then drains tickets per tenant. Tickets are coalesced into runs and split into windows. For each window: pad by 900 seconds, find the transactions to rebuild and who owned each entry, publish an analytics ticket, read eligible entries, group them by server thread and user, persist with inherited ids and fingerprints so unchanged rows cost no writes, commit, advance the checkpoint, mark tickets consumed. The shadow head lane plans from saved state and is compared after the rebuild. Failures back off and abandon after three attempts.">
+  <defs>
+    <marker id="sa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+    <marker id="saq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b7791f"/></marker>
+    <marker id="sab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0f6e8c"/></marker>
+    <marker id="sar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b3462e"/></marker>
+    <marker id="sap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7a6fa8"/></marker>
+  </defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+
+    <!-- tick -->
+    <rect x="40" y="24" width="1040" height="58" rx="3" fill="#0f6e8c" fill-opacity="0.08" stroke="#0f6e8c" stroke-width="1.2"/>
+    <text x="56" y="46" font-weight="600">stitch worker tick, every 1 s</text>
+    <text x="56" y="64" font-family="IBM Plex Mono, monospace" font-size="10.5">log_stitch_worker._tick</text>
+    <g font-size="11.5">
+      <text x="330" y="46">a  sealer: UPDATE sealed = true where nothing more can join</text>
+      <text x="330" y="64">   own tenant list, runs first, failures never stop the drain</text>
+      <text x="700" y="46">b  reaper: drop saved streams idle past the TTL</text>
+      <text x="700" y="64">c  drain: for each tenant with an open, due ticket → finalize_pending</text>
+    </g>
+
+    <!-- queue in -->
+    <rect x="40" y="130" width="230" height="86" rx="3" fill="#b7791f" fill-opacity="0.12" stroke="#b7791f" stroke-width="1.6"/>
+    <text x="155" y="153" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_regroup_pending</text>
+    <text x="155" y="171" text-anchor="middle" font-size="11" opacity="0.8">tickets from Stage 1</text>
+    <text x="155" y="185" text-anchor="middle" font-size="11" opacity="0.8">open = consumed_at null, not abandoned,</text>
+    <text x="155" y="199" text-anchor="middle" font-size="11" opacity="0.8">available_at ≤ now</text>
+
+    <!-- step 1 -->
+    <rect x="40" y="260" width="230" height="110" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="155" y="283" text-anchor="middle" font-weight="600">1  claim, coalesce, split</text>
+    <text x="52" y="303" font-size="11">read ALL open tickets of the tenant</text>
+    <text x="52" y="318" font-size="11">merge ranges closer than 2 × pad (30 min)</text>
+    <text x="52" y="333" font-size="11">into runs, cut runs into windows ≤ 6 h</text>
+    <text x="52" y="348" font-size="11">per-tenant advisory lock per window</text>
+    <text x="52" y="362" font-family="IBM Plex Mono, monospace" font-size="10">finalize_pending</text>
+    <path d="M155,216 L155,260" stroke="#b7791f" stroke-width="1.4" fill="none" marker-end="url(#saq)"/>
+
+    <!-- regroup_window box -->
+    <rect x="330" y="130" width="440" height="470" rx="3" fill="#0f6e8c" fill-opacity="0.06" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="550" y="153" text-anchor="middle" font-weight="600">one window, one database transaction</text>
+    <text x="550" y="169" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">regroup_window → _group → _persist</text>
+    <path d="M270,315 L330,315" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#sa)"/>
+    <text x="300" y="305" text-anchor="middle" font-size="10.5">lo..hi</text>
+
+    <g font-size="11.5">
+      <text x="346" y="200" font-weight="600">2  pad</text>
+      <text x="346" y="216">read range = lo − 900 s .. hi + 900 s. Cross-pad may move the floor back (shadow only today).</text>
+
+      <text x="346" y="244" font-weight="600">3  who is being rebuilt</text>
+      <text x="346" y="260">freed = transactions starting in lo − 900 s .. hi, sealed included. Load the owner of every</text>
+      <text x="346" y="275">entry in the range from log_entry_assignment, and the stored fingerprints of the freed rows.</text>
+
+      <text x="346" y="303" font-weight="600" fill="#b7791f">4  publish the analytics ticket, inside this same transaction</text>
+
+      <text x="346" y="331" font-weight="600">5  read eligible entries in stream order</text>
+      <text x="346" y="347">an entry is eligible if it has no owner yet, or its owner is in freed. Nothing is deleted.</text>
+
+      <text x="346" y="375" font-weight="600">6  group, pure Python</text>
+      <text x="346" y="391">open conversation keyed by (server, thread, user). A user-less line inherits the thread's current</text>
+      <text x="346" y="406">stream. REQUEST waits in a pool, paired by ReqID or to the body right after it. RESPONSE closes</text>
+      <text x="346" y="421">the OLDEST open work of that user on that server. Idle for 300 s → the conversation is closed.</text>
+
+      <text x="346" y="449" font-weight="600">7  persist, write only the difference</text>
+      <text x="346" y="465">id: inherit from the freed transaction that owned most of the entries, else uuid5 of the anchor</text>
+      <text x="346" y="480">status: error if any ERROR line, incomplete if no RESPONSE, soft if an MI result ≠ OK, else success</text>
+      <text x="346" y="495">sealed: ended before newest entry − 900 s (3600 s if incomplete)</text>
+      <text x="346" y="510">row and members fingerprints equal → unchanged, no write (the 98.7% case)</text>
+      <text x="346" y="525">row changed only → UPDATE the transaction · members changed → rewrite its assignments</text>
+      <text x="346" y="540">new → INSERT transaction + assignments · stored but not rebuilt → DELETE (vanished)</text>
+
+      <text x="346" y="568" font-weight="600">8  COMMIT, then advance log_stitch_checkpoint, then mark the run's tickets consumed</text>
+      <text x="346" y="584" font-size="11" opacity="0.8">the checkpoint and the consumed stamp are separate small commits after the window commit</text>
+    </g>
+
+    <!-- right: tables -->
+    <rect x="830" y="230" width="250" height="60" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="955" y="252" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_transactions</text>
+    <text x="955" y="268" text-anchor="middle" font-size="11" opacity="0.8">one row per conversation,</text>
+    <text x="955" y="282" text-anchor="middle" font-size="11" opacity="0.8">row_fingerprint, members_fingerprint, sealed</text>
+
+    <rect x="830" y="310" width="250" height="60" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="955" y="332" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_entry_assignment</text>
+    <text x="955" y="348" text-anchor="middle" font-size="11" opacity="0.8">entry → transaction, seq</text>
+    <text x="955" y="362" text-anchor="middle" font-size="11" opacity="0.8">read in step 3, rewritten in step 7</text>
+
+    <path d="M770,260 L830,260" stroke="#0f6e8c" stroke-width="1.4" fill="none" marker-end="url(#sab)" marker-start="url(#sab)"/>
+    <path d="M770,340 L830,340" stroke="#0f6e8c" stroke-width="1.4" fill="none" marker-end="url(#sab)" marker-start="url(#sab)"/>
+    <text x="800" y="250" text-anchor="middle" font-size="10" opacity="0.8">3, 7</text>
+    <text x="800" y="330" text-anchor="middle" font-size="10" opacity="0.8">3, 7</text>
+
+    <rect x="830" y="130" width="250" height="60" rx="3" fill="#b7791f" fill-opacity="0.12" stroke="#b7791f" stroke-width="1.6"/>
+    <text x="955" y="152" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_pending_windows</text>
+    <text x="955" y="168" text-anchor="middle" font-size="11" opacity="0.8">"transactions in lo−pad .. hi+pad changed"</text>
+    <text x="955" y="182" text-anchor="middle" font-size="11" opacity="0.8">drained by station 4</text>
+    <path d="M770,303 C800,303 800,160 830,160" stroke="#b7791f" stroke-width="1.4" fill="none" marker-end="url(#saq)"/>
+    <text x="800" y="220" text-anchor="middle" font-size="10" fill="#b7791f">4</text>
+
+    <rect x="830" y="400" width="250" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="955" y="420" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5">log_stitch_checkpoint</text>
+    <text x="955" y="436" text-anchor="middle" font-size="11" opacity="0.8">stitched_through = hi, never moves back</text>
+    <path d="M770,568 C800,568 800,423 830,423" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#sa)"/>
+    <text x="800" y="500" text-anchor="middle" font-size="10" opacity="0.8">8</text>
+
+    <rect x="830" y="470" width="250" height="60" rx="3" fill="#7a6fa8" fill-opacity="0.10" stroke="#7a6fa8" stroke-width="1.2" stroke-dasharray="4 3"/>
+    <text x="955" y="492" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5">log_open_stream</text>
+    <text x="955" y="508" text-anchor="middle" font-size="11" opacity="0.8">conversations still open at window end,</text>
+    <text x="955" y="522" text-anchor="middle" font-size="11" opacity="0.8">replaced each window, a cache not truth</text>
+    <path d="M770,395 C805,395 805,485 830,485" stroke="#7a6fa8" stroke-width="1.2" fill="none" stroke-dasharray="3 3" marker-end="url(#sap)"/>
+    <text x="808" y="460" text-anchor="middle" font-size="10" fill="#7a6fa8">save</text>
+
+    <!-- shadow head lane -->
+    <rect x="830" y="560" width="250" height="72" rx="3" fill="none" stroke="#b3462e" stroke-width="1.2" stroke-dasharray="5 3"/>
+    <text x="955" y="582" text-anchor="middle" font-size="11.5" font-weight="600" fill="#b3462e">shadow head lane</text>
+    <text x="955" y="598" text-anchor="middle" font-size="11" fill="#b3462e">before the rebuild: plan from open_stream + checkpoint</text>
+    <text x="955" y="612" text-anchor="middle" font-size="11" fill="#b3462e">after: compare ownership + fingerprints</text>
+    <text x="955" y="626" text-anchor="middle" font-size="11" fill="#b3462e">AGREED or DIVERGED in the journal, writes nothing</text>
+    <path d="M955,560 L955,530" stroke="#b3462e" stroke-width="1.2" fill="none" stroke-dasharray="5 3" marker-end="url(#sar)"/>
+    <path d="M900,560 L900,446" stroke="#b3462e" stroke-width="1.2" fill="none" stroke-dasharray="5 3" marker-end="url(#sar)"/>
+    <text x="905" y="548" text-anchor="start" font-size="10" fill="#b3462e">reads</text>
+
+    <!-- failure path -->
+    <rect x="40" y="420" width="230" height="130" rx="3" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="155" y="443" text-anchor="middle" font-weight="600">if a window raises</text>
+    <text x="52" y="463" font-size="11">whole window rolls back, nothing torn</text>
+    <text x="52" y="478" font-size="11">ticket: attempts + 1, last_error</text>
+    <text x="52" y="493" font-size="11">transient: available_at pushed out,</text>
+    <text x="52" y="508" font-size="11">backoff 30 s doubling to 30 min</text>
+    <text x="52" y="523" font-size="11">3rd failure or permanent error →</text>
+    <text x="52" y="538" font-size="11">abandoned_at set, CRITICAL log, no retry</text>
+    <path d="M330,480 L270,480" stroke="currentColor" stroke-width="1.1" fill="none" stroke-dasharray="4 3" marker-end="url(#sa)"/>
+
+    <!-- sealer detail -->
+    <rect x="40" y="600" width="230" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="155" y="622" text-anchor="middle" font-weight="600">a  sealer, the SQL twin of step 7</text>
+    <text x="52" y="641" font-size="11">clock = the tenant's newest entry, not wall time</text>
+    <text x="52" y="656" font-size="11">terminal: ended &lt; now − 900 s · incomplete: − 3600 s</text>
+    <path d="M270,632 C560,632 700,660 830,290" stroke="currentColor" stroke-width="1" fill="none" stroke-dasharray="2 3" marker-end="url(#sa)" opacity="0.6"/>
+
+    <text x="560" y="700" text-anchor="middle" font-size="11.5" opacity="0.85">The rebuild lane is the production path. It re-derives from log_entries every time, so a wrong grouping heals on the next pass.</text>
+    <text x="560" y="718" text-anchor="middle" font-size="11.5" opacity="0.85">Sealed rows are still freed and rebuilt when their window is touched, which is what makes a late backfill lossless. Fingerprints make it cheap.</text>
+    <text x="560" y="745" text-anchor="middle" font-size="11" opacity="0.7">settings: pad 900 s · open gap 300 s · seal 900 s · abandon 3600 s · max window 6 h · max attempts 3 · poll 1 s</text>
+  </g>
+</svg>
+<figcaption>Figure 4. Stage 2 for one tenant tick. Steps 2 to 7 happen inside one database transaction per window, with the analytics ticket published in it, so readers see the old grouping or the new one and never a torn state. The shadow head lane runs beside the rebuild and only reports.</figcaption>
+</figure>
+
+<ol class="steps">
+  <li><b>Claim, coalesce, split.</b> Every second the worker asks which tenants have an open, due ticket. For each tenant it reads all open tickets, merges ranges closer than twice the pad into runs, cuts runs into windows of at most six hours, and takes a per-tenant advisory lock per window. <code>log_stitch_worker.py:106</code>, <code>derive_transactions.py:1536</code></li>
+  <li><b>Pad.</b> The window becomes lo minus 900 s to hi plus 900 s. The cross-pad extension may move the floor further back for a conversation that straddles it. Today it only reports what it would do. <code>derive_transactions.py:1329</code></li>
+  <li><b>Decide who is being rebuilt.</b> Freed is every transaction that starts inside lo minus pad to hi, sealed ones included. The owner of every entry in the range is read from <code>log_entry_assignment</code> before anything changes, and the stored fingerprints of the freed rows are loaded. <code>derive_transactions.py:1340</code></li>
+  <li><b>Publish the analytics ticket</b> for the padded range, inside the same transaction, and before the early return, so a window that frees transactions and rebuilds nothing still tells station 4 to reverse their facts. <code>derive_transactions.py:1390</code></li>
+  <li><b>Read eligible entries.</b> All entries in the padded range that have no owner or whose owner is in freed, in timestamp then file then line order. Nothing is deleted first. <code>derive_transactions.py:1412</code></li>
+  <li><b>Group in memory.</b> An open conversation is keyed by (server, thread, user). A user-less line joins the thread's current conversation. A REQUEST waits in a pool and is paired by ReqID, or as the id-less request right before a body. A RESPONSE closes the oldest open work of that user on that server. Anything idle for 300 s is closed. A conversation can never mix two users or two servers. <code>derive_transactions.py:258</code></li>
+  <li><b>Persist only the difference.</b> Each group's id is inherited from the freed transaction that owned most of its entries, otherwise minted from the hash of its request line. Status, sealed flag and two fingerprints are computed. Equal fingerprints mean no write at all. A changed row updates the transaction. Changed membership rewrites that transaction's assignments. New groups are inserted. Stored transactions the rebuild did not produce are deleted. <code>derive_transactions.py:762</code>, <code>continuity.py:138</code></li>
+  <li><b>Commit and bookkeep.</b> The window commits. Then the stitch checkpoint advances to hi, and only when every window of a run has committed are the run's tickets marked consumed. A failure rolls the window back, bumps attempts with backoff, and abandons the ticket on the third failure or immediately for a permanent error. <code>derive_transactions.py:1613</code></li>
+</ol>
+<p><b>Two side jobs on the same tick.</b> The sealer runs first and updates <code>sealed = true</code> on rows that nothing more can join, using the tenant's newest entry as the clock so back-dated ingestion seals correctly. It has its own tenant list because rows needing a seal are exactly the ones no ticket touches any more. The reaper deletes saved streams the grouper has stopped touching. <code>sealer.py:123</code>, <code>stream_state.py:199</code></p>
+
+<div class="er">
+<pre class="mermaid">
+erDiagram
+    log_entries {
+        uuid id
+        datetime timestamp
+        string thread
+        string user_ctx
+    }
+    log_entry_assignment {
+        uuid entry_id "soft -> log_entries, unique with entry_ts"
+        datetime entry_ts "PARTITION KEY, copied from the entry"
+        uuid transaction_id "soft -> log_transactions"
+        int seq "position inside the transaction"
+        string customer_code
+        datetime assigned_at
+    }
+    log_transactions {
+        uuid id "inherited on rebuild, else uuid5 of anchor entry"
+        datetime started_at "PARTITION KEY"
+        datetime ended_at
+        int duration_ms
+        string customer_code
+        string user_name
+        string warehouse
+        string device_name
+        string method
+        string transaction_name
+        string item_number
+        string order_number
+        enum status "success / soft / error / incomplete"
+        int entry_count
+        bool sealed "true = will never change again"
+        string row_fingerprint "byte-identical means no write"
+        string members_fingerprint
+        jsonb attributes "long-tail parameters"
+        datetime updated_at
+    }
+    log_open_stream {
+        uuid id PK
+        string customer_code
+        string server "part of the key, thread ids repeat per server"
+        string thread
+        string user_ctx
+        uuid transaction_id "soft, the conversation still open"
+        bool has_request
+        datetime last_entry_ts
+        bool is_current
+        datetime updated_at "TTL reaper keys on this"
+    }
+    log_pending_request {
+        uuid id PK
+        uuid entry_id "soft, a request still waiting for its body"
+        string reqid
+        datetime timestamp
+    }
+    log_stitch_checkpoint {
+        string customer_code PK "one row per tenant"
+        datetime stitched_through "never moves backwards"
+    }
+    log_regroup_runs {
+        uuid id PK
+        string kind "finalize / full"
+        enum status
+        datetime range_start "null = whole history"
+        datetime range_end
+    }
+    analytics_pending_windows {
+        uuid id PK
+        string customer_code
+        datetime range_start "padded window that changed"
+        datetime range_end
+        datetime consumed_at
+        int attempts
+        datetime abandoned_at
+    }
+    log_entries ||..o| log_entry_assignment : "currently assigned to"
+    log_transactions ||..o{ log_entry_assignment : "groups"
+    log_transactions ||..o| log_open_stream : "still open as"
+    log_entries ||..o| log_pending_request : "waiting"
+    log_transactions }o..|| analytics_pending_windows : "change covered by ticket"
+</pre>
+</div>
+<ul class="notes">
+  <li><b>Transactions are rewritten many times.</b> Lines arrive late, so a window is re-stitched again and again until it seals about 15 minutes later. The rebuild keeps the old transaction id where it can, so downstream tables can follow it.</li>
+  <li><b>The assignment table is why the entries table stays clean.</b> Before this split every regroup rewrote each entry row about 55 times. That write storm caused the 5 August 2026 outage.</li>
+  <li><b>Fingerprints make rebuilding free.</b> If the rebuilt row has the same fingerprint, nothing is written. This is also how the shadow lane is judged: its plan must match these fingerprints exactly.</li>
+  <li><b>The purple tables are a cache.</b> <code>log_open_stream</code> and <code>log_pending_request</code> remember where the grouper got to. The live lane ignores them and rebuilds from scratch. The shadow head lane starts from them, which is why stale saved state produces the ownership divergences seen this week.</li>
+</ul>
+</section>
+
+<section class="station">
+<h2><span class="eyebrow">Station 4</span><br>Analytics: transactions become facts</h2>
+<p>A worker consumes each ticket, re-reads the transactions in that window, and folds each one into a fact. Because a transaction is rewritten many times, the worker cannot simply add numbers up as they arrive. Each fact carries a fingerprint of its source. Same fingerprint, no write. Different fingerprint, replace the fact and push the old version onto the ledger.</p>
+<figure>
+<svg viewBox="0 0 1120 800" role="img" aria-label="Data flow of the analytics station. Every two seconds the worker takes each tenant's due tickets, coalesces them into runs, and for each run in one transaction: reads the captured transactions and the stored facts for the same range, re-reads response entries only for transactions whose fingerprint changed, registers observed field names, normalises each transaction into a fact or a quarantine row, range-diffs stored against source into insert, update, unchanged or reverse, applies to analytics_facts with every version appended to the ledger, expands per-record rows, recomputes dirty rollup buckets, updates tenant state, stamps tickets consumed, and commits.">
+  <defs>
+    <marker id="na" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+    <marker id="naq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b7791f"/></marker>
+    <marker id="nab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0f6e8c"/></marker>
+  </defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+
+    <!-- tick -->
+    <rect x="40" y="24" width="1040" height="46" rx="3" fill="#0f6e8c" fill-opacity="0.08" stroke="#0f6e8c" stroke-width="1.2"/>
+    <text x="56" y="44" font-weight="600">analytics worker tick, every 2 s</text>
+    <text x="56" y="60" font-family="IBM Plex Mono, monospace" font-size="10.5">analytics_worker._tick → consume.drain_once → consume_tenant → _consume_run</text>
+    <text x="620" y="44" font-size="11.5">one tenant at a time, own advisory lock namespace so it never blocks Stage 2</text>
+    <text x="620" y="60" font-size="11.5">enabled on the server: ANALYTICS_WORKER_ENABLED=true</text>
+
+    <!-- queue in -->
+    <rect x="40" y="110" width="230" height="78" rx="3" fill="#b7791f" fill-opacity="0.12" stroke="#b7791f" stroke-width="1.6"/>
+    <text x="155" y="133" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_pending_windows</text>
+    <text x="155" y="151" text-anchor="middle" font-size="11" opacity="0.8">tickets from Stage 2, padded ranges</text>
+    <text x="155" y="165" text-anchor="middle" font-size="11" opacity="0.8">open = consumed_at null, not abandoned,</text>
+    <text x="155" y="179" text-anchor="middle" font-size="11" opacity="0.8">available_at ≤ now</text>
+
+    <rect x="40" y="220" width="230" height="78" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="155" y="243" text-anchor="middle" font-weight="600">1  claim and coalesce</text>
+    <text x="52" y="263" font-size="11">overlapping tickets → disjoint runs,</text>
+    <text x="52" y="278" font-size="11">each run ≤ one day, own transaction</text>
+    <text x="52" y="292" font-size="11">destination partitions created first</text>
+    <path d="M155,188 L155,220" stroke="#b7791f" stroke-width="1.4" fill="none" marker-end="url(#naq)"/>
+
+    <!-- inputs read -->
+    <rect x="40" y="340" width="230" height="64" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="155" y="362" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_transactions</text>
+    <text x="155" y="378" text-anchor="middle" font-size="11" opacity="0.8">all rows with started_at in the range,</text>
+    <text x="155" y="392" text-anchor="middle" font-size="11" opacity="0.8">captured names only, never a LIMIT</text>
+
+    <rect x="40" y="420" width="230" height="64" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="155" y="442" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_entry_assignment + log_entries</text>
+    <text x="155" y="458" text-anchor="middle" font-size="11" opacity="0.8">response and mi_result lines, read ONLY</text>
+    <text x="155" y="472" text-anchor="middle" font-size="11" opacity="0.8">for transactions whose fingerprint moved</text>
+
+    <rect x="40" y="500" width="230" height="78" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="155" y="522" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">analytics_transaction_registry</text>
+    <text x="155" y="537" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">analytics_field_registry</text>
+    <text x="155" y="553" text-anchor="middle" font-size="11" opacity="0.8">switches: capture / show / expand, field</text>
+    <text x="155" y="567" text-anchor="middle" font-size="11" opacity="0.8">allow-list. Read once per run, new names seeded</text>
+
+    <rect x="40" y="600" width="230" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="155" y="620" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5">analytics_metrics</text>
+    <text x="155" y="636" text-anchor="middle" font-size="11" opacity="0.8">active definitions drive the rollups</text>
+
+    <!-- run box -->
+    <rect x="330" y="110" width="440" height="560" rx="3" fill="#0f6e8c" fill-opacity="0.06" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="550" y="133" text-anchor="middle" font-weight="600">one run, one database transaction, everything or nothing</text>
+    <text x="550" y="149" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">consume._consume_run</text>
+    <path d="M270,259 L330,259" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#na)"/>
+
+    <g font-size="11.5">
+      <text x="346" y="178" font-weight="600">2  read both sides with the SAME range predicate</text>
+      <text x="346" y="194">source = captured transactions in the range · stored = analytics_facts in the range</text>
+
+      <text x="346" y="222" font-weight="600">3  response payloads, only where needed</text>
+      <text x="346" y="238">a stored fact carries the source row_fingerprint it was built from. Same fingerprint and same</text>
+      <text x="346" y="253">normaliser version → carry the stored fact through untouched. Otherwise read that transaction's</text>
+      <text x="346" y="268">response lines, extract scalars as resp.* and mi.*, register every name, keep the approved ones.</text>
+
+      <text x="346" y="296" font-weight="600">4  normalise, pure Python: one transaction → one fact, or one quarantine row</text>
+      <text x="346" y="312">columns copied, lot / from / to locations from attributes, business_date in the tenant zone,</text>
+      <text x="346" y="327">quantity parsed for quantity methods. Unreadable quantity → quarantine, never zero.</text>
+      <text x="346" y="342">source_version_hash = fingerprint of the fact (created_at excluded, or every rebuild would churn)</text>
+
+      <text x="346" y="370" font-weight="600">5  range diff, pure: key = (source_transaction_id, event_time)</text>
+      <text x="346" y="386">in source, not stored → INSERT · both, hashes differ → UPDATE · both, hashes equal → UNCHANGED</text>
+      <text x="346" y="401">stored, absent from source → REVERSE. Merge, split, delete and purge are all this one branch.</text>
+
+      <text x="346" y="429" font-weight="600">6  apply + ledger</text>
+      <text x="346" y="445">facts: insert with revision 1, update with revision + 1, reverse = delete the row.</text>
+      <text x="346" y="460">every non-unchanged verdict appends ONE ledger row: full fact values, revision, reason, recorded_at.</text>
+      <text x="346" y="475">a reversal gets a ledger row too, so history never just stops.</text>
+
+      <text x="346" y="503" font-weight="600">7  expand records + quarantine</text>
+      <text x="346" y="519">for names with expand = on: one analytics_record_facts row per record in the mi_result payload.</text>
+      <text x="346" y="534">quarantine rows written for every issue from step 4. A1: a bad row never halts the tenant.</text>
+
+      <text x="346" y="562" font-weight="600">8  rollups, recompute and replace</text>
+      <text x="346" y="578">the diff decides WHICH hour and day buckets are dirty. Each dirty bucket is recomputed from facts</text>
+      <text x="346" y="593">and its rows replaced, monthly from daily. Empty bucket → deleted. hidden names excluded. Never +=.</text>
+
+      <text x="346" y="621" font-weight="600">9  tenant state, tickets, cursor, COMMIT</text>
+      <text x="346" y="637">watermarks move forward only, counts move by the diff's own numbers, tickets stamped consumed,</text>
+      <text x="346" y="652">retention position published as the minimum across tenants, then one commit for all of it.</text>
+    </g>
+
+    <!-- read arrows from left inputs into the run -->
+    <path d="M270,372 L330,372" stroke="#0f6e8c" stroke-width="1.3" fill="none" marker-end="url(#nab)"/>
+    <text x="300" y="362" text-anchor="middle" font-size="10" opacity="0.8">2</text>
+    <path d="M270,452 L330,452" stroke="#0f6e8c" stroke-width="1.3" fill="none" marker-end="url(#nab)"/>
+    <text x="300" y="442" text-anchor="middle" font-size="10" opacity="0.8">3</text>
+    <path d="M270,539 L330,539" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#na)" marker-start="url(#na)"/>
+    <text x="300" y="529" text-anchor="middle" font-size="10" opacity="0.8">2, 3</text>
+    <path d="M270,623 L330,623" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#na)"/>
+    <text x="300" y="613" text-anchor="middle" font-size="10" opacity="0.8">8</text>
+
+    <!-- outputs right -->
+    <rect x="830" y="110" width="250" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="955" y="132" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_facts</text>
+    <text x="955" y="148" text-anchor="middle" font-size="11" opacity="0.8">CURRENT fact per transaction</text>
+    <text x="955" y="162" text-anchor="middle" font-size="11" opacity="0.8">partition by event_time, monthly</text>
+    <path d="M770,194 C800,194 800,142 830,142" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#na)" marker-start="url(#na)"/>
+    <text x="800" y="160" text-anchor="middle" font-size="10" opacity="0.8">2, 6</text>
+
+    <rect x="830" y="200" width="250" height="78" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="955" y="222" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_fact_ledger</text>
+    <text x="955" y="238" text-anchor="middle" font-size="11" opacity="0.8">EVERY version, append-only, never updated</text>
+    <text x="955" y="252" text-anchor="middle" font-size="11" opacity="0.8">unique (tenant, txn, started_at, revision, recorded_at)</text>
+    <text x="955" y="266" text-anchor="middle" font-size="11" opacity="0.8">partition by recorded_at, monthly</text>
+    <path d="M770,455 C800,455 800,239 830,239" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#na)"/>
+    <text x="800" y="330" text-anchor="middle" font-size="10" opacity="0.8">6</text>
+
+    <rect x="830" y="304" width="250" height="60" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="955" y="326" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5">analytics_record_facts</text>
+    <text x="955" y="342" text-anchor="middle" font-size="11" opacity="0.8">one row per payload record, rec.* fields</text>
+    <text x="955" y="356" text-anchor="middle" font-size="11" opacity="0.8">only for names with expand = on</text>
+    <path d="M770,515 C800,515 800,334 830,334" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#na)"/>
+    <text x="800" y="420" text-anchor="middle" font-size="10" opacity="0.8">7</text>
+
+    <rect x="830" y="390" width="250" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="955" y="410" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5">analytics_quality_issues</text>
+    <text x="955" y="426" text-anchor="middle" font-size="11" opacity="0.8">quarantine: reason, detail, observed values</text>
+    <path d="M770,530 C805,530 805,413 830,413" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#na)"/>
+
+    <rect x="830" y="462" width="250" height="78" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="955" y="484" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_hourly / daily / monthly_rollups</text>
+    <text x="955" y="500" text-anchor="middle" font-size="11" opacity="0.8">per metric, bucket, dim1..dim4:</text>
+    <text x="955" y="514" text-anchor="middle" font-size="11" opacity="0.8">sum, count, sum_sq, min, max, histogram</text>
+    <text x="955" y="528" text-anchor="middle" font-size="11" opacity="0.8">read by station 5 and the chart API</text>
+    <path d="M770,578 C800,578 800,500 830,500" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#na)"/>
+    <text x="800" y="545" text-anchor="middle" font-size="10" opacity="0.8">8</text>
+
+    <rect x="830" y="566" width="250" height="60" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="955" y="588" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5">analytics_tenant_state</text>
+    <text x="955" y="604" text-anchor="middle" font-size="11" opacity="0.8">one row per tenant: watermarks, unsealed share,</text>
+    <text x="955" y="618" text-anchor="middle" font-size="11" opacity="0.8">facts_total, open / abandoned tickets, last_error</text>
+    <path d="M770,637 C800,637 800,596 830,596" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#na)"/>
+    <text x="800" y="625" text-anchor="middle" font-size="10" opacity="0.8">9</text>
+
+    <rect x="830" y="646" width="250" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.8"/>
+    <text x="955" y="666" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5">consumer_cursors</text>
+    <text x="955" y="682" text-anchor="middle" font-size="11" opacity="0.8">"analytics has read through here", retention waits</text>
+    <path d="M770,652 C805,652 805,669 830,669" stroke="currentColor" stroke-width="1.1" fill="none" marker-end="url(#na)"/>
+
+    <!-- failure -->
+    <rect x="40" y="680" width="230" height="78" rx="3" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="155" y="702" text-anchor="middle" font-weight="600">if a run raises</text>
+    <text x="52" y="721" font-size="11">whole run rolls back, tickets stay open</text>
+    <text x="52" y="736" font-size="11">attempts + 1, backoff 5 s doubling to 15 min</text>
+    <text x="52" y="751" font-size="11">5th failure → abandoned, tenant state last_error</text>
+    <path d="M330,700 L270,700" stroke="currentColor" stroke-width="1.1" fill="none" stroke-dasharray="4 3" marker-end="url(#na)"/>
+
+    <text x="560" y="785" text-anchor="middle" font-size="11.5" opacity="0.85">A separate hourly reconcile worker audits facts against transactions and rollups against facts, report-only. Its findings are the "entries_vs_assignments" lines in the journal.</text>
+  </g>
+</svg>
+<figcaption>Figure 5. Station 4 for one run. The two reads in step 2 use the same range, which is what lets a vanished transaction be reversed instead of leaking into every total. The fact table holds the present, the ledger holds every version, and rollups are recomputed from facts rather than incremented.</figcaption>
+</figure>
+
+<ol class="steps">
+  <li><b>Claim and coalesce.</b> Every two seconds the worker finds tenants with open, due tickets, merges overlapping tickets into disjoint runs of at most one day, and processes each run in its own transaction under a per-tenant lock in its own namespace. <code>consume.py:1030</code>, <code>consume.py:844</code></li>
+  <li><b>Read both sides with one predicate.</b> Source is every transaction whose start falls in the range, filtered to captured names. Stored is every fact in the same range, same filter. Applying the filter to both sides is what makes un-ticking capture stop new facts without deleting old ones. <code>consume.py:263</code>, <code>capture.py:142</code></li>
+  <li><b>Read response payloads only where needed.</b> Each stored fact carries the source row fingerprint it was built from. If it matches and the normaliser version is unchanged, the stored fact is carried through untouched and no entries are read. Otherwise the transaction's response and MI result lines are read, their scalars extracted under the resp. and mi. prefixes, every field name registered, and only approved names kept. <code>consume.py:307</code>, <code>payload.py:128</code></li>
+  <li><b>Normalise, no database.</b> One transaction becomes one fact or one quarantine row. Quantity methods must carry a readable quantity or the row is quarantined, never counted as zero. The fact's fingerprint deliberately excludes created_at, since Stage 2 refreshes that on every rebuild. <code>normalizer.py:216</code></li>
+  <li><b>Range diff.</b> Pure function over the two lists keyed by (transaction id, event_time). Insert, update, unchanged, or reverse. A merge, a split, a delete and a purge are all the reverse branch. <code>diff.py:114</code></li>
+  <li><b>Apply and ledger.</b> Inserts get revision 1, updates revision plus one, reversals delete the fact row. Every one of those appends a ledger row with the full values, the revision, the reason and the time recorded. Unchanged writes nothing. <code>consume.py:409</code></li>
+  <li><b>Expand records and quarantine.</b> Transactions whose name has expand switched on get one record fact per record in the payload. Quality issues from step 4 are written to the quarantine table. <code>consume.py:523</code>, <code>consume.py:629</code></li>
+  <li><b>Rollups.</b> The diff decides which hour and local-day buckets are dirty. Each is recomputed from facts and replaced, monthly from daily. A bucket that recomputes to nothing is deleted. Names with show off are excluded here and nowhere else, which is why that switch is instant and reversible. <code>consume.py:646</code>, <code>rollups.py:316</code></li>
+  <li><b>State, tickets, cursor, commit.</b> Tenant state is upserted with forward-only watermarks and counts moved by the diff's numbers. Tickets are stamped consumed. The retention cursor is published as the minimum across tenants. One commit. On failure everything rolls back, attempts increase with backoff, and the fifth failure abandons the tickets. <code>consume.py:732</code>, <code>consume.py:998</code></li>
+</ol>
+
+<div class="er">
+<pre class="mermaid">
+erDiagram
+    log_transactions {
+        uuid id
+        datetime started_at
+        string row_fingerprint
+    }
+    analytics_facts {
+        uuid id "row identity only"
+        string customer_code
+        uuid source_transaction_id "soft -> log_transactions"
+        datetime source_started_at "the source row's partition key"
+        string source_version_hash "matching = write nothing"
+        bigint revision
+        datetime event_time "PARTITION KEY, monthly"
+        date business_date "tenant-local day"
+        string transaction_name
+        string method
+        string status
+        string item_number
+        string warehouse
+        string user_name
+        numeric quantity
+        string quantity_classification
+        jsonb attributes "only allow-listed fields"
+    }
+    analytics_fact_ledger {
+        uuid id
+        uuid source_transaction_id
+        bigint revision "one row per version, append-only"
+        datetime recorded_at "PARTITION KEY, monthly: when this version was written"
+        text reason "insert / update / reverse"
+        string source_version_hash
+        datetime event_time
+        numeric quantity "same measure columns as the fact"
+        jsonb attributes
+    }
+    analytics_record_facts {
+        uuid id
+        uuid source_transaction_id
+        int record_index "one row per record inside the transaction"
+        datetime event_time "PARTITION KEY, monthly"
+        string mi_program
+        jsonb attributes
+    }
+    analytics_transaction_registry {
+        uuid id PK
+        string transaction_name
+        bool capture "does a fact exist at all"
+        bool show "does it reach charts"
+        bool expand "write per-record rows"
+        datetime reviewed_at "null = needs review"
+    }
+    analytics_field_registry {
+        uuid id PK
+        string method
+        string source "request / response / mi_result"
+        string field "field NAME only, never a value"
+        bool captured
+        int seen_count
+    }
+    analytics_metrics {
+        uuid id PK
+        string name "unique per tenant"
+        jsonb dimensions "fields to group by"
+        jsonb measures "sum / count / avg of which field"
+        jsonb filter "method allow-list"
+        jsonb grains "hourly / daily / monthly"
+        string status "draft / active / inactive"
+        date backfilled_through
+    }
+    analytics_tenant_state {
+        uuid id PK
+        string customer_code "one row per tenant"
+        datetime analytics_watermark "settled through here"
+        datetime source_watermark
+        numeric unsealed_share "drives Provisional / Settled badge"
+        int open_tickets
+        int abandoned_tickets
+        bigint facts_total
+        bigint record_facts_total
+        datetime last_cycle_at
+        text last_error
+    }
+    log_transactions ||..o| analytics_facts : "current contribution"
+    analytics_facts ||..o{ analytics_fact_ledger : "every past version"
+    log_transactions ||..o{ analytics_record_facts : "expanded when registry says so"
+    analytics_transaction_registry ||..o{ analytics_facts : "gates by transaction_name"
+    analytics_field_registry ||..o{ analytics_facts : "allow-lists attributes"
+</pre>
+</div>
+<ul class="notes">
+  <li><b>No foreign keys anywhere here.</b> Five of these tables are partitioned, and a foreign key from a partition once made the log partitions undroppable. Tenant purges delete from each table explicitly instead.</li>
+  <li><b>Two tables that look redundant are not.</b> <code>analytics_facts</code> is the current value. <code>analytics_fact_ledger</code> is every value there has ever been. The ledger is what lets a training set be rebuilt months after the raw entries have been dropped at 60 days.</li>
+  <li><b>The registries are switches, not data.</b> They decide which transaction names get facts, which reach charts, and which field names may be captured. They never store field values.</li>
+</ul>
+</section>
+
+<section class="station">
+<h2><span class="eyebrow">Station 5</span><br>Rollups: pre-added numbers for charts</h2>
+<p>A rollup row is one metric, one time bucket, and up to four dimension values, with the sum, count, min, max and a histogram already computed. The API answers a chart by combining settled rollups for old buckets with a live scan of facts for the current bucket. Rollups store additive parts, never finished answers, so an average is computed at read time from sum and count.</p>
+<figure>
+<svg viewBox="0 0 1120 740" role="img" aria-label="Station 5 has a write side and a read side. Write side, inside the analytics run: dirty facts are folded per metric definition into hourly UTC buckets and local-day buckets, monthly is folded from daily, and each dirty bucket's rows are deleted and reinserted. Read side, the series API: choose the coarsest grain that resolves the window, read the tenant watermark once, serve whole buckets before the watermark from rollups and the ragged edges plus the tail after it from a bounded fact scan, merge role by role, and return additive roles so averages are divided at read time.">
+  <defs>
+    <marker id="ra" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+    <marker id="rab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0f6e8c"/></marker>
+  </defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+
+    <!-- column headers -->
+    <g font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.08em" opacity="0.7">
+      <text x="290" y="40" text-anchor="middle">WRITE · inside the station 4 run, step 8</text>
+      <text x="840" y="40" text-anchor="middle">READ · GET /api/v1/analytics/series</text>
+    </g>
+    <line x1="560" y1="28" x2="560" y2="640" stroke="currentColor" stroke-width="0.6" opacity="0.25"/>
+
+    <!-- WRITE side -->
+    <rect x="40" y="60" width="230" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="155" y="82" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5">analytics_metrics</text>
+    <text x="155" y="98" text-anchor="middle" font-size="11" opacity="0.8">active definitions: dimensions (≤ 4),</text>
+    <text x="155" y="112" text-anchor="middle" font-size="11" opacity="0.8">measures, filter, grains</text>
+
+    <rect x="300" y="60" width="240" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="420" y="82" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_facts</text>
+    <text x="420" y="98" text-anchor="middle" font-size="11" opacity="0.8">read ONCE: only rows in the dirty hours</text>
+    <text x="420" y="112" text-anchor="middle" font-size="11" opacity="0.8">and dirty local days, hidden names excluded</text>
+
+    <rect x="40" y="160" width="500" height="120" rx="3" fill="#0f6e8c" fill-opacity="0.06" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="290" y="182" text-anchor="middle" font-weight="600">fold, pure Python, per definition</text>
+    <text x="290" y="198" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">rollups.group_fold → definition.fold</text>
+    <g font-size="11.5">
+      <text x="56" y="222">group key = (bucket, dim1..dim4) · one output row per MEASURE</text>
+      <text x="56" y="238">a row contributes only if it passes the definition's method, classification and status filters</text>
+      <text x="56" y="254">roles per row: count += 1, sum += v, sum_sq += v², min, max, histogram bucket += 1</text>
+      <text x="56" y="270">a value that cannot be read contributes to NOTHING, never to the count</text>
+    </g>
+    <path d="M155,124 L155,160" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
+    <path d="M420,124 L420,160" stroke="#0f6e8c" stroke-width="1.3" fill="none" marker-end="url(#rab)"/>
+
+    <rect x="40" y="320" width="230" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="155" y="342" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_hourly_rollups</text>
+    <text x="155" y="358" text-anchor="middle" font-size="11" opacity="0.8">bucket_start = UTC hour</text>
+    <text x="155" y="372" text-anchor="middle" font-size="11" opacity="0.8">daily partitions, kept 90 days</text>
+
+    <rect x="310" y="320" width="230" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="425" y="342" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_daily_rollups</text>
+    <text x="425" y="358" text-anchor="middle" font-size="11" opacity="0.8">business_date = tenant-LOCAL day</text>
+    <text x="425" y="372" text-anchor="middle" font-size="11" opacity="0.8">yearly partitions</text>
+
+    <path d="M155,280 L155,320" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#ra)"/>
+    <path d="M425,280 L425,320" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#ra)"/>
+    <text x="290" y="304" text-anchor="middle" font-size="11">both from facts, in one pass. Never daily from hourly:</text>
+    <text x="290" y="317" text-anchor="middle" font-size="10.5" opacity="0.8">a +05:30 tenant has one UTC hour straddling two local days</text>
+
+    <rect x="310" y="430" width="230" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="425" y="452" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_monthly_rollups</text>
+    <text x="425" y="468" text-anchor="middle" font-size="11" opacity="0.8">month_start, unpartitioned</text>
+    <text x="425" y="482" text-anchor="middle" font-size="11" opacity="0.8">folded from DAILY with add_roles, exact</text>
+    <path d="M425,384 L425,430" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#ra)"/>
+    <text x="440" y="411" text-anchor="start" font-size="10.5">after daily is replaced</text>
+
+    <rect x="40" y="430" width="230" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="155" y="452" text-anchor="middle" font-weight="600">replace, never increment</text>
+    <text x="52" y="470" font-size="11">DELETE every row of the dirty buckets,</text>
+    <text x="52" y="484" font-size="11">INSERT the recomputed ones. Empty → gone.</text>
+
+    <text x="290" y="530" text-anchor="middle" font-size="11.5" opacity="0.85">Rows store additive ROLES: sum, count, sum_sq, min, max, histogram.</text>
+    <text x="290" y="546" text-anchor="middle" font-size="11.5" opacity="0.85">Never an average, never a percentile. Those are divided out at read time,</text>
+    <text x="290" y="562" text-anchor="middle" font-size="11.5" opacity="0.85">so twelve months can be added and divided once instead of averaging averages.</text>
+    <text x="290" y="590" text-anchor="middle" font-size="11" opacity="0.7">A retried run recomputes the same buckets to the same rows. Adding deltas would double-count on the first retry.</text>
+
+    <!-- READ side -->
+    <rect x="590" y="60" width="500" height="58" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="840" y="82" text-anchor="middle" font-weight="600">request</text>
+    <text x="840" y="99" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">X-Customer-Code · metric · measure · start · end · group_by</text>
+    <text x="840" y="112" text-anchor="middle" font-size="11" opacity="0.8">/breakdown is the same read with one dimension, then ranked top N</text>
+
+    <rect x="590" y="140" width="500" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="606" y="162" font-weight="600">1  choose the grain</text>
+    <text x="606" y="179" font-size="11.5">coarsest of the definition's grains that still resolves the window:</text>
+    <text x="606" y="194" font-size="11.5">≤ 60 buckets and ≤ 100,000 rows. A year → monthly, a month → daily, a shift → hourly.</text>
+
+    <rect x="590" y="220" width="500" height="50" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="606" y="242" font-weight="600">2  read the watermark ONCE</text>
+    <text x="606" y="259" font-size="11.5">analytics_tenant_state.analytics_watermark: everything at or before it has been folded</text>
+
+    <rect x="590" y="290" width="500" height="150" rx="3" fill="#0f6e8c" fill-opacity="0.06" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="606" y="312" font-weight="600">3  plan, pure: split the window into two tiers from that one boundary</text>
+    <text x="606" y="330" font-family="IBM Plex Mono, monospace" font-size="10.5">read.plan_read</text>
+    <!-- timeline -->
+    <line x1="620" y1="372" x2="1070" y2="372" stroke="currentColor" stroke-width="1.4"/>
+    <line x1="620" y1="364" x2="620" y2="380" stroke="currentColor" stroke-width="1.2"/>
+    <line x1="1070" y1="364" x2="1070" y2="380" stroke="currentColor" stroke-width="1.2"/>
+    <text x="620" y="356" text-anchor="middle" font-size="10.5">start</text>
+    <text x="1070" y="356" text-anchor="middle" font-size="10.5">end</text>
+    <rect x="620" y="366" width="52" height="12" fill="currentColor" fill-opacity="0.18"/>
+    <rect x="672" y="366" width="260" height="12" fill="#0f6e8c" fill-opacity="0.35"/>
+    <rect x="932" y="366" width="138" height="12" fill="currentColor" fill-opacity="0.18"/>
+    <line x1="932" y1="360" x2="932" y2="384" stroke="#b3462e" stroke-width="1.4"/>
+    <text x="932" y="356" text-anchor="middle" font-size="10.5" fill="#b3462e">watermark</text>
+    <text x="646" y="398" text-anchor="middle" font-size="10.5">ragged edge</text>
+    <text x="802" y="398" text-anchor="middle" font-size="10.5" fill="#0f6e8c" font-weight="600">whole buckets → rollups</text>
+    <text x="1001" y="398" text-anchor="middle" font-size="10.5">edge + unfolded tail</text>
+    <text x="646" y="411" text-anchor="middle" font-size="10.5" opacity="0.8">→ live fact scan</text>
+    <text x="1001" y="411" text-anchor="middle" font-size="10.5" opacity="0.8">→ live fact scan</text>
+    <text x="840" y="432" text-anchor="middle" font-size="11" opacity="0.85">daily grain aligns the boundary to LOCAL midnight. Ad-hoc group_by → the whole window is read live.</text>
+
+    <rect x="590" y="460" width="240" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="710" y="482" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">hourly / daily rollups</text>
+    <text x="710" y="498" text-anchor="middle" font-size="11" opacity="0.8">4a  whole buckets, one prepared query,</text>
+    <text x="710" y="512" text-anchor="middle" font-size="11" opacity="0.8">only the requested dim slots</text>
+
+    <rect x="850" y="460" width="240" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="970" y="482" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_facts</text>
+    <text x="970" y="498" text-anchor="middle" font-size="11" opacity="0.8">4b  live spans, capped at 200,000 rows,</text>
+    <text x="970" y="512" text-anchor="middle" font-size="11" opacity="0.8">folded with the SAME definition.fold</text>
+
+    <path d="M760,440 L710,460" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
+    <path d="M920,440 L970,460" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
+
+    <rect x="590" y="550" width="500" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="606" y="572" font-weight="600">5  merge and answer</text>
+    <text x="606" y="589" font-size="11.5">add_roles merges the two tiers per (bucket, dims). Response: grain, from_rollups, live_spans, and</text>
+    <text x="606" y="604" font-size="11.5">ROLES per bucket. average = sum ÷ count, p95 from the histogram, computed by the caller.</text>
+    <path d="M710,524 L710,550" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
+    <path d="M970,524 L970,550" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
+
+    <rect x="590" y="640" width="500" height="50" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.8"/>
+    <text x="840" y="661" text-anchor="middle" font-weight="600">Next.js dashboard</text>
+    <text x="840" y="677" text-anchor="middle" font-size="11" opacity="0.8">polls /status every 2 s per tab: lag_seconds → stale · unsealed_share &gt; 0 → Provisional badge</text>
+    <path d="M840,614 L840,640" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
+
+    <text x="560" y="725" text-anchor="middle" font-size="11.5" opacity="0.85">The two tiers meet at one value read once. Reading it twice would double-count or drop the bucket the worker folds in between, and both look like real numbers.</text>
+  </g>
+</svg>
+<figcaption>Figure 6. Left, the write side: rollups are recomputed from facts for dirty buckets only and replaced whole, inside the station 4 transaction. Right, the read side: one request is split at the tenant watermark into settled buckets from rollups and a bounded live scan of facts, then merged role by role.</figcaption>
+</figure>
+
+<ol class="steps">
+  <li><b>Choose the grain.</b> Walk the definition's grains from finest to coarsest and take the first with at most 60 buckets and at most 100,000 estimated rows, which yields the coarsest grain that still resolves the window. A grain the definition never folded is never chosen, because it would return an empty chart that looks like zero activity. <code>read.py:91</code></li>
+  <li><b>Read the watermark once.</b> The API reads the tenant state row and passes the analytics watermark into the planner. The planner cannot fetch it, by design. <code>analytics.py:251</code>, <code>read.py:146</code></li>
+  <li><b>Plan the two tiers.</b> Whole buckets that end at or before the watermark come from rollups. The ragged edges of the request and anything after the watermark come from a live scan of facts. For the daily grain the boundary sits at the tenant's local midnight. An ad-hoc group-by, one not among the definition's dimensions, is served entirely live. <code>read.py:146</code></li>
+  <li><b>Read both tiers.</b> Rollup points come from one prepared query over the requested dimension slots. Live points come from a fact scan capped at 200,000 rows and folded with the same fold function the writer uses, so a live edge and a settled bucket can only differ in freshness, never in meaning. <code>read.py:307</code>, <code>read.py:342</code></li>
+  <li><b>Merge and answer.</b> Role buckets are merged with add_roles. The response carries the grain, whether rollups were used, the live spans, and additive roles per bucket. Averages, standard deviation and percentiles are derived by the caller from sum, count, sum of squares and the histogram. <code>read.py:404</code>, <code>definition.py:405</code></li>
+</ol>
+<p><b>On the write side</b>, inside the station 4 run, the diff names the dirty UTC hours and local days. Facts for those buckets are read once and folded into hourly and daily rows in one pass. Monthly is folded from daily, which is exact because a month start is a pure function of a business date. Each dirty bucket's rows are deleted and reinserted, so a retry produces the same rows and an empty bucket disappears. <code>rollups.py:316</code>, <code>rollups.py:356</code>, <code>rollups.py:194</code></p>
+
+<div class="er">
+<pre class="mermaid">
+erDiagram
+    analytics_metrics {
+        uuid id PK
+        string name
+        jsonb dimensions
+        jsonb measures
+    }
+    analytics_hourly_rollups {
+        uuid id
+        datetime bucket_start "PARTITION KEY, daily partitions, kept 90 days"
+        string customer_code
+        uuid definition_id "soft -> analytics_metrics"
+        string measure_name
+        string dim1 "dimension values, in definition order"
+        string dim2
+        string dim3
+        string dim4
+        numeric sum_value
+        bigint count_value
+        numeric sum_sq "for variance"
+        numeric min_value
+        numeric max_value
+        jsonb histogram
+        datetime computed_at
+    }
+    analytics_daily_rollups {
+        uuid id
+        date business_date "tenant-LOCAL day, yearly partitions"
+        uuid definition_id
+        string measure_name
+        string dim1 "dim1..dim4 as hourly"
+        numeric sum_value
+        bigint count_value
+        numeric sum_sq
+        numeric min_value
+        numeric max_value
+        jsonb histogram
+    }
+    analytics_monthly_rollups {
+        uuid id
+        date month_start "unpartitioned"
+        uuid definition_id
+        string measure_name
+        string dim1 "dim1..dim4 as hourly"
+        numeric sum_value
+        bigint count_value
+        numeric sum_sq
+        numeric min_value
+        numeric max_value
+        jsonb histogram
+    }
+    analytics_metrics ||..o{ analytics_hourly_rollups : "defines"
+    analytics_metrics ||..o{ analytics_daily_rollups : "defines"
+    analytics_metrics ||..o{ analytics_monthly_rollups : "defines"
+</pre>
+</div>
+</section>
+
+<section class="station">
+<h2><span class="eyebrow">Platform</span><br>Tables that cross every station</h2>
+<p>These do not belong to one station. <code>customers</code> is the tenant registry that every <code>customer_code</code> column refers to, softly. Notifications watch <code>log_transactions.updated_at</code> through a cursor, and <code>consumer_cursors</code> stops retention from dropping a day a slow reader has not finished with.</p>
+<figure>
+<svg viewBox="0 0 1120 820" role="img" aria-label="Two platform flows. Left, retention: an hourly partition worker first creates 14 days of partitions ahead, then finds partitions past their table's retention and drops each only if four gates pass: past retention, no open stitch ticket overlaps it, every live consumer cursor has passed its end, and analytics is healthy. Right, notifications: every 10 seconds the rule engine reads log_transactions by updated_at from each rule's cursor lagging 60 seconds behind now, evaluates rules, publishes deduplicated events to an outbox, fans out one delivery row per channel, and a paced drain sends them with retries. The notification cursor is published into consumer_cursors, which is what retention reads.">
+  <defs>
+    <marker id="pla" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+    <marker id="plr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b3462e"/></marker>
+    <marker id="plb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0f6e8c"/></marker>
+  </defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+
+    <g font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.08em" opacity="0.7">
+      <text x="290" y="40" text-anchor="middle">RETENTION · log_partition_worker, hourly</text>
+      <text x="840" y="40" text-anchor="middle">NOTIFICATIONS · notification_worker, every 10 s</text>
+    </g>
+    <line x1="560" y1="28" x2="560" y2="720" stroke="currentColor" stroke-width="0.6" opacity="0.25"/>
+
+    <!-- RETENTION -->
+    <rect x="40" y="60" width="500" height="64" rx="3" fill="#0f6e8c" fill-opacity="0.08" stroke="#0f6e8c" stroke-width="1.2"/>
+    <text x="56" y="82" font-weight="600">a  create the runway FIRST, independently of dropping</text>
+    <text x="56" y="99" font-size="11.5">one partition per period for today through today + 14 days, for every table in partitioning.PARTITIONED</text>
+    <text x="56" y="114" font-size="11.5">a creation failure is CRITICAL: nothing breaks now, inserts fail when the runway runs out</text>
+
+    <rect x="40" y="144" width="500" height="92" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="56" y="166" font-weight="600">b  candidates: partitions past THEIR table's retention</text>
+    <g font-size="11.5">
+      <text x="56" y="184">log_transactions 60 d · log_entries and log_entry_assignment 61 d (the midnight rule)</text>
+      <text x="56" y="199">analytics_hourly_rollups 90 d · analytics_quality_issues 365 d</text>
+      <text x="56" y="214">KEEP_FOREVER, never a candidate: analytics_facts, fact_ledger, daily_rollups, record_facts</text>
+      <text x="56" y="229" opacity="0.8">compared against each partition's LAST day, so a monthly partition is not expired 30 days early</text>
+    </g>
+
+    <text x="290" y="262" text-anchor="middle" font-weight="600">c  four gates, ALL must pass for a partition to be dropped</text>
+    <path d="M290,236 L290,248" stroke="currentColor" stroke-width="1.2" fill="none"/>
+
+    <rect x="40" y="276" width="240" height="78" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="160" y="297" text-anchor="middle" font-weight="600">1  past retention</text>
+    <text x="52" y="316" font-size="11">from the table above. Entries and</text>
+    <text x="52" y="330" font-size="11">assignments outlive transactions by a day so</text>
+    <text x="52" y="344" font-size="11">a 23:58 transaction keeps its 00:13 entries</text>
+
+    <rect x="300" y="276" width="240" height="78" rx="3" fill="#b7791f" fill-opacity="0.10" stroke="#b7791f" stroke-width="1.2"/>
+    <text x="420" y="297" text-anchor="middle" font-weight="600">2  no open stitch ticket overlaps</text>
+    <text x="312" y="316" font-size="11" font-family="IBM Plex Mono, monospace">log_regroup_pending</text>
+    <text x="312" y="330" font-size="11">open = not consumed, not abandoned.</text>
+    <text x="312" y="344" font-size="11">an abandoned ticket does NOT pin retention</text>
+
+    <rect x="40" y="370" width="240" height="92" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="160" y="391" text-anchor="middle" font-weight="600">3  every live reader has passed it</text>
+    <text x="52" y="410" font-size="11" font-family="IBM Plex Mono, monospace">consumer_cursors</text>
+    <text x="52" y="424" font-size="11">min(position) over consumers seen within 24 h.</text>
+    <text x="52" y="438" font-size="11">a stale consumer is IGNORED and logged</text>
+    <text x="52" y="452" font-size="11">CRITICAL: a dead reader must not fill the disk</text>
+
+    <rect x="300" y="370" width="240" height="92" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="420" y="391" text-anchor="middle" font-weight="600">4  analytics is healthy (source tables only)</text>
+    <text x="312" y="410" font-size="11" font-family="IBM Plex Mono, monospace">analytics_tenant_state + abandoned tickets</text>
+    <text x="312" y="424" font-size="11">an abandoned analytics ticket or a failed cycle</text>
+    <text x="312" y="438" font-size="11">holds log_entries / transactions / assignments,</text>
+    <text x="312" y="452" font-size="11">capped at 14 days, then released CRITICAL</text>
+
+    <rect x="40" y="490" width="500" height="50" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="56" y="511" font-weight="600">d  DROP TABLE partition</text>
+    <text x="56" y="528" font-size="11.5">a file unlink, no row scan, nothing to vacuum. Logged per partition. Then report days_ahead every tick.</text>
+    <path d="M160,462 L160,490" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#pla)"/>
+    <path d="M420,462 L420,490" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#pla)"/>
+
+    <text x="290" y="580" text-anchor="middle" font-size="11.5" opacity="0.85">The three log tables are dropped together because they share the daily grain.</text>
+    <text x="290" y="596" text-anchor="middle" font-size="11.5" opacity="0.85">A day of entries and that day's assignments can never be stranded apart.</text>
+    <text x="290" y="612" text-anchor="middle" font-size="11.5" opacity="0.85">Two consumers publish into consumer_cursors today: analytics (station 4, step 9) and notifications (right).</text>
+
+    <!-- cross link: notifications publishes cursor -->
+    <path d="M600,690 C560,690 400,690 290,462" stroke="#0f6e8c" stroke-width="1.2" fill="none" stroke-dasharray="4 3" marker-end="url(#plb)"/>
+    <text x="470" y="672" text-anchor="middle" font-size="10.5" fill="#0f6e8c">min(cursor_at) of active rules → consumer_cursors row "notifications"</text>
+
+    <!-- NOTIFICATIONS -->
+    <rect x="590" y="60" width="500" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="606" y="82" font-weight="600">0  tenant gate, on every query</text>
+    <text x="606" y="99" font-size="11.5" font-family="IBM Plex Mono, monospace">customers.notifications_enabled = true</text>
+    <text x="606" y="114" font-size="11.5">a switched-off tenant's rules are not evaluated, its queued alerts stop, its cursors do not pin retention</text>
+
+    <rect x="590" y="144" width="240" height="78" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="710" y="165" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">notification_rules</text>
+    <text x="602" y="184" font-size="11">rule_type: status_match, text_match (streaming),</text>
+    <text x="602" y="198" font-size="11">error_digest (windowed) · match JSONB · severity</text>
+    <text x="602" y="212" font-size="11">cursor_at: "read through here", per rule</text>
+
+    <rect x="850" y="144" width="240" height="78" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="970" y="165" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_transactions</text>
+    <text x="862" y="184" font-size="11">read by updated_at, never started_at, so a</text>
+    <text x="862" y="198" font-size="11">backfilled old row is still seen. Window ends</text>
+    <text x="862" y="212" font-size="11">60 s behind now. Alertable rows only.</text>
+
+    <rect x="590" y="246" width="500" height="92" rx="3" fill="#0f6e8c" fill-opacity="0.06" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="606" y="268" font-weight="600">1  rule engine, one query per tenant, one transaction</text>
+    <g font-size="11.5">
+      <text x="606" y="286">streaming: window = [oldest cursor of the tenant's rules, now − 60 s), left-inclusive, cap 2,000 rows</text>
+      <text x="606" y="301">each rule evaluates only rows after ITS OWN cursor · digest rules summarise the last COMPLETED window</text>
+      <text x="606" y="316">events not already in the outbox (dedup_key) are published · cursors advance in the SAME commit</text>
+      <text x="606" y="331" opacity="0.8">invariant: no row is ever skipped, a row may be read twice. Dedupe absorbs a repeat, nothing absorbs a skip.</text>
+    </g>
+    <path d="M710,222 L710,246" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#pla)" marker-start="url(#pla)"/>
+    <path d="M970,222 L970,246" stroke="#0f6e8c" stroke-width="1.3" fill="none" marker-end="url(#plb)"/>
+
+    <rect x="590" y="362" width="240" height="78" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="710" y="383" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">notification_events</text>
+    <text x="602" y="402" font-size="11">2  the OUTBOX: one row per event, unique</text>
+    <text x="602" y="416" font-size="11">dedup_key, title, summary, payload,</text>
+    <text x="602" y="430" font-size="11">target_channel_ids. Durable BEFORE any send.</text>
+
+    <rect x="850" y="362" width="240" height="78" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="970" y="383" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">notification_deliveries</text>
+    <text x="862" y="402" font-size="11">3  fan-out: one row per (event × channel)</text>
+    <text x="862" y="416" font-size="11">status pending → sent, or failed with</text>
+    <text x="862" y="430" font-size="11">next_attempt_at, or suppressed, or dead</text>
+    <path d="M710,338 L710,362" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#pla)"/>
+    <path d="M830,401 L850,401" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#pla)"/>
+
+    <rect x="590" y="464" width="500" height="92" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="606" y="486" font-weight="600">4  burst rollup, then the paced drain</text>
+    <g font-size="11.5">
+      <text x="606" y="504">past 5 alerts per rule per 5 min window, further matches are recorded as suppressed and one summary</text>
+      <text x="606" y="519">card per completed window represents them, as an ordinary alert through the same outbox</text>
+      <text x="606" y="534">drain: claim due rows FOR UPDATE SKIP LOCKED, round-robin across tenants, ≤ 20 sends per channel</text>
+      <text x="606" y="549">per minute, batch 100. Retry backoff 30 s, 60 s, 5 min, 15 min, 1 h, up to 50 attempts, then dead.</text>
+    </g>
+    <path d="M970,440 L970,464" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#pla)"/>
+
+    <rect x="590" y="580" width="240" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="710" y="601" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5">customer_notification_channels</text>
+    <text x="602" y="620" font-size="11">where to send: Slack, Teams, WhatsApp</text>
+    <text x="602" y="634" font-size="11">webhook config, per-channel rate limit</text>
+
+    <rect x="850" y="580" width="240" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="970" y="601" text-anchor="middle" font-weight="600">5  send</text>
+    <text x="862" y="620" font-size="11">HTTP to the channel, each attempt in its own</text>
+    <text x="862" y="634" font-size="11">session. Retry-After honoured. Outage delays, never drops.</text>
+    <path d="M710,556 L710,580" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#pla)"/>
+    <path d="M970,556 L970,580" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#pla)"/>
+
+    <rect x="590" y="666" width="500" height="46" rx="3" fill="none" stroke="#0f6e8c" stroke-width="1.2" stroke-dasharray="4 3"/>
+    <text x="606" y="686" font-weight="600" fill="#0f6e8c">6  publish the consumed position</text>
+    <text x="606" y="702" font-size="11.5">after every tick: the oldest cursor_at across active rules of enabled tenants, into consumer_cursors</text>
+    <path d="M840,644 L840,666" stroke="#0f6e8c" stroke-width="1.2" fill="none" marker-end="url(#plb)"/>
+
+    <text x="560" y="760" text-anchor="middle" font-size="11.5" opacity="0.85">Both flows resolve the same hard call the same way: a reader that stops reporting stops protecting its data, loudly, rather than filling the disk quietly.</text>
+    <text x="560" y="785" text-anchor="middle" font-size="11" opacity="0.7">settings: retention 60 d · runway 14 d · cursor stale 24 h · analytics hold cap 14 d · notification poll 10 s · cursor lag 60 s · burst cap 5 per 5 min</text>
+  </g>
+</svg>
+<figcaption>Figure 7. Left, retention: hourly, create the runway first, then drop only partitions that pass all four gates. Right, notifications: a cursor on updated_at feeds the rule engine, events land in a durable outbox, deliveries fan out per channel and drain with pacing and retries. The dashed link is the one place the two flows meet: the notification cursor is a consumer position that retention must respect.</figcaption>
+</figure>
+
+<h3>Retention, step by step</h3>
+<ol class="steps">
+  <li><b>Create the runway first.</b> For every registered partitioned table, create the partitions covering today through 14 days ahead. This runs before and independently of dropping, because a creation failure eventually stops ingestion while a drop failure only delays reclaiming disk. <code>log_partition_worker.py:402</code></li>
+  <li><b>Find candidates.</b> A partition is a candidate when its last day is past its table's retention: 60 days for transactions, 61 for entries and assignments, 90 for hourly rollups, 365 for quality issues. Facts, the ledger, daily rollups and record facts are never candidates. <code>log_partition_worker.py:103</code>, <code>partitioning.py:89</code></li>
+  <li><b>Gate 2, open stitch work.</b> Drop nothing an open, non-abandoned regroup ticket still overlaps. <code>log_partition_worker.py:169</code></li>
+  <li><b>Gate 3, live readers.</b> Drop nothing whose end is past the minimum position among consumers that reported within 24 hours. A consumer silent longer than that is ignored and logged CRITICAL. <code>consumer_cursors.py:85</code></li>
+  <li><b>Gate 4, analytics health.</b> If any tenant has an abandoned analytics ticket or a failed last cycle, hold the three source tables so a repair still has its input. The hold is capped at 14 days, then released with a CRITICAL log. Fails closed if health cannot be read. <code>log_partition_worker.py:239</code></li>
+  <li><b>Drop and report.</b> Each surviving candidate is dropped as a table, then the remaining runway is reported every tick so a shortfall is visible before it bites. <code>log_partition_worker.py:383</code></li>
+</ol>
+
+<h3>Notifications, step by step</h3>
+<ol class="steps">
+  <li><b>Tenant gate.</b> Every query filters to tenants whose notifications switch is on. This one predicate is shared by rule loading, the delivery drain and the retention position, so they can never disagree. <code>tenant_gate.py:31</code></li>
+  <li><b>Rule engine.</b> Per tenant, one query reads transactions by updated_at from the oldest of its rules' cursors up to 60 seconds behind now, only rows whose status is stable enough to alert on. Each streaming rule evaluates the rows past its own cursor. Digest rules summarise the most recent completed window. New events are published, and cursors advance in the same commit. <code>engine.py:91</code>, <code>cursor.py:71</code></li>
+  <li><b>Outbox.</b> The dispatcher persists each event once, keyed by dedup_key, and creates one delivery row per target channel. Nothing is sent here. <code>dispatcher.py:108</code></li>
+  <li><b>Burst rollup.</b> Past five alerts per rule in a five-minute window, further matches are stored as suppressed and one summary card per completed window stands in for them, through the same outbox. <code>rollup.py:174</code></li>
+  <li><b>Paced drain.</b> Claim due deliveries with a skip-locked lease, round-robin across tenants, spend per-channel budgets of 20 per minute, batch 100, and send each in its own session. Failures back off from 30 seconds to one hour for up to 50 attempts, then dead. <code>dispatcher.py:365</code></li>
+  <li><b>Publish the position.</b> After each tick the oldest active cursor across enabled tenants is written into consumer_cursors as the notifications position. Retention gate 3 reads it. <code>consumer_cursors.py:122</code></li>
+</ol>
+
+<div class="er">
+<pre class="mermaid">
+erDiagram
+    customers {
+        uuid id PK
+        string customer_code "the value every other table carries"
+        string name
+        string display_name
+        string timezone "locked once entries exist"
+        enum kind
+        enum environment
+        bool active
+        bool notifications_enabled
+        datetime expires_at
+    }
+    customer_display_names {
+        uuid id PK
+        string customer_code
+        string display_name
+        bool active
+    }
+    saved_views {
+        uuid id PK
+        string customer_code
+        string title
+        text notes
+        string assignee
+        string status
+        jsonb state "the saved filter state"
+        jsonb comments
+    }
+    notification_rules {
+        uuid id PK
+        string customer_code
+        string name
+        string rule_type
+        jsonb match "what to look for"
+        string severity
+        jsonb target_channel_ids
+        string status
+        datetime cursor_at "reads log_transactions.updated_at from here"
+    }
+    notification_events {
+        uuid id PK
+        uuid rule_id "soft -> notification_rules"
+        string dedup_key
+        string event_type
+        string severity
+        string title
+        jsonb payload
+    }
+    notification_deliveries {
+        uuid id PK
+        uuid event_id "soft -> notification_events"
+        uuid channel_id
+        string channel_type
+        string status
+        int attempts
+        datetime next_attempt_at
+        text last_error
+    }
+    consumer_cursors {
+        string consumer PK "one row per reader"
+        datetime position "retention may not pass this"
+    }
+    idempotency_keys {
+        uuid id PK
+        string customer_code
+        string idem_key
+        string method
+        string path
+        string request_fingerprint
+        string status
+        int response_status
+        jsonb response_body
+        datetime expires_at
+    }
+    customers ||..o{ customer_display_names : "named"
+    customers ||..o{ saved_views : "owns"
+    customers ||..o{ notification_rules : "owns"
+    notification_rules ||..o{ notification_events : "fired"
+    notification_events ||..o{ notification_deliveries : "sent as"
+</pre>
+</div>
+<p>A separate document-search pipeline owns <code>chunks</code>, <code>chunks_entity</code> and <code>embedding_queue</code>. It shares the database but not the log path, and is left out of this page.</p>
+</section>
+
+<h2>Sizes today</h2>
+<p>Measured on the server on 4 September 2026. Row counts are planner estimates, which is deliberate: the entries table is never counted with a full scan.</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Table</th><th>Station</th><th>Partitions</th><th>Est. rows</th><th>Size</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">log_entries</td><td>2 · Stage 1</td><td class="num">46 days</td><td class="num">4,057,824</td><td class="num">4,965 MB</td></tr>
+    <tr><td class="mono">log_entry_assignment</td><td>3 · Stage 2</td><td class="num">46 days</td><td class="num">4,205,048</td><td class="num">1,525 MB</td></tr>
+    <tr><td class="mono">log_transactions</td><td>3 · Stage 2</td><td class="num">46 days</td><td class="num">250,156</td><td class="num">908 MB</td></tr>
+    <tr><td class="mono">analytics_fact_ledger</td><td>4 · Analytics</td><td class="num">4 months</td><td class="num">502,109</td><td class="num">799 MB</td></tr>
+    <tr><td class="mono">analytics_record_facts</td><td>4 · Analytics</td><td class="num">3 months</td><td class="num">2,028,755</td><td class="num">737 MB</td></tr>
+    <tr><td class="mono">analytics_facts</td><td>4 · Analytics</td><td class="num">4 months</td><td class="num">232,329</td><td class="num">442 MB</td></tr>
+    <tr><td class="mono">log_source_objects</td><td>1 · Collection</td><td class="num">1</td><td class="num">36,167</td><td class="num">20 MB</td></tr>
+    <tr><td class="mono">analytics_hourly_rollups</td><td>5 · Rollups</td><td class="num">64 days</td><td class="num">39,946</td><td class="num">18 MB</td></tr>
+    <tr><td class="mono">log_regroup_pending</td><td>queue 1 → 2</td><td class="num">1</td><td class="num">34,237</td><td class="num">11 MB</td></tr>
+    <tr><td class="mono">analytics_pending_windows</td><td>queue 2 → 3</td><td class="num">1</td><td class="num">12,684</td><td class="num">4.6 MB</td></tr>
+    <tr><td class="mono">analytics_daily_rollups</td><td>5 · Rollups</td><td class="num">2 years</td><td class="num">16,982</td><td class="num">6.8 MB</td></tr>
+    <tr><td class="mono">analytics_monthly_rollups</td><td>5 · Rollups</td><td class="num">1</td><td class="num">2,680</td><td class="num">2.4 MB</td></tr>
+    <tr><td class="mono">log_open_stream</td><td>3 · saved state</td><td class="num">1</td><td class="num">49</td><td class="num">184 kB</td></tr>
+    <tr><td class="mono">log_stitch_checkpoint</td><td>3 · saved state</td><td class="num">1</td><td class="num">2</td><td class="num">56 kB</td></tr>
+  </tbody>
+</table>
+</div>
+<p style="color:var(--muted);font-size:14px;margin-top:18px">Sources: <code>docs/analytics-ml-architecture/final_architecture.md</code> chapters 2 to 10, <code>docs/database-er-diagram.md</code> subsystems 2, 3 and 8, and the live catalogue on 192.168.0.142.</p>
+</main>
+
+</body>
+</html>
