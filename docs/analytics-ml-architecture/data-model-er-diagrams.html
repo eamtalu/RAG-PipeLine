@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- Standalone copy of the "Matrix Pipeline Data Model" page, generated 2026-09-04 from the live schema on 192.168.0.142, docs/database-er-diagram.md and the ingestion code. Open directly in a browser; Mermaid loads from jsdelivr. -->
+<!-- Standalone copy of the "Matrix Pipeline Data Model" page, generated 2026-09-12 from the live schema on 192.168.0.142, docs/database-er-diagram.md and the ingestion code. Open directly in a browser; Mermaid loads from jsdelivr. -->
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script>
   (function () {
@@ -75,6 +75,15 @@
   ol.steps { max-width: 78ch; padding-left: 22px; margin: 14px 0 6px; }
   ol.steps li { margin: 6px 0; font-size: 15px; }
   ol.steps li b { font-weight: 600; }
+  pre.code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12.5px; line-height: 1.45; background: var(--code-bg); padding: 10px 12px; border-radius: 3px; overflow-x: auto; margin: 8px 0 4px; max-width: 100%; }
+  pre.code .ref { color: var(--muted); }
+  h3.sub { font-size: 18px; margin: 36px 0 6px; }
+  .chip { display: inline-block; font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 10.5px; letter-spacing: 0.06em; padding: 1px 7px; border-radius: 3px; border: 1px solid; white-space: nowrap; }
+  .chip.prod { color: var(--accent); border-color: var(--accent); }
+  .chip.shadow { color: var(--shadow); border-color: var(--shadow); }
+  .chip.manual { color: var(--queue); border-color: var(--queue); }
+  .chip.reserved { color: var(--muted); border-color: var(--muted); }
+  .chip.cache { color: var(--cache); border-color: var(--cache); }
   table { border-collapse: collapse; width: 100%; font-size: 14.5px; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
   th { font-weight: 600; color: var(--muted); font-size: 13px; letter-spacing: 0.03em; }
@@ -390,6 +399,539 @@
   <li><b>Parse.</b> Create a <code>jobs</code> row, run Stage 1 on the saved bytes, mark the object ingested with its entry count, delete the local file. Failures back off, and after the maximum attempts the row is abandoned with its error. <code>log_parse_worker.py:227</code></li>
   <li><b>Manual fetch only.</b> The dashboard button creates a <code>log_ssh_fetch_runs</code> row, runs the same fetch in the background with progress written to that row, and marks it completed or failed. <code>remote_fetcher.py:733</code></li>
 </ol>
+<h3 class="sub">One poll, line by line</h3>
+<p>Figure 2 showed who touches which table. This section follows one poll of one WMS server through the code, in the order the functions are called, with the real lines. Read it with the backend repo open at <code>app/services/mnp_log_ingestion/remote/</code>.</p>
+
+<figure>
+<svg viewBox="0 0 1120 560" role="img" aria-label="Call tree of one poll. Supervisor, per-customer loop, fetch_now, then per server: open SFTP and verify the host key fingerprint, pin it on first connect, load all checkpoints of the server, build the rotation index, list files. Then per file: read the first 4 KB and hash it, decide with no I/O, then either read new bytes and queue a chunk with the checkpoint, or only move the checkpoint. Finally prune vanished paths and record health.">
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <g font-family="IBM Plex Mono, monospace" font-size="11.5">
+      <text x="40" y="44" font-weight="500">run_ssh_log_fetcher</text><text x="300" y="44" opacity="0.7">workers/ssh_log_fetcher.py:117</text>
+      <text x="560" y="44" font-family="IBM Plex Sans, system-ui, sans-serif">supervisor, one loop task per customer with an enabled source</text>
+      <text x="60" y="70" font-weight="500">&#9492; _customer_loop</text><text x="300" y="70" opacity="0.7">workers/ssh_log_fetcher.py:67</text>
+      <text x="560" y="70" font-family="IBM Plex Sans, system-ui, sans-serif">tick, then sleep the smallest poll interval of the customer's sources</text>
+      <text x="80" y="96" font-weight="500">&#9492; fetch_now</text><text x="300" y="96" opacity="0.7">remote_fetcher.py:613</text>
+      <text x="560" y="96" font-family="IBM Plex Sans, system-ui, sans-serif">sources in name order &#183; backpressure check &#183; per-host lock</text>
+      <text x="100" y="122" font-weight="500">&#9492; _fetch_source</text><text x="300" y="122" opacity="0.7">remote_fetcher.py:394</text>
+      <text x="560" y="122" font-family="IBM Plex Sans, system-ui, sans-serif">one server, one SFTP connection, no DB connection held</text>
+
+      <text x="120" y="152" font-weight="500">&#9500; ssh_client.sftp &#8594; connect</text><text x="400" y="152" opacity="0.7">ssh_client.py:117, :72</text>
+      <text x="120" y="176" font-weight="500">&#9474;  &#9500; asyncssh.connect(known_hosts=None)</text><text x="400" y="176" opacity="0.7">ssh_client.py:81</text>
+      <text x="120" y="200" font-weight="500">&#9474;  &#9492; get_fingerprint + compare</text><text x="400" y="200" opacity="0.7">ssh_client.py:51, :101</text>
+      <text x="120" y="224" font-weight="500">&#9500; pin host key if first connect</text><text x="400" y="224" opacity="0.7">remote_fetcher.py:424</text>
+      <text x="120" y="248" font-weight="500">&#9500; _load_ckpts</text><text x="400" y="248" opacity="0.7">remote_fetcher.py:283</text>
+      <text x="120" y="272" font-weight="500">&#9500; build sig_consumed</text><text x="400" y="272" opacity="0.7">remote_fetcher.py:418</text>
+      <text x="120" y="296" font-weight="500">&#9500; _list</text><text x="400" y="296" opacity="0.7">remote_fetcher.py:265</text>
+      <text x="120" y="320" font-weight="500">&#9500; for each file, alphabetical</text><text x="400" y="320" opacity="0.7">remote_fetcher.py:438</text>
+      <text x="120" y="344" font-weight="500">&#9474;  &#9500; _read_head_fp</text><text x="400" y="344" opacity="0.7">remote_fetcher.py:313</text>
+      <text x="120" y="368" font-weight="500">&#9474;  &#9500; _plan_incremental</text><text x="400" y="368" opacity="0.7">remote_fetcher.py:354</text>
+      <text x="120" y="392" font-weight="500">&#9474;  &#9500; _stage_range &#8594; _queue_and_checkpoint</text><text x="400" y="392" opacity="0.7">remote_fetcher.py:199, :141</text>
+      <text x="120" y="416" font-weight="500">&#9474;  &#9492; or _save_ckpt (skip cases)</text><text x="400" y="416" opacity="0.7">remote_fetcher.py:294</text>
+      <text x="120" y="440" font-weight="500">&#9492; _prune_checkpoints</text><text x="400" y="440" opacity="0.7">remote_fetcher.py:325</text>
+      <text x="100" y="470" font-weight="500">&#9492; _record_success / _record_failure</text><text x="400" y="470" opacity="0.7">remote_fetcher.py:555, :571</text>
+    </g>
+    <rect x="590" y="186" width="500" height="20" rx="2" fill="#0f6e8c" fill-opacity="0.08"/>
+    <rect x="590" y="330" width="500" height="20" rx="2" fill="#b3462e" fill-opacity="0.08"/>
+    <rect x="590" y="354" width="500" height="20" rx="2" fill="#b3462e" fill-opacity="0.08"/>
+    <rect x="590" y="402" width="500" height="20" rx="2" fill="#b3462e" fill-opacity="0.08"/>
+    <g font-size="11.5">
+      <text x="600" y="176">TCP + SSH handshake. The server presents its host key.</text>
+      <text x="600" y="200" fill="#0f6e8c" font-weight="600">fingerprint 1 arrives here: SHA-256 of the server's host key</text>
+      <text x="600" y="224">trust on first use, then every later connect must match</text>
+      <text x="600" y="248">ALL checkpoint rows of this server, one indexed query, 101 today</text>
+      <text x="600" y="272">{(head hash, size, mtime) &#8594; consumed offset}, from the same snapshot</text>
+      <text x="600" y="296">glob + stat, metadata only, sorted by path text</text>
+      <text x="600" y="344" fill="#b3462e" font-weight="600">fingerprint 2 computed here: SHA-256 of the file's first 4 KB</text>
+      <text x="600" y="368" fill="#b3462e" font-weight="600">compared here, against this path's row and the index</text>
+      <text x="600" y="392">SFTP read from the checkpoint offset &#183; save chunk &#183; queue row + checkpoint, one commit</text>
+      <text x="600" y="416" fill="#b3462e" font-weight="600">fingerprint 2 stored here, on log_ssh_file_checkpoints</text>
+      <text x="600" y="440">delete rows for paths gone from the listing for 30 days</text>
+      <text x="600" y="470">last_ok_at / last_error / consecutive_failures on log_ssh_sources</text>
+    </g>
+    <text x="560" y="520" text-anchor="middle" font-size="11.5" opacity="0.85">Two fingerprints, never mixed: blue identifies the server and lives on log_ssh_sources; red identifies file content and lives on log_ssh_file_checkpoints.</text>
+    <text x="560" y="540" text-anchor="middle" font-size="11" opacity="0.7">Only one SFTP connection is open for the whole per-server loop, and no database connection is held while it is.</text>
+  </g>
+</svg>
+<figcaption>Figure 2b. The call tree of one poll for one server, with the line where each function starts. The two fingerprints appear at different depths, in different modules, and on different tables.</figcaption>
+</figure>
+
+<ol class="steps">
+  <li><b>1. Which servers, in what order.</b> The supervisor keeps one loop per customer. Each tick loads that customer's enabled sources sorted by name, so TMP-AZ-BEC01 is fully processed before TMP-AZ-BEC02. Servers are taken one at a time, each on its own SFTP connection, under a per-host lock so an on-demand fetch and the poller never overlap on one server.
+<pre class="code"><span class="ref"># remote_fetcher.py:546-547</span>
+return list((await db.execute(
+    stmt.order_by(LogSshSource.name.asc()))).scalars().all())</pre>
+  </li>
+  <li><b>2. Connect, and verify the server.</b> One library call opens the TCP connection and runs the SSH handshake. Inside it the server presents its host key and we present our private key from the source row. <code>known_hosts=None</code> turns off the library's own known-hosts file because the next lines do that job against our database instead. The fingerprint is a SHA-256 of the key the server just presented. It identifies the server, arrives with the connection, and is compared against <code>log_ssh_sources.host_key_fingerprint</code>. Pinned on the first successful connect, checked on every later one, never used again in the poll.
+<pre class="code"><span class="ref"># ssh_client.py:81-90 and :101-104</span>
+conn = await asyncio.wait_for(asyncssh.connect(
+    host=source.host, port=source.port, username=source.username,
+    client_keys=keys, passphrase=passphrase,
+    known_hosts=None,   # we pin the fingerprint ourselves below
+    ...), timeout=settings.ssh_connect_timeout_seconds)
+
+fp = get_fingerprint(conn)        # conn.get_server_host_key().get_fingerprint()
+if source.host_key_fingerprint and fp != source.host_key_fingerprint:
+    raise SshHostKeyMismatch(f&quot;Host key for {source.host}:{source.port} changed ...&quot;)</pre>
+  </li>
+  <li><b>3. Load every checkpoint of this server, once.</b> One indexed query returns all rows for the source as a dictionary keyed by remote path. Yes, all of them: 101 rows per WMS server today, one per file in the folder, about 200 bytes each. All are needed because the next step has to know every content signature this server has ever consumed, under any name. Once, because the loop that follows holds an SFTP connection open for network reads, and a database session must not be held across that. The dictionary is a snapshot. Writes during the loop go to the database, not back into it, on purpose.
+<pre class="code"><span class="ref"># remote_fetcher.py:283-291</span>
+async def _load_ckpts(source):
+    &quot;&quot;&quot;{remote_path: (last_size, last_mtime, last_offset, head_fingerprint)}&quot;&quot;&quot;
+    async with async_session() as db:
+        rows = (await db.execute(select(LogSshFileCheckpoint).where(
+            LogSshFileCheckpoint.source_id == source.id))).scalars().all()
+        return {r.remote_path: (r.last_size, r.last_mtime, r.last_offset, r.head_fingerprint)
+                for r in rows}</pre>
+  </li>
+  <li><b>4. Build the rotation index.</b> From the same snapshot, a second dictionary keyed by content signature: the head hash, the size and the modification time together, mapping to the furthest offset consumed under any path. This is what recognises a file that has been renamed since the last poll.
+<pre class="code"><span class="ref"># remote_fetcher.py:418-422</span>
+sig_consumed: dict[tuple[str, int, float], int] = {}
+for (l_size, l_mtime, l_off, l_fp) in ckpts.values():
+    if l_fp is not None:
+        key = (l_fp, l_size, l_mtime)
+        sig_consumed[key] = max(sig_consumed.get(key, -1), l_off)</pre>
+  </li>
+  <li><b>5. List files, metadata only.</b> A glob on the remote folder, then one <code>stat</code> per match. Nothing is downloaded. The result is sorted as text, so the order is <code>.txt, .txt.1, .txt.10, .txt.100, .txt.11, &#8230; .txt.2</code>. That is harmless: every file has its own checkpoint, the rotation index was built before the loop, and Stage 2 orders by timestamp across all files. Order only affects which file's bytes reach the queue a few seconds earlier.
+<pre class="code"><span class="ref"># remote_fetcher.py:269-280</span>
+pattern = f&quot;{source.remote_log_dir.rstrip(&#x27;/&#x27;)}/{source.file_glob}&quot;
+for m in await ssh_client.op(client.glob(pattern), &quot;glob&quot;):
+    attrs = await ssh_client.op(client.stat(path), &quot;stat&quot;)
+    out.append((path, int(attrs.size), float(attrs.mtime or 0.0)))
+return sorted(out)</pre>
+  </li>
+  <li><b>6. Per file, hash the first 4 KB.</b> Open the remote file, read 4096 bytes from offset 0, close it, and compute a SHA-256 here in Python. That is fingerprint 2. The log server only served 4 KB; it knows nothing about the hash. For an append-only log the first 4 KB never change once the file is past 4 KB, and a rename preserves them, which is what makes this a stable identity for the content.
+<pre class="code"><span class="ref"># remote_fetcher.py:313-323</span>
+async def _read_head_fp(client, remote_path):
+    f = await ssh_client.op(client.open(remote_path, &quot;rb&quot;), f&quot;open-head {remote_path}&quot;)
+    try:
+        data = await ssh_client.op(f.read(size=settings.ssh_fingerprint_bytes, offset=0), &quot;read-head&quot;)
+    finally:
+        await f.close()
+    return hashlib.sha256(data or b&quot;&quot;).hexdigest()</pre>
+  </li>
+  <li><b>7. Decide, with no I/O.</b> A pure function takes this path's checkpoint row, the rotation index, and the file's size, mtime and head hash, and returns one of four verdicts. The order of the checks is the point, see Figure 2c.
+<pre class="code"><span class="ref"># remote_fetcher.py:367-391</span>
+stored_fp = ck[3] if ck else None
+fp_reliable = ck is not None and stored_fp is not None and ck[0] &gt;= n and size &gt;= n
+rotated = fp_reliable and stored_fp != head_fp
+
+if ck and not rotated and size == ck[0] and mtime == ck[1]:
+    return _FetchPlan(False, ..., reason=&quot;unchanged&quot;)                       # 1
+if head_fp is not None and size &gt;= n and sig_consumed.get((head_fp, size, mtime), -1) &gt;= size:
+    return _FetchPlan(False, save_offset=size, reason=&quot;rotated-content-skip&quot;)  # 2
+if rotated or (ck and size &lt; ck[0]):
+    return _FetchPlan(True, start=0, reason=&quot;rotated-reread&quot;)               # 3
+start = ck[2] if ck else 0
+if ck and start &gt;= size:
+    return _FetchPlan(False, save_offset=start, reason=&quot;no-new-bytes&quot;)
+return _FetchPlan(True, start=start, reason=(&quot;append&quot; if ck else &quot;new-file&quot;))  # 4</pre>
+  </li>
+</ol>
+
+<figure>
+<svg viewBox="0 0 1120 400" role="img" aria-label="The per-file decision. Inputs: this path's checkpoint row, the rotation index, and the file's size, mtime and head hash. Four ordered branches: unchanged skips; rotated-content-skip skips and rewrites the path row to the new content at full offset; rotated-reread reads from zero; append reads from the saved offset or reports no new bytes.">
+  <defs><marker id="dca" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <rect x="40" y="40" width="230" height="140" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="155" y="62" text-anchor="middle" font-weight="600">inputs, all already in memory</text>
+    <g font-size="11.5">
+      <text x="52" y="84">ck = this path's checkpoint row</text>
+      <text x="52" y="99" font-family="IBM Plex Mono, monospace" font-size="10.5">(last_size, last_mtime, last_offset, head_fp)</text>
+      <text x="52" y="119">sig_consumed = rotation index</text>
+      <text x="52" y="139">size, mtime = from the listing</text>
+      <text x="52" y="159">head_fp = hash of first 4 KB, just read</text>
+    </g>
+    <text x="155" y="200" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">_plan_incremental &#183; remote_fetcher.py:354</text>
+    <text x="155" y="216" text-anchor="middle" font-size="11" opacity="0.8">pure: no database, no network</text>
+    <g font-size="11.5">
+      <rect x="320" y="40" width="380" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      <text x="332" y="60" font-weight="600">1  unchanged</text>
+      <text x="332" y="78">same path, hash not changed, size and mtime equal</text>
+      <text x="332" y="94" opacity="0.8">the usual verdict for the 100 rotated files on every poll</text>
+      <rect x="320" y="120" width="380" height="64" rx="3" fill="#b7791f" fill-opacity="0.10" stroke="#b7791f" stroke-width="1.4"/>
+      <text x="332" y="140" font-weight="600">2  rotated-content-skip</text>
+      <text x="332" y="158">(head_fp, size, mtime) is in the index with offset &#8805; size</text>
+      <text x="332" y="174" opacity="0.8">these bytes were fully consumed under another name</text>
+      <rect x="320" y="200" width="380" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      <text x="332" y="220" font-weight="600">3  rotated-reread</text>
+      <text x="332" y="238">hash changed at this path, or the file shrank</text>
+      <text x="332" y="254" opacity="0.8">replaced or truncated in place: start over from byte 0</text>
+      <rect x="320" y="280" width="380" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      <text x="332" y="300" font-weight="600">4  append, new-file, or no-new-bytes</text>
+      <text x="332" y="318">default: start = last_offset, or 0 for a path never seen</text>
+      <text x="332" y="334" opacity="0.8">last_offset already at size &#8594; no-new-bytes</text>
+    </g>
+    <path d="M270,110 L320,72" stroke="currentColor" stroke-width="1.1" fill="none" marker-end="url(#dca)"/>
+    <path d="M270,110 L320,152" stroke="currentColor" stroke-width="1.1" fill="none" marker-end="url(#dca)"/>
+    <path d="M270,110 L320,232" stroke="currentColor" stroke-width="1.1" fill="none" marker-end="url(#dca)"/>
+    <path d="M270,110 L320,312" stroke="currentColor" stroke-width="1.1" fill="none" marker-end="url(#dca)"/>
+    <g font-size="11.5">
+      <text x="740" y="60" font-weight="600">effect</text>
+      <text x="740" y="78">skip. No read. Checkpoint untouched,</text>
+      <text x="740" y="94">except backfilling a NULL hash.</text>
+      <text x="740" y="140" font-weight="600">effect</text>
+      <text x="740" y="158">skip. No read. Upsert THIS path's row to the new</text>
+      <text x="740" y="174">content: new hash, size, mtime, offset = size.</text>
+      <text x="740" y="220" font-weight="600">effect</text>
+      <text x="740" y="238">read [0, size) in windows, queue chunks,</text>
+      <text x="740" y="254">checkpoint rewritten as it goes. Dedup drops overlap.</text>
+      <text x="740" y="300" font-weight="600">effect</text>
+      <text x="740" y="318">read [last_offset, size) only. The normal live-file</text>
+      <text x="740" y="334">case: kilobytes per poll from a multi-megabyte file.</text>
+    </g>
+    <text x="560" y="380" text-anchor="middle" font-size="11.5" opacity="0.85">Checked top to bottom, first match wins. Branch 2 sits above branch 3 on purpose: a cascaded file looks rotated at its new path, yet its bytes are already in the database.</text>
+  </g>
+</svg>
+<figcaption>Figure 2c. The four verdicts of the per-file decision and what each does to the checkpoint. Below 4 KB the hash is not trusted and only size and mtime decide, so a small file being appended to is never mistaken for a rotation.</figcaption>
+</figure>
+
+<ol class="steps" start="8">
+  <li><b>8. Read only the new bytes.</b> For a pull verdict, the file is opened once and read in windows from the start offset to the end of the file. <code>f.read(size=window, offset=offset)</code> is an SFTP read from a byte position: the server seeks there and returns at most <code>window</code> bytes. If the checkpoint was at byte 5,178,000 and the file is now 5,180,500 bytes, 2,500 bytes cross the wire. A window that does not reach the end of the file is trimmed to its last newline so a half-written line waits for the next poll. Each window is saved to local disk as its own chunk file, and one <code>log_source_objects</code> row plus the checkpoint move are committed together. A crash between windows resumes from the last committed <code>end_offset</code>. The window cap of 200 MB only matters for a fresh large file or a re-read from zero.
+<pre class="code"><span class="ref"># remote_fetcher.py:211-235</span>
+storage = LocalStorage(settings.upload_dir)
+offset, bytes_read, queued = start, 0, 0
+f = await ssh_client.op(client.open(remote_path, &quot;rb&quot;), f&quot;open {remote_path}&quot;)
+try:
+    while offset &lt; size:
+        window = min(settings.ssh_max_file_size, size - offset)          # 200 MB cap
+        data = await ssh_client.op(f.read(size=window, offset=offset), &quot;read&quot;)
+        if not data:
+            break
+        at_eof = offset + len(data) &gt;= size
+        if not at_eof:
+            nl = data.rfind(b&quot;\n&quot;)
+            data = data[: nl + 1] if nl != -1 else data                  # never split a line
+        chunk_start, chunk_end = offset, offset + len(data)
+        key = f&quot;{source.customer_code}/{uuid4().hex}/{source.name}-{_basename(remote_path)}&quot;
+        await storage.save(key, data)                                    # one chunk file on disk
+        await _queue_and_checkpoint(source, remote_path, size=size, mtime=mtime,
+            offset=chunk_end, head_fp=head_fp, storage_key=key,
+            start_offset=chunk_start, end_offset=chunk_end)              # both, or neither
+        queued += 1
+        offset = chunk_end
+finally:
+    await f.close()</pre>
+  </li>
+  <li><b>9. Skips still move the checkpoint.</b> For the two skip verdicts that carry a <code>save_offset</code>, the path's row is upserted with the new hash, size, mtime and offset. This is how a renamed file's row comes to describe its new occupant without a single content byte being read.
+<pre class="code"><span class="ref"># remote_fetcher.py:461-467</span>
+plan = _plan_incremental(ckpts.get(path), sig_consumed, size, mtime, head_fp,
+                         settings.ssh_fingerprint_bytes)
+do_pull, start = plan.do_pull, plan.start
+if not do_pull and plan.save_offset is not None:
+    await _save_ckpt(source, path, size, mtime, plan.save_offset, head_fp)
+if plan.reason == &quot;rotated-content-skip&quot;:
+    content_skipped += 1</pre>
+  </li>
+  <li><b>10. Housekeeping and health.</b> After the loop, checkpoint rows for paths no longer in the listing and not fetched for 30 days are deleted. An empty listing is ignored so a transient empty glob can never wipe the table. Then the source row gets <code>last_ok_at</code>, or on failure <code>last_error</code> and a breaker increment that disables the source after the configured count.
+<pre class="code"><span class="ref"># remote_fetcher.py:331-336</span>
+cutoff = datetime.now(timezone.utc) - timedelta(days=settings.ssh_checkpoint_retention_days)
+await db.execute(delete(LogSshFileCheckpoint).where(
+    LogSshFileCheckpoint.source_id == source.id,
+    LogSshFileCheckpoint.remote_path.notin_(present_paths),
+    LogSshFileCheckpoint.last_fetched_at &lt; cutoff,
+))</pre>
+  </li>
+</ol>
+
+<p><b>Reading the poll line in the journal.</b> The stats returned by <code>_fetch_source</code> at <code>remote_fetcher.py:516</code> are what the "SSH poll" log line prints. In queue mode parsing happens later, so one field is always zero here.</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">files_considered</td><td>files matched by the glob, 101 per server today</td></tr>
+    <tr><td class="mono">files_fetched</td><td>files where at least one window was read, usually 1, the live file</td></tr>
+    <tr><td class="mono">bytes_fetched</td><td>bytes that crossed SFTP as content. Kilobytes on a normal poll. Excludes the 4 KB heads</td></tr>
+    <tr><td class="mono">objects_queued</td><td>chunk rows written to <code>log_source_objects</code> for the parse worker</td></tr>
+    <tr><td class="mono">entries_ingested</td><td>always 0 in queue mode. The parse worker reports the real count on the object row two seconds later</td></tr>
+    <tr><td class="mono">content_skipped</td><td>rotated files recognised by content and not re-read. Non-zero on a rotation morning</td></tr>
+    <tr><td class="mono">io_skipped</td><td>files skipped because of a disk read error on our side, checkpoint left unadvanced</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 class="sub">How a rotated file is recognised</h3>
+<p>The checkpoint row carries two identities. The path is the unique key, <code>(source_id, remote_path)</code> at <code>log_ssh_file_checkpoint.py:31</code>, and answers "where do I resume in this name". The content signature, head hash plus size plus mtime, answers "have I seen these bytes before, under any name". This server uses rename-cascade rotation, where every file changes name on every rotation, so the second identity is what stops 100 files being downloaded again each morning.</p>
+
+<figure>
+<svg viewBox="0 0 1120 440" role="img" aria-label="Before rotation three checkpoint rows: .txt with hash A, .txt.1 with hash B, .txt.2 with hash C, each with offset equal to size. The server renames .txt.1 to .txt.2, .txt to .txt.1 and starts a fresh .txt. After the poll the .txt.2 row holds hash B and the .txt.1 row holds hash A, both via rotated-content-skip with no bytes read, and the .txt row holds the fresh file read from byte 0. Bytes moved: the new live file plus three 4 KB heads.">
+  <defs><marker id="rta" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <g font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.08em" opacity="0.7">
+      <text x="200" y="34" text-anchor="middle">CHECKPOINT ROWS BEFORE</text>
+      <text x="560" y="34" text-anchor="middle">WHAT THE SERVER DID OVERNIGHT</text>
+      <text x="920" y="34" text-anchor="middle">CHECKPOINT ROWS AFTER THE POLL</text>
+    </g>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <rect x="40" y="60" width="320" height="52" rx="3" fill="none" stroke="currentColor" stroke-width="1.1"/>
+      <text x="52" y="80" font-weight="500">eSmartServerLog.txt</text>
+      <text x="52" y="98">hash A &#183; size 5,178,954 &#183; offset 5,178,954</text>
+      <rect x="40" y="124" width="320" height="52" rx="3" fill="none" stroke="currentColor" stroke-width="1.1"/>
+      <text x="52" y="144" font-weight="500">eSmartServerLog.txt.1</text>
+      <text x="52" y="162">hash B &#183; size 5,242,912 &#183; offset 5,242,912</text>
+      <rect x="40" y="188" width="320" height="52" rx="3" fill="none" stroke="currentColor" stroke-width="1.1"/>
+      <text x="52" y="208" font-weight="500">eSmartServerLog.txt.2</text>
+      <text x="52" y="226">hash C &#183; size 5,243,036 &#183; offset 5,243,036</text>
+    </g>
+    <g font-size="11.5">
+      <text x="560" y="86" text-anchor="middle">content A: .txt &#8594; .txt.1</text>
+      <text x="560" y="150" text-anchor="middle">content B: .txt.1 &#8594; .txt.2</text>
+      <text x="560" y="214" text-anchor="middle">content C: .txt.2 &#8594; .txt.3 (not shown)</text>
+      <text x="560" y="278" text-anchor="middle">new .txt started, 1,240 bytes so far</text>
+    </g>
+    <path d="M360,86 L400,86 L400,150 L440,150" stroke="currentColor" stroke-width="1.1" fill="none"/>
+    <path d="M360,150 L400,150 L400,214 L440,214" stroke="currentColor" stroke-width="1.1" fill="none"/>
+    <path d="M680,150 L720,150 L720,214 L760,214" stroke="currentColor" stroke-width="1.1" fill="none" marker-end="url(#rta)"/>
+    <path d="M680,86 L720,86 L720,150 L760,150" stroke="currentColor" stroke-width="1.1" fill="none" marker-end="url(#rta)"/>
+    <path d="M680,278 L720,278 L720,86 L760,86" stroke="currentColor" stroke-width="1.1" fill="none" marker-end="url(#rta)"/>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <rect x="760" y="60" width="320" height="52" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="772" y="80" font-weight="500">eSmartServerLog.txt</text>
+      <text x="772" y="98">hash N &#183; size 1,240 &#183; offset 1,240</text>
+      <rect x="760" y="124" width="320" height="52" rx="3" fill="#b7791f" fill-opacity="0.10" stroke="#b7791f" stroke-width="1.3"/>
+      <text x="772" y="144" font-weight="500">eSmartServerLog.txt.1</text>
+      <text x="772" y="162">hash A &#183; size 5,178,954 &#183; offset 5,178,954</text>
+      <rect x="760" y="188" width="320" height="52" rx="3" fill="#b7791f" fill-opacity="0.10" stroke="#b7791f" stroke-width="1.3"/>
+      <text x="772" y="208" font-weight="500">eSmartServerLog.txt.2</text>
+      <text x="772" y="226">hash B &#183; size 5,242,912 &#183; offset 5,242,912</text>
+    </g>
+    <g font-size="11">
+      <text x="920" y="256" text-anchor="middle">verdicts, in listing order (.txt first):</text>
+      <text x="920" y="272" text-anchor="middle">.txt &#8594; rotated-reread from 0, hash A &#8800; N and file shrank. 1,240 bytes read.</text>
+      <text x="920" y="288" text-anchor="middle" fill="#b7791f">.txt.1 &#8594; rotated-content-skip: (A, 5,178,954, mtime) in index at full offset. 0 bytes.</text>
+      <text x="920" y="304" text-anchor="middle" fill="#b7791f">.txt.2 &#8594; rotated-content-skip: (B, 5,242,912, mtime) in index at full offset. 0 bytes.</text>
+    </g>
+    <rect x="40" y="300" width="320" height="100" rx="3" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.6"/>
+    <text x="52" y="322" font-weight="600" font-size="11.5">bytes over SFTP for this poll</text>
+    <g font-size="11.5" font-family="IBM Plex Mono, monospace">
+      <text x="52" y="342">3 x 4,096 head reads     12,288</text>
+      <text x="52" y="358">new live file             1,240</text>
+      <text x="52" y="374">rotated content               0</text>
+      <text x="52" y="392" font-weight="600">total ~ 13.5 KB vs 15.6 MB of files</text>
+    </g>
+    <text x="560" y="428" text-anchor="middle" font-size="11.5" opacity="0.85">The index was built from the BEFORE rows, so it still knows A and B whatever order the files are visited in. Every row survives and now describes its new occupant.</text>
+  </g>
+</svg>
+<figcaption>Figure 2d. A rotation morning with the real file sizes from TMP-AZ-BEC01. Two of three rows are rewritten by content match without reading a byte; only the fresh live file is downloaded.</figcaption>
+</figure>
+
+<ul class="notes">
+  <li><b>Why the first 4 KB is a safe identity.</b> A log is append-only, so once a file is past 4,096 bytes its head never changes, and a rename preserves the bytes, the size and the mtime. All three must match for branch 2, so a false skip needs a different file with the same first 4 KB, the same length to the byte, and the same modification time.</li>
+  <li><b>Below 4 KB the hash is not trusted.</b> <code>fp_reliable</code> requires both the stored size and the current size to be at least 4,096, so a small file being appended to falls through to size and mtime and is never mistaken for a rotation.</li>
+  <li><b>The backstop.</b> If a signature ever misfires, for example because the server rewrote the mtime on rename, the file is re-read from zero. Stage 1 hashes every raw line and inserts with ON CONFLICT DO NOTHING at <code>parse_insert.py:46</code>, so a re-read costs bandwidth and parse time but never a duplicate entry.</li>
+  <li><b>If the files had stable names.</b> With date-stamped or ever-increasing numbers, a file keeps its name for life and branch 2 with its index would never fire. Branch 3 would still be needed for a file truncated or replaced in place, the newline trim for half-written lines, and the dedup as the backstop. The general form is kept because the WMS server chooses the rotation policy, not this code, and the cost is one 4 KB read per file per poll.</li>
+</ul>
+
+<h3 class="sub">Two fingerprints, kept apart</h3>
+<div class="tablewrap">
+<table>
+  <thead><tr><th></th><th>Host-key fingerprint</th><th>File head fingerprint</th></tr></thead>
+  <tbody>
+    <tr><td>identifies</td><td>the WMS server we connected to</td><td>the content of one log file</td></tr>
+    <tr><td>comes from</td><td>the SSH handshake: the server presents its host public key, the library hashes it</td><td>our own read of the file's first 4,096 bytes, hashed in Python</td></tr>
+    <tr><td>the log server</td><td>presents the key, checks nothing against us</td><td>serves 4 KB, never sees the hash</td></tr>
+    <tr><td>stored in</td><td class="mono">log_ssh_sources.host_key_fingerprint</td><td class="mono">log_ssh_file_checkpoints.head_fingerprint</td></tr>
+    <tr><td>compared at</td><td class="mono">ssh_client.py:101</td><td class="mono">remote_fetcher.py:354</td></tr>
+    <tr><td>how often</td><td>once per connection, before any file is touched</td><td>once per file per poll</td></tr>
+    <tr><td>first time</td><td>pinned on first successful connect, trust on first use</td><td>stored with the first checkpoint of the path</td></tr>
+    <tr><td>on mismatch</td><td>refuse to connect, the poll fails for that server</td><td>re-read from zero, or skip if the content is known under another name</td></tr>
+  </tbody>
+</table>
+</div>
+<p>One operational consequence: if a WMS server is rebuilt or its SSH host key regenerated, every poll to it fails with the host-key-changed error until the pinned value on its <code>log_ssh_sources</code> row is cleared. That is intended, since a silently changing host key is what an interception looks like.</p>
+
+<h3 class="sub">From remote bytes to a queue row, and back to entries</h3>
+<p>A <code>log_source_objects</code> row never holds bytes. The bytes are downloaded into memory by the SFTP read, written to a local chunk file, and only then is the row inserted pointing at that file. A row with status pending therefore means "saved on our disk, not yet parsed", never "not yet downloaded". The parse worker later leases the row, loads the file by its <code>storage_key</code>, parses it into <code>log_entries</code>, marks the row ingested and deletes the file. On the live server the whole cycle takes about two seconds.</p>
+
+<figure>
+<svg viewBox="0 0 1120 500" role="img" aria-label="Journey of one chunk. The remote log file on the WMS server is read by SFTP from the checkpoint offset into memory on the Matrix server. The bytes are trimmed to the last newline and written to a local chunk file under uploads. Then one log_source_objects row with status pending and the checkpoint move are committed together. Two seconds later the parse worker leases the row, loads the chunk file, parses it into log_entries, marks the row ingested with the entry count, and deletes the file. The row stays forever as provenance.">
+  <defs><marker id="bja" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+        <marker id="bjq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b7791f"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <g font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.08em" opacity="0.7">
+      <text x="150" y="34" text-anchor="middle">WMS SERVER</text>
+      <text x="560" y="34" text-anchor="middle">MATRIX SERVER &#183; fetcher, then parse worker</text>
+      <text x="990" y="34" text-anchor="middle">POSTGRES</text>
+    </g>
+    <line x1="290" y1="44" x2="290" y2="440" stroke="currentColor" stroke-width="0.6" opacity="0.25"/>
+    <line x1="850" y1="44" x2="850" y2="440" stroke="currentColor" stroke-width="0.6" opacity="0.25"/>
+
+    <!-- remote file -->
+    <rect x="40" y="70" width="220" height="90" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="150" y="92" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" font-weight="500">C:/BEC Logs/eSmartServerLog.txt</text>
+    <rect x="56" y="104" width="188" height="14" fill="currentColor" fill-opacity="0.15"/>
+    <rect x="200" y="104" width="44" height="14" fill="#0f6e8c" fill-opacity="0.45"/>
+    <text x="128" y="132" text-anchor="middle" font-size="10.5" opacity="0.8">already consumed, 2,974,128 bytes</text>
+    <text x="222" y="146" text-anchor="middle" font-size="10.5" fill="#0f6e8c" font-weight="600">new 30,971</text>
+
+    <!-- memory -->
+    <rect x="320" y="70" width="230" height="64" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="435" y="92" text-anchor="middle" font-weight="600">1  bytes in memory</text>
+    <text x="435" y="109" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">data = await f.read(size=window, offset=offset)</text>
+    <text x="435" y="124" text-anchor="middle" font-size="10.5" opacity="0.8">a Python bytes object, lives for one loop iteration</text>
+    <path d="M260,112 L320,102" stroke="#0f6e8c" stroke-width="1.4" fill="none" marker-end="url(#bja)"/>
+    <text x="290" y="96" text-anchor="middle" font-size="10" fill="#0f6e8c">SFTP</text>
+
+    <!-- trim -->
+    <text x="435" y="156" text-anchor="middle" font-size="11">2  trim to the last newline, remote_fetcher.py:220</text>
+
+    <!-- local file -->
+    <rect x="320" y="176" width="230" height="78" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="435" y="198" text-anchor="middle" font-weight="600">3  local chunk file</text>
+    <text x="435" y="214" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10">uploads/tmp-live/&lt;uuid&gt;/TMP-AZ-BEC02-eSmartServerLog.txt</text>
+    <text x="435" y="229" text-anchor="middle" font-size="10.5" opacity="0.8">LocalStorage.save, local.py:17 &#183; 30,971 bytes on disk</text>
+    <text x="435" y="244" text-anchor="middle" font-size="10.5" opacity="0.8">lives about 2 seconds</text>
+    <path d="M435,134 L435,176" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#bja)"/>
+
+    <!-- row + checkpoint -->
+    <rect x="880" y="176" width="220" height="92" rx="3" fill="#b7791f" fill-opacity="0.12" stroke="#b7791f" stroke-width="1.6"/>
+    <text x="990" y="198" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_source_objects</text>
+    <text x="990" y="215" text-anchor="middle" font-size="10.5">4  one row: start 2,974,128 end 3,005,099</text>
+    <text x="990" y="230" text-anchor="middle" font-size="10.5">storage_key = the file path above</text>
+    <text x="990" y="245" text-anchor="middle" font-size="10.5" font-weight="600">status = pending</text>
+    <text x="990" y="260" text-anchor="middle" font-size="10.5" opacity="0.8">+ checkpoint last_offset = 3,005,099, same commit</text>
+    <path d="M550,215 L880,215" stroke="#b7791f" stroke-width="1.4" fill="none" marker-end="url(#bjq)"/>
+    <text x="715" y="205" text-anchor="middle" font-size="10.5" fill="#b7791f">_queue_and_checkpoint, remote_fetcher.py:141 &#183; file first, row second</text>
+
+    <!-- parse worker -->
+    <rect x="320" y="300" width="230" height="78" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="435" y="322" text-anchor="middle" font-weight="600">6  parse worker</text>
+    <text x="435" y="338" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">storage.load(storage_key) &#8594; parser</text>
+    <text x="435" y="353" text-anchor="middle" font-size="10.5" opacity="0.8">reads the chunk file back into memory,</text>
+    <text x="435" y="368" text-anchor="middle" font-size="10.5" opacity="0.8">splits lines, inserts rows. parse_insert.py:75</text>
+    <path d="M880,240 C700,240 700,290 550,320" stroke="#b7791f" stroke-width="1.4" fill="none" marker-end="url(#bjq)"/>
+    <text x="700" y="282" text-anchor="middle" font-size="10.5" fill="#b7791f">5  lease: status = leased, lease_expires_at set</text>
+    <text x="700" y="296" text-anchor="middle" font-size="10.5" fill="#b7791f">FOR UPDATE SKIP LOCKED, log_parse_worker.py:68</text>
+    <path d="M435,254 L435,300" stroke="currentColor" stroke-width="1.2" fill="none" stroke-dasharray="3 3" marker-end="url(#bja)"/>
+    <text x="455" y="281" text-anchor="start" font-size="10" opacity="0.8">read by key</text>
+
+    <!-- entries -->
+    <rect x="880" y="300" width="220" height="64" rx="3" fill="#2f7d4f" fill-opacity="0.12" stroke="#2f7d4f" stroke-width="1.6"/>
+    <text x="990" y="322" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">log_entries</text>
+    <text x="990" y="339" text-anchor="middle" font-size="10.5">7  64 new rows, duplicates skipped</text>
+    <text x="990" y="354" text-anchor="middle" font-size="10.5" opacity="0.8">+ one log_regroup_pending ticket</text>
+    <path d="M550,339 L880,339" stroke="#2f7d4f" stroke-width="1.4" fill="none" marker-end="url(#bja)"/>
+
+    <!-- finish -->
+    <rect x="880" y="384" width="220" height="56" rx="3" fill="none" stroke="#b7791f" stroke-width="1.2"/>
+    <text x="990" y="404" text-anchor="middle" font-size="10.5" font-weight="600">8  row: status = ingested, entries_inserted = 64</text>
+    <text x="990" y="419" text-anchor="middle" font-size="10.5" opacity="0.8">ingested_at, job_id, then file_deleted_at</text>
+    <text x="990" y="433" text-anchor="middle" font-size="10.5" opacity="0.8">kept forever as provenance</text>
+    <path d="M550,360 C700,360 760,410 880,410" stroke="#b7791f" stroke-width="1.2" fill="none" marker-end="url(#bjq)"/>
+
+    <!-- delete file -->
+    <rect x="320" y="400" width="230" height="40" rx="3" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="435" y="418" text-anchor="middle" font-size="11">9  chunk file deleted, local.py:28</text>
+    <text x="435" y="432" text-anchor="middle" font-size="10.5" opacity="0.8">the bytes now live only in log_entries</text>
+    <path d="M435,378 L435,400" stroke="currentColor" stroke-width="1.1" fill="none" stroke-dasharray="3 3" marker-end="url(#bja)"/>
+
+    <text x="560" y="478" text-anchor="middle" font-size="11.5" opacity="0.85">Real chunk from TMP-AZ-BEC02 on 12 Sep 2026: created 10:24:40, leased and parsed, ingested 10:24:42. 30,971 bytes became 64 entries.</text>
+  </g>
+</svg>
+<figcaption>Figure 2e. One chunk's journey. The bytes exist in three places in turn: memory for milliseconds, a local file for about two seconds, then rows in log_entries. The queue row points at the file while it exists and keeps the byte range forever.</figcaption>
+</figure>
+
+<ol class="steps">
+  <li><b>1. The transfer is the read call.</b> The SFTP server on the WMS box seeks to <code>offset</code> in the open file and streams up to <code>window</code> bytes back over the SSH channel. When the call returns, <code>data</code> is a bytes object in our process's memory holding exactly those bytes. Nothing has touched disk or database yet.
+<pre class="code"><span class="ref"># remote_fetcher.py:217</span>
+data = await ssh_client.op(f.read(size=window, offset=offset), &quot;read&quot;)</pre>
+  </li>
+  <li><b>2. Trim to a whole line.</b> If the window did not reach the end of the file, everything after the last newline is dropped from <code>data</code>. Those bytes stay on the remote server behind the checkpoint and are read again next poll.
+<pre class="code"><span class="ref"># remote_fetcher.py:220-223</span>
+at_eof = offset + len(data) &gt;= size
+if not at_eof:
+    nl = data.rfind(b&quot;\n&quot;)
+    data = data[: nl + 1] if nl != -1 else data</pre>
+  </li>
+  <li><b>3. Save the bytes to a local file.</b> The key is a fresh random folder per chunk under the customer, so two chunks of the same file can never collide. <code>LocalStorage.save</code> joins the key onto the base directory, creates the folder and writes the bytes. On the server the base directory is <code>./uploads</code> relative to the backend, from <code>UPLOAD_DIR</code> in <code>.env</code>.
+<pre class="code"><span class="ref"># remote_fetcher.py:225-226 and local.py:17-22</span>
+key = f&quot;{source.customer_code}/{uuid4().hex}/{source.name}-{_basename(remote_path)}&quot;
+await storage.save(key, data)
+
+# LocalStorage.save
+path = self._resolve(key)                 # base_dir / key
+path.parent.mkdir(parents=True, exist_ok=True)
+async with aiofiles.open(path, &quot;wb&quot;) as f:
+    await f.write(data)</pre>
+  </li>
+  <li><b>4. Insert the row and move the checkpoint, together.</b> Only now does the database learn the chunk exists. The row records the byte range and the path to the file; it does not contain the bytes. File first, row second: a crash between them leaves a harmless orphan file, never a row pointing at a file that does not exist.
+<pre class="code"><span class="ref"># remote_fetcher.py:158-182</span>
+db.add(LogSourceObject(
+    customer_code=source.customer_code, source_id=source.id, source_name=source.name,
+    remote_path=remote_path, start_offset=start_offset, end_offset=end_offset,
+    observed_size=size, observed_mtime=mtime, head_fingerprint=head_fp,
+    storage_key=storage_key, status=SourceObjectStatus.pending,
+    max_attempts=settings.log_parse_max_attempts))
+stmt = pg_insert(LogSshFileCheckpoint).values(..., last_offset=offset, ...).on_conflict_do_update(...)
+await db.execute(stmt)
+await db.commit()          # both, or neither</pre>
+  </li>
+  <li><b>5. The parse worker leases the row.</b> Every two seconds it takes the oldest due pending row and stamps it leased with an expiry. Skip-locked means two workers can never take the same row. If the worker dies mid-parse, the expiry returns the row to pending and counts one attempt.
+<pre class="code"><span class="ref"># log_parse_worker.py:78-89</span>
+WITH candidate AS (
+    SELECT id FROM log_source_objects
+    WHERE status = &#x27;pending&#x27; AND available_at &lt;= clock_timestamp()
+    ORDER BY available_at, created_at
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+UPDATE log_source_objects q
+SET status = &#x27;leased&#x27;, lease_owner = :owner, lease_expires_at = :until
+FROM candidate WHERE q.id = candidate.id
+RETURNING q.id</pre>
+  </li>
+  <li><b>6. Load the bytes back and parse.</b> A <code>jobs</code> row is created pointing at the same <code>storage_key</code>, and Stage 1 reads the chunk file from disk into memory again and turns it into <code>log_entries</code> rows.
+<pre class="code"><span class="ref"># log_parse_worker.py:238-245 and parse_insert.py:90</span>
+job = Job(customer_code=obj.customer_code, filename=filename,
+          storage_key=obj.storage_key, document_type=DOCUMENT_TYPE)
+...
+inserted = await run_log_parse_insert(job_id, s, storage)
+
+# inside Stage 1
+data = await storage.load(job.storage_key)</pre>
+  </li>
+  <li><b>7 and 8. Finish the row.</b> Status becomes ingested with the entry count, the job id and the time. The row stays forever, which is how "which exact bytes produced this entry" stays answerable after the file is gone.
+<pre class="code"><span class="ref"># log_parse_worker.py:189-194</span>
+obj.status = SourceObjectStatus.ingested
+obj.ingested_at = datetime.now(timezone.utc)
+obj.job_id = job_id
+obj.entries_inserted = int(entries_inserted or 0)
+obj.lease_owner = None
+obj.lease_expires_at = None</pre>
+  </li>
+  <li><b>9. Delete the chunk file.</b> Once the row proves the bytes are in Postgres, the local copy is redundant and is removed, with <code>file_deleted_at</code> stamped on the row.
+<pre class="code"><span class="ref"># log_parse_worker.py:264-268 and local.py:28-31</span>
+await storage.delete(obj.storage_key)
+await s.execute(update(LogSourceObject).where(LogSourceObject.id == obj.id)
+                .values(file_deleted_at=datetime.now(timezone.utc)))
+
+# LocalStorage.delete
+path = self._resolve(key)
+if path.exists():
+    path.unlink()</pre>
+  </li>
+</ol>
+
+<p><b>What each status means for the bytes.</b></p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Status</th><th>Where the bytes are</th><th>How the row got here</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">pending</td><td>on local disk at <code>storage_key</code>, waiting</td><td>fresh from the fetcher, or returned after a transient failure with <code>available_at</code> pushed out by backoff</td></tr>
+    <tr><td class="mono">leased</td><td>on local disk, a worker is parsing them now</td><td>claimed by <code>claim_one</code>; <code>lease_expires_at</code> recovers it if the worker dies</td></tr>
+    <tr><td class="mono">ingested</td><td>in <code>log_entries</code> as rows; the disk file is deleted</td><td>Stage 1 succeeded, <code>entries_inserted</code> recorded</td></tr>
+    <tr><td class="mono">abandoned</td><td>still on local disk on purpose, for inspection</td><td>3 failed attempts, or one permanent error; re-armed via <code>POST /logs/ingest-queue/reset-abandoned</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<ul class="notes">
+  <li><b>Three lifetimes.</b> The bytes in memory last one loop iteration. The chunk file lasts until parsed, about two seconds on the live server. The row lasts forever. On 12 Sep 2026 the server held 45,718 rows, all ingested, none pending, leased or abandoned.</li>
+  <li><b>Why not parse straight from memory.</b> The fetcher holds an SFTP connection and a per-host lock while it reads. Parsing inline would hold both across the slow part, and a parse failure would abort the poll. Saving the bytes and walking away lets the fetcher release the connection in milliseconds and gives the parse its own retry budget.</li>
+  <li><b>Why the row and not the checkpoint is the record.</b> The checkpoint is overwritten as the file advances, so it cannot say which byte range produced which entries. The row keeps path, offsets, size, mtime and head fingerprint for each chunk. Without it, a crash between "checkpoint advanced" and "entries inserted" would skip those bytes forever.</li>
+  <li><b>Housekeeping gap found while writing this.</b> <code>LocalStorage.delete</code> unlinks the file but leaves the random per-chunk folder. <code>uploads/tmp-live</code> held about 45,000 empty folders on 12 Sep 2026, growing by one per chunk. Harmless to correctness, but the directory will get slow to list. The fix is to remove the empty parent folder in <code>delete</code> and sweep the existing ones once.</li>
+</ul>
+
+
 
 <div class="er">
 <pre class="mermaid">
@@ -576,6 +1118,46 @@ erDiagram
   <li><b>Write the ticket and finish the job in the same commit.</b> If anything was inserted, one <code>log_regroup_pending</code> row is added covering min to max of the returned timestamps, and the job is set to completed with the new-entry count. One commit for all of it. <code>parse_insert.py:186</code></li>
   <li><b>Report back to station 1.</b> The source object is marked ingested with the entry count and its local file is deleted. On failure the batch rolls back, the job is marked failed, and the object row records the error for retry. <code>log_parse_worker.py:185</code></li>
 </ol>
+
+<h3 class="sub">Why a jobs row exists at all</h3>
+<p>For the SSH path, <code>log_source_objects</code> already carries everything Stage 1 needs: customer, file name, storage key, status and retry budget. The <code>jobs</code> row the parse worker creates is redundant bookkeeping for that path. It is still there for two reasons, and neither is "the worker needs it".</p>
+
+<ul class="notes">
+  <li><b>1. Enforced foreign keys.</b> <code>log_entries.job_id</code> and <code>log_transactions.job_id</code> are real foreign keys to <code>jobs</code> with cascade delete, so an entry cannot be inserted without a job row existing first. <code>log_entry.py</code> and <code>log_transaction.py</code>, both <code>ForeignKey("jobs.id", ondelete="CASCADE")</code>.</li>
+  <li><b>2. Shared ingest record.</b> <code>jobs</code> predates the log pipeline. It is the generic "one file was ingested" row used by the unrelated document-search pipeline (<code>chunks</code>, <code>chunks_entity</code>, <code>embedding_queue</code> all point at it) and by every other way log bytes enter the system. Stage 1 was written against a job and has never been split from it.</li>
+</ul>
+
+<p><b>The four ways log bytes enter Stage 1.</b> Only the SSH path has an object row. The other three have nothing but the job as their record, which is why <code>run_log_parse_insert</code> takes a job id and reads filename, customer and storage key from it.</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Path</th><th>Creates the job at</th><th>Has a log_source_objects row</th></tr></thead>
+  <tbody>
+    <tr><td>SSH poller, via the parse worker</td><td class="mono">log_parse_worker.py:238</td><td>yes</td></tr>
+    <tr><td>manual upload, <code>POST /logs/upload</code></td><td class="mono">api/v1/logs.py:174</td><td>no</td></tr>
+    <tr><td>server folder scan</td><td class="mono">api/v1/logs.py:209</td><td>no</td></tr>
+    <tr><td>directory watcher</td><td class="mono">workers/log_watcher.py:43</td><td>no</td></tr>
+  </tbody>
+</table>
+</div>
+<pre class="code"><span class="ref"># log_parse_worker.py:230-232, :238 and parse_insert.py:85-91</span>
+# The bytes are already on disk at obj.storage_key ... It creates the Job for the existing key
+# and calls the unchanged run_log_parse_insert, so Stage 1 behaviour is byte-for-byte the same
+# as the inline path.
+job = Job(customer_code=obj.customer_code, filename=filename,
+          storage_key=obj.storage_key, document_type=DOCUMENT_TYPE)
+
+# Stage 1 reads everything it needs from the job
+filename = job.filename
+customer_code = job.customer_code
+data = await storage.load(job.storage_key)</pre>
+
+<ul class="notes">
+  <li><b>What it costs.</b> One extra row and one extra commit per chunk, about 45,700 rows so far. The job's <code>chunk_count</code> duplicates <code>log_source_objects.entries_inserted</code>, and its <code>status</code> duplicates the object status. Nothing reads the job afterwards except the entries' foreign key.</li>
+  <li><b>The code already calls it transitional.</b> <code>log_source_object.py:24</code>: "job_id is a nullable soft reference and is TRANSITIONAL: the parse worker still creates a Job and records which one, so nothing downstream changes. It disappears when jobs is retired from the log path during the partitioning work." That retirement has not happened.</li>
+  <li><b>What retiring it would take.</b> Give <code>run_log_parse_insert</code> a small source descriptor of customer, filename and storage key instead of a job id, and have all four paths supply one. Drop or soften the two foreign keys, which also fits the existing rule that a foreign key from a partitioned table blocks retention. Have the three non-SSH paths insert their own <code>log_source_objects</code> row with a null <code>source_id</code> and offsets covering the whole upload, so one table describes every byte range that ever entered the system. The document pipeline keeps <code>jobs</code> untouched.</li>
+  <li><b>The one thing jobs still provides.</b> Nothing for the SSH path. For a manual upload, the job's <code>status</code> and <code>error</code> are what the upload endpoint polls to show progress, so the replacement descriptor would need those two fields or the upload UI changes.</li>
+</ul>
+
 
 <div class="er">
 <pre class="mermaid">
@@ -795,6 +1377,904 @@ erDiagram
   <li><b>Commit and bookkeep.</b> The window commits. Then the stitch checkpoint advances to hi, and only when every window of a run has committed are the run's tickets marked consumed. A failure rolls the window back, bumps attempts with backoff, and abandons the ticket on the third failure or immediately for a permanent error. <code>derive_transactions.py:1613</code></li>
 </ol>
 <p><b>Two side jobs on the same tick.</b> The sealer runs first and updates <code>sealed = true</code> on rows that nothing more can join, using the tenant's newest entry as the clock so back-dated ingestion seals correctly. It has its own tenant list because rows needing a seal are exactly the ones no ticket touches any more. The reaper deletes saved streams the grouper has stopped touching. <code>sealer.py:123</code>, <code>stream_state.py:199</code></p>
+
+<h3 class="sub">Tickets into runs, runs into windows</h3>
+<p>Every Stage 1 parse leaves one ticket saying "this time range has new lines". The stitch worker does not process tickets one by one. Per tenant it reads all open tickets, merges the ones whose padded windows would touch into a run, and cuts any run longer than six hours into consecutive windows. Each window is one database transaction. The run's tickets are stamped consumed only when every window has committed.</p>
+
+<figure>
+<svg viewBox="0 0 1120 520" role="img" aria-label="Timeline of twelve real tickets from tmp-live between 13:19 and 13:38 UTC on 12 Sep 2026, each a short bar. Because every gap between them is under the 30 minute merge distance, if all were open together they would form one run from 13:19:10 to 13:37:52. The run is shorter than six hours so it is one window. Padding by 900 seconds each side gives a rebuild range of 13:04:10 to 13:52:52. A second strip shows a sparse case: a January backfill ticket and a June ticket stay two separate runs. A third strip shows a 20 hour backfill run cut into four windows of six hours, overlapping by their pads.">
+  <defs><marker id="tka" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <text x="40" y="34" font-weight="600">A. Twelve real tickets, tmp-live, 12 Sep 2026 13:19 to 13:38 UTC</text>
+    <!-- axis: 13:00 at x=60 ... 14:00 at x=1080 => 17 px/min -->
+    <line x1="60" y1="120" x2="1080" y2="120" stroke="currentColor" stroke-width="1.2"/>
+    <g font-size="10.5" opacity="0.8" text-anchor="middle">
+      <line x1="60" y1="114" x2="60" y2="126" stroke="currentColor"/><text x="60" y="140">13:00</text>
+      <line x1="230" y1="114" x2="230" y2="126" stroke="currentColor"/><text x="230" y="140">13:10</text>
+      <line x1="400" y1="114" x2="400" y2="126" stroke="currentColor"/><text x="400" y="140">13:20</text>
+      <line x1="570" y1="114" x2="570" y2="126" stroke="currentColor"/><text x="570" y="140">13:30</text>
+      <line x1="740" y1="114" x2="740" y2="126" stroke="currentColor"/><text x="740" y="140">13:40</text>
+      <line x1="910" y1="114" x2="910" y2="126" stroke="currentColor"/><text x="910" y="140">13:50</text>
+      <line x1="1080" y1="114" x2="1080" y2="126" stroke="currentColor"/><text x="1080" y="140">14:00</text>
+    </g>
+    <!-- tickets as amber bars: x = 60 + minutes*17 -->
+    <g fill="#b7791f" fill-opacity="0.85">
+      <rect x="386" y="96" width="18" height="10"/>   <!-- 13:19:10-13:20:15 -->
+      <rect x="388" y="84" width="20" height="10"/>   <!-- 13:19:19-13:20:28 -->
+      <rect x="408" y="96" width="22" height="10"/>   <!-- 13:20:28-13:21:45 -->
+      <rect x="433" y="96" width="18" height="10"/>   <!-- 13:21:58-13:23:00 -->
+      <rect x="452" y="84" width="10" height="10"/>   <!-- 13:23:03-13:23:39 -->
+      <rect x="473" y="96" width="19" height="10"/>   <!-- 13:24:19-13:25:25 -->
+      <rect x="508" y="96" width="4" height="10"/>    <!-- 13:26:22 -->
+      <rect x="525" y="96" width="4" height="10"/>    <!-- 13:27:21 -->
+      <rect x="527" y="84" width="4" height="10"/>    <!-- 13:27:28 -->
+      <rect x="554" y="96" width="4" height="10"/>    <!-- 13:29:05 -->
+      <rect x="600" y="96" width="4" height="10"/>    <!-- 13:31:45 -->
+      <rect x="703" y="96" width="4" height="10"/>    <!-- 13:37:52 -->
+    </g>
+    <text x="545" y="74" text-anchor="middle" font-size="10.5" fill="#b7791f">12 tickets, 0 to 77 s wide, gaps 3 s to 366 s. All gaps &lt; 1,800 s (2 &#215; pad)</text>
+    <!-- run -->
+    <path d="M386,160 L707,160" stroke="currentColor" stroke-width="3"/>
+    <text x="546" y="178" text-anchor="middle" font-size="11">one RUN if all were open together: 13:19:10 &#8594; 13:37:52, 18.7 min &lt; 6 h, so one WINDOW</text>
+    <!-- padded -->
+    <rect x="131" y="192" width="831" height="14" fill="#0f6e8c" fill-opacity="0.25" stroke="#0f6e8c" stroke-width="1"/>
+    <rect x="386" y="192" width="321" height="14" fill="#0f6e8c" fill-opacity="0.35"/>
+    <text x="131" y="222" text-anchor="start" font-size="10.5" fill="#0f6e8c">13:04:10 = lo &#8722; 900 s</text>
+    <text x="962" y="222" text-anchor="end" font-size="10.5" fill="#0f6e8c">13:52:52 = hi + 900 s</text>
+    <text x="546" y="222" text-anchor="middle" font-size="10.5" fill="#0f6e8c" font-weight="600">the padded REBUILD range regroup_window actually reads</text>
+    <text x="40" y="250" font-size="11" opacity="0.85">In steady state the worker runs every second, so it usually finds ONE open ticket and the run is that ticket. Measured over two hours: 114 drains of 1 ticket, 1 drain of 2. The merge matters after a pause or a backfill, when many tickets are open at once.</text>
+
+    <text x="40" y="292" font-weight="600">B. Sparse tickets stay separate runs</text>
+    <line x1="60" y1="330" x2="1080" y2="330" stroke="currentColor" stroke-width="1.2"/>
+    <rect x="120" y="322" width="60" height="10" fill="#b7791f" fill-opacity="0.85"/>
+    <rect x="860" y="322" width="80" height="10" fill="#b7791f" fill-opacity="0.85"/>
+    <text x="150" y="350" text-anchor="middle" font-size="10.5">January backfill file</text>
+    <text x="900" y="350" text-anchor="middle" font-size="10.5">June file</text>
+    <text x="520" y="350" text-anchor="middle" font-size="10.5" opacity="0.8">gap &#8811; 1,800 s &#8594; two runs, each rebuilt over its own narrow window, never one giant span</text>
+
+    <text x="40" y="392" font-weight="600">C. A long run is cut into 6 h windows that overlap by their pads</text>
+    <line x1="60" y1="430" x2="1080" y2="430" stroke="currentColor" stroke-width="1.2"/>
+    <path d="M100,430 L1040,430" stroke="currentColor" stroke-width="3"/>
+    <text x="570" y="418" text-anchor="middle" font-size="10.5">one run of 20 hours after a long outage</text>
+    <g fill="#0f6e8c" fill-opacity="0.25" stroke="#0f6e8c" stroke-width="1">
+      <rect x="86" y="446" width="310" height="12"/>
+      <rect x="368" y="462" width="310" height="12"/>
+      <rect x="650" y="446" width="310" height="12"/>
+      <rect x="932" y="462" width="122" height="12"/>
+    </g>
+    <text x="241" y="490" text-anchor="middle" font-size="10.5">window 1, 6 h + pads</text>
+    <text x="523" y="490" text-anchor="middle" font-size="10.5">window 2</text>
+    <text x="805" y="490" text-anchor="middle" font-size="10.5">window 3</text>
+    <text x="993" y="490" text-anchor="middle" font-size="10.5">window 4, 2 h</text>
+    <text x="560" y="512" text-anchor="middle" font-size="11" opacity="0.85">Each window commits on its own. Neighbours overlap at the seam by 2 &#215; 900 s and rebuild it identically, because ids are deterministic, so the split loses nothing. Tickets are stamped consumed only after window 4 commits.</text>
+  </g>
+</svg>
+<figcaption>Figure 4b. How open tickets become runs and windows. A, twelve real tickets from this afternoon and the one run and padded window they would form. B, why sparse tickets are kept apart. C, why a long run is cut, and why the cut is safe.</figcaption>
+</figure>
+
+<ol class="steps">
+  <li><b>Claim.</b> All of a tenant's open tickets, in start order. Open means not consumed, not abandoned, and past its backoff time on the database clock.
+<pre class="code"><span class="ref"># derive_transactions.py:1560</span>
+pend = list((await db.execute(select(LogRegroupPending).where(
+    LogRegroupPending.customer_code == customer_code,
+    LogRegroupPending.consumed_at.is_(None),
+    LogRegroupPending.abandoned_at.is_(None),
+    LogRegroupPending.available_at &lt;= func.clock_timestamp(),
+).order_by(LogRegroupPending.range_start.asc()))).scalars().all())</pre>
+  </li>
+  <li><b>Merge into runs.</b> Walk the tickets in start order. If the next ticket starts within 2 &#215; pad of the current run's end, it joins the run and the run's end extends. Otherwise a new run begins. Each run remembers which ticket rows formed it, so a failing run leaves only its own tickets open.
+<pre class="code"><span class="ref"># derive_transactions.py:1505-1517</span>
+def _coalesce_pending(pend, gap):
+    runs = []  # [lo, hi, [rows]]
+    for p in sorted(pend, key=lambda r: r.range_start):
+        if runs and p.range_start &lt;= runs[-1][1] + gap:
+            runs[-1][1] = max(runs[-1][1], p.range_end)
+            runs[-1][2].append(p)
+        else:
+            runs.append([p.range_start, p.range_end, [p]])
+    return [(lo, hi, rows) for lo, hi, rows in runs]
+
+# called with gap = 2 * _regroup_pad()  (= 1,800 s)</pre>
+  </li>
+  <li><b>Split into windows.</b> A run longer than six hours is cut into consecutive windows of at most six hours. Consecutive windows are padded by 900 s each, so they overlap at the seam and rebuild it identically.
+<pre class="code"><span class="ref"># derive_transactions.py:1520-1533</span>
+def _split_run(lo, hi, max_seconds):
+    if max_seconds &lt;= 0 or (hi - lo).total_seconds() &lt;= max_seconds:
+        yield (lo, hi); return
+    step = timedelta(seconds=max_seconds)
+    cur = lo
+    while cur &lt; hi:
+        nxt = min(cur + step, hi)
+        yield (cur, nxt)
+        cur = nxt
+
+# settings: log_regroup_max_window_seconds = 6 * 3600, log_regroup_pad_seconds = 900</pre>
+  </li>
+  <li><b>Rebuild each window, then stamp.</b> Each window takes the per-tenant advisory lock, runs <code>regroup_window</code> and commits on its own. Only when every window of the run has committed are the run's tickets marked consumed, in a separate small commit.
+<pre class="code"><span class="ref"># derive_transactions.py:1582-1621</span>
+lock = func.pg_advisory_xact_lock(func.hashtext(customer_code))
+for lo, hi, rows in runs:
+    for w_lo, w_hi in _split_run(lo, hi, max_window):
+        async with async_session() as wdb:
+            await wdb.execute(select(lock))
+            by_window.append(await regroup_window(wdb, customer_code, w_lo, w_hi, commit=True))
+        await head_lane.advance_checkpoint(customer_code, w_hi)
+    async with async_session() as cdb:
+        await cdb.execute(update(LogRegroupPending)
+            .where(LogRegroupPending.id.in_([p.id for p in rows]))
+            .values(consumed_at=datetime.now(timezone.utc)))
+        await cdb.commit()</pre>
+  </li>
+</ol>
+
+<h3 class="sub">The padded window: what is freed, what is read</h3>
+<p>A ticket says "this range has new lines", but a conversation near the edge may have started before it or may end after it. So the rebuild widens the range by 900 seconds on each side. The two edges are treated differently, and the difference is the whole geometry.</p>
+
+<figure>
+<svg viewBox="0 0 1120 470" role="img" aria-label="A time axis with the ticket range lo to hi in the middle. Below it, the freed band from lo minus 900 seconds to hi: every transaction starting in it is rebuilt, sealed or not. Below that, the read band from lo minus 900 seconds to hi plus 900 seconds: every entry in it is loaded. Four example transactions: T1 starts inside the freed band and is rebuilt whole even though its entries run past hi. T2 starts after hi, inside the read band, and is untouched; its entries are read but skipped because their owner is not being rebuilt. T3 is a new entry with no owner and is grouped. T4 ended just before the floor; a new line that could join it triggers the cross-pad extension, which moves the floor back to T4's start, bounded at 20 minutes.">
+  <defs><marker id="pwa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <!-- axis: 12:30 x=60, 14:30 x=1080 => 8.5 px/min -->
+    <line x1="60" y1="60" x2="1080" y2="60" stroke="currentColor" stroke-width="1.2" marker-end="url(#pwa)"/>
+    <g font-size="10.5" opacity="0.8" text-anchor="middle">
+      <text x="315" y="46">12:45</text><text x="443" y="46">13:00</text><text x="953" y="46">14:00</text><text x="1080" y="46">14:15</text>
+    </g>
+    <!-- ticket -->
+    <rect x="443" y="70" width="510" height="14" fill="#b7791f" fill-opacity="0.85"/>
+    <text x="698" y="100" text-anchor="middle" font-size="11" fill="#b7791f" font-weight="600">ticket: lo = 13:00 &#8594; hi = 14:00</text>
+    <!-- freed band -->
+    <rect x="315" y="120" width="638" height="16" fill="#0f6e8c" fill-opacity="0.35" stroke="#0f6e8c"/>
+    <text x="634" y="154" text-anchor="middle" font-size="11" fill="#0f6e8c" font-weight="600">FREED: every transaction STARTING in [lo &#8722; 900 s, hi] = [12:45, 14:00], sealed ones included</text>
+    <text x="634" y="168" text-anchor="middle" font-size="10.5" opacity="0.8">their old ids and their entries' old owners are read first (continuity), then they are rebuilt from scratch</text>
+    <!-- read band -->
+    <rect x="315" y="186" width="765" height="16" fill="none" stroke="#0f6e8c" stroke-width="1.4" stroke-dasharray="4 3"/>
+    <text x="697" y="220" text-anchor="middle" font-size="11" fill="#0f6e8c" font-weight="600">READ: every entry in [lo &#8722; 900 s, hi + 900 s] = [12:45, 14:15], then filtered in Python</text>
+    <text x="697" y="234" text-anchor="middle" font-size="10.5" opacity="0.8">eligible = no owner yet, or owner &#8712; FREED. Everything else is loaded and ignored.</text>
+    <!-- why hi+pad -->
+    <text x="1016" y="180" text-anchor="middle" font-size="10" opacity="0.8">+900 s so a transaction</text>
+    <text x="1016" y="192" text-anchor="middle" font-size="10" opacity="0.8">anchored at hi is seen whole</text>
+
+    <!-- examples -->
+    <g font-size="11">
+      <!-- T1 -->
+      <rect x="900" y="262" width="110" height="10" rx="2" fill="#0f6e8c" fill-opacity="0.6"/>
+      <text x="60" y="271">T1  starts 13:54, ends 14:07</text>
+      <text x="1015" y="271" text-anchor="start" font-size="10.5">start &#8712; FREED &#8594; rebuilt whole; its 14:00 to 14:07 entries are inside READ</text>
+      <!-- T2 -->
+      <rect x="990" y="292" width="70" height="10" rx="2" fill="currentColor" fill-opacity="0.25"/>
+      <text x="60" y="301">T2  starts 14:04, ends 14:12</text>
+      <text x="1015" y="301" text-anchor="start" font-size="10.5">start &gt; hi &#8594; NOT freed; its entries are read, then skipped: owner not in FREED</text>
+      <!-- T3 -->
+      <rect x="700" y="322" width="6" height="10" rx="1" fill="#2f7d4f"/>
+      <text x="60" y="331">T3  one new line at 13:30, no owner</text>
+      <text x="720" y="331" text-anchor="start" font-size="10.5">eligible &#8594; grouped; may join a freed transaction or start a new one</text>
+      <!-- T4 -->
+      <rect x="250" y="352" width="62" height="10" rx="2" fill="#b3462e" fill-opacity="0.5"/>
+      <rect x="318" y="352" width="5" height="10" rx="1" fill="#2f7d4f"/>
+      <text x="60" y="361" fill="#b3462e">T4  12:37 to 12:44, plus a new line at 12:46</text>
+      <text x="330" y="361" text-anchor="start" font-size="10.5">T4 ends just before the floor and the new line could join it &#8594; cross-pad extension moves the floor back to 12:37</text>
+      <text x="330" y="375" text-anchor="start" font-size="10.5" opacity="0.8">bounded at pad + gap = 20 min; beyond that the window refuses loudly (CrossPadSpanExceeded). Today this runs in shadow: it only reports what it would do.</text>
+    </g>
+    <line x1="315" y1="110" x2="315" y2="390" stroke="currentColor" stroke-width="0.6" stroke-dasharray="2 3" opacity="0.5"/>
+    <line x1="953" y1="110" x2="953" y2="390" stroke="currentColor" stroke-width="0.6" stroke-dasharray="2 3" opacity="0.5"/>
+    <text x="315" y="404" text-anchor="middle" font-size="10" opacity="0.7">floor</text>
+    <text x="953" y="404" text-anchor="middle" font-size="10" opacity="0.7">hi</text>
+    <text x="560" y="440" text-anchor="middle" font-size="11.5" opacity="0.85">Why the asymmetry: FREED stops at hi so a transaction starting after the ticket is never disturbed, but READ goes to hi + 900 s so a freed transaction anchored at hi still sees all its entries.</text>
+    <text x="560" y="458" text-anchor="middle" font-size="11" opacity="0.7">Nothing is deleted before the read. Ownership is decided in Python from the owner map loaded in step 3, which is what lets unchanged rows cost no writes.</text>
+  </g>
+</svg>
+<figcaption>Figure 4c. The two bands of one window. Freed decides which transactions are rebuilt; read decides which entries are loaded. An entry is regrouped only if it is new or belongs to a freed transaction, so neighbours outside the freed band keep their rows and their ids.</figcaption>
+</figure>
+<pre class="code"><span class="ref"># derive_transactions.py:1330-1359 and :1411-1415</span>
+pad = _regroup_pad()                       # 900 s
+lo_p, hi_p = lo - pad, hi + pad
+lo_p, cross_pad = await _cross_pad_floor(db, customer_code, lo_p, hi_p)
+
+freed = list((await db.execute(select(LogTransaction.id).where(
+    LogTransaction.customer_code == customer_code,
+    LogTransaction.started_at &gt;= lo_p,
+    LogTransaction.started_at &lt;= hi,        # FREED band ends at hi, not hi_p
+))).scalars().all())
+
+cont = continuity.Continuity(
+    owner_by_entry=await assignments.load_owners_in_window(db, customer_code,
+        time_bounds.from_instants([lo_p, hi_p], pad=timedelta(0))),
+    reusable=frozenset(freed))
+
+_rebuilding = frozenset(freed)
+def _eligible(entry_id) -&gt; bool:
+    owner = cont.owner_by_entry.get(entry_id)
+    return owner is None or owner in _rebuilding</pre>
+
+
+<h3 class="sub">Vocabulary of one window, as the code names it</h3>
+<p><b>"Freed" is not a database field.</b> It is a Python list built at the start of <code>regroup_window</code>: the ids of every transaction whose <code>started_at</code> falls in the freed band. The name is historical. Before the fingerprint change, those transactions were deleted so their entries were "freed" for regrouping. Since then nothing is deleted first, but the list still means exactly "the transactions this window is allowed to rebuild and whose ids it may hand out again". Everything else in the table below is also in memory only, and lives for one window.</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Term used on this page</th><th>What it is in the code</th><th>Type and lifetime</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr><td><b>freed</b></td><td><code>freed</code>: ids of transactions with <code>started_at</code> in [lo &#8722; pad, hi]. Also copied into <code>_rebuilding</code> and into <code>Continuity.reusable</code></td><td>list of uuid, one window</td><td class="mono">derive_transactions.py:1343</td></tr>
+    <tr><td><b>owner map</b></td><td><code>cont.owner_by_entry</code>: {entry_id &#8594; transaction_id} for every assigned entry in the read band, loaded from <code>log_entry_assignment</code> before anything changes</td><td>dict, one window</td><td class="mono">assignments.py:188</td></tr>
+    <tr><td><b>stored</b></td><td><code>stored</code>: {id &#8594; (started_at, row_fingerprint, members_fingerprint)} of the freed transactions, what the rebuild is compared against</td><td>dict, one window</td><td class="mono">derive_transactions.py:1370</td></tr>
+    <tr><td><b>eligible entry</b></td><td><code>_eligible(entry_id)</code>: owner is None (new) or owner &#8712; freed. Decided in Python, not SQL</td><td>function, one window</td><td class="mono">derive_transactions.py:1413</td></tr>
+    <tr><td><b>open conversation</b></td><td><code>_TxnBuilder</code>: a list of entries plus <code>open_pos</code>, the stream position where it opened. Called a stream or a builder in the code</td><td>object, until closed</td><td class="mono">derive_transactions.py:67</td></tr>
+    <tr><td><b>open_by_key</b></td><td>{(server, thread, user) &#8594; builder}: the conversations currently open</td><td>dict, one grouping pass</td><td class="mono">derive_transactions.py:285</td></tr>
+    <tr><td><b>current_by_thread</b></td><td>{(server, thread) &#8594; key}: which open conversation a user-less line on that thread should inherit</td><td>dict, one grouping pass</td><td class="mono">derive_transactions.py:287</td></tr>
+    <tr><td><b>pending_reqs</b></td><td>REQUEST lines waiting for their body or their work</td><td>list, one grouping pass</td><td class="mono">derive_transactions.py:313</td></tr>
+    <tr><td><b>builders</b></td><td>the output: every closed conversation, plus whatever is still open when the entries run out</td><td>list, handed to <code>_persist</code></td><td class="mono">derive_transactions.py:496</td></tr>
+  </tbody>
+</table>
+</div>
+<p>"Merging" is used for three different things on this page, and only one of them is about transactions. Tickets merge into runs (Figure 4b). Lines merge into a conversation while the grouper runs, including a thread that flips between users and comes back (Figure 4f). Two stored transactions merge into one across a rebuild, which is a result of the grouper seeing lines together that earlier windows saw apart, and continuity then deciding whose id survives (Figure 4g).</p>
+
+<figure>
+<svg viewBox="0 0 1120 560" role="img" aria-label="The grouper's three in-memory structures, pending requests, open conversations keyed by server thread user, and current conversation per thread, shown after each of seven lines on thread 94. User A's request body opens conversation A. A user-less MI line inherits A. User B's body on the same thread opens conversation B and becomes the thread's current conversation. A user-less line now inherits B, not A. User A's MI result carries the user and goes back to A even though the thread had flipped to B. A's response closes A with five entries; B stays open. When entries run out, B is emitted as an incomplete transaction.">
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5" letter-spacing="0.06em" opacity="0.7">
+      <text x="40" y="30">#  LINE (server BEC01, thread 94)</text>
+      <text x="470" y="30">pending_reqs</text>
+      <text x="610" y="30">open_by_key</text>
+      <text x="860" y="30">current_by_thread[(BEC01,94)]</text>
+    </g>
+    <line x1="40" y1="38" x2="1080" y2="38" stroke="currentColor" stroke-width="0.6" opacity="0.4"/>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <text x="40" y="66">1  request (null)</text>            <text x="470" y="66">[r1]</text>          <text x="610" y="66">{}</text>                                    <text x="860" y="66">-</text>
+      <text x="40" y="100">2  request_body user A</text>       <text x="470" y="100">[]</text>           <text x="610" y="100">{A: [r1, b2]}</text>                        <text x="860" y="100">A</text>
+      <text x="40" y="134">3  mi_call (null)</text>            <text x="470" y="134">[]</text>           <text x="610" y="134">{A: [r1, b2, m3]}</text>                    <text x="860" y="134">A</text>
+      <text x="40" y="168">4  request_body user B</text>       <text x="470" y="168">[]</text>           <text x="610" y="168">{A: [r1,b2,m3], B: [b4]}</text>             <text x="860" y="168" fill="#b3462e" font-weight="600">B</text>
+      <text x="40" y="202">5  sql (null)</text>                <text x="470" y="202">[]</text>           <text x="610" y="202">{A: [r1,b2,m3], B: [b4, s5]}</text>         <text x="860" y="202">B</text>
+      <text x="40" y="236">6  mi_result user A</text>          <text x="470" y="236">[]</text>           <text x="610" y="236">{A: [r1,b2,m3,m6], B: [b4,s5]}</text>       <text x="860" y="236" fill="#0f6e8c" font-weight="600">A</text>
+      <text x="40" y="270">7  response user A</text>           <text x="470" y="270">[]</text>           <text x="610" y="270">{B: [b4, s5]}</text>                        <text x="860" y="270">B</text>
+      <text x="40" y="304">   end of entries</text>            <text x="470" y="304">[]</text>           <text x="610" y="304">{}</text>                                    <text x="860" y="304">-</text>
+    </g>
+    <g font-size="10.5" opacity="0.85">
+      <text x="40" y="80">waits: POST requests carry no ReqID until their body</text>
+      <text x="40" y="114">key (BEC01,94,A) opens; take_post_request pops r1 into it</text>
+      <text x="40" y="148">no user on the line &#8594; inherits current = A</text>
+      <text x="40" y="182">same thread, other user &#8594; a SECOND open conversation; current flips to B</text>
+      <text x="40" y="216">no user &#8594; inherits current, which is now B, not A</text>
+      <text x="40" y="250">line carries user A &#8594; routed to key (BEC01,94,A) even though current is B</text>
+      <text x="40" y="284">closes the OLDEST open conversation of user A on BEC01 &#8594; A emitted with 5 entries</text>
+      <text x="40" y="318">B still open with no response &#8594; emitted as an INCOMPLETE transaction (builders.extend(open_by_key.values()))</text>
+    </g>
+    <rect x="40" y="340" width="1040" height="80" rx="3" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.6"/>
+    <text x="56" y="360" font-weight="600" font-size="11.5">Why two dictionaries and not one</text>
+    <text x="56" y="377" font-size="11">A .NET thread is reused mid-request for another user's work, then resumes the first. open_by_key keeps the two users apart on the same thread.</text>
+    <text x="56" y="392" font-size="11">current_by_thread answers the only question a user-less line can ask: "who is live on this thread right now". Line 5 goes to B and line 3 went to A for that reason alone.</text>
+    <text x="56" y="407" font-size="11">Result: A re-merges its own work after the flip, and B never absorbs A's lines. Neither dictionary is ever written to the database; the saved-state tables are a separate copy taken at window end.</text>
+    <g font-size="11" opacity="0.85">
+      <text x="40" y="450" font-weight="600">Two more rules that act on these structures</text>
+      <text x="40" y="468">evict_stale(now): before each line, any open conversation whose last entry is more than 300 s older than this line is closed where it stands, and any pending request older than 300 s becomes its own one-line incomplete transaction. derive_transactions.py:378</text>
+      <text x="40" y="486">response with no open work for its user on its server: it opens a one-line transaction of its own. That is the orphan-response count the reconciler watches. derive_transactions.py:451</text>
+    </g>
+    <text x="560" y="530" text-anchor="middle" font-size="11.5" opacity="0.85">Everything above is one call to _group(rows). It reads nothing and writes nothing. The result is the list of builders that _persist then compares against the stored fingerprints.</text>
+  </g>
+</svg>
+<figcaption>Figure 4f. The grouper's live state after each line, for a thread that flips from user A to user B and back. The user on a line beats the thread's current conversation; only a user-less line inherits.</figcaption>
+</figure>
+<pre class="code"><span class="ref"># derive_transactions.py:285-313, :405-421 and :423-450</span>
+# the three structures
+open_by_key: dict[tuple, _TxnBuilder] = {}        # (server, thread, user) -&gt; open conversation
+current_by_thread: dict[tuple, tuple] = {}         # (server, thread) -&gt; its currently-active key
+pending_reqs: list[LogEntry] = ...                 # REQUEST lines waiting for body or work
+
+# a REQUEST waits
+if et == &quot;request&quot;:
+    pending_reqs.append(e)
+
+# a REQUEST BODY opens a conversation and claims its request
+elif et == &quot;request_body&quot;:
+    u = e.user_ctx or _entry_user(e)
+    key = (srv, th, u)
+    if key in open_by_key:
+        builders.append(close(key))                # prior cycle for this (thread,user): no RESPONSE
+    b = _TxnBuilder()
+    req = take_by_reqid(_entry_reqid(e), srv) or take_post_request(srv)
+    if req is not None: b.add(req)
+    b.add(e)
+    open_by_key[key] = b
+    current_by_thread[(srv, th)] = key
+
+# a work line joins by user, or inherits the thread&#x27;s current conversation
+elif et in _INTERNAL:
+    u = e.user_ctx
+    if u is not None:
+        key = (srv, th, u); b = open_by_key.get(key) or _TxnBuilder(); open_by_key[key] = b
+        current_by_thread[(srv, th)] = key
+    else:
+        key = current_by_thread.get((srv, th)); b = open_by_key.get(key) if key else None
+    b.add(e)</pre>
+<h3 class="sub">What log_entry_assignment actually holds: one real conversation</h3>
+<p><code>log_entry_assignment</code> is a plain link table. One row per entry, and every row of the same conversation repeats the same transaction id. Nothing else is duplicated: the entry's content stays in <code>log_entries</code>, the conversation's summary stays in <code>log_transactions</code>, and this table only says which entry belongs to which conversation and in what position. It exists because <code>log_entries</code> has no transaction column at all, so Stage 2 can regroup forever without touching an entry row.</p>
+
+<figure>
+<svg viewBox="0 0 1120 560" role="img" aria-label="Three tables for one real conversation from 12 Sep 2026 13:39. Top: one log_transactions row, id ede21277, user OPRACHASUK, method LogSignOff, six entries, 18 milliseconds, success. Middle: six log_entry_assignment rows, each with a different entry id, the same transaction id ede21277, and seq 0 to 5. Bottom: the six log_entries rows those point at: request, request body, info, sql, info on thread 42 and the response on thread 65, all untouched by Stage 2. Arrows from each assignment row to its entry and up to the one transaction.">
+  <defs><marker id="lea" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <!-- transaction -->
+    <text x="40" y="30" font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.06em" opacity="0.7">log_transactions &#183; ONE row &#183; the summary</text>
+    <rect x="40" y="40" width="1040" height="50" rx="3" fill="#0f6e8c" fill-opacity="0.12" stroke="#0f6e8c" stroke-width="1.4"/>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <text x="56" y="58" opacity="0.7">id        started       ended         ms  status   user_name   method      entry_count  members_fingerprint</text>
+      <text x="56" y="78" font-weight="500">ede21277  13:39:07.407  13:39:07.425  18  success  OPRACHASUK  LogSignOff  6            f21a17f5&#8230;</text>
+    </g>
+
+    <!-- assignment -->
+    <text x="40" y="130" font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.06em" opacity="0.7">log_entry_assignment &#183; SIX rows &#183; the link: same transaction_id on every row, seq = position</text>
+    <rect x="40" y="140" width="520" height="170" rx="3" fill="#0f6e8c" fill-opacity="0.06" stroke="#0f6e8c" stroke-width="1.2"/>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <text x="56" y="160" opacity="0.7">entry_id  transaction_id  seq  entry_ts</text>
+      <text x="56" y="182">2d4c0a06  <tspan fill="#0f6e8c" font-weight="600">ede21277</tspan>        0    13:39:07.407</text>
+      <text x="56" y="204">500cc458  <tspan fill="#0f6e8c" font-weight="600">ede21277</tspan>        1    13:39:07.420</text>
+      <text x="56" y="226">eda6d004  <tspan fill="#0f6e8c" font-weight="600">ede21277</tspan>        2    13:39:07.421</text>
+      <text x="56" y="248">bb9c714e  <tspan fill="#0f6e8c" font-weight="600">ede21277</tspan>        3    13:39:07.421</text>
+      <text x="56" y="270">c62a5309  <tspan fill="#0f6e8c" font-weight="600">ede21277</tspan>        4    13:39:07.425</text>
+      <text x="56" y="292">05c9d51a  <tspan fill="#0f6e8c" font-weight="600">ede21277</tspan>        5    13:39:07.425</text>
+    </g>
+    <path d="M300,140 L300,90" stroke="#0f6e8c" stroke-width="1.4" fill="none" marker-end="url(#lea)"/>
+    <text x="310" y="118" font-size="10.5" fill="#0f6e8c">all six point at the one transaction</text>
+
+    <!-- notes right of assignment -->
+    <g font-size="11.5">
+      <text x="590" y="162" font-weight="600">What is and is not duplicated</text>
+      <text x="590" y="182">duplicated: the transaction id, once per entry. That is the whole job of the table.</text>
+      <text x="590" y="198">not duplicated: the entry's text, type, thread, user. Those stay in log_entries.</text>
+      <text x="590" y="214">not duplicated: status, duration, method. Those stay on the one transaction row.</text>
+      <text x="590" y="240" font-weight="600">Unique key: (entry_id, entry_ts)</text>
+      <text x="590" y="258">an entry belongs to at most one conversation at a time. entry_ts is the partition</text>
+      <text x="590" y="274">key, copied from the entry, so a day of entries and its assignments drop together.</text>
+      <text x="590" y="298">No foreign keys: both links are soft, so partitions stay droppable.</text>
+    </g>
+
+    <!-- entries -->
+    <text x="40" y="350" font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.06em" opacity="0.7">log_entries &#183; SIX rows &#183; the evidence, never written by Stage 2 &#183; no transaction column exists here</text>
+    <rect x="40" y="360" width="1040" height="170" rx="3" fill="#2f7d4f" fill-opacity="0.08" stroke="#2f7d4f" stroke-width="1.4"/>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <text x="56" y="380" opacity="0.7">entry_id  timestamp     thread  user_ctx    entry_type    message</text>
+      <text x="56" y="402">2d4c0a06  13:39:07.407  42      OPRACHASUK  request       REQUEST: http://172.17.0.230/api/Activity/LogSignOff</text>
+      <text x="56" y="424">500cc458  13:39:07.420  42      OPRACHASUK  request_body  REQUEST BODY: {"Company":"915","Warehouse":"BRI","User":"OPR&#8230;</text>
+      <text x="56" y="446">eda6d004  13:39:07.421  42      OPRACHASUK  info          Logging Activity of Transaction Type 000002 via unified obje&#8230;</text>
+      <text x="56" y="468">bb9c714e  13:39:07.421  42      OPRACHASUK  sql           Stored Procedure Executed is &gt;&gt;</text>
+      <text x="56" y="490">c62a5309  13:39:07.425  42      OPRACHASUK  info          Activity Logged OK</text>
+      <text x="56" y="512">05c9d51a  13:39:07.425  <tspan fill="#b3462e" font-weight="600">65</tspan>      OPRACHASUK  response      RESPONSE: "OK"</text>
+    </g>
+    <path d="M80,310 L80,360" stroke="currentColor" stroke-width="1" fill="none" stroke-dasharray="3 3" marker-end="url(#lea)"/>
+    <text x="90" y="340" font-size="10.5" opacity="0.8">entry_id + entry_ts &#8594; the entry row</text>
+    <text x="560" y="550" text-anchor="middle" font-size="11" fill="#b3462e">the response arrived on thread 65, not 42. It was matched to this conversation by user, not by thread. The assignment row is where that decision is recorded.</text>
+  </g>
+</svg>
+<figcaption>Figure 4h. One real LogSignOff conversation from tmp-live, 12 Sep 2026 13:39: one summary row, six link rows repeating the same transaction id, six evidence rows that Stage 2 never writes.</figcaption>
+</figure>
+
+<ul class="notes">
+  <li><b>Why a separate table and not a column on the entry.</b> A column on <code>log_entries</code> was rewritten on every rebuild, about 55 times per entry, which caused the 5 August 2026 outage. Now a rebuild that changes nothing writes zero assignment rows.</li>
+  <li><b>Moving an entry is cheap.</b> When regrouping moves an entry to another conversation, that is one small row deleted and one inserted, not an update of a wide entry row with eleven indexes. In Figure 4g, e6 joining B was: delete B's two rows, insert three rows e4, e5, e6 with seq 0, 1, 2. The entries themselves were never written.</li>
+  <li><b>seq is the timeline.</b> The log viewer renders a transaction by reading its assignment rows in <code>seq</code> order and joining each to its entry. That order is also what <code>members_fingerprint</code> hashes, so a reordering counts as a change.</li>
+</ul>
+
+<h3 class="sub">Gate, room, exit: where the owner map is used, and where it is not</h3>
+<p>"Rebuilding" a transaction means recomputing it in memory. Nothing is deleted or changed in the database when a transaction is freed. Its lines are loaded into Python, grouped again by the rules, given an id again, hashed again, and only the difference is written at the end. The owner map read from <code>log_entry_assignment</code> is used at two points and deliberately ignored at the one in between.</p>
+
+<figure>
+<svg viewBox="0 0 1120 760" role="img" aria-label="Three columns. Left, database read once: the owner map, the freed list and the stored hashes. Middle, memory: the gate filters entries, the room groups them blind to the map, the exit names groups by counting owners and compares hashes. Right, database written last: only the differences. Real numbers from the tmp-live window for the ticket 13:24:19 to 13:25:25 on 12 Sep 2026: freed 161 transactions with 2,089 entries, 150 of them sealed; read band holds 2,189 entries; gate lets 2,090 in and keeps 99 out that belong to 14 transactions starting after hi.">
+  <defs><marker id="gre" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <g font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.08em" opacity="0.7">
+      <text x="160" y="34" text-anchor="middle">DATABASE &#183; read once at the start</text>
+      <text x="560" y="34" text-anchor="middle">MEMORY &#183; the worker process, one window</text>
+      <text x="960" y="34" text-anchor="middle">DATABASE &#183; written once at the end</text>
+    </g>
+    <line x1="300" y1="44" x2="300" y2="700" stroke="currentColor" stroke-width="0.6" opacity="0.25"/>
+    <line x1="820" y1="44" x2="820" y2="700" stroke="currentColor" stroke-width="0.6" opacity="0.25"/>
+
+    <!-- real window header -->
+    <rect x="40" y="52" width="1040" height="44" rx="3" fill="#b7791f" fill-opacity="0.10" stroke="#b7791f" stroke-width="1.2"/>
+    <text x="56" y="70" font-weight="600" fill="#b7791f">real window, tmp-live, 12 Sep 2026: ticket lo 13:24:19.835 &#8594; hi 13:25:25.214</text>
+    <text x="56" y="88" font-size="11">freed band [13:09:19.835, 13:25:25.214] &#183; read band [13:09:19.835, 13:40:25.214] &#183; all times server local</text>
+
+    <!-- left: reads -->
+    <g font-size="11.5">
+      <rect x="40" y="120" width="240" height="70" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c"/>
+      <text x="52" y="140" font-weight="600">freed</text>
+      <text x="52" y="156">SELECT id FROM log_transactions</text>
+      <text x="52" y="170">WHERE started_at IN freed band</text>
+      <text x="52" y="184" font-weight="600" fill="#0f6e8c">161 ids, 2,089 entries, 150 sealed</text>
+
+      <rect x="40" y="206" width="240" height="70" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c"/>
+      <text x="52" y="226" font-weight="600">owner map</text>
+      <text x="52" y="242">SELECT entry_id, transaction_id</text>
+      <text x="52" y="256">FROM log_entry_assignment IN read band</text>
+      <text x="52" y="270" font-weight="600" fill="#0f6e8c">2,189 pairs {entry &#8594; txn}</text>
+
+      <rect x="40" y="292" width="240" height="56" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c"/>
+      <text x="52" y="312" font-weight="600">stored</text>
+      <text x="52" y="328">the 2 hashes of each freed id</text>
+      <text x="52" y="342" font-weight="600" fill="#0f6e8c">161 &#215; (row_fp, members_fp)</text>
+
+      <rect x="40" y="364" width="240" height="56" rx="3" fill="#2f7d4f" fill-opacity="0.10" stroke="#2f7d4f"/>
+      <text x="52" y="384" font-weight="600">entries</text>
+      <text x="52" y="400">SELECT * FROM log_entries IN read band</text>
+      <text x="52" y="414" font-weight="600" fill="#2f7d4f">2,189 rows, time order</text>
+    </g>
+
+    <!-- GATE -->
+    <rect x="330" y="120" width="460" height="130" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="560" y="140" text-anchor="middle" font-weight="600">GATE &#183; may this line be regrouped?</text>
+    <text x="560" y="154" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">_eligible(entry_id) &#183; derive_transactions.py:1413</text>
+    <g font-size="11.5">
+      <text x="346" y="178">owner is None</text>                     <text x="560" y="178">&#8594; IN</text>   <text x="620" y="178">new line, nobody owns it</text>
+      <text x="346" y="198">owner &#8712; freed</text>               <text x="560" y="198">&#8594; IN</text>   <text x="620" y="198" font-weight="600" fill="#0f6e8c">2,090 lines of the 161</text>
+      <text x="346" y="218">owner &#8713; freed</text>               <text x="560" y="218">&#8594; OUT</text>  <text x="620" y="218" font-weight="600" fill="#b3462e">99 lines of 14 neighbours</text>
+      <text x="346" y="240" opacity="0.85">the map decides WHO enters. It says nothing about where they sit.</text>
+    </g>
+    <path d="M280,241 L330,185" stroke="#0f6e8c" stroke-width="1.2" fill="none" marker-end="url(#gre)"/>
+    <path d="M280,392 L330,220" stroke="#2f7d4f" stroke-width="1.2" fill="none" marker-end="url(#gre)"/>
+    <path d="M280,155 L330,170" stroke="#0f6e8c" stroke-width="1.2" fill="none" marker-end="url(#gre)"/>
+
+    <!-- OUT examples -->
+    <rect x="850" y="120" width="230" height="130" rx="3" fill="none" stroke="#b3462e" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="862" y="140" font-weight="600" fill="#b3462e">kept OUT, left untouched</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5">
+      <text x="862" y="158">2ec94540 13:26:22 22 entries</text>
+      <text x="862" y="172">c5730a45 13:27:22 LogSignOff</text>
+      <text x="862" y="186">8368d877 13:31:45 StockMove</text>
+      <text x="862" y="200">ede21277 13:39:07 LogSignOff</text>
+      <text x="862" y="214">&#8230; 14 transactions, 99 lines</text>
+    </g>
+    <text x="862" y="240" font-size="10.5" fill="#b3462e">start &gt; hi: another window owns them</text>
+
+    <!-- ROOM -->
+    <rect x="330" y="280" width="460" height="150" rx="3" fill="#0f6e8c" fill-opacity="0.06" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="560" y="300" text-anchor="middle" font-weight="600">ROOM &#183; _group(rows): blind to the owner map</text>
+    <text x="560" y="314" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">derive_transactions.py:258 &#183; the map is not passed in</text>
+    <g font-size="11.5">
+      <text x="346" y="338">2,090 lines in time order &#8594; conversations by (server, thread, user),</text>
+      <text x="346" y="354">request pool, response FIFO per user, 300 s idle gap</text>
+      <text x="346" y="374">a line that was in A yesterday lands wherever the rules put it today</text>
+      <text x="346" y="394" font-weight="600">out: ~161 groups, e.g. b420a4b1 = 10 lines, 13:25:25.058 &#8594; 13:26:22.275</text>
+      <text x="346" y="414" opacity="0.85">this group starts 156 ms before hi and ends 57 s after it: that is why the read band reaches past hi</text>
+    </g>
+    <path d="M560,250 L560,280" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#gre)"/>
+
+    <!-- EXIT -->
+    <rect x="330" y="460" width="460" height="170" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="560" y="480" text-anchor="middle" font-weight="600">EXIT &#183; name each group, then compare</text>
+    <text x="560" y="494" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">continuity.assign &#183; continuity.py:138 &#183; _persist &#183; derive_transactions.py:805</text>
+    <g font-size="11.5">
+      <text x="346" y="518">for each group: count owners of its lines from the map</text>
+      <text x="346" y="534">the freed id owning most lines is inherited, once. No owner &#8594; uuid5(request hash)</text>
+      <text x="346" y="558">recompute row_fp and members_fp, compare with stored[id]</text>
+      <text x="346" y="578">equal, equal &#8594; unchanged &#183; row differs &#8594; row only &#183; members differ &#8594; rewrite</text>
+      <text x="346" y="598">stored id nobody claimed &#8594; vanished</text>
+      <text x="346" y="620" opacity="0.85">the map is used here to NAME, the hashes to decide whether to WRITE</text>
+    </g>
+    <path d="M560,430 L560,460" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#gre)"/>
+    <path d="M280,241 C300,300 300,500 330,540" stroke="#0f6e8c" stroke-width="1.2" fill="none" stroke-dasharray="3 3" marker-end="url(#gre)"/>
+    <path d="M280,320 C300,380 300,540 330,565" stroke="#0f6e8c" stroke-width="1.2" fill="none" stroke-dasharray="3 3" marker-end="url(#gre)"/>
+    <text x="296" y="470" font-size="10" fill="#0f6e8c" transform="rotate(-72 296 470)">owner map, stored: used again</text>
+
+    <!-- right: writes -->
+    <g font-size="11.5">
+      <rect x="850" y="460" width="230" height="170" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="862" y="480" font-weight="600">only the difference</text>
+      <text x="862" y="500">typical re-run of this window today:</text>
+      <text x="862" y="516" font-family="IBM Plex Mono, monospace" font-size="10.5">unchanged  ~161</text>
+      <text x="862" y="530" font-family="IBM Plex Mono, monospace" font-size="10.5">row_only     0</text>
+      <text x="862" y="544" font-family="IBM Plex Mono, monospace" font-size="10.5">rewritten    0</text>
+      <text x="862" y="558" font-family="IBM Plex Mono, monospace" font-size="10.5">deleted      0</text>
+      <text x="862" y="580">+ 1 analytics ticket</text>
+      <text x="862" y="596">+ saved stream state</text>
+      <text x="862" y="618" opacity="0.85">2,090 lines regrouped, 0 rows written</text>
+    </g>
+    <path d="M790,545 L850,545" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#gre)"/>
+
+    <text x="560" y="672" text-anchor="middle" font-size="11.5" opacity="0.85">On the original run at 13:25:39 the new lines had no owner yet and entered through the first gate rule. Re-running the same window today, every one of them has an owner in freed and enters through the second. The room does the same thing either way.</text>
+    <text x="560" y="692" text-anchor="middle" font-size="11.5" opacity="0.85">The 99 lines kept out belong to 14 transactions that start after hi. Each of those is rebuilt whole by the window that covers its own start.</text>
+    <text x="560" y="730" text-anchor="middle" font-size="11" opacity="0.7">Gate: the map decides who gets in, not where they sit. Room: seating is decided fresh by the rules only. Exit: the map names the tables, the hashes decide whether anything is written.</text>
+  </g>
+</svg>
+<figcaption>Figure 4i. One real window, 12 Sep 2026 13:24 to 13:25, through gate, room and exit. Everything between the two database columns is variables in the worker process for the life of one window.</figcaption>
+</figure>
+
+<ul class="notes">
+  <li><b>Why the gate keeps the 99 out.</b> If a line of 2ec94540 entered the room, the grouper might seat it in a freed conversation. That conversation would be written with the line, but 2ec94540, which is not being rebuilt, would still claim it too. Two transactions owning one line, and 2ec94540's row describing 22 lines while 21 remain. Keeping it out leaves 2ec94540 exactly as it is until the window that covers 13:26 rebuilds it whole.</li>
+  <li><b>Why the room is blind.</b> If the grouper were told "this line was in A", it would tend to put it back in A, and a mistake made once would repeat forever. Regrouping blind is what lets a wrong grouping heal on the next rebuild. It is also the reason the rebuild lane is trusted while the shadow head lane, which starts from saved state, is not.</li>
+  <li><b>Where ownership comes from in the first place.</b> The room's decision, written down. The first time a line is seen it has no owner; the grouper seats it, the exit mints an id, and <code>_persist</code> writes one assignment row. That row is what the next window reads back as "owner".</li>
+  <li><b>"Freed" and "sealed" are different kinds of thing.</b> Sealed is a column set by the sealer. Freed is this in-memory list, chosen by start time with no sealed condition, so 150 of the 161 freed transactions here were sealed and were rebuilt anyway. If their lines did not change they hashed identical and cost nothing.</li>
+</ul>
+<pre class="code"><span class="ref"># derive_transactions.py:1343-1349, :1355-1359, :1411-1415</span>
+freed = list((await db.execute(select(LogTransaction.id).where(
+    LogTransaction.customer_code == customer_code,
+    LogTransaction.started_at &gt;= lo_p,            # floor
+    LogTransaction.started_at &lt;= hi,              # NOT hi_p: neighbours after hi are never freed
+))).scalars().all())
+
+cont = continuity.Continuity(
+    owner_by_entry=await assignments.load_owners_in_window(db, customer_code, read_band),
+    reusable=frozenset(freed))                    # only freed ids may be inherited
+
+_rebuilding = frozenset(freed)
+def _eligible(entry_id) -&gt; bool:                  # the GATE
+    owner = cont.owner_by_entry.get(entry_id)
+    return owner is None or owner in _rebuilding
+
+rows = [e for e in entries_in_read_band if _eligible(e.id)]
+groups = _group(rows)                             # the ROOM: `cont` is not passed in
+result = await _persist(db, groups, customer_code, seal_cutoff, abandon_cutoff, cont, stored=stored)  # the EXIT</pre>
+
+<figure>
+<svg viewBox="0 0 1120 720" role="img" aria-label="The exit as a decision tree. For each group the rebuild produced: resolve its id, inherited from the freed transaction that owned most of its lines, else minted from the request hash. Then look the id up in the stored map. Not stored and not existing elsewhere: INSERT one log_transactions row and one log_entry_assignment row per entry. Not stored but existing outside the freed band: clash, skip and warn. Stored with both hashes equal: no statement. Stored with row hash different and members hash equal: one UPDATE of log_transactions. Stored with members hash different: one UPDATE of log_transactions, DELETE that transaction's assignment rows, INSERT one per entry. Finally every stored id no group claimed: DELETE from both tables. Real example rows from today annotate each branch.">
+  <defs><marker id="exa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <text x="40" y="30" font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.08em" opacity="0.7">EXIT &#183; for each group the room produced &#183; _persist, derive_transactions.py:762</text>
+
+    <!-- step 1 id -->
+    <rect x="40" y="50" width="1040" height="60" rx="3" fill="#0f6e8c" fill-opacity="0.08" stroke="#0f6e8c" stroke-width="1.2"/>
+    <text x="56" y="70" font-weight="600">1  resolve the id</text>
+    <text x="56" y="88" font-size="11.5">count the owners of the group's lines in the owner map. The freed id with most lines is inherited, each id at most once. No freed owner &#8594; id = uuid5(customer + hash of the request line).</text>
+    <text x="56" y="103" font-size="11" opacity="0.8">continuity.assign, continuity.py:138 &#183; _txn_id, derive_transactions.py:517</text>
+
+    <!-- step 2 lookup -->
+    <rect x="380" y="130" width="360" height="44" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="560" y="150" text-anchor="middle" font-weight="600">2  is this id in `stored`?</text>
+    <text x="560" y="166" text-anchor="middle" font-size="11" opacity="0.8">stored = the freed transactions read at the start, with their two hashes</text>
+    <path d="M560,110 L560,130" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#exa)"/>
+
+    <!-- NO branch -->
+    <path d="M380,152 L200,152 L200,210" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#exa)"/>
+    <text x="290" y="146" text-anchor="middle" font-size="11" font-weight="600">NO</text>
+    <rect x="40" y="210" width="320" height="44" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="200" y="228" text-anchor="middle" font-weight="600">does the id exist elsewhere, outside freed?</text>
+    <text x="200" y="244" text-anchor="middle" font-size="11" opacity="0.8">_existing_transaction_ids, bounded to one pad &#183; :590</text>
+
+    <path d="M120,254 L120,290" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#exa)"/>
+    <text x="108" y="278" text-anchor="end" font-size="11" font-weight="600">no</text>
+    <rect x="40" y="290" width="200" height="120" rx="3" fill="#2f7d4f" fill-opacity="0.12" stroke="#2f7d4f" stroke-width="1.6"/>
+    <text x="140" y="310" text-anchor="middle" font-weight="600" fill="#2f7d4f">NEW &#8594; INSERT</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5">
+      <text x="52" y="330">INSERT log_transactions</text>
+      <text x="52" y="344">  (id, started_at, &#8230;, sealed,</text>
+      <text x="52" y="358">   row_fp, members_fp)</text>
+      <text x="52" y="376">INSERT log_entry_assignment</text>
+      <text x="52" y="390">  one row per entry, seq 0..n</text>
+    </g>
+    <text x="140" y="404" text-anchor="middle" font-size="10.5" opacity="0.85">_write_transaction :743</text>
+
+    <path d="M280,254 L280,290" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#exa)"/>
+    <text x="292" y="278" text-anchor="start" font-size="11" font-weight="600">yes</text>
+    <rect x="260" y="290" width="200" height="120" rx="3" fill="none" stroke="#b3462e" stroke-width="1.2" stroke-dasharray="4 3"/>
+    <text x="360" y="310" text-anchor="middle" font-weight="600" fill="#b3462e">CLASH &#8594; SKIP</text>
+    <g font-size="10.5">
+      <text x="272" y="330">no statement at all</text>
+      <text x="272" y="346">entries left unassigned,</text>
+      <text x="272" y="360">counted as orphan_entries</text>
+      <text x="272" y="376">WARNING in the journal</text>
+      <text x="272" y="390">cause: out-of-order or bulk ingest</text>
+    </g>
+    <text x="360" y="404" text-anchor="middle" font-size="10.5" opacity="0.85">:797</text>
+
+    <!-- YES branch -->
+    <path d="M740,152 L880,152 L880,210" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#exa)"/>
+    <text x="810" y="146" text-anchor="middle" font-size="11" font-weight="600">YES</text>
+    <rect x="500" y="210" width="580" height="44" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="790" y="228" text-anchor="middle" font-weight="600">3  recompute row_fp and members_fp, compare with stored[id]</text>
+    <text x="790" y="244" text-anchor="middle" font-size="11" opacity="0.8">fingerprints.row / fingerprints.members &#183; :805-807</text>
+
+    <path d="M600,254 L600,290" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#exa)"/>
+    <rect x="500" y="290" width="180" height="120" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="590" y="310" text-anchor="middle" font-weight="600">both equal</text>
+    <text x="590" y="326" text-anchor="middle" font-weight="600">&#8594; NOTHING</text>
+    <text x="590" y="350" text-anchor="middle" font-size="10.5">no statement</text>
+    <text x="590" y="366" text-anchor="middle" font-size="10.5">counted as unchanged</text>
+    <text x="590" y="382" text-anchor="middle" font-size="10.5">the 98.7% case</text>
+    <text x="590" y="404" text-anchor="middle" font-size="10.5" opacity="0.85">:815</text>
+
+    <path d="M790,254 L790,290" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#exa)"/>
+    <rect x="700" y="290" width="180" height="120" rx="3" fill="#0f6e8c" fill-opacity="0.12" stroke="#0f6e8c" stroke-width="1.6"/>
+    <text x="790" y="310" text-anchor="middle" font-weight="600" fill="#0f6e8c">row &#8800;, members =</text>
+    <text x="790" y="326" text-anchor="middle" font-weight="600" fill="#0f6e8c">&#8594; UPDATE row only</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5">
+      <text x="712" y="350">UPDATE log_transactions</text>
+      <text x="712" y="364">SET &#8230;, sealed, updated_at,</text>
+      <text x="712" y="378">    row_fp, members_fp</text>
+      <text x="712" y="392">WHERE id=? AND started_at=?</text>
+    </g>
+    <text x="790" y="404" text-anchor="middle" font-size="10.5" opacity="0.85">_update_transaction :718</text>
+
+    <path d="M980,254 L980,290" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#exa)"/>
+    <rect x="900" y="290" width="180" height="120" rx="3" fill="#0f6e8c" fill-opacity="0.12" stroke="#0f6e8c" stroke-width="1.6"/>
+    <text x="990" y="310" text-anchor="middle" font-weight="600" fill="#0f6e8c">members &#8800;</text>
+    <text x="990" y="326" text-anchor="middle" font-weight="600" fill="#0f6e8c">&#8594; UPDATE + REWRITE</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5">
+      <text x="912" y="350">UPDATE log_transactions (as left)</text>
+      <text x="912" y="364">DELETE log_entry_assignment</text>
+      <text x="912" y="378">  WHERE transaction_id=?</text>
+      <text x="912" y="392">INSERT one row per entry</text>
+    </g>
+    <text x="990" y="404" text-anchor="middle" font-size="10.5" opacity="0.85">:821-828</text>
+
+    <!-- step 4 vanished -->
+    <rect x="40" y="440" width="1040" height="56" rx="3" fill="none" stroke="#b3462e" stroke-width="1.2"/>
+    <text x="56" y="460" font-weight="600" fill="#b3462e">4  after all groups: every id in `stored` that no group claimed &#8594; VANISHED &#8594; DELETE</text>
+    <text x="56" y="478" font-family="IBM Plex Mono, monospace" font-size="10.5">DELETE FROM log_entry_assignment WHERE transaction_id IN (&#8230;)   DELETE FROM log_transactions WHERE id IN (&#8230;)</text>
+    <text x="56" y="491" font-size="10.5" opacity="0.85">a merge or split absorbed it; its lines now live in another group. :849-851</text>
+
+    <!-- real examples -->
+    <text x="40" y="530" font-weight="600">Which branch, on real rows from today</text>
+    <g font-size="11.5">
+      <text x="40" y="552"><tspan font-weight="600" fill="#2f7d4f">INSERT</tspan>  ede21277, the LogSignOff conversation, at its first window 13:39:16. No stored id, no clash &#8594; 1 row + 6 assignment rows.</text>
+      <text x="40" y="572"><tspan font-weight="600">NOTHING</tspan>  the 13:24 window re-run: 161 freed transactions, all hashes equal &#8594; 0 statements for 2,090 lines.</text>
+      <text x="40" y="592"><tspan font-weight="600" fill="#0f6e8c">UPDATE row only</tspan>  1890b3b3 if a backfill rebuilds it: sealer set sealed=true at 13:39, stored row_fp still says false &#8594; row_fp differs, members same.</text>
+      <text x="40" y="612"><tspan font-weight="600" fill="#0f6e8c">UPDATE + REWRITE</tspan>  Figure 4g variant 1: B gains its late response. Same id, status incomplete &#8594; success, 4 assignment rows deleted, 5 inserted.</text>
+      <text x="40" y="632"><tspan font-weight="600" fill="#b3462e">DELETE</tspan>  Figure 4e case 2: C's single line was absorbed into B's group. No group claimed C &#8594; C's row and its 1 assignment row removed.</text>
+      <text x="40" y="652"><tspan font-weight="600" fill="#b3462e">SKIP</tspan>  a minted id that already exists outside the freed band. Seen live only during bulk backfills; the journal line reads "skipped N builder(s) with an already-sealed id".</text>
+    </g>
+    <text x="560" y="690" text-anchor="middle" font-size="11.5" opacity="0.85">All statements from one window share one database transaction with the analytics ticket and the saved stream state, committed once. UPDATE is always addressed by (id, started_at), the partition key, and never touches created_at.</text>
+  </g>
+</svg>
+<figcaption>Figure 4j. The exit as a decision tree. Insert happens only for an id that is neither stored nor existing elsewhere. Update happens only when a hash moved, and the assignment rows are rewritten only when the members hash moved.</figcaption>
+</figure>
+
+<h3 class="sub">Grouping: one thread, eight lines</h3>
+<p>Inside the window the grouper walks eligible entries in time order and keeps open conversations keyed by (server, thread, user). The rules are in Station 3's Figure 4 step 6. Here is one thread on one server for eight lines, the shape that produces the 15-line picker transaction from the start of this page.</p>
+
+<figure>
+<svg viewBox="0 0 1120 420" role="img" aria-label="Eight log lines on server BEC01 thread 94 in time order. Line 1 is a REQUEST with no user, it waits in the pending pool. Line 2 is a REQUEST BODY with user BECWHLO, it opens conversation X, claims the pending request. Lines 3 to 5 are MI call, MI result and SQL with user BECWHLO, they join X. Line 6 is an info line with no user, it inherits the thread's current conversation X. Line 7 is a RESPONSE with header user BECWHLO, it closes the oldest open conversation of that user, X, with seven entries. Line 8 is a REQUEST for another user on the same thread, it starts a new pending request and does not touch X.">
+  <defs><marker id="gra" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5" letter-spacing="0.06em" opacity="0.7">
+      <text x="40" y="34">#  TIME          USER      TYPE           ACTION</text>
+    </g>
+    <line x1="40" y1="42" x2="1080" y2="42" stroke="currentColor" stroke-width="0.6" opacity="0.4"/>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <text x="40" y="66">1  13:42:33,362  (null)    request        &#8594; pending pool (no user yet, no ReqID: POST)</text>
+      <text x="40" y="94">2  13:42:33,365  BECWHLO   request_body   &#8594; opens X = (BEC01, 94, BECWHLO); claims line 1 as its request</text>
+      <text x="40" y="122">3  13:42:33,398  BECWHLO   mi_call        &#8594; joins X</text>
+      <text x="40" y="150">4  13:42:33,540  BECWHLO   mi_result      &#8594; joins X   (Result: OK)</text>
+      <text x="40" y="178">5  13:42:33,612  BECWHLO   sql            &#8594; joins X</text>
+      <text x="40" y="206">6  13:42:33,615  (null)    info           &#8594; inherits the thread's CURRENT conversation = X</text>
+      <text x="40" y="234">7  13:42:33,701  BECWHLO   response       &#8594; closes the OLDEST open conversation of BECWHLO on BEC01 = X</text>
+      <text x="40" y="262">8  13:42:33,720  CPRICE    request        &#8594; new pending request; X is already closed, untouched</text>
+    </g>
+    <!-- bracket for X -->
+    <path d="M1000,54 L1010,54 L1010,242 L1000,242" stroke="#0f6e8c" stroke-width="1.4" fill="none"/>
+    <text x="1020" y="150" font-size="11" fill="#0f6e8c" font-weight="600">X</text>
+    <text x="1020" y="164" font-size="10.5" fill="#0f6e8c">7 entries</text>
+    <g font-size="11">
+      <text x="40" y="300" font-weight="600">Transaction X as persisted</text>
+      <text x="40" y="318">started_at 13:42:33,362 (the request) &#183; ended_at 13:42:33,701 (the response) &#183; duration 339 ms</text>
+      <text x="40" y="334">status success: has a response, no ERROR line, MI result OK &#183; entry_count 7 &#183; user BECWHLO &#183; method from line 2's URL</text>
+      <text x="40" y="350">id = inherited from the transaction that owned most of these 7 entries before the rebuild, else uuid5(customer + hash of line 1)</text>
+    </g>
+    <g font-size="11" opacity="0.85">
+      <text x="40" y="386">Two guards: a conversation idle for more than 300 s is closed where it stands, and nothing ever pairs across two servers or two users. Line 8 on the same thread cannot disturb X because its user differs.</text>
+      <text x="40" y="404">A RESPONSE with no matching open work opens a one-line transaction of its own, which is the orphan-response count the reconciler watches.</text>
+    </g>
+  </g>
+</svg>
+<figcaption>Figure 4d. One conversation assembled line by line. The request waits until its body claims it, work lines join by (server, thread, user), a user-less line inherits the thread's live conversation, and the response closes the user's oldest open conversation.</figcaption>
+</figure>
+
+
+<figure>
+<svg viewBox="0 0 1120 600" role="img" aria-label="Two stored transactions become one across two rebuild windows. Window 1 rebuilds a ticket covering 13:00. The grouper sees a request, a body and two work lines for user A but no response, so it emits transaction B as incomplete with four entries. Later the response line for that conversation arrives from the log server. Its ticket covers 13:01. Window 2 pads to 12:46 to 13:16, so transaction B, which started at 13:00:58, is in the freed band. The eligible entries are B's four plus the new response. The grouper now sees all five together and the response closes the conversation. Continuity votes B four, so the group inherits B's id. Members changed, so B's row is updated to success with five entries and its assignments are rewritten. A second variant: if the response had been ingested first as a one-line orphan transaction C, and the request lines arrived later by backfill, window 2 frees C, the grouper joins all five, votes are C one, and the merged transaction inherits C's id.">
+  <defs><marker id="mga" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <text x="40" y="34" font-weight="600">Variant 1: the response arrives late</text>
+    <!-- window 1 -->
+    <rect x="40" y="52" width="500" height="200" rx="3" fill="#0f6e8c" fill-opacity="0.06" stroke="#0f6e8c" stroke-width="1.2"/>
+    <text x="56" y="74" font-weight="600" fill="#0f6e8c">WINDOW 1 &#183; ticket 13:00:10 to 13:01:00 &#183; padded 12:45:10 to 13:16:00</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <text x="56" y="100">eligible entries: r 13:00:58.1  b 13:00:58.3  m 13:00:58.6  s 13:00:58.9</text>
+      <text x="56" y="120">grouper: body opens (BEC01,94,A), claims r; m, s join; entries end</text>
+      <text x="56" y="140">builders: [ {r,b,m,s} ]  no response &#8594; status incomplete</text>
+      <text x="56" y="164">freed = []  (nothing stored here yet)   votes: none &#8594; mint</text>
+      <text x="56" y="184">id B = uuid5(customer + hash of r)</text>
+    </g>
+    <rect x="56" y="200" width="468" height="36" rx="3" fill="#0f6e8c" fill-opacity="0.15" stroke="#0f6e8c"/>
+    <text x="290" y="223" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">stored B: started 13:00:58.1  status incomplete  entry_count 4  sealed false</text>
+
+    <!-- late arrival -->
+    <rect x="580" y="52" width="500" height="60" rx="3" fill="#2f7d4f" fill-opacity="0.10" stroke="#2f7d4f" stroke-width="1.2"/>
+    <text x="596" y="74" font-weight="600" fill="#2f7d4f">a minute later Stage 1 inserts the RESPONSE line, stamped 13:01:02.4</text>
+    <text x="596" y="92" font-size="11">it was written to the log file after the previous poll read it. Ticket: 13:01:02 to 13:01:02</text>
+    <text x="596" y="106" font-size="11" opacity="0.8">windows follow entry timestamps, not arrival time, so this ticket lands next to B</text>
+
+    <!-- window 2 -->
+    <rect x="580" y="130" width="500" height="290" rx="3" fill="#0f6e8c" fill-opacity="0.06" stroke="#0f6e8c" stroke-width="1.2"/>
+    <text x="596" y="152" font-weight="600" fill="#0f6e8c">WINDOW 2 &#183; ticket 13:01:02 &#183; padded 12:46:02 to 13:16:02</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <text x="596" y="178">freed = [B]        B.started_at 13:00:58.1 &#8712; [12:46:02, 13:01:02]</text>
+      <text x="596" y="198">owner map: r&#8594;B b&#8594;B m&#8594;B s&#8594;B   resp&#8594;(none)</text>
+      <text x="596" y="218">eligible: r b m s (owner B &#8712; freed) + resp (no owner)</text>
+      <text x="596" y="242">grouper: body opens, claims r; m, s join;</text>
+      <text x="596" y="262">         resp closes the oldest open conv of A &#8594; {r,b,m,s,resp}</text>
+      <text x="596" y="286">votes {B: 4}  &#8594; inherits id B</text>
+      <text x="596" y="306">row fingerprint changed (status, ended_at, count)</text>
+      <text x="596" y="326">members fingerprint changed (+resp)</text>
+    </g>
+    <rect x="596" y="344" width="468" height="36" rx="3" fill="#0f6e8c" fill-opacity="0.15" stroke="#0f6e8c"/>
+    <text x="830" y="367" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">UPDATE B: status success  entry_count 5  &#183; assignments of B rewritten (5 rows)</text>
+    <text x="830" y="404" text-anchor="middle" font-size="11" opacity="0.85">verdict "rewritten": one transaction, same id, one more member. Nothing was inserted or deleted.</text>
+    <path d="M540,218 L580,218" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#mga)"/>
+
+    <!-- variant 2 -->
+    <text x="40" y="460" font-weight="600">Variant 2: the response was ingested FIRST, the request lines came later by backfill</text>
+    <g font-size="11.5">
+      <text x="40" y="482">window 1 sees only resp: no open work for user A &#8594; a one-line orphan transaction C, id = uuid5(hash of resp), status incomplete</text>
+      <text x="40" y="500">backfill file arrives with r b m s stamped 13:00:58 &#8594; ticket around 13:00:58 &#8594; window 2 pads to 12:45:58 to 13:15:58 &#8594; freed = [C]</text>
+      <text x="40" y="518">grouper sees r b m s resp together &#8594; one conversation of 5. votes {C: 1}, the only predecessor &#8594; the merged transaction INHERITS C's id</text>
+      <text x="40" y="536">C's row is UPDATED to success with 5 entries; its old one-line assignment is replaced by 5. The orphan simply grew into the full conversation.</text>
+    </g>
+    <text x="560" y="576" text-anchor="middle" font-size="11.5" opacity="0.85">A transaction merge is never an "attach by id". It is the grouper seeing lines together that earlier windows saw apart, then continuity keeping the id that owned the most of them.</text>
+  </g>
+</svg>
+<figcaption>Figure 4g. How two stored transactions become one. The rebuild does not look up an id and append a line. It regroups every eligible line in the padded window from scratch, and continuity hands the result the id of its largest predecessor.</figcaption>
+</figure>
+
+<h3 class="sub">Id resolution: inherit by plurality, mint otherwise</h3>
+<p>A transaction is rebuilt many times, so its id has to survive the rebuild. Before anything is freed, the window reads which transaction owned every entry in the read band. After grouping, each new group inherits the id of the freed transaction that owned most of its entries. A group with no freed predecessor mints a fresh id from the hash of its request line. Each old id can be handed to at most one group.</p>
+
+<figure>
+<svg viewBox="0 0 1120 640" role="img" aria-label="Three cases of id resolution. Case 1, plain rebuild: entries e1 to e4 were owned by A, the rebuild groups them the same way, votes A equals 4, the group keeps id A and the fingerprints match so nothing is written. Case 2, merge: a late request body joins e5 to e8 that were owned by B with two new entries e9 and e10; votes B equals 4, the group keeps id B, members changed so assignments are rewritten; if a stored transaction C contributed one entry it loses the vote and C is deleted as vanished. Case 3, split: A's four entries are regrouped as two conversations; group one has three of A's entries, group two has one; claims are sorted by votes so group one inherits A and group two is refused because A is already taken, so it mints uuid5 of its anchor; a clash check confirms the new id does not already exist.">
+  <defs><marker id="ida" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5" letter-spacing="0.06em" opacity="0.7">
+      <text x="40" y="30">BEFORE: owner map read from log_entry_assignment</text>
+      <text x="560" y="30">AFTER: groups the rebuild produced &#8594; votes &#8594; id</text>
+    </g>
+    <line x1="540" y1="20" x2="540" y2="600" stroke="currentColor" stroke-width="0.6" opacity="0.25"/>
+
+    <!-- case 1 -->
+    <text x="40" y="62" font-weight="600">1  Plain rebuild, the 98.7% case</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <rect x="40" y="72" width="200" height="26" rx="3" fill="#0f6e8c" fill-opacity="0.15" stroke="#0f6e8c"/>
+      <text x="140" y="90" text-anchor="middle">A: e1 e2 e3 e4</text>
+      <rect x="560" y="72" width="200" height="26" rx="3" fill="none" stroke="currentColor"/>
+      <text x="660" y="90" text-anchor="middle">G1: e1 e2 e3 e4</text>
+    </g>
+    <path d="M240,85 L560,85" stroke="currentColor" stroke-width="1" fill="none" marker-end="url(#ida)" stroke-dasharray="3 3"/>
+    <g font-size="11">
+      <text x="780" y="82">votes {A: 4} &#8594; inherits A</text>
+      <text x="780" y="97" opacity="0.85">row + members fingerprints equal &#8594; UNCHANGED, no write</text>
+    </g>
+
+    <!-- case 2 -->
+    <text x="40" y="150" font-weight="600">2  Merge: a late line joins two conversations into one</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <rect x="40" y="160" width="200" height="26" rx="3" fill="#0f6e8c" fill-opacity="0.15" stroke="#0f6e8c"/>
+      <text x="140" y="178" text-anchor="middle">B: e5 e6 e7 e8</text>
+      <rect x="40" y="194" width="200" height="26" rx="3" fill="#0f6e8c" fill-opacity="0.15" stroke="#0f6e8c"/>
+      <text x="140" y="212" text-anchor="middle">C: e9</text>
+      <rect x="260" y="194" width="120" height="26" rx="3" fill="#2f7d4f" fill-opacity="0.15" stroke="#2f7d4f"/>
+      <text x="320" y="212" text-anchor="middle">new: e10</text>
+      <rect x="560" y="176" width="260" height="26" rx="3" fill="none" stroke="currentColor"/>
+      <text x="690" y="194" text-anchor="middle">G2: e5 e6 e7 e8 e9 e10</text>
+    </g>
+    <path d="M240,173 L560,187" stroke="currentColor" stroke-width="1" fill="none" marker-end="url(#ida)" stroke-dasharray="3 3"/>
+    <path d="M240,207 L560,191" stroke="currentColor" stroke-width="1" fill="none" marker-end="url(#ida)" stroke-dasharray="3 3"/>
+    <path d="M380,207 L560,193" stroke="#2f7d4f" stroke-width="1" fill="none" marker-end="url(#ida)" stroke-dasharray="3 3"/>
+    <g font-size="11">
+      <text x="840" y="186">votes {B: 4, C: 1} &#8594; inherits B</text>
+      <text x="840" y="201" opacity="0.85">members changed &#8594; UPDATE row,</text>
+      <text x="840" y="215" opacity="0.85">rewrite G2's assignments</text>
+      <text x="560" y="232" opacity="0.85">C was stored in this window but no group claimed it &#8594; C is VANISHED: row and assignments deleted.</text>
+      <text x="560" y="246" opacity="0.85">e10 had no owner, so it cast no vote. The merge keeps the larger contributor's id.</text>
+    </g>
+
+    <!-- case 3 -->
+    <text x="40" y="300" font-weight="600">3  Split: one conversation is now two, and one id cannot go to both</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <rect x="40" y="310" width="200" height="26" rx="3" fill="#0f6e8c" fill-opacity="0.15" stroke="#0f6e8c"/>
+      <text x="140" y="328" text-anchor="middle">A: e1 e2 e3 e4</text>
+      <rect x="560" y="296" width="200" height="26" rx="3" fill="none" stroke="currentColor"/>
+      <text x="660" y="314" text-anchor="middle">G3: e1 e2 e3</text>
+      <rect x="560" y="332" width="200" height="26" rx="3" fill="none" stroke="currentColor"/>
+      <text x="660" y="350" text-anchor="middle">G4: e4</text>
+    </g>
+    <path d="M240,318 L560,309" stroke="currentColor" stroke-width="1" fill="none" marker-end="url(#ida)" stroke-dasharray="3 3"/>
+    <path d="M240,328 L560,345" stroke="currentColor" stroke-width="1" fill="none" marker-end="url(#ida)" stroke-dasharray="3 3"/>
+    <g font-size="11">
+      <text x="780" y="306">claim G3: {A: 3}</text>
+      <text x="780" y="342">claim G4: {A: 1}</text>
+      <text x="560" y="384">claims sorted strongest first: (G3, A, 3 votes), (G4, A, 1 vote)</text>
+      <text x="560" y="400">award: G3 gets A. G4's owner A is already taken &#8594; refused &#8594; G4 mints uuid5(customer + hash of e4's anchor line)</text>
+      <text x="560" y="416" opacity="0.85">then the clash check: does the fresh id already exist within one pad of e4? No &#8594; INSERT G4. A's row is UPDATED to 3 members.</text>
+      <text x="560" y="432" opacity="0.85">ties on votes are broken on the id bytes, so a rebuild is reproducible run to run.</text>
+    </g>
+
+    <!-- why single award -->
+    <rect x="40" y="470" width="1040" height="60" rx="3" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.6"/>
+    <text x="56" y="490" font-weight="600" font-size="11.5">Why one id may go to only one group</text>
+    <text x="56" y="507" font-size="11">The unique key on log_transactions is (id, started_at), not id alone, because a partitioned table needs the partition key inside every unique constraint.</text>
+    <text x="56" y="522" font-size="11">Postgres would accept two rows sharing an id with different started_at, one per partition, and two rows would share an identity silently. The single-award rule closes that door.</text>
+
+    <text x="40" y="566" font-weight="600" font-size="11.5">Why only freed ids are reusable</text>
+    <text x="40" y="583" font-size="11">Entries whose owner is outside the freed band cast no vote. Their transaction still exists, so handing out its id would create the same two-rows-one-identity problem. `Continuity.owner_of` returns None for them.</text>
+    <text x="40" y="612" font-size="11" opacity="0.85">Live check, 12 Sep 2026: a typical window reported 119 unchanged, 0 row-only, 1 rewritten, 0 deleted. The rewrite is a group whose members moved; its id was inherited and its assignment rows were rewritten.</text>
+  </g>
+</svg>
+<figcaption>Figure 4e. Id resolution for a plain rebuild, a merge and a split. Votes come only from entries owned by freed transactions. The strongest claim on each old id wins, everything else mints a fresh deterministic id, and a stored transaction nobody claimed is deleted.</figcaption>
+</figure>
+<pre class="code"><span class="ref"># continuity.py:100-147</span>
+def _plurality_owner(entries, continuity):
+    votes = _votes(entries, continuity)            # only owners in `reusable` (= freed) count
+    return max(votes.items(), key=_by_votes_then_id) if votes else None
+
+def _claims(groups, fallbacks, continuity):
+    claims = []
+    for i, entries in enumerate(groups):
+        winner = _plurality_owner(entries, continuity)
+        if winner is not None:
+            owner, votes = winner
+            claims.append((-votes, fallbacks[i].bytes, i, owner))
+    return sorted(claims)                          # strongest first, stable tiebreak
+
+def _award(claims):
+    taken, awarded = set(), {}
+    for _votes, _tiebreak, index, owner in claims:
+        if owner not in taken:                     # each old id to at most ONE group
+            taken.add(owner); awarded[index] = owner
+    return awarded
+
+def assign(groups, continuity, *, fallback):
+    fallbacks = [fallback(entries) for entries in groups]   # fallback = _txn_id = uuid5(anchor)
+    awarded = _award(_claims(groups, fallbacks, continuity))
+    return [awarded.get(i, fallbacks[i]) for i in range(len(groups))]</pre><pre class="code"><span class="ref"># derive_transactions.py:505-518 and :666-692</span>
+def _anchor(entries):
+    &quot;&quot;&quot;REQUEST or REQUEST BODY entry if present, else the earliest entry; prefixed by customer.&quot;&quot;&quot;
+    req = next((e for e in entries if e.entry_type.value in (&quot;request&quot;, &quot;request_body&quot;)), None)
+    e = req or entries[0]
+    return f&quot;{e.customer_code}:{e.entry_hash or f&#x27;{e.source_file}:{e.line_number}&#x27;}&quot;
+
+def _txn_id(entries):
+    return uuid.uuid5(_TXN_NS, _anchor(entries))
+
+async def _resolve_ids(db, builders, customer_code, cont):
+    for b in builders:
+        b.entries.sort(key=_entry_stream_order)       # anchor must be chosen AFTER sorting
+    ids = continuity.assign([b.entries for b in builders], cont, fallback=_txn_id)
+    existing = await _existing_transaction_ids(db, customer_code, ids,
+        window=_clash_window([e.timestamp for b in builders for e in b.entries]))
+    return ids, existing</pre>
+<ul class="notes">
+  <li><b>Why not always mint from content.</b> A content id moves when a backfill adds an earlier line or supplies the request line that failed to parse. Measured on production, 1.3% of transactions have no request line and are exposed to that. An id that changes breaks notification dedupe, alert links and saved views, so identity is assigned once and carried.</li>
+  <li><b>The clash check is bounded on purpose.</b> A colliding row was built from the same anchor entry, so its start lies within one pad of that entry's timestamp. The check asks only about the ids being written, within that span, instead of loading every id the tenant ever had. <code>derive_transactions.py:563</code></li>
+  <li><b>What a clash means.</b> A minted id that already exists outside the freed band is an out-of-order or bulk ingest collision. The builder is skipped with a warning and its entries stay unassigned, counted as <code>orphan_entries</code>. The repair is the server-side full regroup runbook.</li>
+</ul>
+
+
+<h3 class="sub">Which Stage 2 tables are actually in use, and by what</h3>
+<p>Not every table in this station is on the production path. Each row below carries a label, checked against the code and the live rows on 12 Sep 2026.</p>
+<p class="legend" style="margin-bottom:10px">
+  <span class="chip prod">PRODUCTION</span> written by the rebuild lane every window &#160;
+  <span class="chip cache">CACHE</span> written every window, read only by the shadow lane &#160;
+  <span class="chip shadow">SHADOW ONLY</span> exists for the head lane; nothing on the production path depends on it &#160;
+  <span class="chip manual">MANUAL ONLY</span> written only when a person triggers something from the dashboard &#160;
+  <span class="chip reserved">RESERVED</span> code can read and write it, but no caller does today
+</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Table</th><th>Status</th><th>Written by</th><th>Read by</th><th>Live rows, 12 Sep 2026</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">log_transactions</td><td><span class="chip prod">PRODUCTION</span></td><td>the exit of every window: insert, update, delete. The sealer flips <code>sealed</code></td><td>the log viewer, analytics station 4, notifications, the next window's <code>stored</code></td><td class="num">250k</td></tr>
+    <tr><td class="mono">log_entry_assignment</td><td><span class="chip prod">PRODUCTION</span></td><td>the exit of every window, only when members change</td><td>the next window's owner map, the log viewer's timeline, analytics for response payloads</td><td class="num">4.2 M</td></tr>
+    <tr><td class="mono">log_regroup_pending</td><td><span class="chip prod">PRODUCTION</span></td><td>Stage 1, one ticket per parsed chunk. The stitch worker stamps consumed, attempts, abandoned</td><td>the stitch worker every second; retention gate 2</td><td class="num">34k, all consumed</td></tr>
+    <tr><td class="mono">analytics_pending_windows</td><td><span class="chip prod">PRODUCTION</span></td><td>every window, inside its transaction</td><td>the analytics worker, station 4</td><td class="num">12.7k, all consumed</td></tr>
+    <tr><td class="mono">log_open_stream</td><td><span class="chip cache">CACHE</span></td><td>every window, replaced for the streams it touched, <code>stream_state.save</code></td><td>the shadow head lane's plan seed, and the S4 shadow comparison. The rebuild lane never reads it</td><td class="num">49</td></tr>
+    <tr><td class="mono">log_stitch_checkpoint</td><td><span class="chip shadow">SHADOW ONLY</span></td><td><code>head_lane.advance_checkpoint</code> after every window, greatest wins</td><td><code>head_lane.build_plan</code>, to decline windows behind it. If the row vanished, production would be unaffected</td><td class="num">2, one per tenant</td></tr>
+    <tr><td class="mono">log_pending_request</td><td><span class="chip reserved">RESERVED</span></td><td>the only caller passes <code>pending=[]</code>, <code>derive_transactions.py:1299</code></td><td><code>stream_state.load</code>, which finds nothing</td><td class="num">0</td></tr>
+    <tr><td class="mono">log_regroup_runs</td><td><span class="chip manual">MANUAL ONLY</span></td><td>the API when a person triggers a full rebuild or a manual finalize, <code>api/v1/logs.py:393</code>, <code>:453</code></td><td>the API to refuse a second concurrent full run; the stitch worker to pause a tenant with a RUNNING full run</td><td class="num">6, newest 28 Aug</td></tr>
+  </tbody>
+</table>
+</div>
+
+<ul class="notes">
+  <li><b>Is the shadow head lane in use?</b> Yes as a measurement, no as a data path. With <code>stage2_head_lane = shadow</code>, the default, it runs on every eligible window: it builds a plan from <code>log_open_stream</code> and the checkpoint before the rebuild, then compares the plan with what the rebuild wrote and logs one AGREED or DIVERGED line. It never writes to <code>log_transactions</code> or <code>log_entry_assignment</code>. Between 31 Aug and 4 Sep it produced 92 DIVERGED verdicts out of about 3,000 windows, all ownership mismatches, and the standing decision of 1 Sep keeps it in shadow as a canary. Promotion would require a run of clean verdicts plus the pending round-trip below.</li>
+  <li><b>Why log_pending_request is empty.</b> The grouper keeps a lone REQUEST in an in-memory pool until its body arrives. The saved state cannot represent "pending" yet, so the save always writes an empty list and a parked lone request is instead declined by name, the <code>parked_lone_request</code> fallback. The table is the landing place for the designed but deferred pending round-trip. Leave it in place.</li>
+  <li><b>The checkpoint's stale updated_at.</b> The upsert at <code>head_lane.py:67</code> sets only <code>stitched_through</code> on conflict, so <code>updated_at</code> still shows 28 Aug for both tenants while <code>stitched_through</code> is current. Cosmetic; a one-line fix is to add <code>updated_at = clock_timestamp()</code> to the conflict update.</li>
+  <li><b>What the automatic tick never touches.</b> The one-second stitch tick records itself only on <code>log_regroup_pending</code>. <code>log_regroup_runs</code> is untouched by it, which is why six rows cover the whole life of the deployment.</li>
+</ul>
 
 <div class="er">
 <pre class="mermaid">
@@ -1067,6 +2547,90 @@ erDiagram
   <li><b>State, tickets, cursor, commit.</b> Tenant state is upserted with forward-only watermarks and counts moved by the diff's numbers. Tickets are stamped consumed. The retention cursor is published as the minimum across tenants. One commit. On failure everything rolls back, attempts increase with backoff, and the fifth failure abandons the tickets. <code>consume.py:732</code>, <code>consume.py:998</code></li>
 </ol>
 
+<h3 class="sub">Facts and record facts: two different questions about one conversation</h3>
+<p>A fact measures what the handheld did. A record fact captures what M3 answered during a lookup made inside the same conversation. The only link between them is the transaction id and time. There is no arithmetic relationship: the record rows are not a breakdown of the fact's quantity, and their numbers must never be added to it.</p>
+
+<figure>
+<svg viewBox="0 0 1120 640" role="img" aria-label="The fifteen log lines of one real ConfirmPickLine conversation on 12 Sep 2026 at 11:16:24. Lines 1 and 14, the request body and the response, feed the single analytics fact: quantity picked 3.75 of item 104609 from M04A to BRILA2-P. Lines 4 and 9, the two M3 results, feed the record facts: two balance rows for item 104609 in M04A holding 79.7 and 150 units, from MMS060MI LstBalID, and one empty row from MHS850MI AddPickViaRepNo whose fields are not approved. The fact and the record facts share the transaction id and nothing else.">
+  <defs><marker id="rfa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <text x="40" y="30" font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.08em" opacity="0.7">transaction a0ffc1ff &#183; ConfirmPickLine &#183; user ISZABO &#183; 12 Sep 2026 11:16:24.893 &#8594; 11:16:25.797 &#183; 15 lines</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5">
+      <text x="40" y="58"> 0  request        REQUEST: /api/picking/ConfirmPickLine</text>
+      <text x="40" y="76" fill="#0f6e8c" font-weight="600"> 1  request_body   ItemNumber 104609 &#183; LotNumber 2609091191 &#183; ToLocation BRILA2-P &#183; QuantityPicked 3.75 &#183; OrderNumber 1000010395</text>
+      <text x="40" y="94"> 2  info           Calling MMS060MI - LstBalID</text>
+      <text x="40" y="112"> 3  mi_call        MMS060MI LstBalID</text>
+      <text x="40" y="130" fill="#b3462e" font-weight="600"> 4  mi_result      MMS060MI LstBalID   Result OK   records: 2</text>
+      <text x="40" y="148"> 5  info           Downloaded 2 Records</text>
+      <text x="40" y="166"> 6  info           Sorted Data: List[SimpleItemBalanceModel]</text>
+      <text x="40" y="184"> 7  info           Calling MHS850MI - AddPickViaRepNo</text>
+      <text x="40" y="202"> 8  mi_call        MHS850MI AddPickViaRepNo</text>
+      <text x="40" y="220" fill="#b3462e" font-weight="600"> 9  mi_result      MHS850MI AddPickViaRepNo   Result OK   records: 1</text>
+      <text x="40" y="238">10  info           Downloaded 1 Records</text>
+      <text x="40" y="256">11  info           Logging Activity of Transaction Type 002001</text>
+      <text x="40" y="274">12  sql            Stored Procedure Executed</text>
+      <text x="40" y="292">13  info           Activity Logged OK</text>
+      <text x="40" y="310" fill="#0f6e8c" font-weight="600">14  response       RESPONSE: "3.75"</text>
+    </g>
+
+    <!-- fact -->
+    <rect x="40" y="350" width="500" height="118" rx="3" fill="#0f6e8c" fill-opacity="0.10" stroke="#0f6e8c" stroke-width="1.6"/>
+    <text x="56" y="372" font-weight="600" fill="#0f6e8c">analytics_facts &#183; ONE row &#183; what the device did</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5">
+      <text x="56" y="392">method ConfirmPickLine   status success   duration_ms 904</text>
+      <text x="56" y="408">quantity 3.750  classification pick   from QuantityPicked, per contract.quantity_field</text>
+      <text x="56" y="424">item_number 104609   from_location M04A   to_location BRILA2-P</text>
+      <text x="56" y="440">lot_number 2609091191   order_number 1000010395</text>
+    </g>
+    <text x="56" y="460" font-size="10.5" opacity="0.85">built from lines 1 and 14 by normalizer.normalise &#183; normalizer.py:216</text>
+    <path d="M300,318 L300,350" stroke="#0f6e8c" stroke-width="1.4" fill="none" marker-end="url(#rfa)"/>
+
+    <!-- record facts -->
+    <rect x="580" y="350" width="500" height="118" rx="3" fill="#b3462e" fill-opacity="0.08" stroke="#b3462e" stroke-width="1.6"/>
+    <text x="596" y="372" font-weight="600" fill="#b3462e">analytics_record_facts &#183; THREE rows &#183; what M3 said</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5">
+      <text x="596" y="392">0  MMS060MI LstBalID    rec.ITNO 104609  rec.WHSL M04A  rec.BANO 2609091191  rec.STQT 79.7</text>
+      <text x="596" y="408">1  MMS060MI LstBalID    rec.ITNO 104609  rec.WHSL M04A  rec.BANO 2609111141  rec.STQT 150.0</text>
+      <text x="596" y="424">2  MHS850MI AddPick&#8230;    {}   CONO, MSGN, STNB, STRN not on the approved list</text>
+    </g>
+    <text x="596" y="444" font-size="10.5" opacity="0.85">built from lines 4 and 9 by payload.records &#183; payload.py:203; M3 also returned ITDS, PRDT, STAS, dropped as unapproved</text>
+    <text x="596" y="460" font-size="10.5" opacity="0.85">written by consume._expand_records only while expand is on for "Brighton Stock Pick"</text>
+    <path d="M830,318 L830,350" stroke="#b3462e" stroke-width="1.4" fill="none" marker-end="url(#rfa)"/>
+
+    <!-- link -->
+    <path d="M540,410 L580,410" stroke="currentColor" stroke-width="1.2" fill="none" stroke-dasharray="4 3" marker-end="url(#rfa)" marker-start="url(#rfa)"/>
+    <text x="560" y="400" text-anchor="middle" font-size="10">same id</text>
+    <text x="560" y="426" text-anchor="middle" font-size="10">same time</text>
+
+    <rect x="40" y="496" width="1040" height="60" rx="3" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.6"/>
+    <text x="56" y="516" font-weight="600" font-size="11.5">The two questions</text>
+    <text x="56" y="533" font-size="11">Fact: how many units did this pick confirm? 3.75. Record facts: what stock did M3 report for item 104609 while this pick was being processed? Two lots in M04A, 79.7 and 150 units.</text>
+    <text x="56" y="548" font-size="11">3.75 is not part of 79.7 or 150, and 229.7 is not a consumption. The records are a snapshot of inventory M3 held at 11:16:24, taken because this conversation happened to ask.</text>
+
+    <text x="560" y="590" text-anchor="middle" font-size="11.5" opacity="0.85">The one live record metric, units-observed-by-item, sums rec.STQT by rec.ITNO over Brighton Stock Pick transactions. Read literally it is "stock units M3 reported per item at pick time".</text>
+    <text x="560" y="608" text-anchor="middle" font-size="11.5" opacity="0.85">It counts the same physical lot again every time a later pick looks it up. That is what it measures, not a bug, but it is not consumption and must not be read as one.</text>
+    <text x="560" y="630" text-anchor="middle" font-size="11" opacity="0.7">Why keep records at all: the raw lines are dropped at 60 days. These rows are the only place M3's answers survive, for a question somebody asks next year. Section 18x of the architecture document.</text>
+  </g>
+</svg>
+<figcaption>Figure 5b. One real conversation, its single fact and its three record facts. The fact comes from the request body and the response; the record facts come from the M3 result lines. They share a transaction id and nothing else.</figcaption>
+</figure>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th></th><th>analytics_facts</th><th>analytics_record_facts</th></tr></thead>
+  <tbody>
+    <tr><td>one row is</td><td>one handheld transaction</td><td>one record inside one M3 answer within that transaction</td></tr>
+    <tr><td>values come from</td><td>the request body and response, per the method's quantity contract</td><td>the <code>records[]</code> arrays of <code>mi_result</code> lines, approved <code>rec.*</code> fields only</td></tr>
+    <tr><td>example</td><td>ConfirmPickLine, 3.75 units, item 104609</td><td>two balance rows of item 104609, 79.7 and 150 in M04A</td></tr>
+    <tr><td>relationship</td><td>parent</td><td>children by <code>source_transaction_id</code> and <code>event_time</code>; no numeric relation</td></tr>
+    <tr><td>written when</td><td>every fold, for every captured transaction</td><td>same fold, only for names with <code>expand</code> on; replaced per transaction; deleted when the parent fact is reversed</td></tr>
+    <tr><td>metric source</td><td><code>analytics_metrics.source = "transaction"</code>: consumption, consumption_by_item</td><td><code>source = "record"</code>: units-observed-by-item</td></tr>
+    <tr><td>history</td><td>every version in the ledger</td><td>no ledger; rollups recompute from current rows, and record-grain ML sets are not reproducible by design decision</td></tr>
+    <tr><td>live rows</td><td class="num">232k</td><td class="num">2.03 M, mostly LstPickersPL answers</td></tr>
+  </tbody>
+</table>
+</div>
+
 <div class="er">
 <pre class="mermaid">
 erDiagram
@@ -1107,11 +2671,15 @@ erDiagram
     }
     analytics_record_facts {
         uuid id
-        uuid source_transaction_id
-        int record_index "one row per record inside the transaction"
-        datetime event_time "PARTITION KEY, monthly"
-        string mi_program
-        jsonb attributes
+        uuid source_transaction_id "same conversation as the fact, nothing more"
+        datetime source_started_at
+        int record_index "position among the records M3 returned in this conversation"
+        datetime event_time "PARTITION KEY, monthly, kept forever"
+        string method
+        string transaction_name
+        string mi_program "which M3 program answered, e.g. MMS060MI"
+        string mi_transaction "which M3 transaction, e.g. LstBalID"
+        jsonb attributes "rec.* fields only, approved names only; _exp_v stamp"
     }
     analytics_transaction_registry {
         uuid id PK
@@ -1154,7 +2722,8 @@ erDiagram
     }
     log_transactions ||..o| analytics_facts : "current contribution"
     analytics_facts ||..o{ analytics_fact_ledger : "every past version"
-    log_transactions ||..o{ analytics_record_facts : "expanded when registry says so"
+    log_transactions ||..o{ analytics_record_facts : "M3 answers inside it, when expand is on"
+    analytics_facts ||..o{ analytics_record_facts : "same transaction id and event_time; no numeric relation"
     analytics_transaction_registry ||..o{ analytics_facts : "gates by transaction_name"
     analytics_field_registry ||..o{ analytics_facts : "allow-lists attributes"
 </pre>
@@ -1660,6 +3229,7 @@ erDiagram
 </div>
 <p style="color:var(--muted);font-size:14px;margin-top:18px">Sources: <code>docs/analytics-ml-architecture/final_architecture.md</code> chapters 2 to 10, <code>docs/database-er-diagram.md</code> subsystems 2, 3 and 8, and the live catalogue on 192.168.0.142.</p>
 </main>
+
 
 </body>
 </html>
