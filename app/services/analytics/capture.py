@@ -42,16 +42,18 @@ failing is exactly what someone will want to measure later and the entries are g
 shown because they are not warehouse activity and would distort every default chart.
 """
 
+import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import literal_column, select
+from sqlalchemy import delete, literal_column, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
+from app.persistence.models.analytics_metric import AnalyticsMetric
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
 from app.persistence.models.log_transaction import LogTransaction
 from app.services.analytics import payload as pl
@@ -337,3 +339,54 @@ async def approved_record_fields(db: AsyncSession, customer_code: str) -> frozen
             AnalyticsFieldRegistry.captured.is_(True),
             AnalyticsFieldRegistry.field.like("rec.%")))).scalars().all()
     return frozenset(rows)
+
+
+async def prune_unseen_fields(db: AsyncSession, customer_code: str, *,
+                              days: int = 60, dry_run: bool = True) -> dict:
+    """Chunk 96: a DELIBERATE one-off cleanup of response-field rows that describe nothing.
+
+    Observation never deletes (R1b), and this function is not observation: a person invokes it,
+    dry-run first, after a history rebuild has restated the facts. It exists because Stage 2's
+    pairing faults (18ac) registered other requests' response fields under methods that never
+    return them - 47 of the 48 fields under ConfirmPickLine on the live tenant.
+
+    A row is a candidate only when ALL hold:
+      - `source == "response"` (record and MI rows are not considered);
+      - no fact of THAT METHOD within the last `days` carries the key. 60 is the entry retention:
+        an older fact cannot be restated, so it says nothing about what the method returns today;
+      - `captured` equals the seeded default for the name, so no person has ticked or un-ticked it.
+        A decision outlives the data that prompted it;
+      - no metric of the tenant, in any status, names `attr:<field>`.
+    Rows kept for the last two reasons are reported with the reason, so the caller sees them.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    carried = {(m, k) for m, k in (await db.execute(text("""
+        SELECT f.method, k FROM analytics_facts f, jsonb_object_keys(f.attributes) k
+        WHERE f.customer_code = :c AND f.event_time >= :since AND k LIKE 'resp.%'
+        GROUP BY f.method, k"""), {"c": customer_code, "since": since})).all()}
+    named = " ".join(json.dumps([m.dimensions, m.measures, m.filter]) for m in (await db.execute(
+        select(AnalyticsMetric).where(AnalyticsMetric.customer_code == customer_code))).scalars())
+    rows = (await db.execute(
+        select(AnalyticsFieldRegistry).where(AnalyticsFieldRegistry.customer_code == customer_code,
+                                             AnalyticsFieldRegistry.source == "response"))).scalars().all()
+    candidates, kept = [], []
+    for r in rows:
+        if (r.method, r.field) in carried:
+            continue
+        entry = {"id": str(r.id), "method": r.method, "field": r.field, "captured": r.captured,
+                 "last_seen_at": r.last_seen_at.isoformat() if r.last_seen_at else None}
+        if f'"attr:{r.field}"' in named:
+            kept.append({**entry, "reason": "named by a metric"})
+        elif r.captured != pl.seeded(r.field):
+            kept.append({**entry, "reason": "human decision"})
+        else:
+            candidates.append(entry)
+    deleted = 0
+    if not dry_run and candidates:
+        result = await db.execute(delete(AnalyticsFieldRegistry).where(
+            AnalyticsFieldRegistry.customer_code == customer_code,
+            AnalyticsFieldRegistry.id.in_([uuid.UUID(c["id"]) for c in candidates])))
+        deleted = result.rowcount or 0
+        logger.warning("Analytics [%s]: pruned %d response-field registry rows unseen in %d days",
+                       customer_code, deleted, days)
+    return {"dry_run": dry_run, "days": days, "candidates": candidates, "kept": kept, "deleted": deleted}

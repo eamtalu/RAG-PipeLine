@@ -4295,4 +4295,7 @@ If eSmartServer logs it on the RESPONSE line as well, Stage 2 pairs exactly and 
 After deploying, run a full regroup for the tenant (`POST /logs/regroup/full`), as after 18r.
 The version bump rewrites every surviving row once; the 67 picks lose their foreign response keys and gain `resp.value`; the analytics tickets the regroup publishes restate the affected facts at normalisation version 2.
 The field registry keeps the foreign rows under ConfirmPickLine, because observation never deletes; the composition screen shows them as "not seen in the last 14 days" as soon as the restated facts land, because the count is taken from the facts themselves, not from the registry.
+Chunk 96 adds the deliberate cleanup for exactly those rows: `POST /analytics/registry/fields/prune`, a dry run by default, deletes response-field rows that no fact of their method carries within the entry retention (60 days).
+It never touches a row a person ticked or un-ticked away from its seeded default, or a row any metric names as `attr:<field>`; both are returned with the reason.
+Run it once after the rebuild and the ticket queue have finished, dry run first, then with `dry_run=false`.
 Standing check afterwards: under ConfirmPickLine every response field but `resp.value` should read "not seen", and the headless count in the reconciler should stay near the new floor.

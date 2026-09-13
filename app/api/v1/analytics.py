@@ -746,6 +746,25 @@ async def set_field_capture(field_id: str, payload: dict = Body(...),
             "tickets_published": published}
 
 
+@router.post("/registry/fields/prune")
+async def prune_field_registry(dry_run: bool = Query(True, description="Report only. Pass false to delete."),
+                               days: int = Query(60, ge=1, le=365,
+                                                 description="A field carried by any fact of its method "
+                                                             "within this many days is kept."),
+                               customer: str = Depends(get_current_customer),
+                               db: AsyncSession = Depends(get_session)):
+    """Chunk 96: delete response-field registry rows that no fact of their method carries.
+
+    Dry run by default. Rows a person decided on and rows a metric names are never deleted and are
+    listed with the reason. Meant to be run once after a Stage 2 history rebuild (18ac) has restated
+    the facts, not on a schedule: discovery itself never deletes.
+    """
+    out = await capture.prune_unseen_fields(db, customer, days=days, dry_run=dry_run)
+    if not dry_run:
+        await db.commit()
+    return out
+
+
 @router.get("/registry/summary")
 async def registry_summary(customer: str = Depends(get_current_customer),
                            db: AsyncSession = Depends(get_session)):
