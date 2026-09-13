@@ -46,7 +46,7 @@ than enforced by hiding data.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, String, UniqueConstraint
+from sqlalchemy import Text, Boolean, DateTime, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.config.database import Base
@@ -78,6 +78,11 @@ class AnalyticsTransactionRegistry(Base):
                                        server_default="true")
     expand: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False,
                                          server_default="false")
+
+    #: What this transaction IS, in the operator's words, for the catalog that the metric wizard and
+    #: the chat agent read (chunk 84). Metadata, not a review decision: editing it publishes no ticket
+    #: and does not touch `reviewed_at`.
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     #: When this transaction was first seen in the projection. Shown in the interface so a reviewer can
     #: tell a transaction that appeared this morning from one that has been running for months.

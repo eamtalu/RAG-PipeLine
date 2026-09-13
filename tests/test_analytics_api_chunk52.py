@@ -235,7 +235,10 @@ async def test_metrics_lists_registry_rows_not_hardcoded_names():
         body = await api.list_metrics(customer=CC, db=db, limit=50)
     row = next(m for m in body["metrics"] if m["name"] == "consumption")
     assert sorted(row["measures"]) == ["attempt_count", "pick_count", "quantity"]
-    assert row["backfilled_through"] is None, "D8: no history was built"
+    # Chunk 87 superseded D8's "always NULL": the fold now records the last day it fully covered for
+    # every active definition. The run above ended on T0's day, so the marker is the day before.
+    assert row["backfilled_through"] == "2026-08-09"
+    assert row["rollups_from"] is None, "the seed definition is unbounded"
 
 
 def test_metrics_is_bounded():

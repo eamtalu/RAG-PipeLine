@@ -38,9 +38,11 @@ against the doc's 3.2M estimate. Small enough to accept, large enough to state.
 
 import enum
 from dataclasses import dataclass, field as dc_field
+from datetime import datetime
 from decimal import Decimal
 
 from app.services.analytics import contract
+from app.services.analytics import hll
 
 #: Grains a definition may ask for. `weekly` has no table of its own: ISO Monday weeks derive from
 #: daily at read time, because a week is not a partition boundary anywhere.
@@ -60,6 +62,9 @@ class Role(enum.Enum):
     min_value = "min_value"
     max_value = "max_value"
     histogram = "histogram"
+    #: Chunk 88: a HyperLogLog sketch, `bytes`. Unions register-wise, so a month's distinct count is
+    #: folded from its days like every other role. An estimate; the catalog says so.
+    distinct_sketch = "distinct_sketch"
 
 
 class Aggregation(enum.Enum):
@@ -76,6 +81,7 @@ class Aggregation(enum.Enum):
     stats = "stats"            # sum, count, sum_sq -> variance and stddev at read time
     extent = "extent"          # min and max -> first and last
     percentile = "percentile"  # 20-bucket log histogram -> median, p95 at read time
+    distinct = "distinct"      # HyperLogLog sketch -> approximate count of different values at read time
 
 
 #: The doc's composition table, executable. This is the single place that decides what a rollup row
@@ -87,6 +93,9 @@ _ROLES: dict[Aggregation, frozenset[Role]] = {
     Aggregation.stats: frozenset({Role.sum_value, Role.count_value, Role.sum_sq}),
     Aggregation.extent: frozenset({Role.min_value, Role.max_value}),
     Aggregation.percentile: frozenset({Role.histogram}),
+    # The count beside the sketch is exact and free: rows that carried a value, which is the honest
+    # denominator for "N different items over M picks" and what `_is_empty` reads.
+    Aggregation.distinct: frozenset({Role.distinct_sketch, Role.count_value}),
 }
 
 
@@ -133,6 +142,9 @@ class Measure:
     #: Per MEASURE rather than per definition, for the same reason `only` is: one definition can then
     #: hold both a total and an error count, differing only by this set.
     statuses: frozenset = dc_field(default_factory=frozenset)
+    #: Chunk 89: what the number is in ("units", "ms", "kg"). Metadata for the catalog and the chat
+    #: agent; the fold never reads it. None for every pre-builder measure.
+    unit: str | None = None
 
     @property
     def roles(self) -> frozenset[Role]:
@@ -164,6 +176,10 @@ class MetricDefinition:
     #: `grains` already means time resolution, and one name for two axes is how a thing gets built
     #: twice.
     source: str = "transaction"
+    #: Chunk 86: where this metric's history starts, or None for unbounded. The fold reads no fact
+    #: before it and the read layer clamps requests to it. A value, not a behaviour: this module stays
+    #: free of clocks and databases, so who sets it and what it triggers live in the registry and API.
+    rollups_from: datetime | None = None
 
 
 #: The classifications that represent a usable confirmation on a quantity-carrying method. A row that
@@ -309,7 +325,8 @@ def _empty_roles(measure: Measure) -> dict:
     """A zero bucket for one measure. min/max start as None so the first real value wins rather than
     competing with a sentinel that could never be exceeded."""
     zero = {Role.sum_value: Decimal(0), Role.count_value: 0, Role.sum_sq: Decimal(0),
-            Role.min_value: None, Role.max_value: None, Role.histogram: ()}
+            Role.min_value: None, Role.max_value: None, Role.histogram: (),
+            Role.distinct_sketch: hll.EMPTY}
     return {r: zero[r] for r in measure.roles}
 
 
@@ -348,6 +365,16 @@ def fold(rows, definition: MetricDefinition) -> dict:
             if not _contributes(row, definition, m):
                 continue
             bucket = out[m.name]
+            if Role.distinct_sketch in bucket:
+                # Chunk 88: the field is an IDENTITY, not a quantity. A user name or item number must
+                # not be dropped for failing numeric coercion, so this path never goes near it.
+                key = contract.distinct_key(contract.resolve_field(row, m.field))
+                if key is None:
+                    continue      # absent is never a value, same rule as below
+                bucket[Role.distinct_sketch] = hll.add(bucket[Role.distinct_sketch], key)
+                if Role.count_value in bucket:
+                    bucket[Role.count_value] += 1
+                continue
             # R1b: resolved rather than read, so a measure may name `attr:resp.QuantityOnHand`, and
             # coerced because a JSONB value is whatever the WMS logged - the live M3 records carry
             # `"STQT": "624"`, a STRING, which would raise TypeError on `+=` below.
@@ -388,6 +415,8 @@ def add_roles(a: dict, b: dict) -> dict:
             out[role] = min([v for v in (x, y) if v is not None], default=None)
         elif role is Role.max_value:
             out[role] = max([v for v in (x, y) if v is not None], default=None)
+        elif role is Role.distinct_sketch:
+            out[role] = hll.union(x or hll.EMPTY, y or hll.EMPTY)
         else:  # histogram: bucket counts add, which is why percentiles are stored this way
             xs, ys = x or (), y or ()
             width = max(len(xs), len(ys))
@@ -402,6 +431,26 @@ def add(a: dict, b: dict) -> dict:
 
 
 # ============================================================== finished answers, at READ time
+def public_roles(roles: dict, *, number=str) -> dict:
+    """A role bucket as it leaves the service: JSON-safe, and the sketch finished into an integer.
+
+    The ONE place a `distinct_sketch` becomes a number. Every reader - `/series`, the preview sample,
+    the agent tools - goes through here, so none of them can leak 4 KB of bytes into a response or
+    present the estimate under a name that hides what it is. Decimals go through `number`, because
+    two callers already format them differently and this is not the chunk to unify that.
+    """
+    out: dict = {}
+    for role, value in roles.items():
+        if role is Role.distinct_sketch:
+            if value:
+                out["distinct_estimate"] = hll.estimate(value)
+        elif isinstance(value, Decimal):
+            out[role.value] = number(value)
+        else:
+            out[role.value] = value
+    return out
+
+
 def average(bucket: dict) -> Decimal | None:
     """Divided here, never stored. None when there was nothing to average, because 0 would read as
     "the average was zero" rather than "there was no data"."""

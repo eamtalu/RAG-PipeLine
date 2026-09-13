@@ -28,7 +28,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +41,8 @@ from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
 from app.services.analytics import capture
+from app.services.analytics import catalog as n8
+from app.services.analytics import preview as n9
 from app.services.analytics import payload as pl
 from app.services.analytics import pending_windows
 from app.services.analytics import definition as d
@@ -151,14 +153,209 @@ async def list_metrics(customer: str = Depends(get_current_customer),
         AnalyticsMetric.customer_code == customer)
         .order_by(AnalyticsMetric.name).limit(limit))).scalars().all()
     return {"metrics": [{
-        "id": str(r.id), "name": r.name, "status": r.status,
+        "id": str(r.id), "name": r.name, "status": r.status, "description": r.description,
         "dimensions": r.dimensions, "grains": r.grains, "source": r.source,
         "measures": [m.get("name") for m in (r.measures or [])],
         "filter": r.filter,
-        # NULL means no history has been built, which after D8 is the permanent state for every metric.
+        # Chunk 87: the day through which this metric's history has been built, and the instant it
+        # starts from. NULL start = unbounded (every pre-builder metric); NULL through = not yet folded.
         "backfilled_through": _iso(r.backfilled_through),
+        "rollups_from": _iso(getattr(r, "rollups_from", None)),
         "created_by": r.created_by,
     } for r in rows]}
+
+
+_SHAPE_KEYS = ("name", "dimensions", "measures", "filter", "grains", "source")
+_TRANSITIONS = {("draft", "active"), ("active", "inactive"), ("inactive", "active")}
+
+
+def _parse_instant(value, *, field: str) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(400, detail=f"{field!r} is not an ISO-8601 instant: {value!r}") from None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+@router.patch("/metrics/{metric_id}")
+async def update_metric(metric_id: str, payload: dict = Body(...),
+                        customer: str = Depends(get_current_customer),
+                        db: AsyncSession = Depends(get_session)):
+    """Edit a metric's shape while it is a draft, describe it any time, and move it through its
+    lifecycle: draft -> active, active -> inactive, inactive -> active (chunk 87).
+
+    Activation is the one step with a side effect beyond the row. It fixes `rollups_from` - the
+    instant given, or now - and if that instant is before what analytics has already folded, it
+    publishes tickets for exactly that range so the ordinary fold builds the history. The same queue
+    field approval uses; no job table, no second worker. A start at or after the watermark publishes
+    nothing, because there is no history to build yet.
+
+    Shape edits on an active metric are refused rather than applied: rollup rows are keyed by the
+    definition id, and changing the key under them would leave rows nothing can explain. Deactivate,
+    copy, edit, activate.
+    """
+    row = await db.scalar(select(AnalyticsMetric).where(
+        AnalyticsMetric.customer_code == customer, AnalyticsMetric.id == metric_id))
+    if row is None:
+        raise HTTPException(404, detail="no such metric for this logspace")
+    allowed = set(_SHAPE_KEYS) | {"status", "rollups_from", "description"}
+    if not any(k in payload for k in allowed):
+        raise HTTPException(400, detail=f"body must contain at least one of {sorted(allowed)}")
+
+    changed: list[str] = []
+    shape_edits = [k for k in _SHAPE_KEYS if k in payload]
+    if shape_edits and row.status != d.Status.draft.value:
+        raise HTTPException(409, detail=f"the metric is {row.status}; its shape ({', '.join(shape_edits)}) "
+                                        f"can only change while it is a draft. Deactivate, copy, edit, activate.")
+    if "description" in payload:
+        row.description = (str(payload["description"]).strip() or None
+                           if payload["description"] is not None else None)
+        changed.append("description")
+
+    # The definition as it would be after this patch, validated as a whole - a dimension edit can
+    # invalidate a measure, so the parts are never checked in isolation.
+    merged = {"name": row.name, "dimensions": row.dimensions, "measures": row.measures,
+              "filter": row.filter, "grains": row.grains, "source": row.source, "status": row.status}
+    merged.update({k: payload[k] for k in shape_edits})
+    definition = _definition_from_payload(merged)
+    if shape_edits:
+        if not definition.name:
+            raise HTTPException(400, detail="`name` is required.")
+        if not definition.measures:
+            raise HTTPException(400, detail="at least one measure is required.")
+
+    target = payload.get("status")
+    if target is not None:
+        try:
+            target = d.Status(target).value
+        except ValueError:
+            raise HTTPException(400, detail=f"status must be one of "
+                                            f"{[s.value for s in d.Status]}, got {target!r}") from None
+        if target != row.status and (row.status, target) not in _TRANSITIONS:
+            raise HTTPException(409, detail=f"cannot move a {row.status} metric to {target}; allowed "
+                                            f"from {row.status}: "
+                                            f"{sorted(t for f, t in _TRANSITIONS if f == row.status) or 'nothing'}")
+    activating = target == d.Status.active.value and row.status != d.Status.active.value
+
+    if shape_edits or activating:
+        problems = d.validate(definition,
+                              known_attributes=await capture.approved_attributes(db, customer))
+        if problems:
+            raise HTTPException(400, detail=problems)
+    for k in shape_edits:
+        setattr(row, k, registry.to_row(definition, customer_code=customer)[k])
+        changed.append(k)
+
+    published = 0
+    backfill = None
+    if "rollups_from" in payload and row.status != d.Status.draft.value:
+        # The bound is fixed at first activation: rollup rows already built under it would be
+        # unexplained by a different one. Refused rather than silently ignored.
+        raise HTTPException(409, detail=f"the metric is {row.status}; `rollups_from` was fixed when it "
+                                        f"first went active and cannot change. Copy the metric as a "
+                                        f"new draft to start from a different instant.")
+    if "rollups_from" in payload:
+        row.rollups_from = _parse_instant(payload.get("rollups_from"), field="rollups_from")
+        changed.append("rollups_from")
+    if activating and row.status == d.Status.draft.value:
+        if row.rollups_from is None:
+            row.rollups_from = datetime.now(timezone.utc)
+            changed.append("rollups_from")
+        state = await _state(db, customer)
+        watermark = state.source_watermark if state else None
+        if watermark is not None and row.rollups_from < watermark:
+            # Same transaction as the status change (invariant 3): an active metric with tickets
+            # that never committed would sit with a start date and no history, forever.
+            # Only from DRAFT: an inactive metric's history was built when it first went active, and
+            # re-publishing that range would only re-fold rows that already exist.
+            published = await pending_windows.publish(db, customer, lo=row.rollups_from, hi=watermark)
+            backfill = {"from": row.rollups_from.isoformat(), "to": watermark.isoformat()}
+
+    if target is not None and target != row.status:
+        row.status = target
+        changed.append("status")
+    row.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"id": str(row.id), "name": row.name, "status": row.status, "description": row.description,
+            "dimensions": row.dimensions, "measures": [m.get("name") for m in (row.measures or [])],
+            "filter": row.filter, "grains": row.grains, "source": row.source,
+            "rollups_from": _iso(row.rollups_from), "backfilled_through": _iso(row.backfilled_through),
+            "changed": changed, "tickets_published": published, "backfill": backfill,
+            "detail": ("history will be built by the worker from the tickets just published"
+                       if published else "no re-fold needed for this change")}
+
+
+@router.get("/catalog")
+async def analytics_catalog(response: Response,
+                            if_none_match: str | None = Header(default=None),
+                            domain_days: int = Query(default=n8.DEFAULT_DOMAIN_DAYS, ge=1, le=90),
+                            domain_cap: int = Query(default=n8.DEFAULT_DOMAIN_CAP, ge=1, le=1000),
+                            customer: str = Depends(get_current_customer),
+                            db: AsyncSession = Depends(get_session)):
+    """What this tenant's analytics MEAN, as one read (chunk 84).
+
+    Active metrics with their descriptions, dimensions and the values those dimensions have taken
+    recently, measures with units, plus the approved fields and the transaction names with their
+    descriptions. The metric wizard's pickers and the chat agent's `list_metrics` tool both read this
+    and nothing else, so a description written once on the review screen reaches both.
+
+    ETag is a digest of the body: three tables and a rollup read have no single revision to key on,
+    and the interface polls pickers rarely enough that computing the body to compare is the cheaper
+    honest option.
+    """
+    body = await n8.build(db, customer, domain_days=domain_days, domain_cap=domain_cap)
+    tag = n8.etag(body)
+    if if_none_match and if_none_match.strip() == tag:
+        return Response(status_code=304, headers={"ETag": tag})
+    response.headers["ETag"] = tag
+    return body
+
+
+def _definition_from_payload(payload: dict) -> d.MetricDefinition:
+    """The request body as a definition, shared by create and preview so the two cannot drift on what
+    a body means. A malformed measure is a 400 naming the problem, as create always did."""
+    try:
+        measures = tuple(registry.measure_from_json(m) for m in (payload.get("measures") or ()))
+        status = d.Status(payload.get("status") or d.Status.draft.value)
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(400, detail=f"malformed measure: {exc}") from None
+    return d.MetricDefinition(
+        name=(payload.get("name") or "").strip(),
+        dimensions=tuple(payload.get("dimensions") or ()),
+        measures=measures,
+        grains=tuple(payload.get("grains") or ("hourly", "daily", "monthly")),
+        method_filter=tuple((payload.get("filter") or {}).get("methods") or ()),
+        # R1: accepted here so the interface can write a per-transaction metric without a deploy.
+        transaction_filter=tuple((payload.get("filter") or {}).get("transactions") or ()),
+        # 18y: which fact table the metric folds and reads. Validate() is source-aware, so a wrong
+        # value or a cross-grain field mix is a 400 with the reasons listed, never a silent chart.
+        source=payload.get("source") or "transaction",
+        status=status,
+    )
+
+
+@router.post("/metrics/preview")
+async def preview_metric(payload: dict = Body(...),
+                         window_hours: int = Query(default=None, ge=1, le=24 * 60),
+                         customer: str = Depends(get_current_customer),
+                         db: AsyncSession = Depends(get_session)):
+    """A dry run of a definition over the last `window_hours` of real facts (chunk 85). Writes nothing.
+
+    Same body as create. Returns every finding at once: the shape problems `validate` would raise,
+    whether anything matches the filter and which methods sit behind it, how much of the matching
+    data carries the aggregated field, how many rollup rows the dimensions imply, and a sample
+    series folded with the writer's own functions. `ok` is false only for a shape problem or zero
+    matches; a sparse field is a warning with its percentage, and the decision stays with the person.
+    """
+    definition = _definition_from_payload(payload)
+    if not definition.measures:
+        raise HTTPException(400, detail="at least one measure is required.")
+    problems = d.validate(definition,
+                          known_attributes=await capture.approved_attributes(db, customer))
+    hours = window_hours or settings.analytics_preview_window_hours
+    return await n9.run(db, customer, definition, problems=problems, window_hours=hours)
 
 
 @router.post("/metrics", status_code=201)
@@ -177,24 +374,7 @@ async def create_metric(payload: dict = Body(...),
     work that never happens. History for a new metric comes from re-folding a range instead, which is an
     explicit operator action -- `POST /analytics/reconcile?repair=true`.
     """
-    try:
-        measures = tuple(registry.measure_from_json(m) for m in (payload.get("measures") or ()))
-    except (KeyError, ValueError, TypeError) as exc:
-        raise HTTPException(400, detail=f"malformed measure: {exc}") from None
-
-    definition = d.MetricDefinition(
-        name=(payload.get("name") or "").strip(),
-        dimensions=tuple(payload.get("dimensions") or ()),
-        measures=measures,
-        grains=tuple(payload.get("grains") or ("hourly", "daily", "monthly")),
-        method_filter=tuple((payload.get("filter") or {}).get("methods") or ()),
-        # R1: accepted here so the interface can write a per-transaction metric without a deploy.
-        transaction_filter=tuple((payload.get("filter") or {}).get("transactions") or ()),
-        # 18y: which fact table the metric folds and reads. Validate() is source-aware, so a wrong
-        # value or a cross-grain field mix is a 400 with the reasons listed, never a silent chart.
-        source=payload.get("source") or "transaction",
-        status=d.Status(payload.get("status") or d.Status.draft.value),
-    )
+    definition = _definition_from_payload(payload)
     if not definition.name:
         raise HTTPException(400, detail="`name` is required.")
     if not definition.measures:
@@ -215,9 +395,14 @@ async def create_metric(payload: dict = Body(...),
 
     row = AnalyticsMetric(**registry.to_row(definition, customer_code=customer,
                                             created_by=payload.get("created_by") or "api"))
+    # Chunk 89: the meaning, as data. The wizard refuses an empty one; the API stays lenient so a
+    # scripted create keeps working, and a blank is NULL rather than "" so the catalog can tell.
+    if payload.get("description") is not None:
+        row.description = str(payload["description"]).strip() or None
     db.add(row)
     await db.commit()
     return {"id": str(row.id), "name": row.name, "status": row.status, "source": row.source,
+            "description": row.description,
             "dimensions": row.dimensions, "grains": row.grains,
             "measures": [m.get("name") for m in (row.measures or [])],
             # D8 again: no history exists for it until a range is re-folded.
@@ -413,11 +598,19 @@ async def set_transaction_switches(transaction_name: str, payload: dict = Body(.
                                  f"for this logspace, so there is nothing to configure")
 
     before = (row.capture, row.show, row.expand)
-    for field in ("capture", "show", "expand"):
-        if field in payload:
-            setattr(row, field, bool(payload[field]))
-    row.reviewed_at = datetime.now(timezone.utc)
-    row.reviewed_by = payload.get("reviewed_by") or "api"
+    switched = [f for f in ("capture", "show", "expand") if f in payload]
+    for field in switched:
+        setattr(row, field, bool(payload[field]))
+    if "description" in payload:
+        # Chunk 84: metadata for the catalog, not a review decision. Describing a transaction must
+        # not stamp `reviewed_at`, or the "needs review" list would empty itself as people document.
+        row.description = (str(payload["description"]).strip() or None
+                           if payload["description"] is not None else None)
+    if not switched and "description" not in payload:
+        raise HTTPException(400, "body must contain at least one of capture, show, expand, description")
+    if switched:
+        row.reviewed_at = datetime.now(timezone.utc)
+        row.reviewed_by = payload.get("reviewed_by") or "api"
     row.updated_at = datetime.now(timezone.utc)
 
     # A ticket only when a switch that changes stored data actually moved, and only in the direction
@@ -446,7 +639,7 @@ async def set_transaction_switches(transaction_name: str, payload: dict = Body(.
     await db.commit()
 
     return {"transaction_name": transaction_name, "capture": row.capture, "show": row.show,
-            "expand": row.expand, "tickets_published": published,
+            "expand": row.expand, "description": row.description, "tickets_published": published,
             "detail": ("the retention range will be re-examined on the next worker tick"
                        if published else "no re-fold needed for this change")}
 
@@ -480,6 +673,7 @@ async def list_field_registry(only_unreviewed: bool = Query(False),
         # not a block: a person is allowed to decide, which is exactly what the veto reserves for them.
         "credential_shaped": pl.never_auto_approve(r.field),
         "seeded": pl.seeded(r.field),
+        "description": r.description, "unit": r.unit,
         "first_seen_at": _iso(r.first_seen_at), "last_seen_at": _iso(r.last_seen_at),
         "reviewed_at": _iso(r.reviewed_at), "reviewed_by": r.reviewed_by,
         "needs_review": r.reviewed_at is None,
@@ -503,13 +697,22 @@ async def set_field_capture(field_id: str, payload: dict = Body(...),
             AnalyticsFieldRegistry.id == field_id))
     if row is None:
         raise HTTPException(404, "no such observed field for this logspace")
-    if "captured" not in payload:
-        raise HTTPException(400, "body must contain 'captured'")
+    if not any(k in payload for k in ("captured", "description", "unit")):
+        raise HTTPException(400, "body must contain at least one of captured, description, unit")
 
     was = row.captured
-    row.captured = bool(payload["captured"])
-    row.reviewed_at = datetime.now(timezone.utc)
-    row.reviewed_by = payload.get("reviewed_by") or "api"
+    if "captured" in payload:
+        row.captured = bool(payload["captured"])
+        row.reviewed_at = datetime.now(timezone.utc)
+        row.reviewed_by = payload.get("reviewed_by") or "api"
+    # Chunk 84: meaning for the catalog. Metadata, so it neither stamps a review nor publishes a
+    # ticket; only `captured` moving changes what a fold stores.
+    if "description" in payload:
+        row.description = (str(payload["description"]).strip() or None
+                           if payload["description"] is not None else None)
+    if "unit" in payload:
+        row.unit = (str(payload["unit"]).strip()[:32] or None
+                    if payload["unit"] is not None else None)
     row.updated_at = datetime.now(timezone.utc)
 
     published = 0
@@ -527,6 +730,7 @@ async def set_field_capture(field_id: str, payload: dict = Body(...),
                 hi=frontier)
     await db.commit()
     return {"id": str(row.id), "field": row.field, "captured": row.captured,
+            "description": row.description, "unit": row.unit,
             "tickets_published": published}
 
 
@@ -650,6 +854,7 @@ async def transaction_registry_detail(transaction_name: str,
             "captured": r.captured,
             "credential_shaped": pl.never_auto_approve(r.field),
             "seeded": pl.seeded(r.field),
+            "description": r.description, "unit": r.unit,
             "first_seen_at": _iso(r.first_seen_at), "last_seen_at": _iso(r.last_seen_at),
             "reviewed_at": _iso(r.reviewed_at), "reviewed_by": r.reviewed_by,
             "needs_review": r.reviewed_at is None,

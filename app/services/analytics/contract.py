@@ -245,6 +245,30 @@ def numeric_or_none(raw) -> Decimal | None:
     return None
 
 
+def distinct_key(raw) -> str | None:
+    """`raw` as the identity a count-distinct hashes, or None when there is nothing to count (chunk 88).
+
+    Numbers are canonicalised so `"624"`, `624` and `Decimal("624")` are one value: the same field is a
+    STRING out of JSONB and a number out of a typed column, and two spellings of one item would count
+    as two items. Whitespace is trimmed and an empty string is None, by the same rule `dimension_value`
+    applies. `bool` is refused as it is in `numeric_or_none`: a flag is not an identity.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float, Decimal)):
+        number = numeric_or_none(raw)
+        if number is None:
+            return None
+        return str(number.normalize()) if number == number.to_integral() else str(number)
+    text = str(raw).strip()
+    if not text:
+        return None
+    number = numeric_or_none(text)
+    if number is not None and number == number.to_integral() and text.lstrip("-").isdigit():
+        return str(number.normalize())      # "0624" and "624" are one item number, "624.0" too
+    return text
+
+
 def dimension_value(raw) -> str | None:
     """`raw` as a dimension value: the ONE normalisation both read paths must share.
 

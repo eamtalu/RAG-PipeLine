@@ -33,7 +33,7 @@ release (R1b).
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.config.database import Base
@@ -76,6 +76,13 @@ class AnalyticsFieldRegistry(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
                                                    default=lambda: datetime.now(timezone.utc))
     seen_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+    #: What the field MEANS and what it is measured in, written by a person on the review screen.
+    #: Chunk 84: the metric wizard and the chat agent both read these through the catalog, and neither
+    #: can infer "on-hand quantity of one lot, in units" from the name `rec.STQT`. Nullable, because
+    #: discovery cannot know; empty means "nobody has described it yet", which the interface shows.
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     #: Deliberately absent: any column that could hold a VALUE. There is nowhere in this table to put
     #: one, so a discovery record cannot leak a secret even by mistake.

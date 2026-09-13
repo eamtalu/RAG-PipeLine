@@ -78,6 +78,11 @@ class AnalyticsMetric(Base):
     #: `active` and what the interface must show, because a newly defined metric has NO history until
     #: its backfill runs.
     backfilled_through: Mapped[date_type | None] = mapped_column(Date, nullable=True)
+    #: Chunk 86: the instant this metric's history starts. The fold never reads a fact before it and
+    #: the read layer clamps every request to it. NULL = unbounded, which is what every metric that
+    #: predates the builder has always been. Set on activation to "now" or to an earlier instant the
+    #: person chose; an earlier instant is what publishes the bounded backfill.
+    rollups_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     #: Who defined it. There is no authentication in this codebase yet (api/deps.py is a permit-all
     #: placeholder with a TODO), so this is recorded now to be attributable later rather than
     #: retrofitted onto rows that have no author.

@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.log_entry import LogEntry
+from app.services.log_agent import analytics_tools
 from app.services.mnp_log_ingestion.pipeline import assignments, time_bounds
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc
@@ -138,6 +139,8 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    # Chunk 90: analytics through the same service functions the dashboard calls. Never SQL.
+    *analytics_tools.TOOLS,
 ]
 
 
@@ -381,6 +384,7 @@ _DISPATCH = {
     "find_errors": _find_errors,
     "get_transaction": _get_transaction,
     "search_entries": _search_entries,
+    **analytics_tools.DISPATCH,
 }
 
 

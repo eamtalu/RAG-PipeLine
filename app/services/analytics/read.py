@@ -320,7 +320,7 @@ async def _rollup_points(db, model, customer_code: str, definition_id, *, bucket
 
     stmt = select(column, *dim_cols,
                   *(getattr(model, _ROLE_COLUMN[r]) for r in
-                    (d.Role.sum_value, d.Role.count_value))).where(
+                    (d.Role.sum_value, d.Role.count_value, d.Role.distinct_sketch))).where(
         model.customer_code == customer_code, model.definition_id == definition_id,
         model.measure_name == measure, column >= lo, column < hi)
 
@@ -328,12 +328,14 @@ async def _rollup_points(db, model, customer_code: str, definition_id, *, bucket
     for row in (await db.execute(stmt)).all():
         bucket, *rest = row
         dims = tuple(rest[:len(dim_cols)])
-        total, count = rest[len(dim_cols):]
+        total, count, sketch = rest[len(dim_cols):]
         roles = {}
         if total is not None:
             roles[d.Role.sum_value] = Decimal(total)
         if count is not None:
             roles[d.Role.count_value] = count
+        if sketch is not None:
+            roles[d.Role.distinct_sketch] = bytes(sketch)
         key = (bucket, dims)
         out[key] = d.add_roles(out.get(key, {}), roles)
     return out
@@ -401,6 +403,24 @@ async def _live_points(db, customer_code: str, definition: d.MetricDefinition,
     return out
 
 
+def _totals(points: dict) -> tuple[list[dict], dict]:
+    """Window totals per group and overall, merged with `add_roles` BEFORE the roles are finished.
+
+    Chunk 90. Sums and counts add across buckets, but a distinct estimate does not: an item seen in two
+    hours is one item, and a caller adding two hourly estimates would count it twice. Merging the raw
+    roles unions the sketches, so `distinct_estimate` here is the window's own figure. Groups are
+    disjoint, so the overall total is the same merge across every point.
+    """
+    per_group: dict = {}
+    overall: dict = {}
+    for (_bucket, dims), roles in points.items():
+        per_group[dims] = d.add_roles(per_group.get(dims, {}), roles)
+        overall = d.add_roles(overall, roles)
+    totals = [{"dimensions": list(dims), "roles": d.public_roles(roles)}
+              for dims, roles in sorted(per_group.items(), key=lambda kv: [str(x) for x in kv[0]])]
+    return totals, d.public_roles(overall)
+
+
 async def series(db, customer_code: str, definition_id, definition: d.MetricDefinition, *,
                  window: UtcWindow, measure: str, group_by: tuple[str, ...] = (),
                  watermark: datetime | None, rows_per_bucket: int = 20,
@@ -412,8 +432,28 @@ async def series(db, customer_code: str, definition_id, definition: d.MetricDefi
     """
     from app.persistence.models.analytics_rollup import AnalyticsDailyRollup, AnalyticsHourlyRollup
 
+    # Chunk 86: a metric with `rollups_from` has no history before it, by definition. Clamp the request
+    # to the bound before planning, so neither tier is asked about instants the fold never covered -
+    # the live tier in particular would otherwise scan facts and present them as this metric's.
+    bound = definition.rollups_from
+    clamp_note = None
+    if bound is not None and window.start is not None and window.start < bound:
+        if window.end is not None and window.end <= bound:
+            return {
+                "grain": choose_grain(window, available=definition.grains,
+                                      rows_per_bucket=rows_per_bucket),
+                "measure": measure, "group_by": list(group_by), "from_rollups": False,
+                "totals": [], "total": {},
+                "live_spans": [], "rollups_from": bound.isoformat(),
+                "reason": f"the whole window is before rollups_from {bound.isoformat()}: "
+                          f"this metric has no history there", "points": [],
+            }
+        window = UtcWindow(start=bound, end=window.end)
+        clamp_note = f"window clamped to rollups_from {bound.isoformat()}"
+
     grain = choose_grain(window, available=definition.grains, rows_per_bucket=rows_per_bucket)
     plan = plan_read(window, grain, watermark=watermark, tz=tz)
+    reason = "; ".join(x for x in (plan.reason, clamp_note) if x) or None
 
     # Chunk 80: an ad-hoc group-by cannot be answered by rollups AT ALL - no rollup is keyed by the
     # requested field, so the rollup tier would contribute points keyed by () while the live tier
@@ -424,14 +464,16 @@ async def series(db, customer_code: str, definition_id, definition: d.MetricDefi
         live = ([(window.start, window.end)] if window.start and window.end else plan.live_windows)
         points = dict(await _live_points(db, customer_code, definition, live,
                                          grain=grain, measure=measure, group_by=group_by))
+        totals, total = _totals(points)
         return {
             "grain": grain, "measure": measure, "group_by": list(group_by),
-            "from_rollups": False,
+            "from_rollups": False, "totals": totals, "total": total,
             "live_spans": [[s0.isoformat(), e0.isoformat()] for s0, e0 in live],
-            "reason": "ad-hoc group-by: served entirely from a bounded fact scan",
+            "rollups_from": bound.isoformat() if bound else None,
+            "reason": "; ".join(x for x in ("ad-hoc group-by: served entirely from a bounded fact scan",
+                                           clamp_note) if x),
             "points": [{"bucket": str(bucket), "dimensions": list(dims),
-                        "roles": {r.value: (str(v) if isinstance(v, Decimal) else v)
-                                  for r, v in roles.items()}}
+                        "roles": d.public_roles(roles)}
                        for (bucket, dims), roles in sorted(points.items(),
                                                            key=lambda kv: str(kv[0][0]))],
         }
@@ -452,15 +494,18 @@ async def series(db, customer_code: str, definition_id, definition: d.MetricDefi
                                           group_by=group_by)).items():
         points[key] = d.add_roles(points.get(key, {}), roles)
 
+    totals, total = _totals(points)
     return {
         "grain": grain,
         "measure": measure,
         "group_by": list(group_by),
         "from_rollups": plan.rollup_window.start is not None,
+        "totals": totals,
+        "total": total,
         "live_spans": [[s.isoformat(), e.isoformat()] for s, e in plan.live_windows],
-        "reason": plan.reason,
+        "rollups_from": bound.isoformat() if bound else None,
+        "reason": reason,
         "points": [{"bucket": str(bucket), "dimensions": list(dims),
-                    "roles": {r.value: (str(v) if isinstance(v, Decimal) else v)
-                              for r, v in roles.items()}}
+                    "roles": d.public_roles(roles)}
                    for (bucket, dims), roles in sorted(points.items(), key=lambda kv: str(kv[0][0]))],
     }

@@ -31,10 +31,10 @@ from app.services.analytics import definition as d
 # ==================================================== the additive primitives
 def test_the_roles_are_exactly_the_additive_primitives_the_doc_allows():
     """Sums and counts direct; averages as sum+count; variance as sum, sum_sq, count; percentiles as a
-    20-bucket log histogram; first and last as min and max. Nothing else composes, so nothing else is a
-    role."""
+    20-bucket log histogram; first and last as min and max; distinct counts as a HyperLogLog sketch
+    (chunk 88), which unions register-wise. Nothing else composes, so nothing else is a role."""
     assert {r.value for r in d.Role} == {
-        "sum_value", "count_value", "sum_sq", "min_value", "max_value", "histogram"}
+        "sum_value", "count_value", "sum_sq", "min_value", "max_value", "histogram", "distinct_sketch"}
 
 
 def test_no_role_can_hold_a_finished_answer():

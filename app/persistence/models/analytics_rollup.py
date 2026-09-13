@@ -30,7 +30,8 @@
 import uuid
 from datetime import date as date_type, datetime, timezone
 
-from sqlalchemy import (BigInteger, Date, DateTime, Index, Numeric, String, UniqueConstraint)
+from sqlalchemy import (BigInteger, Date, DateTime, Index, LargeBinary, Numeric, String,
+                        UniqueConstraint)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -77,6 +78,10 @@ class RollupColumns:
     #: 20-bucket log histogram. JSONB because bucket counts ADD, which is the only reason percentiles
     #: are storable at all: no hll or tdigest extension is available on this server.
     histogram: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    #: Chunk 88: a 4 KB HyperLogLog sketch for count-distinct measures, NULL for every other measure.
+    #: bytea because registers union with `max`, which is the only reason a distinct count is storable
+    #: as a role at all: an exact set would be unbounded, and a finished count would not compose.
+    distinct_sketch: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
     #: Every write is recompute-and-replace, never increment — an additive upsert double-counts on the
     #: first retry. This records when the replacement happened, so a stale level is visible.

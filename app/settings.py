@@ -243,6 +243,9 @@ class Settings(BaseSettings):
     analytics_poll_seconds: float = 2.0
     # Cap on tenants folded per drain, so one busy tenant set cannot monopolise a tick.
     analytics_max_customers_per_tick: int = 25
+    # Chunk 85: how far back the metric preview reads facts for its dry run. A week covers a full
+    # working cycle for a warehouse; longer only makes the dry run slower without changing the verdict.
+    analytics_preview_window_hours: int = 168
     # Dead-letter after this many failures. Matches the Stage 2 queue: a range that has failed five
     # times is failing for a reason a sixth attempt will not change, and an abandoned ticket is
     # visible on the status card rather than silently retried forever.

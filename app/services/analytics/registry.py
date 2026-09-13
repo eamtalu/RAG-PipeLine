@@ -16,9 +16,10 @@ the chart would be confidently wrong.
 
 import logging
 import uuid
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.analytics_metric import AnalyticsMetric
@@ -32,13 +33,16 @@ logger = logging.getLogger(__name__)
 def measure_to_json(measure: d.Measure) -> dict:
     """One measure as a JSONB object. Sets are stored SORTED, so a definition's stored form is stable
     across processes -- an unordered dump would make two identical definitions compare unequal."""
-    return {
+    out = {
         "name": measure.name,
         "aggregation": measure.aggregation.value,
         "field": measure.field,
         "only": sorted(x.value if hasattr(x, "value") else str(x) for x in measure.only),
         "statuses": sorted(measure.statuses),
     }
+    if measure.unit:
+        out["unit"] = measure.unit      # chunk 89: absent when unset, so older stored forms are unchanged
+    return out
 
 
 def measure_from_json(raw: dict) -> d.Measure:
@@ -48,6 +52,7 @@ def measure_from_json(raw: dict) -> d.Measure:
         field=raw.get("field"),
         only=frozenset(c.Classification(x) for x in raw.get("only") or ()),
         statuses=frozenset(raw.get("statuses") or ()),
+        unit=(str(raw["unit"]).strip() or None) if raw.get("unit") is not None else None,
     )
 
 
@@ -71,6 +76,8 @@ def to_row(definition: d.MetricDefinition, *, customer_code: str,
         "grains": list(definition.grains),
         "source": definition.source,
         "status": definition.status.value,
+        # Chunk 86: None round-trips as NULL, which is "unbounded" for every pre-builder metric.
+        "rollups_from": definition.rollups_from,
         "created_by": created_by,
     }
 
@@ -86,6 +93,8 @@ def from_row(row: AnalyticsMetric) -> d.MetricDefinition:
         method_filter=tuple((row.filter or {}).get("methods") or ()),
         transaction_filter=tuple((row.filter or {}).get("transactions") or ()),
         status=d.Status(row.status),
+        # Chunk 86: absent on fakes and pre-migration rows, and absent means unbounded.
+        rollups_from=getattr(row, "rollups_from", None),
     )
 
 
@@ -126,6 +135,32 @@ async def active_definitions(db: AsyncSession, customer_code: str
             continue
         out.append((row.id, definition))
     return out
+
+
+async def advance_backfilled_through(db: AsyncSession, customer_code: str, *,
+                                     range_end: datetime) -> int:
+    """Chunk 87: record how far a fold has built each active definition's history. Does NOT commit.
+
+    A run that folded `[lo, range_end]` has fully covered every day before `range_end`'s own, so
+    `backfilled_through` becomes the day before, never the partial day itself. Forward only, with
+    GREATEST: a backfill of an older range must not drag the marker back. Definitions whose
+    `rollups_from` is after the range end have nothing to gain from this run and are left alone.
+
+    A Date rather than an instant because that is what the column has always been and what the
+    interface reads; a gap in the middle of a backfill is not representable, which is the same limit
+    the column carried before.
+    """
+    through = range_end.date() - timedelta(days=1)
+    result = await db.execute(
+        update(AnalyticsMetric)
+        .where(AnalyticsMetric.customer_code == customer_code,
+               AnalyticsMetric.status == d.Status.active.value,
+               or_(AnalyticsMetric.rollups_from.is_(None),
+                   AnalyticsMetric.rollups_from <= range_end))
+        .values(backfilled_through=func.greatest(
+            func.coalesce(AnalyticsMetric.backfilled_through, through), through))
+        .execution_options(synchronize_session=False))
+    return result.rowcount or 0
 
 
 async def ensure_seed(db: AsyncSession, customer_code: str) -> uuid.UUID:

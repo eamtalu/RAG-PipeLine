@@ -978,6 +978,9 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
             frontier=max((r[_FRONTIER_COLUMN.key] for r in source_rows
                           if r.get(_FRONTIER_COLUMN.key)), default=None),
             settledness=_settledness(source_rows), now=now)
+        # Chunk 87: the metric builder's progress marker. In this transaction, so a run that rolls
+        # back cannot claim history it did not build.
+        await registry.advance_backfilled_through(db, customer_code, range_end=hi)
         # Stamped BEFORE the counts are refreshed, and the order is not cosmetic: `_refresh_counts`
         # counts open tickets, so counting first would always include the tickets this run is in the
         # act of consuming and the status card would never show a drained queue.

@@ -44,7 +44,20 @@ question about a specific message/MI program/SQL use search_entries.
 system failure unless that's what the user is asking about.
 - Always ground your answer in the data you retrieved and CITE the transaction id(s) (and ReqID \
 where useful) you based it on. If the data doesn't contain the answer, say so plainly rather than \
-guessing. Be concise and concrete."""
+guessing. Be concise and concrete.
+
+Analytics (aggregate questions: how many, how much, per warehouse, per day, trends):
+- Use list_metrics to see the registered metrics and their meaning, then query_metric. Do not add \
+up transactions yourself when a metric answers the question; the metric is what the dashboard shows.
+- Every analytics answer is TWO-TIER. Buckets before the analytics watermark come from settled \
+rollups; `live_spans` were folded from the facts on the fly and are PROVISIONAL, because some of \
+their transactions may still be open. Call explain_freshness and say how far behind analytics is \
+and whether the tail is provisional whenever you quote a figure. A `distinct` measure is an \
+estimate (about 1.6 percent) and must be described as one.
+- Metrics with source "record" describe what M3 ANSWERED during a call, not what the warehouse \
+consumed: `units-observed-by-item` sums the stock quantities M3 reported per item, which is a \
+snapshot per response, not units picked. Transaction-source metrics such as `consumption` are the \
+ones about movement."""
 
 
 class LogDebugAgent:

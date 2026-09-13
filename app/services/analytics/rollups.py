@@ -210,15 +210,26 @@ async def _replace(db: AsyncSession, model, customer_code: str, definition_id: u
     return {"deleted": result.rowcount or 0, "inserted": len(rows)}
 
 
+def _since_gate(model, since: datetime | None) -> list:
+    """Chunk 86: the metric's `rollups_from`, as a predicate. Inclusive at the instant itself, and an
+    empty list when unbounded so the query plan of a pre-builder metric is byte-identical to before."""
+    return [model.event_time >= since] if since is not None else []
+
+
 async def _read_dirty_facts(db: AsyncSession, customer_code: str, hours: set[datetime],
                             dates: set[date_type],
-                            hidden: frozenset[str] = frozenset()) -> list[dict]:
+                            hidden: frozenset[str] = frozenset(),
+                            since: datetime | None = None) -> list[dict]:
     """The facts feeding every dirty bucket, read ONCE and folded into both grains.
 
     Two predicates OR-ed rather than one: an hour and a business date are different axes, and a fact can
     be in a dirty hour without being on a dirty date (or the reverse) after a rebuild moved it. Read as
     a contiguous range per axis and filtered to the exact dirty set in Python -- a hundred-term OR would
     defeat the planner, while a range that spans a gap merely reads a few rows that are then ignored.
+
+    `since` is the definition's `rollups_from` (chunk 86). A dirty bucket entirely before it reads no
+    facts, folds to nothing, and `_replace` deletes whatever the bucket held - which is what a metric
+    that starts at an instant means.
     """
     conditions = []
     if hours:
@@ -238,13 +249,15 @@ async def _read_dirty_facts(db: AsyncSession, customer_code: str, hours: set[dat
              | AnalyticsFact.transaction_name.notin_(sorted(hidden))] if hidden else [])
     rows = (await db.execute(
         select(AnalyticsFact).where(AnalyticsFact.customer_code == customer_code,
-                                    or_(*conditions), *gate))).scalars().all()
+                                    or_(*conditions), *gate,
+                                    *_since_gate(AnalyticsFact, since)))).scalars().all()
     return [{c.name: getattr(r, c.name) for c in AnalyticsFact.__table__.columns} for r in rows]
 
 
 async def _read_dirty_record_facts(db: AsyncSession, customer_code: str, hours: set[datetime],
                                    dates: set[date_type],
-                                   hidden: frozenset[str] = frozenset()) -> list[dict]:
+                                   hidden: frozenset[str] = frozenset(),
+                                   since: datetime | None = None) -> list[dict]:
     """18y: the record grain's own reader - `_read_dirty_facts`' mirror, and deliberately a PARALLEL
     function rather than a parameterised one. The 18n structural guarantee ("an existing metric
     cannot see a record row even if somebody forgets a filter") is held by each reader naming
@@ -267,7 +280,8 @@ async def _read_dirty_record_facts(db: AsyncSession, customer_code: str, hours: 
              | AnalyticsRecordFact.transaction_name.notin_(sorted(hidden))] if hidden else [])
     rows = (await db.execute(
         select(AnalyticsRecordFact).where(AnalyticsRecordFact.customer_code == customer_code,
-                                          or_(*conditions), *gate))).scalars().all()
+                                          or_(*conditions), *gate,
+                                          *_since_gate(AnalyticsRecordFact, since)))).scalars().all()
     return [{c.name: getattr(r, c.name) for c in AnalyticsRecordFact.__table__.columns}
             for r in rows]
 
@@ -332,7 +346,8 @@ async def recompute(db: AsyncSession, customer_code: str, definition_id: uuid.UU
     #
     # Recomputed from scratch every time, so flipping `show` back on refills complete history on the
     # next fold of the range. That is the "one recompute" the switch promises.
-    facts = await _read_dirty_facts(db, customer_code, hours, dates, hidden)
+    facts = await _read_dirty_facts(db, customer_code, hours, dates, hidden,
+                                    since=definition.rollups_from)
     return await _fold_grains(db, customer_code, definition_id, definition, facts,
                               hours=hours, dates=dates, now=now)
 
@@ -348,7 +363,8 @@ async def recompute_records(db: AsyncSession, customer_code: str, definition_id:
     if not hours and not dates:
         return {"hourly": {}, "daily": {}, "monthly": {}}
     now = computed_at or datetime.now(timezone.utc)
-    facts = await _read_dirty_record_facts(db, customer_code, hours, dates, hidden)
+    facts = await _read_dirty_record_facts(db, customer_code, hours, dates, hidden,
+                                           since=definition.rollups_from)
     return await _fold_grains(db, customer_code, definition_id, definition, facts,
                               hours=hours, dates=dates, now=now)
 
