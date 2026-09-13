@@ -397,7 +397,12 @@ async def _live_points(db, customer_code: str, definition: d.MetricDefinition,
     # test passed.
     out: dict = {}
     for (bucket, dims), measures in folded.items():
-        if measure not in measures:
+        # Chunk 93: a group the fold SAW but that contributed nothing to this measure is not a
+        # zero, it is no data. The write path has always dropped such buckets through `_is_empty`
+        # before storing them; the live path must apply the same rule or an ad-hoc breakdown draws
+        # a flat zero series for a group that has none (seen live: a `[None]` warehouse from the
+        # connectivity probes, in every hourly point and in the window totals).
+        if measure not in measures or n5._is_empty(measures[measure]):
             continue
         # `_dim_key` pads to the four rollup slots; trim to the requested arity so a live key and a
         # rollup key for the same group are identical and merge instead of doubling the bucket.
