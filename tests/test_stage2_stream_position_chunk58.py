@@ -196,17 +196,31 @@ def test_two_users_never_share_a_transaction():
         assert len({e.user_ctx for e in g.entries if e.user_ctx}) <= 1
 
 
-def test_the_fifo_fallback_prefers_the_earliest_open_stream():
-    """The FIFO comparison used to be between two batch indices; it is now between two tuples. The
-    ORDERING it produces has to be the same, or a response binds to the wrong request."""
+def test_the_response_match_prefers_the_most_recently_heard_from_request():
+    """The comparison used to be between two batch indices and is now between two tuples. 18s (chunk
+    95) then changed WHICH end of the order wins: a response binds to the candidate last heard from
+    most recently, because the server writes RESPONSE the moment a handler finishes. Two lone
+    requests of one user, one second and six seconds before the answer: the later one owns it."""
     early = _e(LogEntryType.request, at=T0, line=1, thread=None, user="amin")
     late = _e(LogEntryType.request, at=T0 + timedelta(seconds=5), line=2, thread=None, user="amin")
     resp = _e(LogEntryType.response, at=T0 + timedelta(seconds=6), line=3, thread=None, user="amin")
     groups = dt._group([early, late, resp])
     holder = next((g for g in groups if any(e.line_number == 3 for e in g.entries)), None)
     assert holder is not None
-    assert any(e.line_number == 1 for e in holder.entries), \
-        "the response must bind to the EARLIER open request, not the later one"
+    assert any(e.line_number == 2 for e in holder.entries), \
+        "the response binds to the request heard from most recently"
+
+
+def test_the_tie_break_is_the_earliest_stream_position():
+    """Two candidates last heard from at the SAME instant fall back to the pre-18ac FIFO, and that
+    order is the durable tuple: the earlier position wins. This is what the tuple-versus-index
+    refactor has to preserve."""
+    early = _e(LogEntryType.request, at=T0, line=1, thread=None, user="amin")
+    late = _e(LogEntryType.request, at=T0, line=2, thread=None, user="amin")
+    resp = _e(LogEntryType.response, at=T0 + timedelta(seconds=1), line=3, thread=None, user="amin")
+    groups = dt._group([early, late, resp])
+    holder = next(g for g in groups if any(e.line_number == 3 for e in g.entries))
+    assert any(e.line_number == 1 for e in holder.entries)
 
 
 def test_a_stale_stream_is_still_evicted():

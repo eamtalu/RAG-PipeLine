@@ -207,18 +207,25 @@ Since chunk 67 a stream is keyed by **(server, thread, user)** - all three, beca
 - The **thread** is the server's processing thread for the request.
 - The **user** disambiguates, because .NET reuses a thread mid-request for another user's work.
 
-The pairing rules, all scoped inside one server:
+The pairing rules, all scoped inside one server (recency rules since 18ac, chunk 95):
 
 ```
  request        -> waits in a pending pool until its work appears
- request_body   -> opens a stream; claims its request by ReqID (GET),
-                   or the most recent id-less pending request (POST)
+ request_body   -> opens a stream; claims its request by ReqID (GET), or the
+                   id-less pending request (POST) written by its OWN THREAD and
+                   USER, then its user's, then the most recent one
  info/mi_*/sql  -> joins its (server, thread, user) stream; a user-less line
-                   inherits whatever stream is live on that thread;
-                   the stream claims a pending GET request once the user is known
- response       -> closes the OLDEST still-open stream of the SAME USER on the
-                   SAME SERVER (first-in-first-out), because responses carry
-                   no request id (verified: 0 of 18,090 live responses do)
+                   inherits whatever stream is live on that thread, and a
+                   user-less stream claims the user-less request its thread
+                   just logged; a user's stream claims its pending GET request
+                   on the same thread, then the user's most recent one
+ response       -> closes the stream of the SAME USER on the SAME SERVER that
+                   was heard from MOST RECENTLY (the server writes RESPONSE the
+                   moment a handler finishes); a stream whose last line is an
+                   M3 call still awaiting its result is not a candidate; a
+                   user-less response goes to user-less work first; ties fall
+                   back to the oldest; responses carry no request id
+                   (verified: 0 of 18,090 live responses do)
  quiet gap      -> a stream idle for more than 300s is closed as-is
                    (log_open_gap_seconds; the longest real conversation
                     measured is 363.7s TOTAL, with entries well inside 300s
@@ -532,7 +539,7 @@ Why the tempting alternative - "find the exact transaction id and attach the lin
 1. **An attach is a re-derivation, not an append.**
    The row's columns are aggregates over ALL its entries, so attaching one line correctly means loading every prior entry anyway; the imagined read savings do not exist.
 2. **The id cannot tell you whether the line actually belongs to it.**
-   Ownership is decided by the grouping rules (FIFO per user, thread flips, gap limits), and only running the grouper over the combined lines answers correctly.
+   Ownership is decided by the grouping rules (recency per user since 18ac, thread flips, gap limits), and only running the grouper over the combined lines answers correctly.
    Two implementations of grouping is exactly what produced the measured shadow divergence (one from-scratch group became seventeen seeded ones).
 3. **Everything downstream comes free through the rebuild.**
    Update by partition key, fingerprint recompute, membership rewrite, seal recompute, the analytics ticket - the rebuild path already does all of it, tested; a targeted attach would re-implement each as a second write authority that must agree with the first forever.
@@ -4207,3 +4214,85 @@ Promotion is reconsidered only when one of three measured triggers flips:
 2. sustained worker CPU pressure (rule of thumb: >70% of a core through working hours);
 3. the stitch checkpoint starts lagging real time during peaks.
 Preconditions at that point: the pending round-trip, plus a grouping-level audit (periodic sampled rebuild-and-compare) so the promoted lane regains a healer.
+
+## 18ac. Which request a RESPONSE belongs to: recency, not FIFO. 2026-09-13. Chunk 95.
+
+Found through the analytics composition screen, not through Stage 2's own alarms.
+Under ConfirmPickLine the screen listed 48 response fields, and the per-method frequency count showed 47 of them on fewer than one percent of the picks.
+A pick answers with a bare quantity string.
+`resp.ItemNumber`, `resp.StockZone`, `resp.Company`, `resp.ReceivingNumber` were other requests' answers, stitched onto picks by Stage 2 and then registered under the pick by discovery.
+67 of 12,131 ConfirmPickLine facts in 14 days carried one.
+
+### The mechanism, three faults
+
+Every one of the 67 traced to one of three pairing rules in `_group`, reconstructed line for line from the live log (server TMP-AZ-BEC02).
+
+**A. Same user, shifted by one (63 of 67).**
+A RESPONSE line carries the log4net context user but no ReqId, and .NET async writes it on a different thread from the request.
+The grouper therefore matched it to the user's OLDEST open request.
+That assumes a user's requests complete in the order they opened.
+They do not: the server writes RESPONSE the moment a handler finishes, one millisecond after its last work line, and a two-second pick and a 100 ms balance lookup overlap routinely.
+Once one response went astray, every later response of that user landed one request late, and the shift ran until a request happened to get no response at all.
+One chain on 9 Sep 22:07 to 22:22 covered 15 transactions: picks received balance objects, balance lookups received pick quantities, and every `duration_ms` in the chain measured the wrong conversation.
+The GET-binding rule (a request's work takes the user's oldest pending request) was the same FIFO in a second place.
+
+**B. A response with no user (2 of 67).**
+A device's CheckServer conversation logs without a context user from URL to answer.
+Its RESPONSE, having no user to filter on, fell back to the server's oldest open work outright: a picker's ConfirmPickLine waiting 470 ms for its AddPickViaRepNo result.
+The pick's own `"4.0"` arrived 200 ms later and opened a headless transaction.
+
+**C. Two POSTs four milliseconds apart (2 of 67).**
+A POST body was paired with the most recent id-less URL line on the server, regardless of who wrote it.
+OPRACHASUK's ReceiptPO URL and JBURCH's ConfirmPickLine URL were logged 4 ms apart; each body took the other's URL, and because a transaction's user is read from its first line, the responses followed the swapped lines.
+That is the `/api/receiving/ReceiptPO` transaction with method `ConfirmPickLine` recorded in the Station 4 notes.
+
+### The fix (chunk 95)
+
+Four rules, all still scoped within one server (18r), all in `derive_transactions.py:_group`.
+
+1. A RESPONSE binds to the candidate of its user that was heard from most recently, by last line timestamp; the pre-18ac FIFO order only breaks ties.
+   The damage from a stray response is then one transaction, not a chain: the wronged request stays open until eviction and becomes incomplete, while every later response finds its own just-finished owner.
+2. A builder whose last line is an M3 call with no result logged is not a candidate.
+   The handler is blocked on M3 and cannot have written a response.
+   Dropped only while something else is available, so a response never becomes an orphan for this rule.
+3. A RESPONSE with no user is matched against user-less work first, and user-less work on a thread that just logged a user-less URL line takes that request.
+   CheckServer becomes one conversation, URL to answer.
+   The fallback to the whole server is kept for a response whose header lost its user.
+4. A POST body takes the id-less URL line written by its own thread under its own user, then its user's, then the most recent one (the old rule, kept for a URL line logged before its context user was set).
+   A GET's work likewise prefers its user's pending request on the same thread, then the user's most recent.
+
+`_DERIVE_VERSION` is bumped 2 -> 3 and the chunk-59 digest regenerated: the change alters what stored rows say wherever one user's requests overlapped.
+
+### Measured before deploying
+
+The patched grouper was run beside the deployed one over three whole live days on the server (395,318 entries, 22,656 transactions), nothing leaving the box but aggregates.
+Oracle: for every method with at least 20 transactions, the dominant response shape under the old grouping; a transaction whose response has a different shape is counted as wrongly matched.
+
+| | old | new |
+|---|---|---|
+| wrongly matched responses, all methods | 1,670 | 729 |
+| methods that got worse | | 0 |
+| ConfirmPickLine wrong | 61 | 0 |
+| GetOldestItemBalanceAPI wrong | 44 | 0 |
+| GetSummarisedBalanceDetails wrong | 56 | 1 |
+| ReportCount wrong | 258 | 1 |
+| ListItemAlternateUnitsOfMeasure wrong | 260 | 0 |
+| headless transactions (no request line) | 161 | 29 |
+| transactions with no response | 154 | 22 |
+| transactions holding two users' lines | 17 | 1 |
+
+The 729 that remain are concentrated in methods whose answer legitimately takes more than one shape (GetNextDeliveryByRoute answers a soft "no delivery" as text; GetItemBalanceWithAltUoMs and StockMove are unchanged old to new), so they are the oracle's limit, not stitching faults.
+The thirteen chunk-95 tests reconstruct the three live cases and pin the unchanged single-conversation behaviour.
+
+### What the log cannot give
+
+Fault A is contained, not eliminated: without a ReqId on the RESPONSE line no rule can pair a response with certainty when two requests of one user finish within the same millisecond.
+The REQUEST line already carries the ReqId.
+If eSmartServer logs it on the RESPONSE line as well, Stage 2 pairs exactly and rules 1 to 4 become the fallback for old files.
+
+### Backlog repair
+
+After deploying, run a full regroup for the tenant (`POST /logs/regroup/full`), as after 18r.
+The version bump rewrites every surviving row once; the 67 picks lose their foreign response keys and gain `resp.value`; the analytics tickets the regroup publishes restate the affected facts at normalisation version 2.
+The field registry keeps the foreign rows under ConfirmPickLine, because observation never deletes; the composition screen will show them as "not seen in the last 14 days" once the restated facts age past the window.
+Standing check afterwards: under ConfirmPickLine every response field but `resp.value` should read "not seen", and the headless count in the reconciler should stay near the new floor.

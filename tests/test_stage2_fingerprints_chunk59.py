@@ -189,7 +189,12 @@ def _derivation_digest() -> str:
 #: per-server operations - so every stored row must be recomputed on its next rebuild. Single-server
 #: groupings derive identically (chunk 67 pins that), but "identical for most rows" is exactly the
 #: situation the version constant exists for.
-_EXPECTED_DERIVATION = "b6cb0f97d9644129"
+#: Changed again by 18ac (chunk 95): a RESPONSE binds to the candidate last heard from most recently
+#: instead of the oldest open one, a candidate blocked on an M3 call is not a candidate, a user-less
+#: response prefers user-less work, and a POST body pairs with the URL line its own thread and user
+#: wrote. `_DERIVE_VERSION` bumped 2 -> 3: measured over three live days, 941 of 22,656 transactions
+#: change their response, method or membership, so every stored row must be recomputed on rebuild.
+_EXPECTED_DERIVATION = "75025b5e9430e0aa"
 
 
 def test_the_derivation_is_pinned_to_the_derive_version():

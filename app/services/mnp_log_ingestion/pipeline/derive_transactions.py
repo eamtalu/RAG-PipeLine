@@ -265,17 +265,22 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
     (`user_ctx`, e.g. "(CPRICE)"), so two users sharing a thread get two separate open builders and
     a thread that flips A→B→A re-merges A's work correctly instead of mixing or fragmenting it.
     The server comes first (18r): the tenant runs several app servers whose files interleave in the
-    stream, and nothing - keys, request pools, response FIFO - may ever match across two of them.
+    stream, and nothing - keys, request pools, response match - may ever match across two of them.
 
-    Rules (all scoped WITHIN one server):
+    Rules (all scoped WITHIN one server; recency rules since 18ac, chunk 95):
       - a line WITH a user routes to its (server, thread, user) builder (creating one if needed) and
         marks that stream as the thread's current one;
       - a line with NO user (some narration / mi bodies log as "(null)") inherits the thread's
-        current stream — it belongs to whatever request is live on that thread right now;
+        current stream — it belongs to whatever request is live on that thread right now; a fresh
+        user-less stream claims the user-less REQUEST its thread logged just before it;
       - a REQUEST is paired to its work by ReqID (GET) or, for a POST whose MoveNext has no id, to
-        the body it immediately precedes; a GET REQUEST is bound by User once its work appears;
-      - a RESPONSE (no payload user/id, but a header user) closes the OLDEST still-open request FOR
-        THAT USER (FIFO within the user).
+        the body written by the same thread under the same user (then the user's, then the most
+        recent id-less one); a GET REQUEST is bound to its user's work on the same thread once the
+        user is known, else to the user's most recent pending request;
+      - a RESPONSE (no payload user/id, but a header user) closes the candidate of THAT USER heard
+        from MOST RECENTLY - the server writes RESPONSE the moment a handler finishes - skipping
+        any candidate whose last line is an M3 call still awaiting its result; ties fall back to
+        the oldest position; a user-less response goes to user-less work first.
     Net guarantee: a transaction can never contain two users' lines, never contain two servers'
     lines, and a response can never be stitched onto another user's or another server's request.
     """
@@ -326,19 +331,49 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
                 return pending_reqs.pop(i)
         return None
 
-    def take_post_request(srv: str) -> LogEntry | None:
-        # a POST's MoveNext has no ReqID; it's the most-recent id-less pending request (emitted
-        # immediately before its body) ON THIS SERVER.
-        for i in range(len(pending_reqs) - 1, -1, -1):
-            if _entry_server(pending_reqs[i]) == srv and _entry_reqid(pending_reqs[i]) is None:
-                return pending_reqs.pop(i)
+    def take_post_request(srv: str, *, thread: str | None, user: str | None) -> LogEntry | None:
+        # a POST's MoveNext has no ReqID; its URL line is an id-less pending request ON THIS SERVER,
+        # emitted immediately before the body by the SAME MoveNext - so on the same thread, under the
+        # same context user. 18ac-C: prefer that pairing, then the same user, and only then the most
+        # recent id-less line (the pre-18ac rule, kept as the fallback for a URL line logged before
+        # its context user was set). Two POSTs by two users 4 ms apart used to swap URLs under the
+        # recency-only rule, and their responses then followed the swapped lines.
+        idless = [i for i, r in enumerate(pending_reqs)
+                  if _entry_server(r) == srv and _entry_reqid(r) is None]
+        preferences = [lambda r: True]
+        if user:
+            preferences = [lambda r: r.thread == thread and req_user(r) == user,
+                           lambda r: req_user(r) == user] + preferences
+        for accept in preferences:
+            for i in reversed(idless):
+                if accept(pending_reqs[i]):
+                    return pending_reqs.pop(i)
         return None
 
-    def take_by_user(user: str | None, srv: str) -> LogEntry | None:
+    def take_by_user(user: str | None, srv: str, *, thread: str | None = None) -> LogEntry | None:
+        # a GET's work appears on the thread that logged its URL line, within milliseconds. 18ac-A:
+        # prefer the user's pending request on the same thread, then the user's most recent one -
+        # the oldest (pre-18ac) was the fourth FIFO in this function, and it bound a fresh lookup's
+        # work to a stale request of the same user that had lost its response.
         if not user:
             return None
-        for i, r in enumerate(pending_reqs):
-            if _entry_server(r) == srv and req_user(r) == user:
+        mine = [i for i, r in enumerate(pending_reqs) if _entry_server(r) == srv and req_user(r) == user]
+        preferences = ([lambda r: r.thread == thread] if thread is not None else []) + [lambda r: True]
+        for accept in preferences:
+            for i in reversed(mine):
+                if accept(pending_reqs[i]):
+                    return pending_reqs.pop(i)
+        return None
+
+    def take_anonymous_request(srv: str, thread: str | None) -> LogEntry | None:
+        # 18ac-B: user-less work (a device's CheckServer) belongs to the user-less URL line the same
+        # thread logged just before it. Without this the request and its work were two transactions,
+        # the request incomplete and the work headless, and the answer had no owner to go to.
+        if thread is None:
+            return None
+        for i in range(len(pending_reqs) - 1, -1, -1):
+            r = pending_reqs[i]
+            if _entry_server(r) == srv and r.thread == thread and req_user(r) is None:
                 return pending_reqs.pop(i)
         return None
 
@@ -372,6 +407,23 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
 
     def last_ts(b: _TxnBuilder) -> datetime | None:
         return next((e.timestamp for e in reversed(b.entries) if e.timestamp is not None), None)
+
+    def awaiting_m3(b: _TxnBuilder) -> bool:
+        """18ac-A: the last line is an M3 call whose result has not been logged. The handler is blocked
+        on M3 and cannot have written a RESPONSE, so this builder is not a candidate for one."""
+        return bool(b.entries) and b.entries[-1].entry_type.value == "mi_call"
+
+    def rank(b: _TxnBuilder | None, r: LogEntry | None):
+        """18ac-A: how strongly a candidate claims a response. Most recently heard from first - the
+        server writes RESPONSE the moment a handler finishes, one millisecond after its last work
+        line, so among a user's open candidates the owner is the one active most recently, not the
+        one that opened first. A pending request with no work yet was last heard from when its URL
+        line was logged. Ties fall back to the pre-18ac FIFO: the oldest position wins."""
+        if b is not None:
+            ts, pos = last_ts(b), b.open_pos
+        else:
+            ts, pos = r.timestamp, _stream_pos(r)
+        return (ts is not None, ts, _Reversed(pos))
 
     gap = timedelta(seconds=settings.log_open_gap_seconds)
 
@@ -412,7 +464,7 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
             if key in open_by_key:
                 builders.append(close(key))  # prior cycle for this (thread,user): no RESPONSE
             b = _TxnBuilder()
-            req = take_by_reqid(_entry_reqid(e), srv) or take_post_request(srv)
+            req = take_by_reqid(_entry_reqid(e), srv) or take_post_request(srv, thread=th, user=u)
             if req is not None:
                 b.add(req)
             b.add(e)
@@ -440,10 +492,14 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
                     b.open_pos = _stream_pos(e)
                     open_by_key[key] = b
                     current_by_thread[(srv, th)] = key
+                    req = take_anonymous_request(srv, th)
+                    if req is not None:
+                        b.add(req)
+                        b.open_pos = _stream_pos(req)
             b.add(e)
             bu = u or _entry_user(e)
             if bu and not has_request(b):  # bind a pending GET REQUEST now that we know the user
-                req = take_by_user(bu, srv)
+                req = take_by_user(bu, srv, thread=th)
                 if req is not None:
                     b.add(req)
                     b.open_pos = _stream_pos(req)  # opened when its REQUEST arrived
@@ -451,7 +507,7 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
         elif et == "response":
             # async: no payload user/id, but the log4net header carries the context user. Restrict
             # candidates to that user so a response can never close another user's request, then pick
-            # the OLDEST still-open request (FIFO). Candidates: open (server,thread,user) builders
+            # the one heard from most recently (18ac). Candidates: open (server,thread,user) builders
             # that did work AND pending requests with no work yet - ON THIS SERVER ONLY (18r): the
             # process that wrote the response is the one that handled its request, so crossing
             # servers fabricates conversations. If the user filter leaves nothing (user-less
@@ -460,20 +516,29 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
             ru = e.user_ctx
             keys = [k for k in open_by_key if k[0] == srv]
             srv_reqs = [r for r in pending_reqs if _entry_server(r) == srv]
-            if ru is not None:
-                u_keys = [k for k in keys if txn_user(open_by_key[k]) == ru]
-                u_reqs = [r for r in srv_reqs if req_user(r) == ru]
-                if not u_keys and not u_reqs:
-                    u_keys, u_reqs = keys, srv_reqs
-            else:
+            # 18ac-B: a response with NO user is matched against user-less work first - a device's
+            # CheckServer conversation logs without a context user from URL to answer - and only
+            # then against everything on the server. It used to take the server's oldest open work
+            # outright, which was a picker's ConfirmPickLine waiting for its M3 result.
+            u_keys = [k for k in keys if txn_user(open_by_key[k]) == ru]
+            u_reqs = [r for r in srv_reqs if req_user(r) == ru]
+            if not u_keys and not u_reqs:
                 u_keys, u_reqs = keys, srv_reqs
+            # 18ac-A: a builder blocked on M3 cannot own this response. Drop those unless nothing else
+            # is left, in which case the response still lands rather than becoming an orphan.
+            settled = [k for k in u_keys if not awaiting_m3(open_by_key[k])]
+            if settled or u_reqs:
+                u_keys = settled
+            # 18ac-A: most recently active wins (see `rank`). FIFO assumed a user's requests complete
+            # in the order they opened. They do not, and one stray response then shifted every later
+            # response of that user one request late for as long as the user kept working - 15
+            # transactions in one live chain. Recency keeps the damage to the one request that
+            # really lost its answer.
+            best_key = max(u_keys, key=lambda k: rank(open_by_key[k], None), default=None)
+            best_req = max(u_reqs, key=lambda r: rank(None, r), default=None)
 
-            best_key = min(u_keys, key=lambda k: open_by_key[k].open_pos, default=None)
-            best_key_pos = open_by_key[best_key].open_pos if best_key is not None else None
-            best_req = min(u_reqs, key=_stream_pos, default=None)
-            best_req_pos = _stream_pos(best_req) if best_req is not None else None
-
-            if best_key is not None and (best_req_pos is None or best_key_pos <= best_req_pos):
+            if best_key is not None and (best_req is None or
+                                         rank(open_by_key[best_key], None) >= rank(None, best_req)):
                 b = close(best_key)
                 b.add(e)
                 builders.append(b)
@@ -553,6 +618,31 @@ def _stream_pos(e: LogEntry):
     the order it receives rows in.
     """
     return (e.timestamp is None, e.timestamp, e.source_file or "", e.line_number or 0)
+
+
+class _Reversed:
+    """A stream position that compares BACKWARDS, so that inside a `max()` the OLDEST position wins.
+    Only the tie-break behind recency in the response match (18ac-A), where the pre-18ac FIFO order is
+    kept for candidates last heard from at the same instant."""
+    __slots__ = ("pos",)
+
+    def __init__(self, pos):
+        self.pos = pos
+
+    def __eq__(self, other):
+        return self.pos == other.pos
+
+    def __lt__(self, other):
+        return self.pos > other.pos
+
+    def __gt__(self, other):
+        return self.pos < other.pos
+
+    def __le__(self, other):
+        return self.pos >= other.pos
+
+    def __ge__(self, other):
+        return self.pos <= other.pos
 
 
 #: A position that sorts before every real one, for a builder opened by something with no request to
