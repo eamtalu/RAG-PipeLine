@@ -462,6 +462,40 @@ async def test_the_composition_endpoint_reports_how_often_each_field_appears_on_
     assert by_name["resp.Ghost"]["recent_facts"] == 0
 
 
+async def test_field_frequency_is_counted_per_method_not_per_transaction_name():
+    """Seen live after the first deploy: under ConfirmPickLine, resp.ItemNumber read "on 19,198 of
+    43,020 recent facts" because both numbers were taken over every method serving the name; the
+    picks themselves carried it on 67. A field's frequency only means something against the facts of
+    the method it is listed under."""
+    await _plant()                                   # one ConfirmPickLine fact with resp.value
+    await n3.consume_tenant(CC)
+    async with async_session() as db:
+        # a second method on the same name, whose fact carries a key the pick does not
+        db.add(AnalyticsFact(id=uuid.uuid4(), customer_code=CC, source_transaction_id=uuid.uuid4(),
+                             source_started_at=T0, source_version_hash="x" * 8, revision=1, event_time=T0,
+                             business_date=T0.date(), transaction_name="Pick", method="GetNextDeliveryByRoute",
+                             status="success", quantity_classification="non_quantity",
+                             attributes={"resp.CustomerName": "E C FOOD", "resp.value": "7"}, created_at=T0))
+        db.add(AnalyticsFieldRegistry(customer_code=CC, method="GetNextDeliveryByRoute", source="response",
+                                      field="resp.CustomerName", captured=True))
+        db.add(AnalyticsFieldRegistry(customer_code=CC, method="ConfirmPickLine", source="response",
+                                      field="resp.CustomerName", captured=True))
+        db.add(LogTransaction(customer_code=CC, job_id=(await db.scalar(select(Job.id).where(Job.customer_code == CC))),
+                              sealed=True, started_at=T0, ended_at=T0, date=T0.date(), duration_ms=5,
+                              method="GetNextDeliveryByRoute", transaction_name="Pick",
+                              status=LogTransactionStatus.success, attributes={}))
+        await db.commit()
+    async with async_session() as db:
+        out = await api.transaction_composition("Pick", customer=CC, db=db)
+    assert out["counts"]["recent_facts"] == 2
+    assert out["counts"]["recent_by_method"] == {"ConfirmPickLine": 1, "GetNextDeliveryByRoute": 1}
+    by_name = {f["field"]: f for f in out["fields"]["response"]}
+    assert by_name["resp.CustomerName"]["recent_by_method"] == {"GetNextDeliveryByRoute": 1}, \
+        "absent from the pick's facts, so no count under ConfirmPickLine"
+    assert by_name["resp.value"]["recent_by_method"] == {"ConfirmPickLine": 1, "GetNextDeliveryByRoute": 1}
+    assert by_name["resp.CustomerName"]["recent_facts"] == 1
+
+
 async def test_the_composition_endpoint_404s_for_an_unknown_name():
     from fastapi import HTTPException
     async with async_session() as db:

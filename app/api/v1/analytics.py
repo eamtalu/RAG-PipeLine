@@ -972,16 +972,24 @@ async def transaction_composition(transaction_name: str,
     recent_days = 14
     since = datetime.now(timezone.utc) - timedelta(days=recent_days)
     from sqlalchemy import text as _text
+    # Per METHOD and key, not per name: a name is served by many methods and a field regular on one
+    # is a one-off on another. Under ConfirmPickLine, "resp.ItemNumber on 19,198 of 43,020" was the
+    # delivery lookups' count dressed as the picks'; the picks carried it on 67.
     recent = (await db.execute(_text("""
-        SELECT k, count(*) FROM analytics_facts f, jsonb_object_keys(f.attributes) k
+        SELECT f.method, k, count(*) FROM analytics_facts f, jsonb_object_keys(f.attributes) k
         WHERE f.customer_code = :c AND f.transaction_name = :n AND f.event_time >= :since
           AND (k LIKE 'resp.%' OR k LIKE 'mi.%')
-        GROUP BY k"""), {"c": customer, "n": transaction_name, "since": since})).all()
-    recent_by_key = {k: n for k, n in recent}
-    recent_total = await db.scalar(
-        select(func.count()).where(AnalyticsFact.customer_code == customer,
-                                   AnalyticsFact.transaction_name == transaction_name,
-                                   AnalyticsFact.event_time >= since)) or 0
+        GROUP BY f.method, k"""), {"c": customer, "n": transaction_name, "since": since})).all()
+    recent_by_key: dict[str, dict[str, int]] = {}
+    for method, k, n in recent:
+        recent_by_key.setdefault(k, {})[method or "(none)"] = n
+    recent_by_method = {(m or "(none)"): n for m, n in (await db.execute(
+        select(AnalyticsFact.method, func.count())
+        .where(AnalyticsFact.customer_code == customer,
+               AnalyticsFact.transaction_name == transaction_name,
+               AnalyticsFact.event_time >= since)
+        .group_by(AnalyticsFact.method))).all()}
+    recent_total = sum(recent_by_method.values())
 
     methods = list((await db.execute(
         select(LogTransaction.method).distinct()
@@ -1013,7 +1021,9 @@ async def transaction_composition(transaction_name: str,
             entry["unit"] = entry["unit"] or r.unit
         for (group, field), entry in grouped.items():
             # record fields live on record rows, not facts; their frequency is not measured here
-            entry["recent_facts"] = None if group == "record" else recent_by_key.get(field, 0)
+            per_method = {} if group == "record" else recent_by_key.get(field, {})
+            entry["recent_by_method"] = per_method
+            entry["recent_facts"] = None if group == "record" else sum(per_method.values())
             fields[group].append(entry)
 
     return {
@@ -1023,6 +1033,7 @@ async def transaction_composition(transaction_name: str,
         "sample": sample,
         "mi_kinds": mi_kinds,
         "counts": {"facts": total, "with_resp_value": with_value, "with_mi": with_mi,
-                   "recent_facts": recent_total, "recent_days": recent_days},
+                   "recent_facts": recent_total, "recent_days": recent_days,
+                   "recent_by_method": recent_by_method},
         "fields": fields,
     }
