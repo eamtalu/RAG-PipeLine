@@ -564,7 +564,7 @@ async def list_transaction_registry(customer: str = Depends(get_current_customer
         .order_by(AnalyticsTransactionRegistry.transaction_name))).scalars().all()
     return {"transactions": [{
         "transaction_name": r.transaction_name,
-        "capture": r.capture, "show": r.show, "expand": r.expand,
+        "capture": r.capture, "show": r.show, "expand": r.expand, "mi": r.mi,
         "first_seen_at": _iso(r.first_seen_at),
         "reviewed_at": _iso(r.reviewed_at), "reviewed_by": r.reviewed_by,
         "needs_review": r.reviewed_at is None,
@@ -600,8 +600,8 @@ async def set_transaction_switches(transaction_name: str, payload: dict = Body(.
         raise HTTPException(404, f"analytics has not seen a transaction named {transaction_name!r} "
                                  f"for this logspace, so there is nothing to configure")
 
-    before = (row.capture, row.show, row.expand)
-    switched = [f for f in ("capture", "show", "expand") if f in payload]
+    before = (row.capture, row.show, row.expand, row.mi)
+    switched = [f for f in ("capture", "show", "expand", "mi") if f in payload]
     for field in switched:
         setattr(row, field, bool(payload[field]))
     if "description" in payload:
@@ -610,7 +610,7 @@ async def set_transaction_switches(transaction_name: str, payload: dict = Body(.
         row.description = (str(payload["description"]).strip() or None
                            if payload["description"] is not None else None)
     if not switched and "description" not in payload:
-        raise HTTPException(400, "body must contain at least one of capture, show, expand, description")
+        raise HTTPException(400, "body must contain at least one of capture, show, expand, mi, description")
     if switched:
         row.reviewed_at = datetime.now(timezone.utc)
         row.reviewed_by = payload.get("reviewed_by") or "api"
@@ -624,7 +624,11 @@ async def set_transaction_switches(transaction_name: str, payload: dict = Body(.
     turned_capture_on = (not before[0]) and row.capture
     show_changed = before[1] != row.show
     turned_expand_on = (not before[2]) and row.expand
-    if turned_capture_on or show_changed or turned_expand_on:
+    # Chunk 94: MI on changes what the fact CONTAINS, so the range diff finds every affected fact by
+    # fingerprint - ordinary tickets, no refold flag. Off publishes nothing: the keys fade when each
+    # range is next restated, and nothing reads them meanwhile.
+    turned_mi_on = (not before[3]) and row.mi
+    if turned_capture_on or show_changed or turned_expand_on or turned_mi_on:
         frontier = await db.scalar(
             select(AnalyticsTenantState.source_watermark).where(
                 AnalyticsTenantState.customer_code == customer))
@@ -646,7 +650,8 @@ async def set_transaction_switches(transaction_name: str, payload: dict = Body(.
     await db.commit()
 
     return {"transaction_name": transaction_name, "capture": row.capture, "show": row.show,
-            "expand": row.expand, "description": row.description, "tickets_published": published,
+            "expand": row.expand, "mi": row.mi, "description": row.description,
+            "tickets_published": published,
             "detail": ("the retention range will be re-examined on the next worker tick"
                        if published else "no re-fold needed for this change")}
 
@@ -851,7 +856,7 @@ async def transaction_registry_detail(transaction_name: str,
 
     return {
         "transaction_name": row.transaction_name,
-        "capture": row.capture, "show": row.show, "expand": row.expand,
+        "capture": row.capture, "show": row.show, "expand": row.expand, "mi": row.mi,
         "first_seen_at": _iso(row.first_seen_at),
         "reviewed_at": _iso(row.reviewed_at), "reviewed_by": row.reviewed_by,
         "needs_review": row.reviewed_at is None,
@@ -871,4 +876,116 @@ async def transaction_registry_detail(transaction_name: str,
                   "first_event_at": _iso(facts[1]), "last_event_at": _iso(facts[2])},
         "records": {"count": record_count},
         "metrics": {"referencing": referencing, "apply_to_all": apply_to_all},
+    }
+
+
+@router.get("/registry/transactions/{transaction_name}/composition")
+async def transaction_composition(transaction_name: str,
+                                  customer: str = Depends(get_current_customer),
+                                  db: AsyncSession = Depends(get_session)):
+    """What a fact of this transaction is MADE OF (chunk 94): the newest fact's attributes grouped into
+    request, response and MI; the kinds of M3 call the newest transaction made, read from its own
+    timeline so they are visible before anyone switches MI on; the four switches; the field approvals
+    per source; and how many facts carry a bare response value or MI detail.
+
+    Bounded by construction: one fact, one transaction's entries through the assignment index, three
+    counts on the tenant+name index. Bookkeeping `__` keys are never shown.
+    """
+    from sqlalchemy import String, cast
+    from app.persistence.models.analytics_fact import AnalyticsFact
+    from app.persistence.models.log_entry import LogEntry, LogEntryType
+    from app.persistence.models.log_entry_assignment import LogEntryAssignment
+    from app.persistence.models.log_transaction import LogTransaction
+    from app.services.analytics import payload as pl
+    row = await db.scalar(
+        select(AnalyticsTransactionRegistry).where(
+            AnalyticsTransactionRegistry.customer_code == customer,
+            AnalyticsTransactionRegistry.transaction_name == transaction_name))
+    if row is None:
+        raise HTTPException(404, f"analytics has not seen a transaction named "
+                                 f"{transaction_name!r} for this logspace")
+
+    newest = (await db.execute(
+        select(AnalyticsFact).where(AnalyticsFact.customer_code == customer,
+                                    AnalyticsFact.transaction_name == transaction_name)
+        .order_by(AnalyticsFact.event_time.desc().nulls_last()).limit(1))).scalar_one_or_none()
+    sample = None
+    if newest is not None:
+        request, response, mi = {}, {}, {}
+        for key, value in sorted((newest.attributes or {}).items()):
+            if key.startswith("__"):
+                continue
+            if key.startswith(pl.RESPONSE_PREFIX):
+                response[key] = value
+            elif key.startswith(pl.MI_PREFIX):
+                parts = key.split(".")
+                if len(parts) == 4:
+                    mi.setdefault(f"{parts[1]}.{parts[2]}", {})[parts[3]] = value
+                else:
+                    mi.setdefault("_legacy", {})[key] = value
+            else:
+                request[key] = value
+        sample = {"fact_id": str(newest.id), "event_time": _iso(newest.event_time),
+                  "method": newest.method, "status": newest.status,
+                  "quantity": None if newest.quantity is None else str(newest.quantity),
+                  "request": request, "response": response, "mi": mi}
+
+    # The kinds of MI call, from the NEWEST transaction's own timeline: what the transaction does,
+    # independent of whether the fact records it. One transaction, through the assignment index.
+    mi_kinds: list[dict] = []
+    latest_txn = (await db.execute(
+        select(LogTransaction.id).where(LogTransaction.customer_code == customer,
+                                        LogTransaction.transaction_name == transaction_name)
+        .order_by(LogTransaction.started_at.desc().nulls_last()).limit(1))).scalar_one_or_none()
+    if latest_txn is not None:
+        entries = (await db.execute(
+            select(LogEntry.fields).join(LogEntryAssignment, LogEntryAssignment.entry_id == LogEntry.id)
+            .where(LogEntryAssignment.transaction_id == latest_txn,
+                   LogEntry.entry_type == LogEntryType.mi_result)
+            .order_by(LogEntryAssignment.seq))).scalars().all()
+        seen: dict[tuple, dict] = {}
+        for fields in entries:
+            if not isinstance(fields, dict):
+                continue
+            key = (fields.get("program") or "_", fields.get("transaction") or "_")
+            k = seen.setdefault(key, {"program": key[0], "transaction": key[1], "calls": 0,
+                                      "records": 0, "errors": 0})
+            k["calls"] += 1
+            records = fields.get("records")
+            k["records"] += len(records) if isinstance(records, list) else 0
+            if fields.get("result") not in (None, "OK"):
+                k["errors"] += 1
+        mi_kinds = list(seen.values())
+
+    total, with_value, with_mi = (await db.execute(
+        select(func.count(),
+               func.count().filter(AnalyticsFact.attributes.has_key(pl.BARE_RESPONSE_FIELD)),
+               func.count().filter(cast(AnalyticsFact.attributes, String).like('%"mi.%')))
+        .where(AnalyticsFact.customer_code == customer,
+               AnalyticsFact.transaction_name == transaction_name))).one()
+
+    methods = list((await db.execute(
+        select(LogTransaction.method).distinct()
+        .where(LogTransaction.customer_code == customer,
+               LogTransaction.transaction_name == transaction_name,
+               LogTransaction.method.is_not(None)).limit(50))).scalars().all())
+    fields: dict[str, list] = {"response": [], "mi": [], "record": []}
+    if methods:
+        for r in (await db.execute(
+                select(AnalyticsFieldRegistry)
+                .where(AnalyticsFieldRegistry.customer_code == customer,
+                       AnalyticsFieldRegistry.method.in_(methods))
+                .order_by(AnalyticsFieldRegistry.field).limit(500))).scalars().all():
+            group = ("record" if r.source == "record" else "mi" if r.source == "mi_result" else "response")
+            fields[group].append({"id": str(r.id), "method": r.method, "field": r.field,
+                                  "captured": r.captured, "description": r.description, "unit": r.unit})
+
+    return {
+        "transaction_name": transaction_name,
+        "switches": {"capture": row.capture, "show": row.show, "expand": row.expand, "mi": row.mi},
+        "methods": methods,
+        "sample": sample,
+        "mi_kinds": mi_kinds,
+        "counts": {"facts": total, "with_resp_value": with_value, "with_mi": with_mi},
+        "fields": fields,
     }

@@ -78,6 +78,10 @@ class AnalyticsTransactionRegistry(Base):
                                        server_default="true")
     expand: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False,
                                          server_default="false")
+    #: Chunk 94: whether the fact carries the M3 calls made inside the transaction, as one group of
+    #: counters per kind of call. OFF by default: a fact is request and response; the calls are the
+    #: transaction's business, kept whole by Stage 2 and as rows by `expand`.
+    mi: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     #: What this transaction IS, in the operator's words, for the catalog that the metric wizard and
     #: the chat agent read (chunk 84). Metadata, not a review decision: editing it publishes no ticket

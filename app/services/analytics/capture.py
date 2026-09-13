@@ -139,6 +139,19 @@ async def expanded_names(db: AsyncSession, customer_code: str) -> frozenset[str]
     return frozenset(rows)
 
 
+async def mi_names(db: AsyncSession, customer_code: str) -> frozenset[str]:
+    """The transaction names this tenant has turned MI on for (chunk 94).
+
+    An inclusion list with default OFF, like `expand` and for the same reason: MI detail on the fact is
+    chosen, never inherited. A name missing from the registry gets request and response only.
+    """
+    rows = (await db.execute(
+        select(AnalyticsTransactionRegistry.transaction_name).where(
+            AnalyticsTransactionRegistry.customer_code == customer_code,
+            AnalyticsTransactionRegistry.mi.is_(True)))).scalars().all()
+    return frozenset(rows)
+
+
 def source_predicate(suppressed: frozenset[str]):
     """The capture gate as a SQLAlchemy predicate on `log_transactions`.
 

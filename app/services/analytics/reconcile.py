@@ -301,7 +301,7 @@ async def _compare_rollups(db: AsyncSession, customer_code: str, *, window: UtcW
 
 async def records_vs_facts(db: AsyncSession, customer_code: str, *,
                            window: UtcWindow) -> list[Finding]:
-    """18y: every expanded fact that PREDICTS records (`mi.record_count` > 0 - the same gate the
+    """18y: every expanded fact that PREDICTS records (its MI calls returned rows - the same gate the
     18x presence diff uses, without which every no-record response would be permanently red) must
     have record rows. The one check that can catch a destructive re-expansion that dropped rows.
 
@@ -318,14 +318,11 @@ async def records_vs_facts(db: AsyncSession, customer_code: str, *,
         .where(AnalyticsFact.customer_code == customer_code,
                window.covers(AnalyticsFact.event_time, include_null=False),
                AnalyticsFact.transaction_name.in_(sorted(expanded))))).all()
-    predicted = {}
-    for f in facts:
-        count = (f.attributes or {}).get("mi.record_count")
-        try:
-            if int(count or 0) > 0:
-                predicted[f.source_transaction_id] = f
-        except (TypeError, ValueError):
-            continue
+    # Chunk 94: the SAME predictor the fold uses (`__mi_records` bookkeeping, legacy `mi.record_count`
+    # for older facts), imported rather than re-implemented so the check and the writer cannot drift.
+    from app.services.analytics.consume import _predicts_records
+    predicted = {f.source_transaction_id: f for f in facts
+                 if _predicts_records({"attributes": f.attributes})}
     if not predicted:
         return []
     present = set((await db.execute(
@@ -345,7 +342,7 @@ async def records_vs_facts(db: AsyncSession, customer_code: str, *,
         findings.append(Finding(
             check="records_vs_facts",
             summary=(f"expanded transaction {f.source_transaction_id} ({f.transaction_name}) "
-                     f"predicts records (mi.record_count) but has no record rows"
+                     f"predicts records (its MI calls returned rows) but has no record rows"
                      + ("" if recoverable else " - beyond entry retention, unrecoverable")),
             detail={"transaction_name": f.transaction_name,
                     "source_transaction_id": str(f.source_transaction_id),

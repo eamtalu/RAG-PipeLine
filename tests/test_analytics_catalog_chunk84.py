@@ -199,7 +199,7 @@ async def test_fields_and_transaction_names_carry_descriptions():
     assert txns["Quick Stock Count"]["description"] is None
     assert txns["Brighton Stock Pick"]["capture"] is True
     assert set(txns["Brighton Stock Pick"]) == {"transaction_name", "description",
-                                                "capture", "show", "expand"}
+                                                "capture", "show", "expand", "mi"}   # mi: chunk 94
 
 
 async def test_an_empty_tenant_is_an_empty_catalog_not_an_error():

@@ -69,8 +69,8 @@ _MI_RECORDS = "records"
 #: warehouse facts rather than protocol noise. Anything absent from here still DISCOVERS - it is
 #: recorded by name for review - so this list is a head start, not a limit.
 SEED_FIELDS: frozenset[str] = frozenset({
-    # mi_result bookkeeping
-    "mi.result", "mi.program", "mi.transaction", "mi.record_count",
+    # chunk 94: a bare response value, the confirmed quantity echoed back on every pick
+    "resp.value",
     # quantities and stock state: the reason R3 exists
     "resp.QuantityOnHand", "resp.OnHandQuantity", "resp.AllocatedQuantity",
     "resp.AvailableQuantity", "resp.TotalNumberOfBalances", "resp.NumberOfLines",
@@ -110,9 +110,14 @@ def seeded(name: str) -> bool:
     """Whether a newly discovered field should arrive already approved.
 
     The veto is checked FIRST and independently, so this stays true even if a credential-shaped name is
-    added to `SEED_FIELDS` by mistake.
+    added to `SEED_FIELDS` by mistake. Chunk 94: the per-kind MI counters are seeded by SHAPE rather
+    than by list, because the kinds are whatever M3 programs a tenant's transactions call - a list
+    could never be complete. They are only ever observed when a transaction's `mi` switch is on, which
+    is the deliberate decision the seed then honours. The four legacy `mi.*` names are no longer seeded.
     """
-    return name in SEED_FIELDS and not never_auto_approve(name)
+    if never_auto_approve(name):
+        return False
+    return name in SEED_FIELDS or bool(_MI_GROUP_NAME.match(name))
 
 
 def _is_scalar(value) -> bool:
@@ -125,19 +130,45 @@ def _is_scalar(value) -> bool:
     return value is None or isinstance(value, (str, int, float, bool))
 
 
-def extract(entries) -> dict:
-    """Every namespaced scalar in one transaction's response and mi_result entries.
+#: Chunk 94: the name a bare response value is kept under. A pick's response is `{"response":
+#: "3.333333"}` - the confirmed quantity echoed back, with no field name of its own. Every recent pick
+#: on the live tenant answers this way, and until this chunk the value was dropped for want of a name.
+BARE_RESPONSE_FIELD = f"{RESPONSE_PREFIX}value"
+#: The four counters kept per KIND of M3 call when a transaction's `mi` switch is on.
+_MI_GROUP_FIELDS = ("calls", "errors", "result", "record_count")
+#: A per-kind MI name: `mi.<program>.<transaction>.<one of the four>`. Program and transaction
+#: are M3 identifiers with no dots, so the shape is unambiguous.
+_MI_GROUP_NAME = re.compile(r"^mi\.[^.]+\.[^.]+\.(calls|errors|result|record_count)$")
+
+
+def _kind(fields: dict) -> str:
+    """`<program>.<transaction>` for one mi_result entry, `_` standing in for a missing half."""
+    program = fields.get("program") if _is_scalar(fields.get("program")) and fields.get("program") else "_"
+    transaction = (fields.get("transaction") if _is_scalar(fields.get("transaction"))
+                   and fields.get("transaction") else "_")
+    return f"{program}.{transaction}"
+
+
+def extract(entries, *, mi: bool = False) -> dict:
+    """Every namespaced scalar in one transaction's response entries, plus its MI calls when asked.
 
     `entries` is an iterable of `(entry_type, fields)`. Returns `{namespaced name: value}` with NOTHING
     filtered - approval happens in `select`, so this stays a pure description of what the WMS said and
     a test can assert the two steps separately.
 
-    LAST value wins when a transaction has several `mi_result` entries carrying the same key. A
-    transaction can hold many M3 calls, so `mi.program` is genuinely ambiguous at this grain; the last
-    is chosen because it is the call the response was built from. `mi.record_count` is SUMMED instead,
-    since "how many records did this transaction see" is a total rather than a pick.
+    Response (chunk 94): an object payload is unwrapped one level into `resp.<key>`; a bare scalar
+    payload is kept as `resp.value`; an empty string is nothing.
+
+    MI (chunk 94): OFF by default, because the fact is the business event and the M3 calls between
+    request and response are the transaction's business - kept in full by Stage 2's timeline and, as
+    rows, by the record grain. Measured before deciding: `status` already captured every MI failure
+    and no metric named an `mi.*` key. When a transaction's `mi` switch is on, each KIND of call
+    (program + transaction) becomes one group of four counters, so a transaction with 39 calls of 5
+    kinds is 5 groups, never 39: `calls`, `errors` (results other than OK), `result` (the last, the one
+    the response was built from) and `record_count` (summed).
     """
     out: dict = {}
+    groups: dict[str, dict] = {}
     for entry_type, fields in entries:
         if not isinstance(fields, dict):
             continue
@@ -151,20 +182,44 @@ def extract(entries) -> dict:
                 for k, v in payload.items():
                     if _is_scalar(v):
                         out[f"{RESPONSE_PREFIX}{k}"] = v
+            elif _is_scalar(payload) and payload is not None \
+                    and not (isinstance(payload, str) and not payload.strip()):
+                out[BARE_RESPONSE_FIELD] = payload
             # Anything else at the top level of a response entry is metadata, not warehouse data.
             for k, v in fields.items():
                 if k != "response" and _is_scalar(v):
                     out[f"{RESPONSE_PREFIX}{k}"] = v
 
-        elif entry_type == "mi_result":
-            for k in _MI_SCALARS:
-                if k in fields and _is_scalar(fields[k]):
-                    out[f"{MI_PREFIX}{k}"] = fields[k]
+        elif entry_type == "mi_result" and mi:
+            g = groups.setdefault(_kind(fields), {"calls": 0, "errors": 0, "result": None, "record_count": 0})
+            g["calls"] += 1
+            result = fields.get("result") if _is_scalar(fields.get("result")) else None
+            g["result"] = result
+            if result is not None and result != "OK":
+                g["errors"] += 1
             records = fields.get(_MI_RECORDS)
             if isinstance(records, list):
-                key = f"{MI_PREFIX}record_count"
-                out[key] = (out.get(key) or 0) + len(records)
+                g["record_count"] += len(records)
+    for kind, g in groups.items():
+        for field in _MI_GROUP_FIELDS:
+            out[f"{MI_PREFIX}{kind}.{field}"] = g[field]
     return out
+
+
+def record_total(entries) -> int:
+    """How many records every `mi_result` in the transaction returned, regardless of the `mi` switch.
+
+    The record grain's zero-record gate (`consume._predicts_records`) needs this on every fact, or a
+    transaction whose calls return nothing would re-expand on every fold forever. Kept as bookkeeping
+    under a `__` key by the caller, never as a metric field.
+    """
+    total = 0
+    for entry_type, fields in entries:
+        if entry_type == "mi_result" and isinstance(fields, dict):
+            records = fields.get(_MI_RECORDS)
+            if isinstance(records, list):
+                total += len(records)
+    return total
 
 
 def select(observed: dict, approved: frozenset[str]) -> tuple[dict, list[str]]:

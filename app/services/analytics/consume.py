@@ -295,13 +295,20 @@ async def _read_source(db: AsyncSession, customer_code: str, window: UtcWindow,
 #: only sound while the code that BUILT it is unchanged too - otherwise an edited derivation would never
 #: reach a settled fact, silently, which is exactly the trap `_DERIVE_VERSION` exists to close on the
 #: Stage 2 side. Same lesson, second place it applies.
-_NORMALISE_VERSION = 1
+#: 2 since chunk 94: bare responses are kept as `resp.value`, the legacy `mi.*` summary is no longer
+#: written, and the record total moved to bookkeeping. Every stored fact whose entries still exist is
+#: restated on the next fold of its range.
+_NORMALISE_VERSION = 2
 
 #: Where the skip decision's inputs live on the stored fact. Prefixed `__` so they cannot be mistaken
 #: for a WMS field, and kept in `attributes` rather than as new columns because they are bookkeeping for
 #: this optimisation rather than anything a metric would measure.
 _SRC_FP_KEY = "__src_fp"
 _NORM_V_KEY = "__norm_v"
+#: Chunk 94: how many records the transaction's MI calls returned, on EVERY fact regardless of the
+#: `mi` switch, because `_predicts_records` needs it to keep zero-record transactions from
+#: re-expanding forever. Bookkeeping, hence the `__` prefix: never a registry row, never a metric field.
+_MI_RECORDS_KEY = "__mi_records"
 
 
 def _needs_entries(source_row, stored_fact) -> bool:
@@ -476,18 +483,22 @@ def _expansion_version(approved_record_fields: frozenset[str]) -> str:
 
 
 def _predicts_records(stored_fact: Mapping | None) -> bool:
-    """Whether the stored fact says its response carried records: `mi.record_count` > 0.
+    """Whether the stored fact says its response carried records.
 
     This is what stops zero-record transactions re-expanding forever: `expand` covers a NAME, a name
     spans methods that legitimately return no records, and `_expand_records` writes nothing for them
-    - so "no rows stored" alone would mean "expand again" on every fold. `mi.record_count` is on the
-    seed list, so every captured fact carries it. Residual edge, accepted and pinned: a records list
-    whose entries are all non-dicts counts here but expands to nothing, costing a bounded re-read
-    per fold of that window - never observed live (every sampled record is a dict of scalars).
+    - so "no rows stored" alone would mean "expand again" on every fold. Since chunk 94 the total is
+    the `__mi_records` bookkeeping key, written on every fact whatever the `mi` switch says; a fact
+    written before that reads its legacy `mi.record_count`. Residual edge, accepted and pinned: a
+    records list whose entries are all non-dicts counts here but expands to nothing, costing a bounded
+    re-read per fold of that window - never observed live (every sampled record is a dict of scalars).
     """
     attrs = (stored_fact or {}).get("attributes") or {}
+    raw = attrs.get(_MI_RECORDS_KEY)
+    if raw is None:
+        raw = attrs.get("mi.record_count")
     try:
-        return int(attrs.get("mi.record_count") or 0) > 0
+        return int(raw or 0) > 0
     except (TypeError, ValueError):
         return False
 
@@ -892,6 +903,9 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         # the record grain's presence diff decides which SETTLED transactions need their entries
         # re-read - and a switch is read once per run (the race rule at the top of this block).
         expanded = await capture.expanded_names(db, customer_code)
+        # Chunk 94: the fourth switch, read once per run like the other three. MI detail lands on
+        # the fact only for the names that asked for it.
+        mi_on = await capture.mi_names(db, customer_code)
         exp_v = _expansion_version(await capture.approved_record_fields(db, customer_code))
         refresh = await _records_needing_expansion(db, customer_code, window, expanded,
                                                    stored_by_txn, exp_v)
@@ -907,7 +921,9 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         # that discovered it, so the fact was written WITHOUT it. That self-heals only if the window is
         # folded again - and tickets are published on change, so a window that never changes again
         # never is. The gap would have been permanent, which is the exact loss R3 exists to prevent.
-        observed_by_row = [(row, pl.extract(by_txn.get(row["id"], ()))) for row in source_rows]
+        observed_by_row = [(row, pl.extract(by_txn.get(row["id"], ()),
+                                            mi=row.get("transaction_name") in mi_on))
+                           for row in source_rows]
         discovered: dict[str, set[str]] = {}
         for row, observed in observed_by_row:
             if observed:
@@ -941,7 +957,8 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
                 # fingerprint and a version bump therefore invalidates every stored fact by itself.
                 fact["attributes"] = {**(fact.get("attributes") or {}),
                                       _SRC_FP_KEY: row.get("row_fingerprint"),
-                                      _NORM_V_KEY: _NORMALISE_VERSION}
+                                      _NORM_V_KEY: _NORMALISE_VERSION,
+                                      _MI_RECORDS_KEY: pl.record_total(by_txn.get(row["id"], ()))}
                 fact["source_version_hash"] = n2._fingerprint(fact)
             (facts if fact is not None else issues).append(fact if fact is not None else issue)
 

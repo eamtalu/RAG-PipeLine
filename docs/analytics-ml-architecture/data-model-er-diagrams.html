@@ -2632,6 +2632,74 @@ erDiagram
 </table>
 </div>
 
+<h3 class="sub">What a fact is made of, and what is left out on purpose</h3>
+<p>A transaction is a request, some M3 calls, and a response. The fact keeps the first and the last and, since 13 September 2026 (chunk 94), leaves the middle out unless a transaction asks for it. The decision was measured, not assumed: on the live tenant the fact's own <code>status</code> column already captured every M3 failure (0 of 49,087 facts in a week were <code>success</code> with a failed last MI call), and no metric had ever named an <code>mi.*</code> key. The calls themselves stay in full in the Stage 3 timeline, and their rows stay in the record grain.</p>
+
+<figure>
+<svg viewBox="0 0 1120 420" role="img" aria-label="One ConfirmPickLine transaction flows into one fact. The request params and body become the unprefixed request keys, always. The response becomes resp dot key per named field, or resp dot value when the response is a bare value such as 3.333333, gated per field by the field registry. The two M3 calls, MMS060MI LstBalID and MHS850MI AddPickViaRepNo, go nowhere on the fact by default; with the transaction's mi switch on they become one group of four counters per kind of call. Their records go to analytics_record_facts when expand is on. A bookkeeping key __mi_records always carries the record total.">
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <text x="40" y="30" font-weight="600">One pick confirmation, and where each part of it lands</text>
+
+    <!-- left: the transaction timeline -->
+    <g font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.08em" opacity="0.7">
+      <text x="200" y="62" text-anchor="middle">TRANSACTION · Stage 3 timeline</text>
+      <text x="800" y="62" text-anchor="middle">FACT · analytics_facts.attributes</text>
+    </g>
+    <rect x="40" y="80" width="320" height="50" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="56" y="100" font-family="IBM Plex Mono, monospace" font-size="11">request      ConfirmPickLine</text>
+    <text x="56" y="118" font-family="IBM Plex Mono, monospace" font-size="10.5" opacity="0.8">ItemNumber 101998 · QuantityPicked 3.333333 · DeliveryNumber 27383</text>
+
+    <rect x="40" y="150" width="320" height="50" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="56" y="170" font-family="IBM Plex Mono, monospace" font-size="11">MI call 1    MMS060MI LstBalID</text>
+    <text x="56" y="188" font-family="IBM Plex Mono, monospace" font-size="10.5" opacity="0.8">OK · 2 records (stock balances)</text>
+
+    <rect x="40" y="220" width="320" height="50" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="56" y="240" font-family="IBM Plex Mono, monospace" font-size="11">MI call 2    MHS850MI AddPickViaRepNo</text>
+    <text x="56" y="258" font-family="IBM Plex Mono, monospace" font-size="10.5" opacity="0.8">OK · 1 record (the pick posted)</text>
+
+    <rect x="40" y="290" width="320" height="50" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="56" y="310" font-family="IBM Plex Mono, monospace" font-size="11">response     "3.333333"</text>
+    <text x="56" y="328" font-family="IBM Plex Mono, monospace" font-size="10.5" opacity="0.8">a bare value: the confirmed quantity echoed back</text>
+
+    <!-- right: the fact -->
+    <rect x="600" y="80" width="480" height="50" rx="3" fill="#2f7d4f" fill-opacity="0.08" stroke="#2f7d4f" stroke-width="1.2"/>
+    <text x="616" y="100" font-family="IBM Plex Mono, monospace" font-size="11">ItemNumber, QuantityPicked, DeliveryNumber, Warehouse, … 46 keys</text>
+    <text x="616" y="118" font-size="10.5" fill="#2f7d4f">REQUEST · always · flattened by Stage 2 · quantity is read from here</text>
+    <path d="M360,105 L600,105" stroke="#2f7d4f" stroke-width="1.3" fill="none" marker-end="url(#ra)"/>
+
+    <rect x="600" y="150" width="480" height="120" rx="3" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="616" y="170" font-size="11" font-weight="600">MI · off by default: nothing written</text>
+    <text x="616" y="188" font-size="10.5" opacity="0.8">with the transaction's mi switch on, one group per KIND of call:</text>
+    <text x="616" y="206" font-family="IBM Plex Mono, monospace" font-size="10.5">mi.MMS060MI.LstBalID.{calls 1, errors 0, result OK, record_count 2}</text>
+    <text x="616" y="222" font-family="IBM Plex Mono, monospace" font-size="10.5">mi.MHS850MI.AddPickViaRepNo.{calls 1, errors 0, result OK, record_count 1}</text>
+    <text x="616" y="242" font-size="10.5" opacity="0.8">38 repeated LstContents calls would still be ONE group, calls 38</text>
+    <text x="616" y="260" font-family="IBM Plex Mono, monospace" font-size="10.5" opacity="0.8">__mi_records 3   ← bookkeeping, always, gates the record grain</text>
+    <path d="M360,175 L600,195" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3" fill="none" marker-end="url(#ra)"/>
+    <path d="M360,245 L600,215" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3" fill="none" marker-end="url(#ra)"/>
+
+    <rect x="600" y="290" width="480" height="50" rx="3" fill="#2f7d4f" fill-opacity="0.08" stroke="#2f7d4f" stroke-width="1.2"/>
+    <text x="616" y="310" font-family="IBM Plex Mono, monospace" font-size="11">resp.value "3.333333"</text>
+    <text x="616" y="328" font-size="10.5" fill="#2f7d4f">RESPONSE · per field, approved in the field registry · a bare value keeps this fixed name</text>
+    <path d="M360,315 L600,315" stroke="#2f7d4f" stroke-width="1.3" fill="none" marker-end="url(#ra)"/>
+
+    <!-- records -->
+    <rect x="600" y="360" width="480" height="40" rx="3" fill="#7a6fa8" fill-opacity="0.08" stroke="#7a6fa8" stroke-width="1.2"/>
+    <text x="616" y="378" font-family="IBM Plex Mono, monospace" font-size="11">analytics_record_facts · 3 rows · rec.ITNO, rec.STQT, … · tagged mi_program, mi_transaction</text>
+    <text x="616" y="394" font-size="10.5" fill="#7a6fa8">RECORDS · only with the transaction's expand switch on · fields approved per name</text>
+    <path d="M200,270 L200,385 L600,385" stroke="#7a6fa8" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
+  </g>
+</svg>
+<figcaption>Figure 5c. Fact composition. Solid arrows are the default: request always, response per approved field with <code>resp.value</code> for a bare answer. The dashed arrows need the transaction's <code>mi</code> switch, and then produce one group of four counters per kind of call however many times it was called. Records need <code>expand</code>. <code>payload.py:152</code>, <code>payload.py:209</code>, <code>consume.py:311</code>, <code>capture.py:142</code></figcaption>
+</figure>
+
+<ul class="notes">
+  <li><b>Why a bare response was being lost.</b> The extractor lifts named fields out of a response object. A response that is a single string or number had no name, so it was dropped; every one of the last 200 pick confirmations on the live tenant answered <code>{"response": "3.333333"}</code>. It is now kept as <code>resp.value</code>, seeded as approved, and addressable in a metric as <code>attr:resp.value</code>. <code>payload.py:136</code></li>
+  <li><b>Why MI is off the fact by default.</b> A fact is the business event. The M3 calls are the transaction's business, kept whole and in order in the Stage 3 timeline, which is where a person investigates one conversation; their rows are the record grain's business. The four summary keys the fact used to carry described the LAST call only, mixed the record counts of every call into one number, and duplicated what <code>status</code> already says. Turning <code>mi</code> on per transaction publishes ordinary tickets over the retained range so its facts are restated once; turning it off publishes nothing and the keys fade on the next restatement. <code>analytics.py:630</code></li>
+  <li><b>Why per kind and not per call.</b> A route lookup makes 15 calls of 10 kinds, a pick-list read 39 calls of 5 kinds, a load 39 calls of 2 kinds, and a stock count up to 481 calls of one kind. Per kind the fact gets 4 keys per kind, bounded by how many programs a method uses; per call it would grow with the number of calls. The counters keep what a chart can use: how often, how many failed, the last result, how many rows.</li>
+  <li><b>What the version bump restates, and what it cannot.</b> The normalisation version is 2, so a stored fact is rebuilt when its range is next folded and its response entries still exist. Entries are dropped at 60 days, so older facts keep their current attributes; the fingerprint skip protects them from churn. <code>consume.py:301</code></li>
+  <li><b>The screen.</b> The transaction page at <code>/registry/[name]</code> has a "Fact composition" section: request card, response card with field approvals, MI card with the switch and the kinds the newest transaction actually made read from its own timeline, records card mirroring expand. One read, <code>GET /registry/transactions/{name}/composition</code>. <code>analytics.py:883</code></li>
+</ul>
+
 <div class="er">
 <pre class="mermaid">
 erDiagram
@@ -2688,6 +2756,7 @@ erDiagram
         bool capture "does a fact exist at all"
         bool show "does it reach charts"
         bool expand "write per-record rows"
+        bool mi "store the M3 calls on the fact, one group per kind of call; default off"
         text description "what the transaction means, for the catalog and the chat agent"
         datetime reviewed_at "null = needs review"
     }

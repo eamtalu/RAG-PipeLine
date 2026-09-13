@@ -98,6 +98,7 @@ class TransactionRow:
     capture: bool
     show: bool
     expand: bool
+    mi: bool = False
 
 
 @dataclass(frozen=True)
@@ -156,7 +157,7 @@ def shape(customer_code: str, rows: Rows) -> dict:
     } for f in sorted(rows.fields, key=lambda r: r.field)]
     transactions = [{
         "transaction_name": t.transaction_name, "description": t.description,
-        "capture": t.capture, "show": t.show, "expand": t.expand,
+        "capture": t.capture, "show": t.show, "expand": t.expand, "mi": t.mi,
     } for t in sorted(rows.transactions, key=lambda r: r.transaction_name)]
     return {"customer_code": customer_code, "metrics": metrics, "fields": fields,
             "transactions": transactions, "aggregations": aggregations()}
@@ -239,7 +240,8 @@ async def _transactions(db: AsyncSession, customer_code: str) -> list[Transactio
         AnalyticsTransactionRegistry.customer_code == customer_code)
         .order_by(AnalyticsTransactionRegistry.transaction_name))).scalars().all()
     return [TransactionRow(transaction_name=r.transaction_name, description=r.description,
-                           capture=r.capture, show=r.show, expand=r.expand) for r in rows]
+                           capture=r.capture, show=r.show, expand=r.expand,
+                           mi=getattr(r, "mi", False)) for r in rows]
 
 
 async def load(db: AsyncSession, customer_code: str, *, now: datetime | None = None,

@@ -45,32 +45,38 @@ def test_an_empty_response_is_not_an_error():
     assert p.extract([("response", {"response": ""})]) == {}
 
 
-def test_mi_result_scalars_are_flat_and_prefixed():
-    got = p.extract([("mi_result", {"result": "OK", "program": "MMS060MI",
-                                    "transaction": "LstBalID"})])
-    assert got == {"mi.result": "OK", "mi.program": "MMS060MI", "mi.transaction": "LstBalID"}
+def test_mi_result_scalars_are_off_by_default_and_grouped_per_kind_when_on():
+    """Chunk 94. A fact is request and response; the M3 calls are the transaction's business unless
+    the name's `mi` switch asks for them, and then one group of counters per KIND of call."""
+    entry = ("mi_result", {"result": "OK", "program": "MMS060MI", "transaction": "LstBalID"})
+    assert p.extract([entry]) == {}
+    assert p.extract([entry], mi=True) == {
+        "mi.MMS060MI.LstBalID.calls": 1, "mi.MMS060MI.LstBalID.errors": 0,
+        "mi.MMS060MI.LstBalID.result": "OK", "mi.MMS060MI.LstBalID.record_count": 0}
 
 
 def test_records_are_counted_not_expanded():
     """`records[]` is where the ~200k rows/day lives, so R3 takes only its LENGTH. Expansion is R4 and
     is opt-in per transaction."""
-    got = p.extract([("mi_result", {"result": "OK", "records": [{"a": 1}, {"a": 2}, {"a": 3}]})])
-    assert got["mi.record_count"] == 3
-    assert not any("a" in k for k in got), "no record field may leak into the transaction grain"
+    got = p.extract([("mi_result", {"result": "OK", "records": [{"a": 1}, {"a": 2}, {"a": 3}]})], mi=True)
+    assert got["mi._._.record_count"] == 3
+    assert not any(k.endswith(".a") for k in got), "no record field may leak into the transaction grain"
 
 
 def test_record_counts_from_several_calls_are_summed():
     """A transaction can hold many M3 calls. "How many records did this transaction see" is a total, so
     summing is the honest answer - unlike `mi.program`, which is a pick."""
-    got = p.extract([("mi_result", {"records": [1, 2]}), ("mi_result", {"records": [3]})])
-    assert got["mi.record_count"] == 3
+    got = p.extract([("mi_result", {"records": [1, 2]}), ("mi_result", {"records": [3]})], mi=True)
+    assert got["mi._._.record_count"] == 3 and got["mi._._.calls"] == 2
+    assert p.record_total([("mi_result", {"records": [1, 2]}), ("mi_result", {"records": [3]})]) == 3
 
 
-def test_the_last_mi_program_wins():
-    """Genuinely ambiguous at transaction grain. The last is chosen because it is the call the response
-    was built from, and the choice is pinned so it cannot drift silently."""
-    got = p.extract([("mi_result", {"program": "FIRST"}), ("mi_result", {"program": "LAST"})])
-    assert got["mi.program"] == "LAST"
+def test_the_last_result_of_a_kind_wins_and_failures_are_counted():
+    """Within one kind the last result is kept, because it is the call the response was built from;
+    the failures on the way are counted rather than lost (chunk 94)."""
+    got = p.extract([("mi_result", {"program": "P", "transaction": "T", "result": "Not found"}),
+                     ("mi_result", {"program": "P", "transaction": "T", "result": "OK"})], mi=True)
+    assert got["mi.P.T.result"] == "OK" and got["mi.P.T.errors"] == 1 and got["mi.P.T.calls"] == 2
 
 
 def test_nested_values_are_dropped_not_flattened():
@@ -225,8 +231,10 @@ def test_the_cycle_registers_fields_before_reading_the_approvals():
 def test_a_seeded_field_is_capturable_on_first_sight():
     """The property the ordering exists to give: no second fold required. Asserted at the unit level
     too, so the guarantee does not rest solely on reading the cycle's source."""
-    observed = p.extract([("mi_result", {"program": "MMS060MI", "records": [1, 2]})])
+    observed = p.extract([("mi_result", {"program": "MMS060MI", "transaction": "LstBalID",
+                                         "records": [1, 2]})], mi=True)
     approved = frozenset(n for n in observed if p.seeded(n))
     captured, unknown = p.select(observed, approved)
-    assert captured == {"mi.program": "MMS060MI", "mi.record_count": 2}
+    assert captured == {"mi.MMS060MI.LstBalID.calls": 1, "mi.MMS060MI.LstBalID.errors": 0,
+                        "mi.MMS060MI.LstBalID.result": None, "mi.MMS060MI.LstBalID.record_count": 2}
     assert unknown == []
