@@ -4294,5 +4294,5 @@ If eSmartServer logs it on the RESPONSE line as well, Stage 2 pairs exactly and 
 
 After deploying, run a full regroup for the tenant (`POST /logs/regroup/full`), as after 18r.
 The version bump rewrites every surviving row once; the 67 picks lose their foreign response keys and gain `resp.value`; the analytics tickets the regroup publishes restate the affected facts at normalisation version 2.
-The field registry keeps the foreign rows under ConfirmPickLine, because observation never deletes; the composition screen will show them as "not seen in the last 14 days" once the restated facts age past the window.
+The field registry keeps the foreign rows under ConfirmPickLine, because observation never deletes; the composition screen shows them as "not seen in the last 14 days" as soon as the restated facts land, because the count is taken from the facts themselves, not from the registry.
 Standing check afterwards: under ConfirmPickLine every response field but `resp.value` should read "not seen", and the headless count in the reconciler should stay near the new floor.
