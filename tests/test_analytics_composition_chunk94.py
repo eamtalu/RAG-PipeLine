@@ -388,6 +388,33 @@ async def test_the_composition_endpoint_lists_mi_kinds_even_when_the_switch_is_o
         [("MMS060MI", "LstBalID", 1, 2), ("MHS850MI", "AddPickViaRepNo", 1, 1)]
 
 
+async def test_the_composition_endpoint_collapses_per_method_rows_into_one_entry_per_field():
+    """Field registry rows are per M3 method. A transaction served by several methods has the same
+    response field registered once per method, and the cards must show the field ONCE - seen live as
+    `resp.AccessToken` eleven times on Brighton Stock Pick. Approval is by name across methods
+    (`approved_attributes`), so one entry carries every row id and `captured` is true if any row is."""
+    await _plant()
+    await n3.consume_tenant(CC)
+    async with async_session() as db:
+        # a second method serving the same name, with the same field registered twice more
+        db.add(LogTransaction(customer_code=CC, job_id=(await db.scalar(select(Job.id).where(Job.customer_code == CC))),
+                              sealed=True, started_at=T0 + timedelta(hours=2), ended_at=T0 + timedelta(hours=2),
+                              date=T0.date(), duration_ms=5, method="GetNextDeliveryByRoute", transaction_name="Pick",
+                              status=LogTransactionStatus.success, attributes={}))
+        for method, captured in (("ConfirmPickLine", False), ("GetNextDeliveryByRoute", True)):
+            db.add(AnalyticsFieldRegistry(customer_code=CC, method=method, source="response",
+                                          field="resp.AllocatedQuantity", captured=captured))
+        await db.commit()
+    async with async_session() as db:
+        out = await api.transaction_composition("Pick", customer=CC, db=db)
+    names = [f["field"] for f in out["fields"]["response"]]
+    assert names.count("resp.AllocatedQuantity") == 1, names
+    entry = next(f for f in out["fields"]["response"] if f["field"] == "resp.AllocatedQuantity")
+    assert entry["captured"] is True, "approved on any method means approved by name"
+    assert sorted(entry["methods"]) == ["ConfirmPickLine", "GetNextDeliveryByRoute"]
+    assert len(entry["ids"]) == 2 and entry["id"] in entry["ids"]
+
+
 async def test_the_composition_endpoint_404s_for_an_unknown_name():
     from fastapi import HTTPException
     async with async_session() as db:

@@ -969,16 +969,31 @@ async def transaction_composition(transaction_name: str,
         .where(LogTransaction.customer_code == customer,
                LogTransaction.transaction_name == transaction_name,
                LogTransaction.method.is_not(None)).limit(50))).scalars().all())
+    # One entry per FIELD NAME, not per registry row. Rows are per M3 method, and a name served by
+    # eleven methods has the same response field registered eleven times - which is what the first
+    # version of these cards showed (`resp.AccessToken` x11 on Brighton Stock Pick). Approval is by
+    # name across methods (`capture.approved_attributes`), so `captured` is true if ANY row is, and
+    # every row id is carried so the screen can flip them all together.
     fields: dict[str, list] = {"response": [], "mi": [], "record": []}
     if methods:
+        grouped: dict[tuple[str, str], dict] = {}
         for r in (await db.execute(
                 select(AnalyticsFieldRegistry)
                 .where(AnalyticsFieldRegistry.customer_code == customer,
                        AnalyticsFieldRegistry.method.in_(methods))
-                .order_by(AnalyticsFieldRegistry.field).limit(500))).scalars().all():
+                .order_by(AnalyticsFieldRegistry.field, AnalyticsFieldRegistry.method)
+                .limit(2000))).scalars().all():
             group = ("record" if r.source == "record" else "mi" if r.source == "mi_result" else "response")
-            fields[group].append({"id": str(r.id), "method": r.method, "field": r.field,
-                                  "captured": r.captured, "description": r.description, "unit": r.unit})
+            entry = grouped.setdefault((group, r.field), {
+                "id": str(r.id), "ids": [], "methods": [], "field": r.field, "captured": False,
+                "description": r.description, "unit": r.unit})
+            entry["ids"].append(str(r.id))
+            entry["methods"].append(r.method)
+            entry["captured"] = entry["captured"] or bool(r.captured)
+            entry["description"] = entry["description"] or r.description
+            entry["unit"] = entry["unit"] or r.unit
+        for (group, _field), entry in grouped.items():
+            fields[group].append(entry)
 
     return {
         "transaction_name": transaction_name,
