@@ -46,7 +46,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -256,9 +256,12 @@ async def observe_fields(db: AsyncSession, customer_code: str,
     hardcoded seed list AND not credential-shaped. Everything else arrives `captured = false`: recorded
     by NAME so it is reviewable, never by value.
 
-    `ON CONFLICT DO NOTHING` for the same reason `observe_names` uses it - observation must never
-    overwrite a decision. A field somebody has un-ticked has to stay un-ticked even though it is on the
-    seed list, and it is seen again on every single tick.
+    On conflict the row's `last_seen_at` and `seen_count` move and NOTHING else does, for the same
+    reason `observe_names` never overwrites: observation must never overwrite a decision. A field
+    somebody has un-ticked has to stay un-ticked even though it is on the seed list, and it is seen
+    again on every single tick. Chunk 94 made the counters move at all - before, the insert did
+    nothing on conflict, so every row read "seen once" forever and a field seen once in August looked
+    exactly like one seen on every pick (1,841 rows on tmp-live, not one with seen_count above 1).
 
     `source` is derived from the namespace rather than passed, so the stored row cannot disagree with
     the prefix the field is addressed by.
@@ -283,10 +286,16 @@ async def observe_fields(db: AsyncSession, customer_code: str,
             })
     if not rows:
         return []
-    stmt = pg_insert(AnalyticsFieldRegistry).values(rows).on_conflict_do_nothing(
-        constraint="uq_analytics_field_registry_key")
-    added = list((await db.execute(
-        stmt.returning(AnalyticsFieldRegistry.field))).scalars().all())
+    insert = pg_insert(AnalyticsFieldRegistry).values(rows)
+    stmt = insert.on_conflict_do_update(
+        constraint="uq_analytics_field_registry_key",
+        set_={"last_seen_at": now, "updated_at": now,
+              "seen_count": AnalyticsFieldRegistry.seen_count + 1})
+    # `xmax = 0` is true only for a row this statement INSERTED; an updated row keeps its old xmax.
+    # That is how "newly registered" is told apart from "seen again" now that both come back.
+    result = await db.execute(stmt.returning(AnalyticsFieldRegistry.field,
+                                             literal_column("(xmax = 0)").label("inserted")))
+    added = [field for field, inserted in result.all() if inserted]
     if added:
         unapproved = sorted(set(added) - {a for a in added if pl.seeded(a)})
         logger.info("Analytics: %d response field(s) seen for the first time for %s; %d auto-approved "

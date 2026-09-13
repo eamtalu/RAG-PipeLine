@@ -415,6 +415,53 @@ async def test_the_composition_endpoint_collapses_per_method_rows_into_one_entry
     assert len(entry["ids"]) == 2 and entry["id"] in entry["ids"]
 
 
+async def test_observing_a_field_again_bumps_its_counters_but_never_its_decision():
+    """Discovery used ON CONFLICT DO NOTHING, so `seen_count` stayed at 1 and `last_seen_at` at the
+    first sighting forever: on tmp-live not one of 1,841 rows had seen_count above 1, and a field
+    seen once in August looked exactly like one seen on every pick. The counters now move on every
+    sighting; `captured` still never does."""
+    async with async_session() as db:
+        added = await capture.observe_fields(db, CC, {"ConfirmPickLine": {"resp.value", "resp.Odd"}})
+        await db.commit()
+    assert sorted(added) == ["resp.Odd", "resp.value"]
+    async with async_session() as db:
+        await db.execute(update(AnalyticsFieldRegistry).where(
+            AnalyticsFieldRegistry.customer_code == CC, AnalyticsFieldRegistry.field == "resp.value")
+            .values(captured=False))                       # a person un-ticks the seeded field
+        await db.commit()
+    async with async_session() as db:
+        added = await capture.observe_fields(db, CC, {"ConfirmPickLine": {"resp.value"}})
+        await db.commit()
+    assert added == [], "seen before: not reported as new"
+    async with async_session() as db:
+        rows = {r.field: r for r in (await db.execute(select(AnalyticsFieldRegistry).where(
+            AnalyticsFieldRegistry.customer_code == CC))).scalars().all()}
+    assert rows["resp.value"].seen_count == 2
+    assert rows["resp.value"].last_seen_at > rows["resp.value"].first_seen_at
+    assert rows["resp.value"].captured is False, "the decision outlives the sighting"
+    assert rows["resp.Odd"].seen_count == 1
+
+
+async def test_the_composition_endpoint_reports_how_often_each_field_appears_on_recent_facts():
+    """The registry says a field EXISTS for a method; only the facts say how often. Forty-seven of the
+    forty-eight response fields under ConfirmPickLine on tmp-live were seen exactly once, from a
+    foreign response object stitched into a pick, and the card showed them as if they were regular."""
+    await _plant()
+    await n3.consume_tenant(CC)
+    async with async_session() as db:
+        # a registry row nobody has seen on a recent fact
+        db.add(AnalyticsFieldRegistry(customer_code=CC, method="ConfirmPickLine", source="response",
+                                      field="resp.Ghost", captured=False))
+        await db.commit()
+    async with async_session() as db:
+        out = await api.transaction_composition("Pick", customer=CC, db=db)
+    assert out["counts"]["recent_days"] == 14
+    assert out["counts"]["recent_facts"] == 1
+    by_name = {f["field"]: f for f in out["fields"]["response"]}
+    assert by_name["resp.value"]["recent_facts"] == 1
+    assert by_name["resp.Ghost"]["recent_facts"] == 0
+
+
 async def test_the_composition_endpoint_404s_for_an_unknown_name():
     from fastapi import HTTPException
     async with async_session() as db:

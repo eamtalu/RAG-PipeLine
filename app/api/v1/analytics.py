@@ -964,6 +964,25 @@ async def transaction_composition(transaction_name: str,
         .where(AnalyticsFact.customer_code == customer,
                AnalyticsFact.transaction_name == transaction_name))).one()
 
+    # How often each response or MI key actually appears on RECENT facts of this name. The registry
+    # says a field exists for a method; only the facts say whether it is regular or a one-off. On
+    # tmp-live 47 of 48 response fields under ConfirmPickLine had been seen exactly once, from a
+    # foreign response object stitched into a pick, and the card showed them as if they were normal.
+    # One aggregate over the name's last two weeks of facts, on the tenant+name+event index.
+    recent_days = 14
+    since = datetime.now(timezone.utc) - timedelta(days=recent_days)
+    from sqlalchemy import text as _text
+    recent = (await db.execute(_text("""
+        SELECT k, count(*) FROM analytics_facts f, jsonb_object_keys(f.attributes) k
+        WHERE f.customer_code = :c AND f.transaction_name = :n AND f.event_time >= :since
+          AND (k LIKE 'resp.%' OR k LIKE 'mi.%')
+        GROUP BY k"""), {"c": customer, "n": transaction_name, "since": since})).all()
+    recent_by_key = {k: n for k, n in recent}
+    recent_total = await db.scalar(
+        select(func.count()).where(AnalyticsFact.customer_code == customer,
+                                   AnalyticsFact.transaction_name == transaction_name,
+                                   AnalyticsFact.event_time >= since)) or 0
+
     methods = list((await db.execute(
         select(LogTransaction.method).distinct()
         .where(LogTransaction.customer_code == customer,
@@ -992,7 +1011,9 @@ async def transaction_composition(transaction_name: str,
             entry["captured"] = entry["captured"] or bool(r.captured)
             entry["description"] = entry["description"] or r.description
             entry["unit"] = entry["unit"] or r.unit
-        for (group, _field), entry in grouped.items():
+        for (group, field), entry in grouped.items():
+            # record fields live on record rows, not facts; their frequency is not measured here
+            entry["recent_facts"] = None if group == "record" else recent_by_key.get(field, 0)
             fields[group].append(entry)
 
     return {
@@ -1001,6 +1022,7 @@ async def transaction_composition(transaction_name: str,
         "methods": methods,
         "sample": sample,
         "mi_kinds": mi_kinds,
-        "counts": {"facts": total, "with_resp_value": with_value, "with_mi": with_mi},
+        "counts": {"facts": total, "with_resp_value": with_value, "with_mi": with_mi,
+                   "recent_facts": recent_total, "recent_days": recent_days},
         "fields": fields,
     }
