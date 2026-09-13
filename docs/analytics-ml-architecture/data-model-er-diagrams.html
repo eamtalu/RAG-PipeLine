@@ -2348,6 +2348,7 @@ erDiagram
         string customer_code
         datetime range_start "padded window that changed"
         datetime range_end
+        bool refold_rollups "rebuild every bucket in range even if no fact changed; show flip, metric activation"
         datetime consumed_at
         int attempts
         datetime abandoned_at
@@ -2687,6 +2688,7 @@ erDiagram
         bool capture "does a fact exist at all"
         bool show "does it reach charts"
         bool expand "write per-record rows"
+        text description "what the transaction means, for the catalog and the chat agent"
         datetime reviewed_at "null = needs review"
     }
     analytics_field_registry {
@@ -2695,17 +2697,22 @@ erDiagram
         string source "request / response / mi_result"
         string field "field NAME only, never a value"
         bool captured
+        text description "what the field means"
+        string unit "units, ms, kg; copied onto measures by the wizard"
         int seen_count
     }
     analytics_metrics {
         uuid id PK
         string name "unique per tenant"
-        jsonb dimensions "fields to group by"
-        jsonb measures "sum / count / avg of which field"
-        jsonb filter "method allow-list"
+        text description "mandatory in the wizard; what the number means"
+        string source "transaction or record: which fact table it folds"
+        jsonb dimensions "up to 4 fields to group by"
+        jsonb measures "name, aggregation, field, unit; sum / count / average / stats / extent / percentile / distinct"
+        jsonb filter "method and transaction allow-lists"
         jsonb grains "hourly / daily / monthly"
         string status "draft / active / inactive"
-        date backfilled_through
+        datetime rollups_from "history starts here; null = unbounded (the built-in metrics)"
+        date backfilled_through "last day fully folded; advances inside every fold"
     }
     analytics_tenant_state {
         uuid id PK
@@ -2736,8 +2743,8 @@ erDiagram
 </section>
 
 <section class="station">
-<h2><span class="eyebrow">Station 5</span><br>Rollups: pre-added numbers for charts</h2>
-<p>A rollup row is one metric, one time bucket, and up to four dimension values, with the sum, count, min, max and a histogram already computed. The API answers a chart by combining settled rollups for old buckets with a live scan of facts for the current bucket. Rollups store additive parts, never finished answers, so an average is computed at read time from sum and count.</p>
+<h2><span class="eyebrow">Station 5</span><br>Rollups: pre-added numbers for charts and the chat agent</h2>
+<p>A rollup row is one metric, one time bucket, and up to four dimension values, with the sum, count, min, max, a histogram and, for a distinct-count measure, a sketch already computed. The levels form a cascade: the dirty hours are folded from facts, each local day is merged from its hourly rows when the tenant's zone allows it (the guard is explained below), and each month from its days. The API answers a chart by combining settled rollups for old buckets with a live scan of facts for the current bucket. Rollups store additive parts, never finished answers, so an average is computed at read time from sum and count.</p>
 <figure>
 <svg viewBox="0 0 1120 740" role="img" aria-label="Station 5 has a write side and a read side. Write side, inside the analytics run: dirty facts are folded per metric definition into hourly UTC buckets and local-day buckets, monthly is folded from daily, and each dirty bucket's rows are deleted and reinserted. Read side, the series API: choose the coarsest grain that resolves the window, read the tenant watermark once, serve whole buckets before the watermark from rollups and the ragged edges plus the tail after it from a bounded fact scan, merge role by role, and return additive roles so averages are divided at read time.">
   <defs>
@@ -2761,8 +2768,8 @@ erDiagram
 
     <rect x="300" y="60" width="240" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
     <text x="420" y="82" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_facts</text>
-    <text x="420" y="98" text-anchor="middle" font-size="11" opacity="0.8">read ONCE: only rows in the dirty hours</text>
-    <text x="420" y="112" text-anchor="middle" font-size="11" opacity="0.8">and dirty local days, hidden names excluded</text>
+    <text x="420" y="98" text-anchor="middle" font-size="11" opacity="0.8">read ONCE per run, for every metric: rows in the dirty hours</text>
+    <text x="420" y="112" text-anchor="middle" font-size="11" opacity="0.8">(dirty days only when a day cannot derive), hidden names excluded</text>
 
     <rect x="40" y="160" width="500" height="120" rx="3" fill="#0f6e8c" fill-opacity="0.06" stroke="#0f6e8c" stroke-width="1.4"/>
     <text x="290" y="182" text-anchor="middle" font-weight="600">fold, pure Python, per definition</text>
@@ -2770,7 +2777,7 @@ erDiagram
     <g font-size="11.5">
       <text x="56" y="222">group key = (bucket, dim1..dim4) · one output row per MEASURE</text>
       <text x="56" y="238">a row contributes only if it passes the definition's method, classification and status filters</text>
-      <text x="56" y="254">roles per row: count += 1, sum += v, sum_sq += v², min, max, histogram bucket += 1</text>
+      <text x="56" y="254">roles per row: count += 1, sum += v, sum_sq += v², min, max, histogram band += 1; distinct: sketch ← value</text>
       <text x="56" y="270">a value that cannot be read contributes to NOTHING, never to the count</text>
     </g>
     <path d="M155,124 L155,160" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
@@ -2788,8 +2795,8 @@ erDiagram
 
     <path d="M155,280 L155,320" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#ra)"/>
     <path d="M425,280 L425,320" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#ra)"/>
-    <text x="290" y="304" text-anchor="middle" font-size="11">both from facts, in one pass. Never daily from hourly:</text>
-    <text x="290" y="317" text-anchor="middle" font-size="10.5" opacity="0.8">a +05:30 tenant has one UTC hour straddling two local days</text>
+    <text x="290" y="304" text-anchor="middle" font-size="11">hourly from facts; each local day MERGED from its hourly buckets</text>
+    <text x="290" y="317" text-anchor="middle" font-size="10.5" opacity="0.8">when the zone guard passes (Figure 6d), else that day from facts</text>
 
     <rect x="310" y="430" width="230" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
     <text x="425" y="452" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">analytics_monthly_rollups</text>
@@ -2803,10 +2810,10 @@ erDiagram
     <text x="52" y="470" font-size="11">DELETE every row of the dirty buckets,</text>
     <text x="52" y="484" font-size="11">INSERT the recomputed ones. Empty → gone.</text>
 
-    <text x="290" y="530" text-anchor="middle" font-size="11.5" opacity="0.85">Rows store additive ROLES: sum, count, sum_sq, min, max, histogram.</text>
-    <text x="290" y="546" text-anchor="middle" font-size="11.5" opacity="0.85">Never an average, never a percentile. Those are divided out at read time,</text>
+    <text x="290" y="530" text-anchor="middle" font-size="11.5" opacity="0.85">Rows store additive ROLES: sum, count, sum_sq, min, max, 20-band histogram, distinct sketch.</text>
+    <text x="290" y="546" text-anchor="middle" font-size="11.5" opacity="0.85">Never an average, a percentile or a finished item count. Those are divided or estimated at read time,</text>
     <text x="290" y="562" text-anchor="middle" font-size="11.5" opacity="0.85">so twelve months can be added and divided once instead of averaging averages.</text>
-    <text x="290" y="590" text-anchor="middle" font-size="11" opacity="0.7">A retried run recomputes the same buckets to the same rows. Adding deltas would double-count on the first retry.</text>
+    <text x="290" y="590" text-anchor="middle" font-size="11" opacity="0.7">A retried run recomputes the same buckets to the same rows. A running total adjusted per change would carry a missed or doubled adjustment forever.</text>
 
     <!-- READ side -->
     <rect x="590" y="60" width="500" height="58" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
@@ -2860,29 +2867,385 @@ erDiagram
     <rect x="590" y="550" width="500" height="64" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
     <text x="606" y="572" font-weight="600">5  merge and answer</text>
     <text x="606" y="589" font-size="11.5">add_roles merges the two tiers per (bucket, dims). Response: grain, from_rollups, live_spans, and</text>
-    <text x="606" y="604" font-size="11.5">ROLES per bucket. average = sum ÷ count, p95 from the histogram, computed by the caller.</text>
+    <text x="606" y="604" font-size="11.5">ROLES per bucket plus window totals per group. average = sum ÷ count by the caller; distinct and percentile arrive finished as distinct_estimate, p50, p95.</text>
     <path d="M710,524 L710,550" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
     <path d="M970,524 L970,550" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
 
     <rect x="590" y="640" width="500" height="50" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity="0.8"/>
     <text x="840" y="661" text-anchor="middle" font-weight="600">Next.js dashboard</text>
-    <text x="840" y="677" text-anchor="middle" font-size="11" opacity="0.8">polls /status every 2 s per tab: lag_seconds → stale · unsealed_share &gt; 0 → Provisional badge</text>
+    <text x="840" y="677" text-anchor="middle" font-size="11" opacity="0.8">polls /status every 10 s per tab: lag_seconds → stale · unsealed_share &gt; 0 → Provisional badge</text>
     <path d="M840,614 L840,640" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
 
     <text x="560" y="725" text-anchor="middle" font-size="11.5" opacity="0.85">The two tiers meet at one value read once. Reading it twice would double-count or drop the bucket the worker folds in between, and both look like real numbers.</text>
   </g>
 </svg>
-<figcaption>Figure 6. Left, the write side: rollups are recomputed from facts for dirty buckets only and replaced whole, inside the station 4 transaction. Right, the read side: one request is split at the tenant watermark into settled buckets from rollups and a bounded live scan of facts, then merged role by role.</figcaption>
+<figcaption>Figure 6. Left, the write side: dirty hours are recomputed from facts, read once per run for every metric, and each dirty local day is merged from its hourly buckets under the zone guard; every bucket is replaced whole, inside the station 4 transaction. Right, the read side: one request is split at the tenant watermark into settled buckets from rollups and a bounded live scan of facts, then merged role by role.</figcaption>
 </figure>
 
 <ol class="steps">
   <li><b>Choose the grain.</b> Walk the definition's grains from finest to coarsest and take the first with at most 60 buckets and at most 100,000 estimated rows, which yields the coarsest grain that still resolves the window. A grain the definition never folded is never chosen, because it would return an empty chart that looks like zero activity. <code>read.py:91</code></li>
-  <li><b>Read the watermark once.</b> The API reads the tenant state row and passes the analytics watermark into the planner. The planner cannot fetch it, by design. <code>analytics.py:251</code>, <code>read.py:146</code></li>
+  <li><b>Read the watermark once.</b> The API reads the tenant state row and passes the analytics watermark into the planner. The planner cannot fetch it, by design. <code>analytics.py:465</code>, <code>read.py:146</code></li>
   <li><b>Plan the two tiers.</b> Whole buckets that end at or before the watermark come from rollups. The ragged edges of the request and anything after the watermark come from a live scan of facts. For the daily grain the boundary sits at the tenant's local midnight. An ad-hoc group-by, one not among the definition's dimensions, is served entirely live. <code>read.py:146</code></li>
-  <li><b>Read both tiers.</b> Rollup points come from one prepared query over the requested dimension slots. Live points come from a fact scan capped at 200,000 rows and folded with the same fold function the writer uses, so a live edge and a settled bucket can only differ in freshness, never in meaning. <code>read.py:307</code>, <code>read.py:342</code></li>
-  <li><b>Merge and answer.</b> Role buckets are merged with add_roles. The response carries the grain, whether rollups were used, the live spans, and additive roles per bucket. Averages, standard deviation and percentiles are derived by the caller from sum, count, sum of squares and the histogram. <code>read.py:404</code>, <code>definition.py:405</code></li>
+  <li><b>Read both tiers.</b> Rollup points come from one prepared query over the requested dimension slots. Live points come from a fact scan capped at 200,000 rows and folded with the same fold function the writer uses, so a live edge and a settled bucket can only differ in freshness, never in meaning. <code>read.py:307</code>, <code>read.py:347</code></li>
+  <li><b>Merge and answer.</b> Role buckets are merged with add_roles. The response carries the grain, whether rollups were used, the live spans, additive roles per bucket and, since chunk 90, window totals per group merged on the server from raw roles so a distinct total is a union rather than a sum of estimates. Averages and standard deviation are derived by the caller from sum, count and sum of squares. A distinct count arrives finished as <code>distinct_estimate</code>, and a percentile as <code>p50</code> and <code>p95</code>, read out of the 20-band log histogram by walking the cumulative count and interpolating inside the crossing band (chunk 92). Both are estimates: a sketch is about 1.6 percent off, a band is a factor of two wide, and the catalog marks both aggregations approximate. <code>histogram.py:65</code> <code>read.py:427</code>, <code>read.py:409</code>, <code>definition.py:410</code>, <code>definition.py:441</code></li>
 </ol>
-<p><b>On the write side</b>, inside the station 4 run, the diff names the dirty UTC hours and local days. Facts for those buckets are read once and folded into hourly and daily rows in one pass. Monthly is folded from daily, which is exact because a month start is a pure function of a business date. Each dirty bucket's rows are deleted and reinserted, so a retry produces the same rows and an empty bucket disappears. <code>rollups.py:316</code>, <code>rollups.py:356</code>, <code>rollups.py:194</code></p>
+<p><b>On the write side</b>, inside the station 4 run, the diff names the dirty UTC hours and local days from both sides of every changed fact. Facts for the dirty hours are read once per run and folded into hourly rows for every active metric. Each dirty local day is then merged from its hourly rows, and each month from its days. Each dirty bucket's rows are deleted and reinserted, so a retry produces the same rows and an empty bucket disappears. <code>rollups.py:183</code>, <code>rollups.py:532</code>, <code>rollups.py:392</code>, <code>rollups.py:433</code>, <code>rollups.py:289</code></p>
+
+<h3 class="sub">The cascade and the zone guard</h3>
+<p>Until 13 September 2026 the daily bucket was folded from the whole business day of facts, once per active metric, whenever one fact in that day changed. At 10,000 facts a day that was affordable; at 100,000 it was not, and it multiplied by the number of metrics the wizard lets people create. The change is to let each level read only the level below, which the architecture always said, and to guard the one step where that is not automatically exact.</p>
+
+<div class="er">
+<pre class="mermaid">
+flowchart TD
+    A[changed facts in the run] --> B[dirty UTC hours and dirty local days<br/>both sides of every changed fact]
+    B --> C{refold ticket in the run?}
+    C -- yes --> C1[every hour and every local day<br/>in the ticket range is dirty<br/>skip nothing]
+    C -- no --> C2[skip a metric whose filter<br/>no changed fact can match]
+    C1 --> D[read facts for the dirty hours ONCE<br/>hidden names excluded]
+    C2 --> D
+    D --> E[per metric: apply rollups_from in Python<br/>fold hourly buckets, replace them]
+    E --> F{for each dirty day:<br/>both local midnights on whole UTC hours?<br/>day inside the hourly horizon?<br/>metric has an hourly grain?}
+    F -- yes --> G[merge the day from its hourly rows<br/>add_roles: sums add, min/max extreme,<br/>sketches union]
+    F -- no --> H[fold the day from facts<br/>read by business_date, as before]
+    G --> I[merge each month from its days]
+    H --> I
+    I --> J[commit with facts, ledger, ticket stamp]
+</pre>
+</div>
+<figcaption style="margin-top:-6px">Figure 6c. One run through the cascade. The three questions in the guard are asked per day and per metric; a "no" to any of them sends that day down the old path, which is never wrong, only slower. <code>rollups.py:88</code>, <code>rollups.py:104</code>, <code>rollups.py:520</code>, <code>consume.py:646</code></figcaption>
+
+<figure>
+<svg viewBox="0 0 1120 470" role="img" aria-label="Three timelines. First, Europe/London on 10 September 2026, British Summer Time: the local day runs from 23:00 UTC on the 9th to 23:00 UTC on the 10th and is exactly 24 hourly buckets, so the guard passes. Second, Europe/London on 25 October 2026, the clock-change day: the local day is 25 hourly buckets and both midnights still fall on whole UTC hours, so the guard passes. Third, Asia/Kolkata at plus five hours thirty: local midnight is 18:30 UTC, which sits inside an hourly bucket, so the guard fails and that day is folded from facts.">
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <text x="40" y="30" font-weight="600">The zone guard: is the local day a whole set of hourly buckets?</text>
+
+    <!-- row 1: London BST -->
+    <text x="40" y="70" font-family="IBM Plex Mono, monospace" font-size="11.5">Europe/London · 10 Sep 2026 · BST (+01:00)</text>
+    <line x1="40" y1="110" x2="1080" y2="110" stroke="currentColor" stroke-width="1"/>
+    <g font-family="IBM Plex Mono, monospace" font-size="10" opacity="0.8">
+      <text x="40" y="128">22:00Z</text><text x="120" y="128">23:00Z</text><text x="520" y="128">11:00Z</text><text x="920" y="128">21:00Z</text><text x="1000" y="128">23:00Z</text><text x="1060" y="128">00Z</text>
+    </g>
+    <rect x="120" y="90" width="880" height="20" fill="#2f7d4f" fill-opacity="0.18" stroke="#2f7d4f" stroke-width="1.2"/>
+    <g stroke="currentColor" stroke-width="0.6" opacity="0.5">
+      <line x1="40" y1="100" x2="40" y2="110"/><line x1="80" y1="100" x2="80" y2="110"/><line x1="120" y1="95" x2="120" y2="115"/><line x1="160" y1="100" x2="160" y2="110"/><line x1="200" y1="100" x2="200" y2="110"/><line x1="240" y1="100" x2="240" y2="110"/><line x1="280" y1="100" x2="280" y2="110"/><line x1="320" y1="100" x2="320" y2="110"/><line x1="360" y1="100" x2="360" y2="110"/><line x1="400" y1="100" x2="400" y2="110"/><line x1="440" y1="100" x2="440" y2="110"/><line x1="480" y1="100" x2="480" y2="110"/><line x1="520" y1="100" x2="520" y2="110"/><line x1="560" y1="100" x2="560" y2="110"/><line x1="600" y1="100" x2="600" y2="110"/><line x1="640" y1="100" x2="640" y2="110"/><line x1="680" y1="100" x2="680" y2="110"/><line x1="720" y1="100" x2="720" y2="110"/><line x1="760" y1="100" x2="760" y2="110"/><line x1="800" y1="100" x2="800" y2="110"/><line x1="840" y1="100" x2="840" y2="110"/><line x1="880" y1="100" x2="880" y2="110"/><line x1="920" y1="100" x2="920" y2="110"/><line x1="960" y1="100" x2="960" y2="110"/><line x1="1000" y1="95" x2="1000" y2="115"/><line x1="1040" y1="100" x2="1040" y2="110"/>
+    </g>
+    <text x="120" y="84" font-size="10.5" fill="#2f7d4f">local midnight = 23:00Z, on the hour</text>
+    <text x="1000" y="84" text-anchor="end" font-size="10.5" fill="#2f7d4f">next local midnight = 23:00Z, on the hour</text>
+    <text x="560" y="150" text-anchor="middle" font-size="11.5" fill="#2f7d4f" font-weight="600">24 hourly buckets, both edges whole → merge the day from hourly</text>
+
+    <!-- row 2: London clock change -->
+    <text x="40" y="190" font-family="IBM Plex Mono, monospace" font-size="11.5">Europe/London · 25 Oct 2026 · clocks go back at 02:00 BST</text>
+    <line x1="40" y1="230" x2="1080" y2="230" stroke="currentColor" stroke-width="1"/>
+    <rect x="80" y="210" width="960" height="20" fill="#2f7d4f" fill-opacity="0.18" stroke="#2f7d4f" stroke-width="1.2"/>
+    <g font-family="IBM Plex Mono, monospace" font-size="10" opacity="0.8">
+      <text x="80" y="248">23:00Z Sat</text><text x="1000" y="248">00:00Z Mon</text>
+    </g>
+    <text x="80" y="204" font-size="10.5" fill="#2f7d4f">midnight BST = 23:00Z</text>
+    <text x="1040" y="204" text-anchor="end" font-size="10.5" fill="#2f7d4f">midnight GMT = 00:00Z</text>
+    <text x="560" y="270" text-anchor="middle" font-size="11.5" fill="#2f7d4f" font-weight="600">25 hourly buckets, both edges still whole → merge. The spring day is 23; same rule.</text>
+
+    <!-- row 3: Kolkata -->
+    <text x="40" y="310" font-family="IBM Plex Mono, monospace" font-size="11.5">Asia/Kolkata · IST (+05:30)</text>
+    <line x1="40" y1="350" x2="1080" y2="350" stroke="currentColor" stroke-width="1"/>
+    <rect x="140" y="330" width="960" height="20" fill="#b3462e" fill-opacity="0.14" stroke="#b3462e" stroke-width="1.2" stroke-dasharray="4 3"/>
+    <g stroke="currentColor" stroke-width="0.6" opacity="0.5">
+      <line x1="120" y1="335" x2="120" y2="355"/><line x1="160" y1="335" x2="160" y2="355"/>
+    </g>
+    <g font-family="IBM Plex Mono, monospace" font-size="10" opacity="0.8">
+      <text x="112" y="368">18:00Z</text><text x="152" y="368">19:00Z</text>
+    </g>
+    <text x="140" y="324" font-size="10.5" fill="#b3462e">local midnight = 18:30Z, INSIDE the 18:00Z bucket</text>
+    <text x="560" y="392" text-anchor="middle" font-size="11.5" fill="#b3462e" font-weight="600">the 18:00Z bucket holds 30 minutes of each local day → guard fails → fold the day from facts</text>
+
+    <text x="560" y="440" text-anchor="middle" font-size="11.5" opacity="0.85">The guard is one comparison: both local midnights, converted to UTC, must equal their own hour floor. No table of zones, no special case for DST.</text>
+  </g>
+</svg>
+<figcaption>Figure 6d. The zone guard on three tenants. Only the third fails, and its fallback is the fact read the daily bucket always used. The same guard also refuses a day older than the hourly retention horizon (90 days less a two-day margin), because its hourly rows may already be dropped and merging from a half-dropped level would delete the day's history. <code>rollups.py:88</code>, <code>rollups.py:104</code>, <code>rollups.py:71</code></figcaption>
+</figure>
+
+<p><b>One day, walked with data.</b> Europe/London tenant, one metric with three measures over <code>ConfirmPickLine</code>: units (sum), items (distinct sketch) and span (min and max). Four facts arrive in one run:</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Fact</th><th>event_time (UTC)</th><th>Local time (BST)</th><th>business_date</th><th>Item</th><th>Quantity</th></tr></thead>
+  <tbody>
+    <tr><td>F1</td><td class="mono">10 Sep 09:00</td><td class="mono">10 Sep 10:00</td><td class="mono">2026-09-10</td><td>A</td><td class="num">10</td></tr>
+    <tr><td>F2</td><td class="mono">10 Sep 10:00</td><td class="mono">10 Sep 11:00</td><td class="mono">2026-09-10</td><td>A</td><td class="num">5</td></tr>
+    <tr><td>F3</td><td class="mono">10 Sep 22:30</td><td class="mono">10 Sep 23:30</td><td class="mono">2026-09-10</td><td>B</td><td class="num">7</td></tr>
+    <tr><td>F4</td><td class="mono">10 Sep 23:30</td><td class="mono">11 Sep 00:30</td><td class="mono">2026-09-11</td><td>C</td><td class="num">1</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Step one, hourly from facts. Four dirty hours, four hourly rows per measure:</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>bucket_start</th><th>units: sum</th><th>count</th><th>items: sketch</th><th>span: min</th><th>max</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">10 Sep 09:00Z</td><td class="num">10</td><td class="num">1</td><td class="mono">{A}</td><td class="num">10</td><td class="num">10</td></tr>
+    <tr><td class="mono">10 Sep 10:00Z</td><td class="num">5</td><td class="num">1</td><td class="mono">{A}</td><td class="num">5</td><td class="num">5</td></tr>
+    <tr><td class="mono">10 Sep 22:00Z</td><td class="num">7</td><td class="num">1</td><td class="mono">{B}</td><td class="num">7</td><td class="num">7</td></tr>
+    <tr><td class="mono">10 Sep 23:00Z</td><td class="num">1</td><td class="num">1</td><td class="mono">{C}</td><td class="num">1</td><td class="num">1</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Step two, the guard. Both dirty days are London days in September, so <code>local_day_span</code> gives 09 Sep 23:00Z to 10 Sep 23:00Z for the 10th and 10 Sep 23:00Z to 11 Sep 23:00Z for the 11th; both edges are whole hours, both days are recent, the metric has an hourly grain. Merge. The 10th collects the 09:00Z, 10:00Z and 22:00Z buckets; the 11th collects the 23:00Z bucket, because 23:00Z is already 00:00 on the 11th in London:</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>business_date</th><th>merged from</th><th>units: sum</th><th>count</th><th>items: estimate</th><th>span: min</th><th>max</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">2026-09-10</td><td class="mono">09:00Z + 10:00Z + 22:00Z</td><td class="num">22</td><td class="num">3</td><td class="num">2 (A, B: A twice is one item)</td><td class="num">5</td><td class="num">10</td></tr>
+    <tr><td class="mono">2026-09-11</td><td class="mono">23:00Z</td><td class="num">1</td><td class="num">1</td><td class="num">1 (C)</td><td class="num">1</td><td class="num">1</td></tr>
+  </tbody>
+</table>
+</div>
+<p>A fold of the four facts by <code>business_date</code> gives exactly the same two rows, which is what the test suite pins measure by measure, sketch bytes included. Step three, the month of September is merged from its daily rows: 23 units, 4 rows, 3 items. Now suppose F3 is corrected from 7 to 9 by a Stage 2 rebuild. Only the 22:00Z hour is dirty, so the run reads the facts of that one hour, rewrites that one hourly row, merges the 10th again from its three hourly rows (24 units), and merges September again. Before this chunk the same correction re-read all of the 10th's facts, once per metric. <code>tests/test_analytics_cascade_chunk91.py</code></p>
+
+<p><b>What a run costs now.</b> Per changed fact, for one tenant, rows read:</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Facts per day</th><th>Before, 3 metrics</th><th>Before, 10 metrics</th><th>Now, any number of metrics</th></tr></thead>
+  <tbody>
+    <tr><td class="num">10,000</td><td class="num">30,000 facts</td><td class="num">100,000 facts</td><td class="num">about 400 facts + about 100 hourly rows</td></tr>
+    <tr><td class="num">100,000</td><td class="num">300,000 facts</td><td class="num">1,000,000 facts</td><td class="num">about 4,000 facts + about 1,000 hourly rows</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Rows written are unchanged: the dirty hour, the dirty day and the month are still replaced whole, which is what keeps a retry harmless. A metric whose method or transaction filter no changed fact can match is not folded at all; the run reports it under <code>definitions_skipped</code>, and <code>rollup_rows_written</code> makes churn visible on the status card. <code>rollups.py:138</code>, <code>rollups.py:152</code></p>
+
+<p><b>The refold ticket.</b> Two operations change what a rollup should hold without changing any fact: activating a metric over facts that were folded before it existed, and flipping a transaction's <code>show</code> switch. Before this chunk both published ordinary tickets, the diff found every fact unchanged, no bucket was dirty, and nothing happened; a new metric got no history and a hidden transaction stayed in every chart. This was verified by test, not reasoned about. Tickets now carry <code>refold_rollups</code>. A run holding one treats every hour and every local day in its range as dirty and skips no metric, so the range is rebuilt from facts through the same cascade. Ordinary tickets keep the flag off, because the 98.7 percent unchanged case must stay free. <code>analytics_pending_window.py:61</code>, <code>pending_windows.py:62</code>, <code>consume.py:674</code>, <code>consume.py:1109</code>, <code>analytics.py:276</code>, <code>analytics.py:645</code></p>
+
+<ul class="notes">
+  <li><b>Why the zone must be passed, never assumed.</b> The single-definition entry that reconcile's repair uses requires the tenant zone as an argument with no default. A repair that derived a London day on UTC midnights would have put the 22:30Z fact above on the wrong day; the review of this chunk found that gap and closed it. <code>reconcile.py:465</code>, <code>rollups.py:479</code></li>
+  <li><b>Why the hourly grain became load-bearing.</b> A day can only be merged from hourly rows that exist. Every metric the wizard creates declares all three grains; a metric declared without hourly falls back to the fact read for its days, so it stays correct and simply does not get the saving.</li>
+  <li><b>Why the retention margin is two days.</b> Hourly rows are dropped by whole daily partitions on an hourly tick at 90 days. A day exactly at the edge could lose its rows between the guard's check and the merge, so the guard stops two days short.</li>
+</ul>
+
+<h3 class="sub">Why rebuild the bucket, not adjust a running total</h3>
+<p>Station 5 follows the <b>recompute affected partitions</b> pattern: a changed fact marks its buckets dirty and each dirty bucket is thrown away and rebuilt from the level below. The alternative is the <b>incremental delta</b> pattern that Kafka Streams and Flink use for streaming aggregates: keep a running total and adjust it by "old value out, new value in". The same small example, both ways.</p>
+
+<figure>
+<svg viewBox="0 0 1120 520" role="img" aria-label="Two columns. Left, adjust a running total as Flink does: the stored total 22 becomes 22 minus 5 plus 3 equals 20; if one adjustment is lost or doubled the total is wrong forever; removing the row holding the minimum leaves the minimum unknown; a distinct-count sketch cannot remove a value. Right, rebuild the bucket as this pipeline does: read the bucket's current facts 10, 3 and 7, delete the bucket's rows, insert sum 20 count 3 min 3; a retry produces the same rows; a wrong write is corrected by the next fold; one code path serves every role.">
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <text x="40" y="30" font-weight="600">Fact T2 changes from 5 to 3. Bucket 09:00 BRI held T1 = 10, T2 = 5, T3 = 7.</text>
+    <line x1="560" y1="50" x2="560" y2="470" stroke="currentColor" stroke-width="0.6" opacity="0.25"/>
+
+    <!-- LEFT: adjust -->
+    <g font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.08em" opacity="0.7">
+      <text x="290" y="64" text-anchor="middle">ADJUST A RUNNING TOTAL · Kafka Streams, Flink · not used here</text>
+    </g>
+    <rect x="40" y="80" width="500" height="70" rx="3" fill="#b3462e" fill-opacity="0.06" stroke="#b3462e" stroke-width="1.2"/>
+    <text x="56" y="102" font-family="IBM Plex Mono, monospace" font-size="11.5">UPDATE rollup SET sum = 22 - 5 + 3 = 20, count = 3</text>
+    <text x="56" y="120" font-size="11.5">Fast: one row touched, no re-read. Correct, when everything goes right.</text>
+    <text x="56" y="138" font-size="11.5" opacity="0.8">Needs the stored old value to be exactly what was folded in.</text>
+
+    <text x="56" y="180" font-weight="600" fill="#b3462e">Three reasons it does not fit this pipeline</text>
+    <rect x="40" y="192" width="500" height="80" rx="3" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="56" y="212" font-weight="600">1  Four of seven aggregations cannot be subtracted</text>
+    <text x="56" y="229" font-size="11.5">delete T2 = 5: sum 22 - 5 ✓ · count 3 - 1 ✓ · min 5 - ? the new minimum is unknown</text>
+    <text x="56" y="246" font-size="11.5">max, percentile bands and the distinct sketch have no "remove one value" either.</text>
+    <text x="56" y="263" font-size="11.5" opacity="0.8">So the bucket must be re-read anyway, and there would be two code paths.</text>
+
+    <rect x="40" y="284" width="500" height="80" rx="3" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="56" y="304" font-weight="600">2  Drift is permanent and invisible</text>
+    <text x="56" y="321" font-size="11.5">total 22 → 20 → 20 → 17 → 17 → …  one missed or doubled adjustment stays forever.</text>
+    <text x="56" y="338" font-size="11.5">Flink is safe because its state and its input offset are checkpointed together,</text>
+    <text x="56" y="355" font-size="11.5">and events arrive once. Here a plain database retry re-runs the same range.</text>
+
+    <rect x="40" y="376" width="500" height="80" rx="3" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="56" y="396" font-weight="600">3  The workload is restatement, not a stream</text>
+    <text x="56" y="413" font-size="11.5">Stage 2 rebuilds transactions continuously: merges, splits, deletes, full rebuilds,</text>
+    <text x="56" y="430" font-size="11.5">a show switch, a metric activated over old facts. Each is a different sequence of</text>
+    <text x="56" y="447" font-size="11.5">signed adjustments to order correctly. Rebuilding needs one operation for all of them.</text>
+
+    <!-- RIGHT: rebuild -->
+    <g font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.08em" opacity="0.7">
+      <text x="840" y="64" text-anchor="middle">REBUILD THE DIRTY BUCKET · what this station does</text>
+    </g>
+    <rect x="590" y="80" width="500" height="70" rx="3" fill="#2f7d4f" fill-opacity="0.08" stroke="#2f7d4f" stroke-width="1.2"/>
+    <text x="606" y="102" font-family="IBM Plex Mono, monospace" font-size="11.5">SELECT facts WHERE hour = 09:00   → 10, 3, 7</text>
+    <text x="606" y="120" font-family="IBM Plex Mono, monospace" font-size="11.5">DELETE rollup WHERE hour = 09:00; INSERT sum 20, count 3, min 3, …</text>
+    <text x="606" y="138" font-size="11.5" opacity="0.8">Costs a re-read of the bucket. Since chunk 91 that is one hour of facts, not one day.</text>
+
+    <text x="606" y="180" font-weight="600" fill="#2f7d4f">What it buys</text>
+    <rect x="590" y="192" width="500" height="80" rx="3" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="606" y="212" font-weight="600">1  One uniform path for every role</text>
+    <text x="606" y="229" font-size="11.5">sum, count, sum_sq, min, max, histogram bands and the sketch are all rebuilt by</text>
+    <text x="606" y="246" font-size="11.5">the same fold. A new aggregation is a role and a column, never a new branch.</text>
+    <text x="606" y="263" font-size="11.5" opacity="0.8">This is the "registry, not an if-chain" rule made structural.</text>
+
+    <rect x="590" y="284" width="500" height="80" rx="3" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="606" y="304" font-weight="600">2  Idempotent, and self-healing</text>
+    <text x="606" y="321" font-size="11.5">A retried run produces byte-identical rows. A wrong write, a bug in one release, a</text>
+    <text x="606" y="338" font-size="11.5">flipped switch: the next fold of that bucket makes it right again from the facts.</text>
+    <text x="606" y="355" font-size="11.5" opacity="0.8">The reconcile check compares rollups to facts and repairs by refolding.</text>
+
+    <rect x="590" y="376" width="500" height="80" rx="3" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="606" y="396" font-weight="600">3  Restatements are free to express</text>
+    <text x="606" y="413" font-size="11.5">Merge, split, delete, hide, activate: each is "these buckets are dirty". No ordering</text>
+    <text x="606" y="430" font-size="11.5">of plus and minus, no applied-version table to survive a retry, no second worker.</text>
+    <text x="606" y="447" font-size="11.5" opacity="0.8">Cost per changed fact after chunk 91: one hour of facts + a few dozen hourly rows.</text>
+
+    <text x="560" y="498" text-anchor="middle" font-size="11.5" opacity="0.85">Adjusting would win only for sums and counts on an append-only stream. This pipeline has neither: half its roles are not invertible and its input is restated all day.</text>
+  </g>
+</svg>
+<figcaption>Figure 6e. The two ways to keep a rollup current, on one changed fact. Left is the streaming pattern and the three reasons it is not used here; right is what Station 5 does and what that buys. Both are correct when nothing goes wrong; only one stays correct when something does.</figcaption>
+</figure>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Pattern</th><th>Used here?</th><th>Where</th><th>Why, in one line</th></tr></thead>
+  <tbody>
+    <tr><td>Recompute affected partitions</td><td>yes</td><td>every dirty hour, day and month bucket</td><td>idempotent on retry, self-healing, one path for all seven aggregations</td></tr>
+    <tr><td>Cascade, each level from the level below</td><td>yes, since chunk 91</td><td>hourly from facts, daily from hourly under the zone guard, monthly from daily</td><td>one changed fact costs one hour of facts instead of a whole day</td></tr>
+    <tr><td>Additive roles, finished at read time</td><td>yes</td><td>sum, count, sum_sq, min, max, histogram bands, sketch; average, stddev, p50, p95, distinct estimate computed on read</td><td>a rollup that stored an average could not be added into a month</td></tr>
+    <tr><td>Change data capture by range diff</td><td>yes</td><td>Station 4, `diff.py`</td><td>a fingerprint match is free, so the 98.7 percent unchanged rebuilds never reach the rollups</td></tr>
+    <tr><td>Incremental delta on a running total (Kafka Streams, Flink)</td><td>no</td><td>-</td><td>not invertible for min, max, percentile, distinct; permanent drift on any missed adjustment; needs checkpointed offsets this pipeline does not have</td></tr>
+    <tr><td>Materialised view refreshed whole</td><td>no</td><td>-</td><td>would re-read every fact on every run; the dirty-bucket set is the whole point</td></tr>
+    <tr><td>Exact sets for distinct counts</td><td>no</td><td>-</td><td>unbounded per row; a 4 KB sketch unions and stays fixed size</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 class="sub">The streaming pattern in full, and when it would be the right choice</h3>
+<p>Kafka Streams and Flink keep aggregates current by <b>adjusting state as events arrive</b>. Understanding how they make that safe is what tells you whether this pipeline should ever adopt it. The short version: they own three things this pipeline does not, and every one of the three would have to be built before a running total could be trusted.</p>
+
+<figure>
+<svg viewBox="0 0 1120 560" role="img" aria-label="A streaming aggregation pipeline. Events flow from a source topic, partitioned by key, into a stateful operator that keeps one running total per key in a state store. Each event adjusts the total in place. A changelog topic records every state change. A checkpoint barrier flows through the stream and, when it reaches the operator, the state store and the input offset are snapshotted together, so recovery replays from exactly the right event with exactly the right state. Below, the three properties that make this safe: the input is appended once and ordered per key; aggregations are invertible or the operator keeps every value; state and offset commit together.">
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <text x="40" y="30" font-weight="600">How Kafka Streams and Flink keep a total current</text>
+
+    <!-- source -->
+    <rect x="40" y="70" width="200" height="90" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="140" y="92" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">source topic</text>
+    <text x="140" y="110" text-anchor="middle" font-size="11" opacity="0.8">events appended ONCE, in order,</text>
+    <text x="140" y="124" text-anchor="middle" font-size="11" opacity="0.8">partitioned by key (warehouse, hour)</text>
+    <text x="140" y="146" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5">offset 1041: T2 = 5</text>
+
+    <!-- operator -->
+    <rect x="330" y="60" width="300" height="200" rx="3" fill="#0f6e8c" fill-opacity="0.06" stroke="#0f6e8c" stroke-width="1.4"/>
+    <text x="480" y="82" text-anchor="middle" font-weight="600">stateful operator</text>
+    <rect x="350" y="96" width="260" height="70" rx="3" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="480" y="114" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">state store, one row per key</text>
+    <text x="480" y="132" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11">(BRI, 09:00) → sum 22, count 3</text>
+    <text x="480" y="150" text-anchor="middle" font-size="10.5" opacity="0.8">on event: total = total − old + new, in place</text>
+    <text x="480" y="188" text-anchor="middle" font-size="11">no re-read of other events: the store IS the answer</text>
+    <text x="480" y="206" text-anchor="middle" font-size="11" opacity="0.8">an update to T2 arrives as a retraction (−5) then an insert (+3)</text>
+    <text x="480" y="240" text-anchor="middle" font-size="10.5" opacity="0.8">for MIN, MAX, percentiles: the operator must keep EVERY value per key,</text>
+    <text x="480" y="254" text-anchor="middle" font-size="10.5" opacity="0.8">which is a re-read of the bucket in disguise</text>
+    <path d="M240,115 L330,115" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
+
+    <!-- changelog + sink -->
+    <rect x="720" y="70" width="200" height="60" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="820" y="92" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">changelog topic</text>
+    <text x="820" y="112" text-anchor="middle" font-size="11" opacity="0.8">every state change, replayable</text>
+    <rect x="720" y="160" width="200" height="60" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="820" y="182" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="500">sink</text>
+    <text x="820" y="202" text-anchor="middle" font-size="11" opacity="0.8">dashboard table, written transactionally</text>
+    <path d="M630,100 L720,100" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
+    <path d="M630,190 L720,190" stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ra)"/>
+
+    <!-- checkpoint barrier -->
+    <line x1="290" y1="60" x2="290" y2="260" stroke="#b7791f" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="290" y="290" text-anchor="middle" font-size="11" fill="#b7791f" font-weight="600">checkpoint barrier</text>
+    <text x="290" y="306" text-anchor="middle" font-size="10.5" fill="#b7791f">snapshots offset 1041 AND the state store together</text>
+    <text x="290" y="320" text-anchor="middle" font-size="10.5" fill="#b7791f">recovery: restore both, replay from 1042. Nothing applied twice.</text>
+
+    <!-- the three properties -->
+    <text x="40" y="370" font-weight="600">The three properties that make adjusting safe, and whether this pipeline has them</text>
+    <rect x="40" y="384" width="340" height="150" rx="3" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="56" y="406" font-weight="600">1  Append-once, ordered input</text>
+    <text x="56" y="424" font-size="11.5">Each event is seen once, per key in order. An</text>
+    <text x="56" y="440" font-size="11.5">update is itself an event: retract, then insert.</text>
+    <text x="56" y="466" font-size="11.5" fill="#b3462e" font-weight="600">Here: no. Stage 2 rewrites transactions for</text>
+    <text x="56" y="482" font-size="11.5" fill="#b3462e">weeks: merges, splits, deletes, full rebuilds.</text>
+    <text x="56" y="498" font-size="11.5" fill="#b3462e">The range diff exists to turn that into a set of</text>
+    <text x="56" y="514" font-size="11.5" fill="#b3462e">verdicts; there is no event stream to key on.</text>
+
+    <rect x="390" y="384" width="340" height="150" rx="3" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="406" y="406" font-weight="600">2  Invertible aggregations, or full state</text>
+    <text x="406" y="424" font-size="11.5">sum and count subtract. min, max, percentile and</text>
+    <text x="406" y="440" font-size="11.5">distinct do not; Flink keeps every value per key.</text>
+    <text x="406" y="466" font-size="11.5" fill="#b3462e" font-weight="600">Here: four of seven roles are not invertible.</text>
+    <text x="406" y="482" font-size="11.5" fill="#b3462e">Keeping every value per bucket is the fact table,</text>
+    <text x="406" y="498" font-size="11.5" fill="#b3462e">which is what the rebuild already reads, and</text>
+    <text x="406" y="514" font-size="11.5" fill="#b3462e">a sketch has no remove at all.</text>
+
+    <rect x="740" y="384" width="340" height="150" rx="3" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="756" y="406" font-weight="600">3  State and offset commit together</text>
+    <text x="756" y="424" font-size="11.5">The barrier snapshots both; a replay never</text>
+    <text x="756" y="440" font-size="11.5">re-applies an adjustment. Exactly once.</text>
+    <text x="756" y="466" font-size="11.5" fill="#b3462e" font-weight="600">Here: partly. One Postgres transaction gives</text>
+    <text x="756" y="482" font-size="11.5" fill="#b3462e">this for a single run. It gives nothing for</text>
+    <text x="756" y="498" font-size="11.5" fill="#b3462e">drift: a wrong adjustment, once committed,</text>
+    <text x="756" y="514" font-size="11.5" fill="#b3462e">is never revisited. Rebuild revisits every fold.</text>
+  </g>
+</svg>
+<figcaption>Figure 6f. The streaming aggregation pattern and its three load-bearing properties. Adjusting in place is safe when the input is appended once, the aggregate can be inverted (or every value is kept), and state is checkpointed with the offset. This pipeline lacks the first, has half of the second, and gets the third only within one run.</figcaption>
+</figure>
+
+<p><b>The three terms, in plain words.</b> Each of the properties in Figure 6f has a name from the streaming world. They are simpler than they sound.</p>
+
+<h4 style="margin:14px 0 4px;font-size:15px">Append once</h4>
+<p>An input is "append once" when every event is written to the end of the stream one time and is never edited or removed afterwards. A correction is a new event saying "the earlier one was wrong", not a change to the earlier one. A till receipt roll works this way: a refund is printed as a new line, the original sale line is never rewritten. This pipeline's source is the opposite. Stage 2 rewrites a transaction whenever a rebuild groups its lines differently: a merge deletes one row and enlarges another, a split does the reverse, and a full rebuild can rewrite a day. The stored row changes in place, so there is no stream of once-written events to key a running total on, which is why Station 4's range diff exists at all: it turns "what is stored now" and "what was stored before" into verdicts after the fact.</p>
+
+<h4 style="margin:14px 0 4px;font-size:15px">Invertible aggregations: the bag test</h4>
+<p>You hold a bag of numbers and one written summary of it. Someone takes one number out of the bag. Can you correct the summary using arithmetic alone, without opening the bag?</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Summary</th><th>Bag</th><th>Remove a 5</th><th>Fixable without looking?</th></tr></thead>
+  <tbody>
+    <tr><td>sum = 22</td><td class="mono">10, 5, 7</td><td>22 − 5 = 17</td><td>yes, invertible</td></tr>
+    <tr><td>count = 3</td><td class="mono">10, 5, 7</td><td>3 − 1 = 2</td><td>yes, invertible</td></tr>
+    <tr><td>min = 5</td><td class="mono">10, 5, 7</td><td>the new smallest is … ?</td><td>no, you must look at what is left (7)</td></tr>
+    <tr><td>max = 10</td><td class="mono">10, 5, 7</td><td>unchanged this time, but only the bag knows</td><td>no</td></tr>
+    <tr><td>distinct items = 2 (A, B)</td><td class="mono">A, A, B</td><td>remove one A: is A still there?</td><td>no, and the sketch has no remove at all</td></tr>
+    <tr><td>median = 7</td><td class="mono">10, 5, 7</td><td>moves, but to what depends on every other value</td><td>no; a band count can drop by one only if you know the old value's band</td></tr>
+  </tbody>
+</table>
+</div>
+<p>A summary is invertible when it is a <b>total</b> of something: sum, count, sum of squares. It is not when it is a <b>position</b> in the data: the smallest, the largest, the middle, how many kinds. Opening the bag is re-reading the bucket's facts, which is exactly the work the streaming pattern is meant to avoid. For the four non-invertible roles it cannot be avoided, so Flink keeps every value per key in its state store, and at that point "adjust in place" has quietly become "keep all the facts and recompute", which is what this station does openly. <code>definition.py:410</code></p>
+
+<h4 style="margin:14px 0 4px;font-size:15px">State and offset saved together</h4>
+<p>The <b>offset</b> is a bookmark: how far into the input the system has read. The <b>state</b> is the answer so far: the running totals. Saving them together means one indivisible snapshot, so after a crash the bookmark always matches the totals. Saved separately they can disagree, and a restart then either counts an event twice or never counts it.</p>
+<pre class="code"><span class="ref"># the input stream, one pick per position</span>
+position   1040       1041       1042       1043
+event      T1 = 10    T2 = 5     T3 = 7     T4 = 2
+
+processed through 1042            state: sum 22   bookmark: 1042
+
+together   snapshot {1042, 22}    crash, restore, resume at 1043, +2   → 24  correct
+totals 1st saved sum 22, crash before the bookmark (still 1041)         → resume 1042, +7 again → 29  T3 twice
+bookmark   saved 1042, crash before the totals (still 15)               → resume 1043, +2 → 17     T3 never</pre>
+<p>Flink's checkpoint barrier is the mechanism: it flows through the stream and each operator snapshots its state store and the barrier's position in the same write. Here the bookmark is the ticket's <code>consumed_at</code> and the state is the facts, ledger rows and rollup rows, and all of them commit in one Postgres transaction with the stamp last, so for a single run this pipeline has the same guarantee. What one transaction cannot give is the other half of the streaming contract, the append-once input: a running total would have absorbed last week's version of a transaction, and no bookmark tells it that version was rewritten today. Rebuilding a bucket from current facts does not care what was absorbed before. <code>consume.py:848</code></p>
+
+<p><b>What adopting it would mean here</b>, so the cost is visible when the question comes back:</p>
+<ol class="steps">
+  <li><b>A change stream of fact versions.</b> The ledger already records every version with a reason (insert, update, reverse), so the stream exists in a table. It would need a consumer position per key, which is the offset in the picture.</li>
+  <li><b>A state store keyed by (metric, measure, dimensions, bucket).</b> That is the rollup row itself. For sum and count the row is enough. For min, max, percentile and distinct the store must hold every contributing value, which is the fact table filtered to the bucket - the exact read the rebuild does today.</li>
+  <li><b>Retraction handling.</b> Every update becomes retract-old then insert-new, and a merge becomes retract-A, retract-B, insert-C, in that order, per bucket, for every metric. The ordering is what Flink's changelog semantics enforce and what would have to be written and tested here.</li>
+  <li><b>An applied-version log to survive retries.</b> Without the checkpoint barrier, a retried run must skip adjustments already applied: one row per fact version per bucket per metric, larger than the rollups themselves. Or the whole run stays in one transaction, which is today's design and removes the streaming latency advantage.</li>
+  <li><b>Late data without limit.</b> Flink windows close after an allowed lateness; here a transaction from months ago can be restated. Windows would have to stay open forever, which is again a store of every value.</li>
+</ol>
+
+<div class="er">
+<pre class="mermaid">
+flowchart TD
+    Q1{Does the input arrive once and never restate?} -- no --> R[rebuild dirty buckets<br/>what Station 5 does]
+    Q1 -- yes --> Q2{Are all aggregations sums and counts,<br/>or can every value be kept per key?}
+    Q2 -- no --> R
+    Q2 -- yes --> Q3{Is sub-second freshness required,<br/>or is one bucket re-read too slow<br/>at millions of facts per hour?}
+    Q3 -- no --> R
+    Q3 -- yes --> S[streaming adjust<br/>Kafka Streams or Flink,<br/>with checkpointed state and offsets]
+    R --> N1[cost: re-read one hour of facts per changed fact<br/>gain: idempotent, self-healing, one path for all roles]
+    S --> N2[cost: state store, changelog, retraction ordering,<br/>exactly-once plumbing, bounded lateness<br/>gain: no re-read, millisecond freshness]
+</pre>
+</div>
+<figcaption style="margin-top:-6px">Figure 6g. When to revisit the choice. Three questions, in order; the first "no" settles it. Today every answer is "no". The signals that would flip them: Stage 2 stops restating (a true append-once event feed), metrics narrow to sums and counts, or fact volume grows past what an hour's re-read can serve inside the two-minute fold bound.</figcaption>
+
+<ul class="notes">
+  <li><b>An honest note on the crash argument.</b> Inside one Postgres transaction a crash rolls back the adjusted total together with the fact change, so a running total would survive a crash here too. The case against adjusting is not crash safety. It is the three properties above: non-invertible roles, permanent drift and a restating input.</li>
+  <li><b>The hybrid that is already in place.</b> The range diff is change data capture, the dirty-bucket set is the streaming pattern's "which keys moved", and the cascade limits the re-read to one hour. That takes most of the streaming pattern's efficiency without taking on its plumbing. The remaining gap, re-reading one bucket instead of adjusting one row, is a few hundred to a few thousand rows per changed fact at the volumes discussed in this document.</li>
+  <li><b>Where a stream would still help.</b> If several consumers needed the same rollup changes (a second dashboard, an alerting service, an export), a changelog of rollup rows would be the right addition. That is a publish of what the rebuild wrote, not a change to how it computes.</li>
+</ul>
 
 <div class="er">
 <pre class="mermaid">
@@ -2890,8 +3253,10 @@ erDiagram
     analytics_metrics {
         uuid id PK
         string name
+        string source "transaction or record"
         jsonb dimensions
         jsonb measures
+        datetime rollups_from "the fold reads no fact before this instant"
     }
     analytics_hourly_rollups {
         uuid id
@@ -2908,7 +3273,8 @@ erDiagram
         numeric sum_sq "for variance"
         numeric min_value
         numeric max_value
-        jsonb histogram
+        jsonb histogram "20 power-of-two bands, counts add; p50 and p95 read out at read time"
+        bytea distinct_sketch "HyperLogLog, 4 KB; unions with max; null unless the measure is distinct"
         datetime computed_at
     }
     analytics_daily_rollups {
@@ -2923,6 +3289,7 @@ erDiagram
         numeric min_value
         numeric max_value
         jsonb histogram
+        bytea distinct_sketch "union of the day's hourly sketches"
     }
     analytics_monthly_rollups {
         uuid id
@@ -2936,12 +3303,73 @@ erDiagram
         numeric min_value
         numeric max_value
         jsonb histogram
+        bytea distinct_sketch "union of the month's daily sketches"
     }
     analytics_metrics ||..o{ analytics_hourly_rollups : "defines"
     analytics_metrics ||..o{ analytics_daily_rollups : "defines"
     analytics_metrics ||..o{ analytics_monthly_rollups : "defines"
 </pre>
 </div>
+
+<h3 class="sub">Building a metric from the interface</h3>
+<p>Until 12 September 2026 a metric was a row someone inserted through the API and history came only from an operator re-folding a range. The metric builder (chunks 84 to 90) makes the same row a four-step form, checks it against a week of real facts before it is saved, and turns activation into the moment history starts. No new tables: two columns on <code>analytics_metrics</code>, three description or unit columns on the registries, one sketch column on the rollups, and one endpoint.</p>
+
+<div class="er">
+<pre class="mermaid">
+stateDiagram-v2
+    direction LR
+    [*] --> draft : POST /metrics (shape validated, nothing folded)
+    draft --> draft : PATCH shape or description (re-validated)
+    draft --> active : PATCH status=active, rollups_from fixed
+    active --> inactive : PATCH status=inactive
+    inactive --> active : PATCH status=active (bound kept, no tickets)
+    active --> active : PATCH description only
+    note right of draft
+        listed with a badge,
+        never charted,
+        preview any time
+    end note
+    note right of active
+        folded by every run,
+        backfilled_through advances,
+        shape edits refused (409)
+    end note
+</pre>
+</div>
+<figcaption style="margin-top:-6px">Figure 6b. The metric lifecycle. Only the draft to active step has a side effect beyond the row: it fixes <code>rollups_from</code> and, when that instant is earlier than the source watermark, publishes tickets for exactly that range. Reactivation keeps the original bound; a different start means copy, edit, activate a new metric.</figcaption>
+
+<ol class="steps">
+  <li><b>Read the catalog.</b> One request returns the active metrics with descriptions, the approved fields with description and unit, the transaction names with their switches, and the aggregations the backend knows with whether each needs a field and whether it is an estimate. The wizard's pickers and the chat agent's <code>list_metrics</code> read this same body, so a name shown to a person is the name the agent uses. An ETag on the body turns an unchanged catalog into a 304. <code>catalog.py:259</code>, <code>catalog.py:132</code>, <code>analytics.py:294</code></li>
+  <li><b>Assemble the definition.</b> Source, then transaction and method filters, then up to four dimensions with <code>method</code> and <code>transaction_name</code> pre-ticked, then one measure. Sum, average, stats, extent and percentile are offered only on numeric fields; count and distinct on any. The description is mandatory, and a numeric measure needs a unit, prefilled from the field registry when it has one. The body is the same shape create accepts, parsed by one function shared with create and preview. <code>analytics.py:319</code>, <code>MetricBuilder.tsx</code></li>
+  <li><b>Preview against real facts.</b> The last 168 hours of facts, or record facts for a record metric, are read once, capped at the ad-hoc row limit, and folded with the writer's own fold. The answer lists what validation would refuse, why the preview itself refuses (zero matches), warnings with real percentages (field present on 7 percent of matching rows), per-method and per-transaction counts, a cardinality budget against the 20 combinations per hour the read planner assumes, and a daily sample series. It writes nothing and says so. <code>preview.py:251</code>, <code>preview.py:178</code>, <code>preview.py:126</code>, <code>analytics.py:343</code></li>
+  <li><b>Save as a draft.</b> Same validation as before, plus the description is stored and each measure keeps its unit. A draft is listed on the analytics screen with a badge and is invisible to the chart selector, to the fold and to the agent. <code>analytics.py:365</code></li>
+  <li><b>Activate from an instant.</b> The PATCH fixes <code>rollups_from</code> to the chosen instant, or now. If it is before the source watermark, refold tickets are published for that range in the same transaction as the status change, so an active metric can never sit with a start date and no history queued; refold, because those facts were folded before the metric existed and would otherwise diff as unchanged (see the cascade section above). From then on the fold reads no fact before the bound, and the series read clamps a request to it rather than presenting older facts as this metric's. <code>analytics.py:183</code>, <code>pending_windows.py:62</code>, <code>rollups.py:308</code>, <code>read.py:441</code></li>
+  <li><b>Watch the progress marker.</b> Every fold, inside its transaction, moves <code>backfilled_through</code> forward to the day before its range end for each active metric whose bound is at or before that range end. Forward only, so a backfill of an older range never drags it back. This replaces the earlier decision (D8) that the column stayed NULL forever. <code>registry.py:140</code>, <code>consume.py:989</code></li>
+</ol>
+
+<p><b>Distinct counts are a sketch, not a set.</b> "How many different items were picked this month" is not a sum of daily counts: an item picked on twelve days is one item. Every other role adds; a distinct count only unions. The <code>distinct</code> aggregation therefore stores a HyperLogLog sketch, 4,096 one-byte registers, beside an exact count of rows that carried a value. The fold hashes the canonical value into the sketch, the cascade unions register by register, and the read path finishes the sketch into <code>distinct_estimate</code> in exactly one place, so no response ever carries the bytes. The catalog flags the measure <code>approximate</code>, about 1.6 percent error, and the window totals returned with a series are merged from raw roles on the server, so a distinct total is a union of sketches rather than a sum of estimates. In-repo, no dependency: the server has no hll extension. <code>hll.py:49</code>, <code>hll.py:75</code>, <code>hll.py:85</code>, <code>definition.py:371</code>, <code>definition.py:425</code>, <code>definition.py:441</code>, <code>read.py:409</code></p>
+
+<p><b>The chat agent reads analytics through the same doors.</b> Three tools sit beside the SQL-backed log tools: <code>list_metrics</code> returns the catalog's active metrics, <code>query_metric</code> validates a group-by exactly as the series endpoint does and returns points with grain, live spans, ad-hoc flag, estimate flag and where history starts, and <code>explain_freshness</code> turns the tenant state into one plain sentence about lag and settledness. None of them issues SQL, none accepts a tenant argument, and a draft is refused with the endpoint's own 404 wording. The system prompt tells the agent about the two tiers, the provisional tail, and that record-source metrics describe what M3 answered rather than what moved. <code>analytics_tools.py:185</code>, <code>analytics_tools.py:193</code>, <code>analytics_tools.py:247</code>, <code>tools.py:143</code>, <code>agent.py:49</code></p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Door</th><th>Reads</th><th>Writes</th><th>Used by</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">GET /analytics/catalog</td><td>analytics_metrics (active), analytics_field_registry (captured), analytics_transaction_registry, recent hourly rollups for dimension values</td><td>nothing</td><td>the wizard's pickers, the agent's list_metrics</td></tr>
+    <tr><td class="mono">POST /analytics/metrics/preview</td><td>analytics_facts or analytics_record_facts, last 168 hours, capped</td><td>nothing</td><td>the wizard, step 1 (find methods) and step 4</td></tr>
+    <tr><td class="mono">POST /analytics/metrics</td><td>analytics_field_registry for approval</td><td>one analytics_metrics row, status draft, with description and units</td><td>the wizard's Save draft</td></tr>
+    <tr><td class="mono">PATCH /analytics/metrics/{id}</td><td>analytics_tenant_state for the watermark</td><td>the row; on draft to active also analytics_pending_windows for [rollups_from, watermark] with refold_rollups = true</td><td>the wizard's Activate; operators for inactive and description edits</td></tr>
+    <tr><td class="mono">agent: query_metric</td><td>whatever read.series reads: rollups before the watermark, facts after it</td><td>nothing</td><td>the chat agent, for how-many and how-much questions</td></tr>
+  </tbody>
+</table>
+</div>
+
+<ul class="notes">
+  <li><b>Why shape edits stop at activation.</b> Rollup rows are keyed by the definition id. Changing dimensions or measures under an active id would leave rows nothing can explain, so the PATCH refuses with a 409 and the path is deactivate, copy, edit, activate.</li>
+  <li><b>Why a draft can become invalid.</b> Create validates, so a draft is never saved invalid. But approval can be withdrawn afterwards: if a field the draft reads is switched off in the registry, activation re-validates and refuses with the field named, and the row stays a draft.</li>
+  <li><b>The percentile aggregation was finished on 13 Sep 2026.</b> Auditing this section showed the histogram container, column and band-wise merge had existed since Phase 3 while nothing filled a band or read a percentile out, so a wizard-made percentile metric would have charted as no data. Chunk 92 completes both ends: the fold counts each value into one of 20 power-of-two bands (band 0 below 1, band i is [2^(i-1), 2^i), the top band clamps at 2^18), the bands merge through the same cascade as every other role, and <code>public_roles</code> reads p50 and p95 out at read time. An exact <code>count_value</code> sits beside the bands, as it does for <code>distinct</code>. <code>histogram.py:32</code>, <code>histogram.py:56</code>, <code>histogram.py:65</code>, <code>definition.py:403</code></li>
+  <li><b>What the three built-in metrics look like now.</b> <code>consumption</code>, <code>consumption_by_item</code> and <code>units-observed-by-item</code> have <code>rollups_from</code> NULL, which is unbounded and byte-identical in query plan to before. Their <code>backfilled_through</code> started moving on the first fold after the deploy.</li>
+</ul>
 </section>
 
 <section class="station">

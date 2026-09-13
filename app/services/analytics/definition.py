@@ -42,6 +42,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from app.services.analytics import contract
+from app.services.analytics import histogram as hg
 from app.services.analytics import hll
 
 #: Grains a definition may ask for. `weekly` has no table of its own: ISO Monday weeks derive from
@@ -92,7 +93,9 @@ _ROLES: dict[Aggregation, frozenset[Role]] = {
     Aggregation.average: frozenset({Role.sum_value, Role.count_value}),
     Aggregation.stats: frozenset({Role.sum_value, Role.count_value, Role.sum_sq}),
     Aggregation.extent: frozenset({Role.min_value, Role.max_value}),
-    Aggregation.percentile: frozenset({Role.histogram}),
+    # Chunk 92: the exact count beside the bands, as for `distinct` - the denominator, and what
+    # `_is_empty` reads.
+    Aggregation.percentile: frozenset({Role.histogram, Role.count_value}),
     # The count beside the sketch is exact and free: rows that carried a value, which is the honest
     # denominator for "N different items over M picks" and what `_is_empty` reads.
     Aggregation.distinct: frozenset({Role.distinct_sketch, Role.count_value}),
@@ -325,7 +328,7 @@ def _empty_roles(measure: Measure) -> dict:
     """A zero bucket for one measure. min/max start as None so the first real value wins rather than
     competing with a sentinel that could never be exceeded."""
     zero = {Role.sum_value: Decimal(0), Role.count_value: 0, Role.sum_sq: Decimal(0),
-            Role.min_value: None, Role.max_value: None, Role.histogram: (),
+            Role.min_value: None, Role.max_value: None, Role.histogram: hg.EMPTY,
             Role.distinct_sketch: hll.EMPTY}
     return {r: zero[r] for r in measure.roles}
 
@@ -397,6 +400,10 @@ def fold(rows, definition: MetricDefinition) -> dict:
             if Role.max_value in bucket:
                 cur = bucket[Role.max_value]
                 bucket[Role.max_value] = value if cur is None else max(cur, value)
+            if Role.histogram in bucket:
+                # Chunk 92: one band count per value. Band counts add across hours and days, which is
+                # the only reason a percentile is storable in a rollup at all.
+                bucket[Role.histogram] = hg.add(bucket[Role.histogram], value)
     return out
 
 
@@ -434,9 +441,10 @@ def add(a: dict, b: dict) -> dict:
 def public_roles(roles: dict, *, number=str) -> dict:
     """A role bucket as it leaves the service: JSON-safe, and the sketch finished into an integer.
 
-    The ONE place a `distinct_sketch` becomes a number. Every reader - `/series`, the preview sample,
-    the agent tools - goes through here, so none of them can leak 4 KB of bytes into a response or
-    present the estimate under a name that hides what it is. Decimals go through `number`, because
+    The ONE place a `distinct_sketch` becomes a number and a `histogram` becomes p50 and p95. Every
+    reader - `/series`, the preview sample, the agent tools - goes through here, so none of them can
+    leak 4 KB of bytes or a band list into a response or present an estimate under a name that hides
+    what it is. Decimals go through `number`, because
     two callers already format them differently and this is not the chunk to unify that.
     """
     out: dict = {}
@@ -444,6 +452,14 @@ def public_roles(roles: dict, *, number=str) -> dict:
         if role is Role.distinct_sketch:
             if value:
                 out["distinct_estimate"] = hll.estimate(value)
+        elif role is Role.histogram:
+            # Chunk 92: finished here, once. The band list never leaves the service; p50 and p95 are
+            # what a chart, the wizard and the chat agent need, and a band is a factor of two wide,
+            # so the catalog calls the aggregation approximate.
+            p50 = hg.percentile(value, 0.5)
+            if p50 is not None:
+                out["p50"] = p50
+                out["p95"] = hg.percentile(value, 0.95)
         elif isinstance(value, Decimal):
             out[role.value] = number(value)
         else:

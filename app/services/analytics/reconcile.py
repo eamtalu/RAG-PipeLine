@@ -459,14 +459,18 @@ async def _repair_by_refold(db: AsyncSession, customer_code: str, findings) -> i
     # 18y: routed by the definition's source. Un-routed, the repair would DELETE a record
     # definition's rollup buckets and REPLACE them with transaction-fact folds - corruption through
     # the repair path, which is worse than the drift it was fixing.
+    # Chunk 91: the daily bucket is merged from the hourly buckets inside the tenant's LOCAL day, so
+    # the repair needs the zone - resolved exactly as the fold resolves it (customer row, else the
+    # configured default), or a repaired London day would be cut at UTC midnight.
+    tz = await get_customer_timezone(db, customer_code)
     for definition_id, definition in await registry.active_definitions(db, customer_code):
         if definition.source == "record":
             if rec_hours or rec_dates:
                 await n5.recompute_records(db, customer_code, definition_id, definition,
-                                           hours=rec_hours, dates=rec_dates)
+                                           hours=rec_hours, dates=rec_dates, tz=tz)
         elif txn_hours or txn_dates:
             await n5.recompute(db, customer_code, definition_id, definition,
-                               hours=txn_hours, dates=txn_dates)
+                               hours=txn_hours, dates=txn_dates, tz=tz)
     return len(txn_hours | rec_hours) + len(txn_dates | rec_dates)
 
 

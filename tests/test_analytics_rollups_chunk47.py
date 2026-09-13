@@ -246,7 +246,8 @@ async def test_a_measure_gets_its_own_row_per_bucket():
 
 async def test_the_hour_and_the_local_day_are_different_axes():
     """23:30 UTC is the next day in London, so the same fact sits in one UTC hour and the FOLLOWING
-    business date. This is why daily is folded from the facts and not from hourly."""
+    business date. Since chunk 91 the daily bucket is merged from the hourly buckets inside the LOCAL
+    day's span, which is exactly what puts this 23:00 UTC hour on the 11th."""
     async with async_session() as db:
         from app.persistence.models.customer import Customer
         db.add(Customer(customer_code=CC, name="probe", timezone="Europe/London"))

@@ -4,8 +4,10 @@
     applies. A per-record update passes test 3 and fails this one.
 
 Phase 0 proved the STRATEGY with a reference implementation living in a test file. This proves the real
-module, and adds what a reference dict could not express: outcomes that drive writes, and signed deltas
-that drive the rollups.
+module, and adds what a reference dict could not express: outcomes that drive writes, and the dirty
+buckets that drive the rollups. (An earlier design moved rollups by signed deltas; the rollups have
+recomputed dirty buckets from the fact table since Phase 3c, and the delta helper was removed on
+13 Sep 2026. The net-change checks below now go through the applied state, which is what the fold reads.)
 
 The property everything rests on: **a contribution is reversed exactly once.** Not zero times (the total
 keeps a vanished row forever) and not twice (the total goes negative). Both failures are silent, which is
@@ -47,12 +49,10 @@ def applied(stored, source) -> list[dict]:
     return list(out.values())
 
 
-def delta_total(outcomes) -> Decimal:
-    """The net change the rollups would see: every signed delta folded and summed."""
-    net = Decimal(0)
-    for sign, row in dd.deltas(outcomes):
-        net += sign * total([row])
-    return net
+def net_change(stored, source) -> Decimal:
+    """How far the total moves once the diff is applied: what a recomputed rollup would show minus what
+    it showed before. The rollups read the applied fact table, so this is the number they see."""
+    return total(applied(stored, source)) - total(stored)
 
 
 # ==================================================== correctness over all ten fixtures
@@ -64,11 +64,11 @@ def test_the_diff_reproduces_the_truth_for_every_fixture(f):
 
 
 @pytest.mark.parametrize("f", FIXTURES, ids=lambda f: f.name)
-def test_the_signed_deltas_move_the_total_by_exactly_the_right_amount(f):
-    """What Phase 0's reference dict could not check. The rollups are never recomputed from scratch --
-    they are moved by deltas -- so a delta list that is right in aggregate but double-counts one row
+def test_applying_the_diff_moves_the_total_by_exactly_the_right_amount(f):
+    """The rollups recompute dirty buckets from the applied fact table, so the applied state must move
+    the total by exactly the difference between before and after - a diff that double-counts one row
     corrupts every bucket while the fact table looks correct."""
-    assert total(f.before) + delta_total(dd.diff(f.before, f.after)) == total(f.after), f.catches
+    assert total(f.before) + net_change(f.before, f.after) == total(f.after), f.catches
 
 
 @pytest.mark.parametrize("f", FIXTURES, ids=lambda f: f.name)
@@ -79,7 +79,7 @@ def test_the_diff_is_idempotent(f):
     second = dd.diff(once, f.after)
     assert all(o.action is dd.Action.unchanged for o in second), \
         f"{f.name}: second pass wrote {[o.action.value for o in second if o.writes]}"
-    assert delta_total(second) == 0
+    assert net_change(once, f.after) == 0
 
 
 @pytest.mark.parametrize("f", FIXTURES, ids=lambda f: f.name)
@@ -125,7 +125,7 @@ def test_a_changed_rebuild_reverses_the_old_contribution_exactly_once():
     f = BY_NAME["rebuild"]
     outcomes = dd.diff(f.before, f.after)
     assert [o.action for o in outcomes] == [dd.Action.update]
-    assert delta_total(outcomes) == Decimal("-2"), "5 becomes 3: down two, not down five or up three"
+    assert net_change(f.before, f.after) == Decimal("-2"), "5 becomes 3: down two, not down five or up three"
 
 
 # ==================================================== the no-op path, which must be free
@@ -136,7 +136,7 @@ def test_an_unchanged_fingerprint_writes_nothing_at_all():
     outcomes = dd.diff(f.before, f.after)
     assert [o.action for o in outcomes] == [dd.Action.unchanged]
     assert not any(o.writes for o in outcomes)
-    assert dd.deltas(outcomes) == []
+    assert net_change(f.before, f.after) == 0
 
 
 def test_a_whole_unchanged_range_produces_no_writes():
@@ -196,29 +196,23 @@ def test_an_event_time_that_moved_is_a_reversal_plus_an_insert():
     outcomes = dd.diff([old], [new])
     assert {o.action for o in outcomes} == {dd.Action.reverse, dd.Action.insert}
     assert total([old]) == Decimal("6"), "the fold must actually see these rows"
-    assert delta_total(outcomes) == 0, "same quantity, so the total must not move"
+    assert net_change([old], [new]) == 0, "same quantity, so the total must not move"
     assert len(applied([old], [new])) == 1, "and the transaction must not be held twice"
 
 
-# ==================================================== deltas
-def test_an_update_emits_a_reversal_and_an_application_in_that_order():
-    """Order matters to a reader of the ledger, not to the arithmetic. A ledger showing the new value
-    before the reversal of the old reads as if the total briefly doubled."""
+# ==================================================== both sides are carried
+def test_an_update_carries_the_stored_row_so_the_old_bucket_can_be_dirtied():
+    """The rollups recompute every bucket a change touched. When a rebuild moves a fact, the bucket it
+    LEFT is known only from the stored row, so an update outcome must carry it alongside the new one."""
     f = BY_NAME["rebuild"]
-    signs = [sign for sign, _ in dd.deltas(dd.diff(f.before, f.after))]
-    assert signs == [-1, 1]
+    (outcome,) = dd.diff(f.before, f.after)
+    assert outcome.action is dd.Action.update
+    assert outcome.stored["quantity"] == Decimal("5"), "the OLD version"
+    assert outcome.fact["quantity"] == Decimal("3"), "the NEW version"
 
 
-def test_deltas_of_an_empty_diff_are_empty():
-    assert dd.deltas([]) == []
-
-
-def test_a_reversal_delta_carries_the_stored_row_not_the_incoming_one():
-    """It has to: the stored row is what was folded IN, so it is the only thing whose subtraction
-    cancels. Reversing using the incoming row would leave the difference behind forever."""
-    f = BY_NAME["rebuild"]
-    (sign, row), _ = dd.deltas(dd.diff(f.before, f.after))
-    assert sign == -1 and row["quantity"] == Decimal("5"), "the OLD quantity"
+def test_a_diff_of_nothing_is_nothing():
+    assert dd.diff([], []) == []
 
 
 # ==================================================== nothing is invented
@@ -242,5 +236,5 @@ def test_everything_stored_going_away_reverses_all_of_it():
     stored = list(BY_NAME["merge"].before)
     outcomes = dd.diff(stored, [])
     assert all(o.action is dd.Action.reverse for o in outcomes)
-    assert delta_total(outcomes) == -total(stored)
+    assert net_change(stored, []) == -total(stored)
     assert applied(stored, []) == []

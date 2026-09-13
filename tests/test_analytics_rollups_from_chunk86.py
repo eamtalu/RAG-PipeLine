@@ -137,7 +137,7 @@ async def test_the_fold_never_reads_a_fact_before_the_bound():
     dirty_dates = {BEFORE.date(), AFTER.date()}
     async with async_session() as db:
         await n5.recompute(db, CC, did, _definition(rollups_from=T0),
-                           hours=dirty_hours, dates=dirty_dates)
+                           hours=dirty_hours, dates=dirty_dates, tz=None)
         await db.commit()
     hourly = await _hourly(did)
     assert hourly == {n5.hour_of(AFTER): Decimal(7)}, "the hour before the bound must hold nothing"
@@ -149,7 +149,7 @@ async def test_an_unbounded_definition_still_folds_everything():
     async with async_session() as db:
         await n5.recompute(db, CC, did, _definition(rollups_from=None),
                            hours={n5.hour_of(BEFORE), n5.hour_of(AFTER)},
-                           dates={BEFORE.date(), AFTER.date()})
+                           dates={BEFORE.date(), AFTER.date()}, tz=None)
         await db.commit()
     assert await _hourly(did) == {n5.hour_of(BEFORE): Decimal(5), n5.hour_of(AFTER): Decimal(7)}
 
@@ -161,7 +161,7 @@ async def test_the_bound_is_inclusive_at_the_instant_itself():
     did = uuid.uuid4()
     async with async_session() as db:
         await n5.recompute(db, CC, did, _definition(rollups_from=T0),
-                           hours={n5.hour_of(T0)}, dates={T0.date()})
+                           hours={n5.hour_of(T0)}, dates={T0.date()}, tz=None)
         await db.commit()
     assert await _hourly(did) == {n5.hour_of(T0): Decimal(3)}
 
@@ -174,7 +174,7 @@ async def test_the_record_grain_respects_the_same_bound():
                                    _definition(rollups_from=T0, source="record",
                                                field="attr:rec.STQT", dims=("attr:rec.ITNO",)),
                                    hours={n5.hour_of(BEFORE), n5.hour_of(AFTER)},
-                                   dates={BEFORE.date(), AFTER.date()})
+                                   dates={BEFORE.date(), AFTER.date()}, tz=None)
         await db.commit()
     assert await _hourly(did) == {n5.hour_of(AFTER): Decimal(70)}
 
@@ -187,11 +187,11 @@ async def test_a_bucket_that_falls_before_the_bound_is_deleted_not_kept():
     hours = {n5.hour_of(BEFORE), n5.hour_of(AFTER)}
     dates = {BEFORE.date(), AFTER.date()}
     async with async_session() as db:
-        await n5.recompute(db, CC, did, _definition(None), hours=hours, dates=dates)
+        await n5.recompute(db, CC, did, _definition(None), hours=hours, dates=dates, tz=None)
         await db.commit()
     assert len(await _hourly(did)) == 2
     async with async_session() as db:
-        await n5.recompute(db, CC, did, _definition(rollups_from=T0), hours=hours, dates=dates)
+        await n5.recompute(db, CC, did, _definition(rollups_from=T0), hours=hours, dates=dates, tz=None)
         await db.commit()
     assert await _hourly(did) == {n5.hour_of(AFTER): Decimal(7)}
 

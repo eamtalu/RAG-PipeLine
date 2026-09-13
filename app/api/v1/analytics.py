@@ -270,7 +270,10 @@ async def update_metric(metric_id: str, payload: dict = Body(...),
             # that never committed would sit with a start date and no history, forever.
             # Only from DRAFT: an inactive metric's history was built when it first went active, and
             # re-publishing that range would only re-fold rows that already exist.
-            published = await pending_windows.publish(db, customer, lo=row.rollups_from, hi=watermark)
+            # Chunk 91: refold, because these facts have already been folded and will diff as
+            # unchanged; without the flag the new metric would get no rollup rows at all.
+            published = await pending_windows.publish(db, customer, lo=row.rollups_from, hi=watermark,
+                                                      refold=True)
             backfill = {"from": row.rollups_from.isoformat(), "to": watermark.isoformat()}
 
     if target is not None and target != row.status:
@@ -632,10 +635,14 @@ async def set_transaction_switches(transaction_name: str, payload: dict = Body(.
             # In the SAME transaction as the switch, which is invariant 3 applied to a registry write:
             # row first, commit, then publish would leave a switch flipped with nothing to act on it,
             # and it would stay that way until some unrelated rebuild happened to touch those windows.
+            #
+            # Chunk 91: a `show` flip changes no fact, so its tickets must ask for a REFOLD or the
+            # rollups stay exactly as they were (verified: they did, before this flag existed).
+            # Capture-on and expand-on change facts and record rows, which dirty buckets by themselves.
             published = await pending_windows.publish(
                 db, customer,
                 lo=history or (frontier - timedelta(days=settings.log_partition_retention_days)),
-                hi=frontier)
+                hi=frontier, refold=show_changed)
     await db.commit()
 
     return {"transaction_name": transaction_name, "capture": row.capture, "show": row.show,

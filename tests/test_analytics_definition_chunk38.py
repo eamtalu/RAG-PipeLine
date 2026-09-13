@@ -51,7 +51,7 @@ def test_no_role_can_hold_a_finished_answer():
     (d.Aggregation.average, {d.Role.sum_value, d.Role.count_value}),
     (d.Aggregation.stats, {d.Role.sum_value, d.Role.count_value, d.Role.sum_sq}),
     (d.Aggregation.extent, {d.Role.min_value, d.Role.max_value}),
-    (d.Aggregation.percentile, {d.Role.histogram}),
+    (d.Aggregation.percentile, {d.Role.histogram, d.Role.count_value}),   # chunk 92
 ])
 def test_each_aggregation_declares_the_roles_it_needs(aggregation, roles):
     """This mapping is the doc's composition table, executable. An average declares sum+count and is

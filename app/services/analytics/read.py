@@ -320,7 +320,8 @@ async def _rollup_points(db, model, customer_code: str, definition_id, *, bucket
 
     stmt = select(column, *dim_cols,
                   *(getattr(model, _ROLE_COLUMN[r]) for r in
-                    (d.Role.sum_value, d.Role.count_value, d.Role.distinct_sketch))).where(
+                    (d.Role.sum_value, d.Role.count_value, d.Role.distinct_sketch,
+                     d.Role.histogram))).where(
         model.customer_code == customer_code, model.definition_id == definition_id,
         model.measure_name == measure, column >= lo, column < hi)
 
@@ -328,7 +329,7 @@ async def _rollup_points(db, model, customer_code: str, definition_id, *, bucket
     for row in (await db.execute(stmt)).all():
         bucket, *rest = row
         dims = tuple(rest[:len(dim_cols)])
-        total, count, sketch = rest[len(dim_cols):]
+        total, count, sketch, hist = rest[len(dim_cols):]
         roles = {}
         if total is not None:
             roles[d.Role.sum_value] = Decimal(total)
@@ -336,6 +337,8 @@ async def _rollup_points(db, model, customer_code: str, definition_id, *, bucket
             roles[d.Role.count_value] = count
         if sketch is not None:
             roles[d.Role.distinct_sketch] = bytes(sketch)
+        if hist:
+            roles[d.Role.histogram] = tuple(hist)
         key = (bucket, dims)
         out[key] = d.add_roles(out.get(key, {}), roles)
     return out

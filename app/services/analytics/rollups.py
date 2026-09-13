@@ -8,11 +8,12 @@ Phase 3c of docs/analytics-ml-architecture/final_architecture.md.
     first retry.
 
 Recompute-and-replace is the decision everything else follows from, and it is worth being precise about
-what it changes. N3 hands over signed deltas, and the tempting thing is to add them to the stored bucket.
-That is wrong for a reason no test of the happy path would catch: a cycle that fails after writing the
-rollup but before committing its tickets is retried, and the retry adds the same delta again. So the
-deltas are used ONLY to decide *which buckets are dirty*; each dirty bucket is then recomputed from
-scratch and its rows replaced. Applying the same range twice is then indistinguishable from applying it
+what it changes. N3 hands over diff OUTCOMES, each carrying the old and the new version of a fact, and
+the tempting thing is to subtract the old and add the new to the stored bucket. That is wrong for a
+reason no test of the happy path would catch: a cycle that fails after writing the rollup but before
+committing its tickets is retried, and the retry adjusts the same bucket again. So the outcomes are used
+ONLY to decide *which buckets are dirty*; each dirty bucket is then recomputed from scratch and its rows
+replaced. Applying the same range twice is then indistinguishable from applying it
 once, which is the only property that makes a retry safe.
 
 A consequence that is easy to miss: **a bucket that recomputes to nothing must be deleted, not skipped.**
@@ -20,28 +21,27 @@ When the last fact in an hour is reversed, "replace the rows for this bucket" ha
 Leaving them would strand the old total in every chart with nothing to indicate it was stale -- the same
 silent-wrongness the range diff exists to prevent, reintroduced one level up.
 
-Where this deviates from the plan, and why
-------------------------------------------
-The plan says each level reads only the level below. Hourly buckets are UTC hours; daily buckets are the
-tenant-LOCAL `business_date`. Folding daily from hourly is therefore exact only when the tenant's UTC
-offset is a whole number of hours. For a zone at +05:30 one UTC hour per day straddles two local dates,
-and that hour's rows would be attributed entirely to one of them -- wrong by up to half a day's traffic,
-silently, and only for some tenants.
+The cascade, and the zone guard (chunk 91)
+-------------------------------------------
+Each level reads only the level below: dirty HOURS are folded from facts (read once per run for every
+active definition), each dirty local DAY is merged from its hourly rows, and each month from its days.
+Hourly buckets are UTC hours and daily buckets are the tenant-LOCAL `business_date`, so the middle step
+is exact only when the local day is a whole set of hourly buckets - which is true whenever both of the
+day's local midnights fall on whole UTC hours. Every whole-hour zone qualifies, Europe/London on both
+sides of a clock change included (23 or 25 buckets, still whole). A zone at +05:30 does not: one UTC
+hour per day straddles two local dates. `local_day_span` is that guard, and a day it refuses, a day
+older than the hourly retention horizon (its hourly rows may already be dropped), or a definition with
+no hourly grain falls back to the fact read by date that this module always did.
 
-So hourly AND daily are both folded from the facts, and monthly from daily (which is exact, because a
-month start is a pure function of a business date). The plan's actual concern -- "the fact table is read
-once per cycle" -- is preserved exactly: the dirty facts are read ONCE and folded into both grains in a
-single pass.
-
-Distinct counts are deliberately absent, per the plan: they do not cascade, and are computed per period
-from the fact table by the read layer.
+Distinct counts cascade too since chunk 88: the sketch unions register-wise like every other role.
 """
 
 import logging
 import uuid
-from datetime import date as date_type, datetime, timedelta, timezone
-from decimal import Decimal
+from dataclasses import dataclass
+from datetime import date as date_type, datetime, time as time_type, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -64,6 +64,99 @@ _ROLE_COLUMN: dict[d.Role, str] = {r: r.value for r in d.Role}
 
 #: A bucket's dimension values, positional, interpreted through the definition's `dimensions` list.
 DimKey = tuple[str | None, ...]
+
+#: How long hourly rows are kept, mirrored from `log_partition_worker.RETENTION_DAYS` and pinned equal
+#: by a test. A day older than this may have lost its hourly rows to retention, so its daily bucket
+#: must come from facts: deriving it from a half-dropped hourly level would DELETE the day's history.
+HOURLY_RETENTION_DAYS = 90
+#: Days of slack before the horizon, because retention runs hourly and drops whole partitions.
+DERIVE_MARGIN_DAYS = 2
+
+
+def _zone(tz: str | None):
+    """The tenant zone, resolved EXACTLY as `normalizer._local_date` resolves it: None and an unusable
+    name both mean UTC. The guard and `business_date` must agree, or a derived day would not be the day
+    the facts were filed under."""
+    if not tz:
+        return timezone.utc
+    try:
+        return ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.utc
+
+
+def local_day_span(day: date_type, tz: str | None) -> tuple[datetime, datetime] | None:
+    """The UTC instants of `day`'s local midnight and the next, or None when the day is NOT a whole set
+    of hourly buckets.
+
+    Both midnights must fall on whole UTC hours. For a whole-hour zone that always holds, including
+    across a DST change (a 23- or 25-hour day is still whole hours). For a half-hour zone it never
+    does, and the daily bucket has to be folded from facts instead.
+    """
+    zone = _zone(tz)
+    lo = datetime.combine(day, time_type.min, tzinfo=zone).astimezone(timezone.utc)
+    hi = datetime.combine(day + timedelta(days=1), time_type.min, tzinfo=zone).astimezone(timezone.utc)
+    if lo != hour_of(lo) or hi != hour_of(hi):
+        return None
+    return lo, hi
+
+
+def daily_derivable(day: date_type, tz: str | None, *, today: date_type) -> bool:
+    """Whether `day`'s daily bucket may be merged from hourly rows rather than folded from facts."""
+    if day < today - timedelta(days=HOURLY_RETENTION_DAYS - DERIVE_MARGIN_DAYS):
+        return False
+    return local_day_span(day, tz) is not None
+
+
+def hours_in(lo: datetime, hi: datetime) -> set[datetime]:
+    """Every hourly bucket the closed range `[lo, hi]` touches."""
+    out: set[datetime] = set()
+    cursor = hour_of(lo)
+    last = hour_of(hi)
+    while cursor <= last:
+        out.add(cursor)
+        cursor += timedelta(hours=1)
+    return out
+
+
+def local_dates_in(lo: datetime, hi: datetime, tz: str | None) -> set[date_type]:
+    """Every tenant-local day the closed range `[lo, hi]` touches."""
+    zone = _zone(tz)
+    first = lo.astimezone(zone).date()
+    last = hi.astimezone(zone).date()
+    return {first + timedelta(days=i) for i in range((last - first).days + 1)}
+
+
+@dataclass(frozen=True)
+class Changed:
+    """What one run's writing outcomes touched, from BOTH sides of every outcome."""
+
+    methods: frozenset
+    names: frozenset
+
+
+def changed_of(outcomes: Iterable[dd.Outcome]) -> Changed:
+    methods: set = set()
+    names: set = set()
+    for o in outcomes:
+        if not o.writes:
+            continue
+        for side in (o.stored, o.fact):
+            if side is None:
+                continue
+            methods.add(side.get("method"))
+            names.add(side.get("transaction_name"))
+    return Changed(frozenset(methods), frozenset(names))
+
+
+def concerns(definition: d.MetricDefinition, changed: Changed) -> bool:
+    """Whether any changed fact can be inside `definition`'s filter. False means the run cannot have
+    altered any of its buckets, so folding it would rewrite identical rows for nothing."""
+    if definition.method_filter and not (set(definition.method_filter) & changed.methods):
+        return False
+    if definition.transaction_filter and not (set(definition.transaction_filter) & changed.names):
+        return False
+    return True
 
 
 def hour_of(moment: datetime) -> datetime:
@@ -185,8 +278,10 @@ def _rows_for(customer_code: str, definition_id: uuid.UUID, definition: d.Metric
             row.update({f"dim{i + 1}": dims[i] for i in range(DIMENSION_SLOTS)})
             row.update({_ROLE_COLUMN[role]: value for role, value in roles.items()
                         if role is not d.Role.histogram})
+            # Chunk 92: a JSONB array of band counts, NULL when nothing was counted so an unused
+            # column costs nothing and `_is_empty` keeps deciding on the count.
             hist = roles.get(d.Role.histogram)
-            row["histogram"] = dict(hist) if isinstance(hist, Mapping) else None
+            row["histogram"] = [int(x) for x in hist] if hist is not None and any(hist) else None
             out.append(row)
     return out
 
@@ -286,6 +381,55 @@ async def _read_dirty_record_facts(db: AsyncSession, customer_code: str, hours: 
             for r in rows]
 
 
+def _since(facts: list[dict], since: datetime | None) -> list[dict]:
+    """The definition's `rollups_from`, applied in Python to a once-read list. Same predicate as
+    `_since_gate`: inclusive at the instant, and a fact with no event_time is excluded."""
+    if since is None:
+        return facts
+    return [f for f in facts if f.get("event_time") is not None and f["event_time"] >= since]
+
+
+async def _fold_daily_from_hourly(db: AsyncSession, customer_code: str, definition_id: uuid.UUID,
+                                  definition: d.MetricDefinition, dates: set[date_type], *,
+                                  tz: str | None, computed_at: datetime) -> dict:
+    """Chunk 91: each local day merged from its hourly rows, exactly as monthly is merged from daily.
+
+    Only for days `local_day_span` accepts. Reads the definition's hourly rows across the whole span
+    of the requested days in one query and assigns each row to the day whose span holds it, then
+    `add_roles` merges per (day, dimensions, measure): sums add, counts add, mins and maxes take the
+    extreme, histograms add element-wise, sketches union. Must run AFTER the hourly level has been
+    replaced in the same transaction, or a day would be merged from stale hours.
+    """
+    if not dates:
+        return {"deleted": 0, "inserted": 0}
+    spans = {day: local_day_span(day, tz) for day in dates}
+    assert all(spans.values()), "caller must route non-derivable days to the fact fold"
+    lo = min(span[0] for span in spans.values())
+    hi = max(span[1] for span in spans.values())
+    hourly = (await db.execute(
+        select(AnalyticsHourlyRollup).where(
+            AnalyticsHourlyRollup.customer_code == customer_code,
+            AnalyticsHourlyRollup.definition_id == definition_id,
+            AnalyticsHourlyRollup.bucket_start >= lo,
+            AnalyticsHourlyRollup.bucket_start < hi))).scalars().all()
+
+    folded: dict[tuple[Any, DimKey], dict] = {}
+    for row in hourly:
+        day = next((day for day, (s_lo, s_hi) in spans.items() if s_lo <= row.bucket_start < s_hi), None)
+        if day is None:
+            continue          # inside the outer range but in a gap between two requested days
+        key = (day, tuple(getattr(row, f"dim{i + 1}") for i in range(DIMENSION_SLOTS)))
+        roles = {role: getattr(row, column) for role, column in _ROLE_COLUMN.items()
+                 if getattr(row, column, None) is not None}
+        bucket = folded.setdefault(key, {})
+        bucket[row.measure_name] = d.add_roles(bucket.get(row.measure_name, {}), roles)
+
+    rows = _rows_for(customer_code, definition_id, definition, folded,
+                     bucket_column="business_date", computed_at=computed_at)
+    return await _replace(db, AnalyticsDailyRollup, customer_code, definition_id,
+                          bucket_column="business_date", buckets=sorted(dates), rows=rows)
+
+
 async def _fold_monthly(db: AsyncSession, customer_code: str, definition_id: uuid.UUID,
                         definition: d.MetricDefinition, months: set[date_type],
                         computed_at: datetime) -> dict:
@@ -327,52 +471,126 @@ async def _fold_monthly(db: AsyncSession, customer_code: str, definition_id: uui
                           bucket_column="month_start", buckets=sorted(months), rows=rows)
 
 
+def _merge(a: dict, b: dict) -> dict:
+    return {"deleted": a.get("deleted", 0) + b.get("deleted", 0),
+            "inserted": a.get("inserted", 0) + b.get("inserted", 0)}
+
+
 async def recompute(db: AsyncSession, customer_code: str, definition_id: uuid.UUID,
                     definition: d.MetricDefinition, *, hours: set[datetime],
                     dates: set[date_type], computed_at: datetime | None = None,
-                    hidden: frozenset[str] = frozenset()) -> dict:
-    """Rebuild every dirty bucket of one definition, at every grain it declares.
+                    hidden: frozenset[str] = frozenset(), tz: str | None) -> dict:
+    """Rebuild every dirty bucket of ONE transaction-source definition, at every grain it declares.
 
-    Does NOT commit: the caller owns the boundary, so the rollups land in the same transaction as the
-    facts they summarise. Committing separately would let a chart disagree with the fact table for as
-    long as the gap between the two commits, and forever if the second one failed.
+    The single-definition entry, kept for reconcile's drifted-bucket repair and for tests. The worker
+    uses `fold_all`, which reads the facts once for every definition. Does NOT commit: the caller owns
+    the boundary, so the rollups land in the same transaction as the facts they summarise.
+
+    `tz` is REQUIRED, with no default. It decides which hourly buckets make up a local day, and a
+    caller that forgot it would silently derive a London tenant's day on UTC midnights. Pass None only
+    to mean "this tenant's business dates are UTC", which is what `normalizer._local_date` does with
+    None too.
     """
     if not hours and not dates:
         return {"hourly": {}, "daily": {}, "monthly": {}}
     now = computed_at or datetime.now(timezone.utc)
-    # R2: `hidden` are the transactions whose `show` switch is off. Excluded HERE rather than at read
-    # time because `transaction_name` is only reliably available at this point - a metric whose
-    # dimensions omit it could not be filtered from a pre-aggregated bucket later.
-    #
-    # Recomputed from scratch every time, so flipping `show` back on refills complete history on the
-    # next fold of the range. That is the "one recompute" the switch promises.
-    facts = await _read_dirty_facts(db, customer_code, hours, dates, hidden,
+    derivable, by_fact = _route_dates(definition, dates, tz, today=now.date())
+    facts = await _read_dirty_facts(db, customer_code, hours, by_fact, hidden,
                                     since=definition.rollups_from)
     return await _fold_grains(db, customer_code, definition_id, definition, facts,
-                              hours=hours, dates=dates, now=now)
+                              hours=hours, dates=dates, derivable=derivable, tz=tz, now=now)
 
 
 async def recompute_records(db: AsyncSession, customer_code: str, definition_id: uuid.UUID,
                             definition: d.MetricDefinition, *, hours: set[datetime],
                             dates: set[date_type], computed_at: datetime | None = None,
-                            hidden: frozenset[str] = frozenset()) -> dict:
+                            hidden: frozenset[str] = frozenset(), tz: str | None) -> dict:
     """18y: `recompute`'s record-grain twin - reads `analytics_record_facts` through the parallel
-    reader and folds through the SAME grain cascade into the same definition-keyed rollup tables.
-    Everything downstream of the read is shared (`_fold_grains`), so the two grains cannot drift in
-    arithmetic; only the readers are grain-specific, by 18n's structural rule."""
+    reader and folds through the SAME grain cascade into the same definition-keyed rollup tables."""
     if not hours and not dates:
         return {"hourly": {}, "daily": {}, "monthly": {}}
     now = computed_at or datetime.now(timezone.utc)
-    facts = await _read_dirty_record_facts(db, customer_code, hours, dates, hidden,
+    derivable, by_fact = _route_dates(definition, dates, tz, today=now.date())
+    facts = await _read_dirty_record_facts(db, customer_code, hours, by_fact, hidden,
                                            since=definition.rollups_from)
     return await _fold_grains(db, customer_code, definition_id, definition, facts,
-                              hours=hours, dates=dates, now=now)
+                              hours=hours, dates=dates, derivable=derivable, tz=tz, now=now)
+
+
+def _route_dates(definition: d.MetricDefinition, dates: set[date_type], tz: str | None, *,
+                 today: date_type) -> tuple[set[date_type], set[date_type]]:
+    """Split dirty days into those merged from hourly rows and those folded from facts.
+
+    A definition without an hourly grain has no hourly rows to merge, so every day goes to facts.
+    """
+    if "hourly" not in definition.grains:
+        return set(), set(dates)
+    derivable = {day for day in dates if daily_derivable(day, tz, today=today)}
+    return derivable, set(dates) - derivable
+
+
+async def fold_all(db: AsyncSession, customer_code: str,
+                   definitions: Sequence[tuple[uuid.UUID, d.MetricDefinition]], *,
+                   hours: set[datetime], dates: set[date_type],
+                   rec_hours: set[datetime], rec_dates: set[date_type],
+                   hidden: frozenset[str], tz: str | None, now: datetime,
+                   changed: Changed | None = None) -> dict:
+    """Chunk 91: fold every active definition from ONE fact read per source.
+
+    Facts for the dirty hours (plus any day that cannot derive from hourly) are read once, then each
+    definition is folded from that list with its own `rollups_from` applied in Python. `changed` is
+    what the run's diff touched; a transaction definition whose filter cannot match any of it is
+    skipped, because none of its buckets can have moved. None means a refold: skip nothing.
+    """
+    stats = {"definitions": 0, "skipped": 0, "rows_written": 0,
+             "buckets": len(hours | rec_hours) + len(dates | rec_dates)}
+    today = now.date()
+
+    async def _one_source(reader, model_defs, d_hours, d_dates):
+        # The days that cannot derive for ANY definition decide the read's date predicate. A
+        # definition with no hourly grain needs facts for every day; read those lazily, once.
+        by_fact_all: set[date_type] = set()
+        routed = {}
+        for definition_id, definition in model_defs:
+            derivable, by_fact = _route_dates(definition, d_dates, tz, today=today)
+            routed[definition_id] = (derivable, by_fact)
+            by_fact_all |= by_fact
+        if not model_defs or (not d_hours and not d_dates):
+            return
+        facts = await reader(db, customer_code, d_hours, by_fact_all, hidden)
+        for definition_id, definition in model_defs:
+            derivable, _by_fact = routed[definition_id]
+            out = await _fold_grains(db, customer_code, definition_id, definition,
+                                     _since(facts, definition.rollups_from),
+                                     hours=d_hours, dates=d_dates, derivable=derivable, tz=tz, now=now)
+            stats["definitions"] += 1
+            for grain in out.values():
+                stats["rows_written"] += grain.get("inserted", 0)
+
+    transaction_defs, record_defs = [], []
+    for definition_id, definition in definitions:
+        if definition.source == "record":
+            record_defs.append((definition_id, definition))
+        elif changed is not None and not concerns(definition, changed):
+            stats["skipped"] += 1
+        else:
+            transaction_defs.append((definition_id, definition))
+
+    await _one_source(_read_dirty_facts, transaction_defs, hours, dates)
+    await _one_source(_read_dirty_record_facts, record_defs, rec_hours, rec_dates)
+    return stats
 
 
 async def _fold_grains(db: AsyncSession, customer_code: str, definition_id: uuid.UUID,
                        definition: d.MetricDefinition, facts: list[dict], *,
-                       hours: set[datetime], dates: set[date_type], now: datetime) -> dict:
+                       hours: set[datetime], dates: set[date_type], now: datetime,
+                       derivable: set[date_type] | None = None, tz: str | None = None) -> dict:
+    """One definition through the cascade. `derivable` are the dirty days merged from hourly rows;
+    the rest of `dates` are folded from `facts`. Hourly is always replaced first, because the daily
+    merge reads it."""
     stats: dict[str, dict] = {}
+    derivable = set(derivable or ())
+    by_fact = set(dates) - derivable
 
     if "hourly" in definition.grains:
         folded = group_fold(
@@ -386,14 +604,20 @@ async def _fold_grains(db: AsyncSession, customer_code: str, definition_id: uuid
                            bucket_column="bucket_start", computed_at=now))
 
     if "daily" in definition.grains:
-        folded = group_fold(
-            facts, definition,
-            lambda r: r["business_date"] if r.get("business_date") in dates else None)
-        stats["daily"] = await _replace(
-            db, AnalyticsDailyRollup, customer_code, definition_id, bucket_column="business_date",
-            buckets=sorted(dates),
-            rows=_rows_for(customer_code, definition_id, definition, folded,
-                           bucket_column="business_date", computed_at=now))
+        daily = {"deleted": 0, "inserted": 0}
+        if by_fact:
+            folded = group_fold(
+                facts, definition,
+                lambda r: r["business_date"] if r.get("business_date") in by_fact else None)
+            daily = _merge(daily, await _replace(
+                db, AnalyticsDailyRollup, customer_code, definition_id, bucket_column="business_date",
+                buckets=sorted(by_fact),
+                rows=_rows_for(customer_code, definition_id, definition, folded,
+                               bucket_column="business_date", computed_at=now)))
+        if derivable:
+            daily = _merge(daily, await _fold_daily_from_hourly(
+                db, customer_code, definition_id, definition, derivable, tz=tz, computed_at=now))
+        stats["daily"] = daily
 
     if "monthly" in definition.grains:
         # AFTER daily has been replaced, necessarily: monthly reads the level below, so folding it from

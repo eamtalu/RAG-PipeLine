@@ -1506,7 +1506,7 @@ A missing field means "not supplied", a different fact from zero, and it must su
 
 ## N3. Analytics worker
 
-Turns tickets into fact rows and aggregate deltas, exactly once in effect.
+Turns tickets into fact rows and the set of dirty rollup buckets, exactly once in effect.
 Runs inside the existing singleton `python -m app.worker`, never in the four web workers, which stay read-only for analytics.
 
 One cycle, one transaction per RUN (corrected 2026-08-22, D6; this said "a single transaction per tenant"):
@@ -1521,7 +1521,7 @@ One cycle, one transaction per RUN (corrected 2026-08-22, D6; this said "a singl
 6. Normalise via N2.
 7. Read existing `analytics_facts` rows in the **same** range.
 8. **Range diff**, never per-row upsert.
-9. Apply outcomes, append changed versions to `analytics_fact_ledger`, hand deltas to N5, write quarantine rows.
+9. Apply outcomes, append changed versions to `analytics_fact_ledger`, hand the outcomes to N5 (which recomputes every dirty bucket from `analytics_facts`; there is no delta arithmetic), write quarantine rows.
 10. Update `analytics_tenant_state`, publish the retention position, stamp tickets consumed.
 
 The diff:
@@ -1675,7 +1675,7 @@ pending_windows ─► N3 claim + coalesce + lock
                      ├─write─► analytics_facts          (upsert)
                      ├─write─► analytics_fact_ledger    (append)
                      ├─write─► analytics_quality_issues
-                     ├─► N5 apply deltas
+                     ├─► N5 recompute dirty buckets from facts
                      ├─write─► analytics_tenant_state
                      ├─write─► consumer_cursors
                      └─write─► pending_windows.consumed_at

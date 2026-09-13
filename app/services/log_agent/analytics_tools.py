@@ -221,9 +221,12 @@ async def query_metric(db: AsyncSession, args: dict, customer_code: str) -> dict
     approximate = m.aggregation.value in catalog._APPROXIMATE_AGGREGATIONS
     description = await db.scalar(select(AnalyticsMetric.description).where(
         AnalyticsMetric.customer_code == customer_code, AnalyticsMetric.id == definition_id))
-    if approximate:
+    if m.aggregation.value == "distinct":
         notes.append("distinct_estimate is a HyperLogLog estimate, about 1.6 percent error; it does "
                      "not add across buckets")
+    elif m.aggregation.value == "percentile":
+        notes.append("p50 and p95 are read out of a 20-band log histogram; each band is a factor of "
+                     "two wide, so quote them as approximate and never add them across buckets")
     if out.get("live_spans"):
         notes.append("buckets inside live_spans were folded from facts on the fly and are provisional")
     return {

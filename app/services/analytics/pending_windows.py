@@ -60,11 +60,15 @@ def _pad() -> timedelta:
 
 
 async def publish(db: AsyncSession, customer_code: str, *, lo: datetime, hi: datetime,
-                  job_id: uuid.UUID | None = None) -> int:
+                  job_id: uuid.UUID | None = None, refold: bool = False) -> int:
     """Record that `[lo, hi]` changed for this tenant. Returns how many tickets were written.
 
     Pads the range and splits it into at most one ticket per day. Does NOT commit: the caller's
     transaction boundary is what makes the ticket atomic with the change it describes.
+
+    `refold` (chunk 91) marks tickets whose purpose is the ROLLUPS rather than the facts: the run must
+    rebuild every bucket in the range even if the diff finds nothing changed. Off by default, because
+    the ordinary ticket relies on the 98.7 percent unchanged case being free.
     """
     pad = _pad()
     start, end = lo - pad, hi + pad
@@ -74,7 +78,8 @@ async def publish(db: AsyncSession, customer_code: str, *, lo: datetime, hi: dat
     while cursor <= end:
         chunk_end = min(cursor + _MAX_TICKET_SPAN, end)
         db.add(AnalyticsPendingWindow(customer_code=customer_code, job_id=job_id,
-                                      range_start=cursor, range_end=chunk_end))
+                                      range_start=cursor, range_end=chunk_end,
+                                      refold_rollups=refold))
         written += 1
         if chunk_end >= end:
             break

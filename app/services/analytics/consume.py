@@ -645,7 +645,9 @@ async def _quarantine(db: AsyncSession, customer_code: str, issues: Sequence[Map
 
 async def _roll_up(db: AsyncSession, customer_code: str, outcomes: Sequence[dd.Outcome],
                    computed_at: datetime,
-                   record_buckets: tuple[set, set] = (frozenset(), frozenset())) -> dict:
+                   record_buckets: tuple[set, set] = (frozenset(), frozenset()), *,
+                   tz: str | None = None,
+                   refold_range: tuple[datetime, datetime] | None = None) -> dict:
     """N5: recompute every rollup bucket this diff dirtied, for every ACTIVE definition.
 
     In the SAME transaction as the facts, deliberately. A chart that disagrees with the fact table for
@@ -655,11 +657,23 @@ async def _roll_up(db: AsyncSession, customer_code: str, outcomes: Sequence[dd.O
     Driven by registry ROWS, not by `CONSUMPTION`. A metric invented from the interface is folded by this
     same call with nothing added, which is the property the whole user-configurable design rests on.
 
-    The deltas decide only WHICH buckets are dirty; each one is then recomputed from scratch. Adding the
-    deltas to the stored bucket would double-count on the first retry, and a retry is the normal
+    The outcomes decide only WHICH buckets are dirty; each one is then recomputed from scratch. Adjusting
+    the stored bucket by old-minus-new would double-count on the first retry, and a retry is the normal
     consequence of any failure.
+
+    Chunk 91. Facts are read ONCE per source and every definition folds from that list; a definition
+    whose filter no changed fact can match is skipped. `refold_range` is set when a ticket in the run
+    carries `refold_rollups`: every hour and local day in the range is then dirty and nothing is
+    skipped, which is how a metric activated over already-folded facts, or a `show` flip, reaches the
+    rollups at all - the diff sees nothing changed in either case.
     """
     hours, dates = n5.dirty_buckets(outcomes)
+    changed: n5.Changed | None = n5.changed_of(outcomes)
+    if refold_range is not None:
+        lo, hi = refold_range
+        hours |= n5.hours_in(lo, hi)
+        dates |= n5.local_dates_in(lo, hi, tz)
+        changed = None
     # 18y: the record grain's dirty buckets are the UNION of the fact diff's and the expansion
     # driver's own (a backfill window's fact diff is all-unchanged, so without the union the
     # expand-on backfill would write record rows and never roll them up). Transaction rollups keep
@@ -668,34 +682,24 @@ async def _roll_up(db: AsyncSession, customer_code: str, outcomes: Sequence[dd.O
     rec_dates = dates | record_buckets[1]
     if not rec_hours and not rec_dates:
         # The 98.7% rebuild case, free all the way through rather than only as far as the fact table.
-        return {"definitions": 0, "buckets": 0}
+        return {"definitions": 0, "skipped": 0, "buckets": 0, "rows_written": 0}
 
     await registry.ensure_seed(db, customer_code)
     # R2. The `show` switch, read once per run like the other two. Facts for a hidden transaction stay
     # exactly where they are; only the rollups exclude them, which is what makes the switch instant to
     # reverse - the next fold of the range refills complete history from facts that never left.
     hidden = await capture.hidden_names(db, customer_code)
-    stats = {"definitions": 0, "buckets": len(rec_hours) + len(rec_dates)}
-    for definition_id, definition in await registry.active_definitions(db, customer_code):
-        d_hours, d_dates = ((rec_hours, rec_dates) if definition.source == "record"
-                            else (hours, dates))
-        fold = n5.recompute_records if definition.source == "record" else n5.recompute
-        if not d_hours and not d_dates:
-            continue
-        try:
-            await fold(db, customer_code, definition_id, definition,
-                       hours=d_hours, dates=d_dates, computed_at=computed_at,
-                       hidden=hidden)
-            stats["definitions"] += 1
-        except Exception:
-            # Deliberately NOT swallowed beyond logging: this re-raises, failing the whole run. A
-            # rollup that silently did not update is a chart that is wrong with nothing to say so,
-            # which is worse than a ticket that stays open and retries. Contrast quarantine (A1),
-            # where the alternative is halting a tenant over one unexplainable row.
-            logger.exception("Analytics: rollup for definition %s (%r) failed for %s",
-                             definition_id, definition.name, customer_code)
-            raise
-    return stats
+    try:
+        return await n5.fold_all(db, customer_code, await registry.active_definitions(db, customer_code),
+                                 hours=hours, dates=dates, rec_hours=rec_hours, rec_dates=rec_dates,
+                                 hidden=hidden, tz=tz, now=computed_at, changed=changed)
+    except Exception:
+        # Deliberately NOT swallowed beyond logging: this re-raises, failing the whole run. A
+        # rollup that silently did not update is a chart that is wrong with nothing to say so,
+        # which is worse than a ticket that stays open and retries. Contrast quarantine (A1),
+        # where the alternative is halting a tenant over one unexplainable row.
+        logger.exception("Analytics: rollup fold failed for %s", customer_code)
+        raise
 
 
 def _settledness(source: Sequence[Mapping[str, Any]]) -> tuple[Decimal | None, datetime | None]:
@@ -842,7 +846,8 @@ async def publish_retention_position(db: AsyncSession) -> datetime | None:
 
 
 async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
-                       tickets: Sequence[AnalyticsPendingWindow], tz: str | None) -> dict:
+                       tickets: Sequence[AnalyticsPendingWindow], tz: str | None, *,
+                       refold: bool = False) -> dict:
     """One disjoint run, in its own transaction. Everything or nothing.
 
     The order inside matters: the tickets are stamped LAST, in this same transaction (invariant 4), so a
@@ -967,7 +972,8 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         await capture.observe_fields(db, customer_code, discovered, source="record")
         quarantined = await _quarantine(db, customer_code, issues, now)
         rolled = await _roll_up(db, customer_code, outcomes, now,
-                                record_buckets=(record_stats["hours"], record_stats["dates"]))
+                                record_buckets=(record_stats["hours"], record_stats["dates"]),
+                                tz=tz, refold_range=(lo, hi) if refold else None)
 
         await _update_state(
             db, customer_code, folded=folded, quarantined=quarantined,
@@ -993,7 +999,8 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
 
     return {**folded, "quarantined": quarantined, "source_rows": len(source_rows),
             "consumed": len(tickets), "definitions_rolled": rolled["definitions"],
-            "buckets_rolled": rolled["buckets"],
+            "definitions_skipped": rolled["skipped"], "buckets_rolled": rolled["buckets"],
+            "rollup_rows_written": rolled["rows_written"],
             "record_facts": record_stats["records"],
             "record_facts_deleted": record_stats["deleted"]}
 
@@ -1040,7 +1047,8 @@ async def consume_tenant(customer_code: str) -> dict:
 
     stats = {"runs": 0, "inserted": 0, "updated": 0, "unchanged": 0, "reversed": 0,
              "quarantined": 0, "source_rows": 0, "consumed": 0, "failed": 0, "abandoned": 0,
-             "definitions_rolled": 0, "buckets_rolled": 0,
+             "definitions_rolled": 0, "definitions_skipped": 0, "buckets_rolled": 0,
+             "rollup_rows_written": 0,
              "record_facts": 0, "record_facts_deleted": 0}
     if not tickets:
         return stats
@@ -1096,9 +1104,12 @@ async def consume_tenant(customer_code: str) -> dict:
             # re-folds a range that is already correct and the diff reports `unchanged` - at-least-once,
             # never at-most-once, which is the direction that cannot lose data.
             claim = rows if index == len(slices) - 1 else []
+            # Chunk 91: the refold request belongs to the RUN, not to the slice that claims the
+            # tickets, or every slice but the last would fold nothing for an unchanged range.
+            refold = any(getattr(t, "refold_rollups", False) for t in rows)
             try:
                 for key, value in (await _consume_run(
-                        customer_code, sub_lo, sub_hi, claim, tz)).items():
+                        customer_code, sub_lo, sub_hi, claim, tz, refold=refold)).items():
                     stats[key] += value
             except Exception as exc:
                 # Per SUB-WINDOW, so one poison six-hour slice fails in isolation instead of taking the

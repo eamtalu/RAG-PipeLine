@@ -48,8 +48,10 @@ DEFAULT_DOMAIN_DAYS = 7
 DEFAULT_DOMAIN_CAP = 200
 
 #: Aggregations whose stored roles are an estimate rather than an exact figure. `distinct` is a
-#: HyperLogLog sketch (chunk 88, about 1.6 percent error); everything else is exact arithmetic.
-_APPROXIMATE_AGGREGATIONS: frozenset[str] = frozenset({d.Aggregation.distinct.value})
+#: HyperLogLog sketch (chunk 88, about 1.6 percent error); `percentile` is read out of a 20-band log
+#: histogram (chunk 92, a band is a factor of two wide). Everything else is exact arithmetic.
+_APPROXIMATE_AGGREGATIONS: frozenset[str] = frozenset({d.Aggregation.distinct.value,
+                                                       d.Aggregation.percentile.value})
 
 
 def aggregations() -> list[dict]:

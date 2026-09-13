@@ -15,7 +15,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, text
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -55,3 +55,8 @@ class AnalyticsPendingWindow(Base):
     # clock skew between app host and database makes a fresh row look "not yet due" intermittently.
     available_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False)
+    # Chunk 91. True asks the run to rebuild every rollup bucket in the range even when the diff finds
+    # every fact unchanged: a metric activated over already-folded facts, or a `show` flip, changes no
+    # fact and would otherwise be a silent no-op for the rollups.
+    refold_rollups: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False,
+                                                 server_default=text("false"))

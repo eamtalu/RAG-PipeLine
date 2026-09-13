@@ -42,10 +42,6 @@ from typing import Any, Iterable, Mapping, Sequence
 #: The identity of a fact, as a hashable pair.
 Key = tuple[str, datetime | None]
 
-#: A signed contribution: `(+1, row)` to fold in, `(-1, row)` to take back out.
-Delta = tuple[int, Mapping[str, Any]]
-
-
 class Action(enum.Enum):
     """What the diff decided about one key. Four outcomes, and `unchanged` is the important one.
 
@@ -64,8 +60,9 @@ class Action(enum.Enum):
 class Outcome:
     """One key's verdict, carrying both sides so the caller needs no second lookup.
 
-    `stored` is kept on an update precisely because the reversal delta must use it: the stored row is
-    what was folded IN, so it is the only thing whose subtraction cancels.
+    `stored` is kept on an update because the rollups need BOTH sides: the bucket the old version sat
+    in is as dirty as the one the new version lands in, and only the stored row knows the old bucket.
+    The ledger needs it too, to record the version a reversal took away.
     """
 
     action: Action
@@ -143,21 +140,3 @@ def diff(stored: Sequence[Mapping[str, Any]],
             outcomes.append(Outcome(Action.reverse, key, None, old))
 
     return outcomes
-
-
-def deltas(outcomes: Iterable[Outcome]) -> list[Delta]:
-    """The signed contributions the rollups must apply, in the order they should be read.
-
-    A reversal is emitted BEFORE its application for an update. The arithmetic does not care, but a
-    ledger showing the new value before the old one was taken back reads as though the total briefly
-    doubled, and that is the reading someone will do at 2am.
-    """
-    out: list[Delta] = []
-    for o in outcomes:
-        if o.action is Action.unchanged:
-            continue
-        if o.stored is not None:
-            out.append((-1, o.stored))
-        if o.fact is not None and o.action is not Action.reverse:
-            out.append((1, o.fact))
-    return out
