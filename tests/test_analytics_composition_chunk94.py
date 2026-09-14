@@ -496,6 +496,37 @@ async def test_field_frequency_is_counted_per_method_not_per_transaction_name():
     assert by_name["resp.CustomerName"]["recent_facts"] == 1
 
 
+async def test_an_unapproved_field_reports_its_registry_sightings_not_a_fact_count():
+    """Seen live on 14 Sep after the fresh start: `resp.AccessToken` and `resp.BasicUnitOfMeasure` under
+    GetOldestItemBalanceAPI read "not seen in the last 14 days" although they are in every response.
+    Nobody approved them, so no fact carries them, and a fact count says nothing about them. What
+    the screen can say truthfully comes from the registry: how many responses showed the name, when
+    it was last seen, and whether it is credential-shaped and therefore never approved by default."""
+    await _plant()
+    await n3.consume_tenant(CC)
+    async with async_session() as db:
+        db.add(AnalyticsFieldRegistry(customer_code=CC, method="ConfirmPickLine", source="response",
+                                      field="resp.AccessToken", captured=False, seen_count=41,
+                                      last_seen_at=T0 + timedelta(hours=2)))
+        db.add(AnalyticsFieldRegistry(customer_code=CC, method="ConfirmPickLine", source="response",
+                                      field="resp.BasicUnitOfMeasure", captured=False, seen_count=7,
+                                      last_seen_at=T0 + timedelta(hours=1)))
+        await db.commit()
+    async with async_session() as db:
+        out = await api.transaction_composition("Pick", customer=CC, db=db)
+    by_name = {f["field"]: f for f in out["fields"]["response"]}
+    token = by_name["resp.AccessToken"]
+    assert token["credential"] is True
+    assert token["seen_by_method"] == {"ConfirmPickLine": {"count": 41, "last_seen_at": (T0 + timedelta(hours=2)).isoformat()}}
+    assert token["recent_by_method"] == {}, "no fact carries an unapproved field, and that is not 'not seen'"
+    uom = by_name["resp.BasicUnitOfMeasure"]
+    assert uom["credential"] is False
+    assert uom["seen_by_method"]["ConfirmPickLine"]["count"] == 7
+    assert by_name["resp.value"]["credential"] is False
+    assert by_name["resp.value"]["seen_by_method"]["ConfirmPickLine"]["count"] >= 1, \
+        "approved fields carry their sightings too, so the screen has both numbers"
+
+
 async def test_the_composition_endpoint_404s_for_an_unknown_name():
     from fastapi import HTTPException
     async with async_session() as db:

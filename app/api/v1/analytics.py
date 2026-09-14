@@ -1032,9 +1032,19 @@ async def transaction_composition(transaction_name: str,
             group = ("record" if r.source == "record" else "mi" if r.source == "mi_result" else "response")
             entry = grouped.setdefault((group, r.field), {
                 "id": str(r.id), "ids": [], "methods": [], "field": r.field, "captured": False,
-                "description": r.description, "unit": r.unit})
+                "description": r.description, "unit": r.unit,
+                # Credential-shaped names are recorded by name and never approved by default; the
+                # screen says so instead of offering them as ordinary fields.
+                "credential": pl.never_auto_approve(r.field),
+                # Registry sightings per method. A fact count only measures APPROVED fields (an
+                # unapproved one is never stored), so for the rest this is the truthful number: how
+                # many responses showed the name and when it was last seen.
+                "seen_by_method": {}})
             entry["ids"].append(str(r.id))
             entry["methods"].append(r.method)
+            entry["seen_by_method"][r.method] = {
+                "count": int(r.seen_count or 0),
+                "last_seen_at": r.last_seen_at.isoformat() if r.last_seen_at else None}
             entry["captured"] = entry["captured"] or bool(r.captured)
             entry["description"] = entry["description"] or r.description
             entry["unit"] = entry["unit"] or r.unit
