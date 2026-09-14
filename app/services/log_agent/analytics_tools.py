@@ -85,7 +85,7 @@ TOOLS: list[dict] = [
                 "metric": {"type": "string", "description": "Metric name, from list_metrics."},
                 "measure": {"type": "string",
                             "description": "Measure name; defaults to the metric's first measure."},
-                "group_by": {"type": "array", "items": {"type": "string"}, "maxItems": 4,
+                "group_by": {"type": "array", "items": {"type": "string"}, "maxItems": 6,
                              "description": "Fields to break down by, e.g. [\"warehouse\"]. Fields that "
                                             "are not dimensions of the metric fall back to a bounded "
                                             "fact scan and are labelled ad_hoc."},

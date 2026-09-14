@@ -42,6 +42,8 @@ def measure_to_json(measure: d.Measure) -> dict:
     }
     if measure.unit:
         out["unit"] = measure.unit      # chunk 89: absent when unset, so older stored forms are unchanged
+    if measure.minus:
+        out["minus"] = measure.minus    # chunk 101, same rule: no key at all when there is no difference
     return out
 
 
@@ -53,6 +55,7 @@ def measure_from_json(raw: dict) -> d.Measure:
         only=frozenset(c.Classification(x) for x in raw.get("only") or ()),
         statuses=frozenset(raw.get("statuses") or ()),
         unit=(str(raw["unit"]).strip() or None) if raw.get("unit") is not None else None,
+        minus=(str(raw["minus"]).strip() or None) if raw.get("minus") is not None else None,
     )
 
 

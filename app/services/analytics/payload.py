@@ -106,18 +106,53 @@ def never_auto_approve(name: str) -> bool:
     return bool(_NEVER_SEED.search(name))
 
 
+#: Prefix of the fold's own plumbing inside `attributes`: `__src_fp`, `__norm_v`, `__mi_records`.
+#: Written by `consume` AFTER normalise so they sit inside the fingerprint. They are not warehouse
+#: data, so they are never registered and never offered as a dimension.
+BOOKKEEPING_PREFIX = "__"
+
+
+def is_bookkeeping(name: str) -> bool:
+    """Whether `name` is the fold's own plumbing rather than something the warehouse said."""
+    return name.startswith(BOOKKEEPING_PREFIX)
+
+
 def seeded(name: str) -> bool:
     """Whether a newly discovered field should arrive already approved.
 
-    The veto is checked FIRST and independently, so this stays true even if a credential-shaped name is
-    added to `SEED_FIELDS` by mistake. Chunk 94: the per-kind MI counters are seeded by SHAPE rather
-    than by list, because the kinds are whatever M3 programs a tenant's transactions call - a list
-    could never be complete. They are only ever observed when a transaction's `mi` switch is on, which
-    is the deliberate decision the seed then honours. The four legacy `mi.*` names are no longer seeded.
+    Chunk 99 changed the DEFAULT, not the safety rules. Both halves of the exchange now arrive ticked:
+    what the handheld sent (a bare name) and what the server returned (`resp.`). The reason is that the
+    old default made the interesting numbers unreachable - a stock move's `Quantity` and a stock
+    count's `BalanceQuantity` are on every such record and could not be measured, while picking and
+    counting worked only because three method names are hardcoded in `contract.QUANTITY_FIELD`.
+
+    For the request half this changes nothing about STORAGE: `normalizer.normalise` copies the source
+    row's `attributes` wholesale, so those values were always on the fact. The tick only decides
+    whether a metric may name the field. For the response half it does change storage, because
+    `select` consults the registry - that was the explicit decision.
+
+    Three things the new default cannot reach past, all checked before it:
+
+    - the credential veto, first and independently, so a `SessionToken` on either half arrives
+      un-ticked however the default is spelled;
+    - the fold's own bookkeeping keys, which are not warehouse data at all;
+    - record fields (`rec.`), still never seeded, because the record grain is opt-in per transaction
+      and expands to roughly 200k rows a day.
+
+    MI names keep chunk 94's shape rule: the per-kind counters are seeded because the kinds are
+    whatever M3 programs a tenant calls and a list could never be complete, and the four legacy
+    `mi.*` names are not.
+
+    `SEED_FIELDS` is kept as the record of what was chosen while the default was off. It no longer
+    decides anything for the two halves, and the chunk 56 tests still guard it.
     """
-    if never_auto_approve(name):
+    if never_auto_approve(name) or is_bookkeeping(name):
         return False
-    return name in SEED_FIELDS or bool(_MI_GROUP_NAME.match(name))
+    if name.startswith(RECORD_PREFIX):
+        return False
+    if name.startswith(MI_PREFIX):
+        return bool(_MI_GROUP_NAME.match(name))
+    return True
 
 
 def _is_scalar(value) -> bool:

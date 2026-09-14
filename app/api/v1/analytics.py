@@ -29,7 +29,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
@@ -39,13 +39,17 @@ from app.config.database import get_session
 from app.persistence.models.analytics_metric import AnalyticsMetric
 from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
+from app.persistence.models.analytics_lookup import AnalyticsLookup, AnalyticsLookupValue
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
 from app.services.analytics import capture
+from app.services.analytics import contract
 from app.services.analytics import catalog as n8
 from app.services.analytics import preview as n9
 from app.services.analytics import payload as pl
 from app.services.analytics import pending_windows
 from app.services.analytics import definition as d
+from app.services.analytics import lookup as lookup_model
+from app.services.analytics import lookup_store
 from app.services.analytics import read as n6
 from app.services.analytics import reconcile as rc
 from app.services.analytics import registry
@@ -427,6 +431,11 @@ async def _refuse_unapproved_ad_hoc_attrs(db, customer: str, definition, dims: t
     dimensions were checked at creation; an ad-hoc path bypasses that, and an unapproved (or
     typo'd) one would scan and return nothing - "no data" instead of the 400 someone can act on."""
     from app.services.analytics import contract as c
+    from app.services.analytics import lookup as lk
+    # Chunk 100: a `lookup:` path names no attribute of its own - its key field does, and `lk.plan`
+    # has already substituted that by the time this runs on the STORED grouping. Passing a raw path
+    # through `attr_key` would refuse a perfectly valid grouping.
+    dims = tuple(g for g in dims if not lk.is_lookup_path(g))
     ad_hoc_attrs = [g for g in dims if c.is_attr_path(g) and g not in definition.dimensions]
     if not ad_hoc_attrs:
         return
@@ -456,8 +465,11 @@ async def analytics_series(customer: str = Depends(get_current_customer),
         raise HTTPException(400, detail=f"{metric!r} has no measure {measure!r}; it has "
                                         f"{sorted(m.name for m in definition.measures)}.")
     dims = tuple(x.strip() for x in (group_by or "").split(",") if x.strip())
+    # Read once per request, like the registry switches: a declaration consulted per row would be a
+    # query per row, and a set read twice in one request could disagree with itself.
+    lookups = await lookup_store.load(db, customer)
     try:
-        decision = n6.resolve(definition, group_by=dims)
+        decision = n6.resolve(definition, group_by=dims, lookups=lookups)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from None
     await _refuse_unapproved_ad_hoc_attrs(db, customer, definition, dims)
@@ -465,7 +477,7 @@ async def analytics_series(customer: str = Depends(get_current_customer),
     state = await _state(db, customer)
     out = await n6.series(db, customer, definition_id, definition, window=window, measure=measure,
                           group_by=dims, ad_hoc=decision.ad_hoc, tz=await get_customer_timezone(db, customer),
-                          watermark=state.analytics_watermark if state else None)
+                          watermark=state.analytics_watermark if state else None, lookups=lookups)
     return {**out, "metric": metric, "ad_hoc": decision.ad_hoc, "resolution": decision.reason,
             "window": {"start": window.start.isoformat(), "end": window.end.isoformat()}}
 
@@ -486,8 +498,9 @@ async def analytics_breakdown(customer: str = Depends(get_current_customer),
         # Chunk 80: /series always refused a wrong measure; /breakdown silently returned empty rows.
         raise HTTPException(400, detail=f"{metric!r} has no measure {measure!r}; it has "
                                         f"{sorted(m.name for m in definition.measures)}.")
+    lookups = await lookup_store.load(db, customer)
     try:
-        decision = n6.resolve(definition, group_by=(dimension,))
+        decision = n6.resolve(definition, group_by=(dimension,), lookups=lookups)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from None
     await _refuse_unapproved_ad_hoc_attrs(db, customer, definition, (dimension,))
@@ -495,7 +508,7 @@ async def analytics_breakdown(customer: str = Depends(get_current_customer),
     state = await _state(db, customer)
     out = await n6.series(db, customer, definition_id, definition, window=window, measure=measure,
                           group_by=(dimension,), ad_hoc=decision.ad_hoc, tz=await get_customer_timezone(db, customer),
-                          watermark=state.analytics_watermark if state else None)
+                          watermark=state.analytics_watermark if state else None, lookups=lookups)
 
     totals: dict = {}
     for point in out["points"]:
@@ -744,6 +757,182 @@ async def set_field_capture(field_id: str, payload: dict = Body(...),
     return {"id": str(row.id), "field": row.field, "captured": row.captured,
             "description": row.description, "unit": row.unit,
             "tickets_published": published}
+
+
+# ============================================================== chunk 100: lookups
+#
+# A fact records one exchange, and that is often not enough to answer the question somebody has. A pick
+# carries its delivery number on every one of 1,343 live records and the customer name on none of them.
+# These endpoints declare where the missing half comes from; the value is resolved when somebody reads,
+# never copied onto the fact. The reasoning, with measurements, is at the top of `analytics/lookup.py`.
+
+
+def _lookup_from_payload(body: dict) -> lookup_model.Lookup:
+    """A request body as the pure value. Raises ValueError on a shape that cannot be a lookup."""
+    attributes = []
+    for raw in (body.get("attributes") or []):
+        if not isinstance(raw, dict) or not raw.get("name"):
+            raise ValueError("each attribute needs a name")
+        sources = []
+        for src in (raw.get("sources") or []):
+            missing = [k for k in ("method", "key_field", "value_field") if not src.get(k)]
+            if missing:
+                raise ValueError(f"source of {raw['name']!r} is missing {', '.join(missing)}; both "
+                                 f"field names are explicit because the spelling differs per method")
+            sources.append(lookup_model.Source(method=str(src["method"]),
+                                               key_field=str(src["key_field"]),
+                                               value_field=str(src["value_field"])))
+        attributes.append(lookup_model.Attribute(
+            name=str(raw["name"]).strip(), sources=tuple(sources),
+            stable=bool(raw.get("stable", True)),
+            on_conflict=str(raw.get("on_conflict") or "first_wins")))
+    return lookup_model.Lookup(name=str(body.get("name") or "").strip(),
+                               key_field=str(body.get("key_field") or "").strip(),
+                               attributes=tuple(attributes))
+
+
+def _lookup_json(row) -> dict:
+    return {"id": str(row.id), "name": row.name, "description": row.description,
+            "key_field": row.key_field, "attributes": row.attributes or [],
+            "enabled": row.enabled, "created_by": row.created_by,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None}
+
+
+@router.get("/lookups")
+async def list_lookups(customer: str = Depends(get_current_customer),
+                       db: AsyncSession = Depends(get_session)):
+    """Every declared lookup, enabled or not, with how many values each has harvested."""
+    rows = (await db.execute(
+        select(AnalyticsLookup).where(AnalyticsLookup.customer_code == customer)
+        .order_by(AnalyticsLookup.name))).scalars().all()
+    counts = dict((await db.execute(
+        select(AnalyticsLookupValue.lookup, func.count())
+        .where(AnalyticsLookupValue.customer_code == customer)
+        .group_by(AnalyticsLookupValue.lookup))).all())
+    return {"lookups": [{**_lookup_json(r), "values": counts.get(r.name, 0)} for r in rows]}
+
+
+@router.post("/lookups", status_code=201)
+async def create_lookup(body: dict = Body(...),
+                        customer: str = Depends(get_current_customer),
+                        db: AsyncSession = Depends(get_session)):
+    """Declare a lookup. Validated against the fact contract, so a typo is refused rather than
+    silently keying on nothing."""
+    try:
+        declared = _lookup_from_payload(body)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from None
+    known = await capture.approved_attributes(db, customer)
+    problems = lookup_model.validate(declared, fact_fields=contract.FACT_FIELDS,
+                                     known_attributes=known)
+    if problems:
+        raise HTTPException(400, detail="; ".join(problems))
+    exists = await db.scalar(select(AnalyticsLookup.id).where(
+        AnalyticsLookup.customer_code == customer, AnalyticsLookup.name == declared.name))
+    if exists:
+        raise HTTPException(409, detail=f"a lookup called {declared.name!r} already exists")
+    row = AnalyticsLookup(customer_code=customer, name=declared.name,
+                          description=(str(body.get("description") or "").strip() or None),
+                          key_field=declared.key_field,
+                          attributes=lookup_store.to_row(declared),
+                          enabled=bool(body.get("enabled", True)),
+                          created_by=str(body.get("created_by") or "api"))
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _lookup_json(row)
+
+
+@router.patch("/lookups/{name}")
+async def update_lookup(name: str, body: dict = Body(...),
+                        customer: str = Depends(get_current_customer),
+                        db: AsyncSession = Depends(get_session)):
+    """Change a declaration. Harvested values are never deleted by an edit: they are history, and a
+    source removed today says nothing about what was true yesterday."""
+    row = await db.scalar(select(AnalyticsLookup).where(
+        AnalyticsLookup.customer_code == customer, AnalyticsLookup.name == name))
+    if row is None:
+        raise HTTPException(404, detail=f"no lookup called {name!r} for this logspace")
+    if "attributes" in body or "key_field" in body:
+        try:
+            declared = _lookup_from_payload({"name": name,
+                                             "key_field": body.get("key_field", row.key_field),
+                                             "attributes": body.get("attributes", row.attributes)})
+        except ValueError as exc:
+            raise HTTPException(400, detail=str(exc)) from None
+        known = await capture.approved_attributes(db, customer)
+        problems = lookup_model.validate(declared, fact_fields=contract.FACT_FIELDS,
+                                         known_attributes=known)
+        if problems:
+            raise HTTPException(400, detail="; ".join(problems))
+        row.key_field = declared.key_field
+        row.attributes = lookup_store.to_row(declared)
+    if "enabled" in body:
+        row.enabled = bool(body["enabled"])
+    if "description" in body:
+        row.description = (str(body["description"]).strip() or None
+                           if body["description"] is not None else None)
+    row.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(row)
+    return _lookup_json(row)
+
+
+@router.get("/lookups/suggest")
+async def suggest_lookup_sources(
+        key_field: str = Query(..., description="The fact field holding the key, e.g. delivery_number"),
+        days: int = Query(14, ge=1, le=365),
+        customer: str = Depends(get_current_customer),
+        db: AsyncSession = Depends(get_session)):
+    """Propose where a key's attributes could be harvested from, by looking at the data.
+
+    The scan itself is `lookup_store.suggest_sources`; this validates the key against the fact contract
+    first, because the field name reaches SQL and because a typo should be a 400 rather than an empty
+    answer somebody reads as "nothing to find".
+    """
+    if key_field not in contract.FACT_FIELDS:
+        raise HTTPException(400, detail=f"{key_field!r} is not a field on the fact row; the fields "
+                                        f"are fixed in analytics.contract")
+    return await lookup_store.suggest_sources(db, customer, key_field=key_field, days=days)
+
+
+@router.post("/lookups/{name}/backfill")
+async def backfill_lookup(name: str,
+                          days: int = Query(60, ge=1, le=3650),
+                          customer: str = Depends(get_current_customer),
+                          db: AsyncSession = Depends(get_session)):
+    """Fill a newly declared lookup from the facts already stored. Rewrites no fact."""
+    declared = (await lookup_store.load(db, customer, enabled_only=False)).get(name)
+    if declared is None:
+        raise HTTPException(404, detail=f"no lookup called {name!r} for this logspace")
+    if not declared.sources_by_method():
+        raise HTTPException(400, detail=f"lookup {name!r} declares no sources, so there is nothing "
+                                        f"to harvest")
+    report = await lookup_store.backfill(db, customer, declared, days=days)
+    await db.commit()
+    return {"lookup": name, "days": days, **report}
+
+
+@router.get("/lookups/{name}/values")
+async def list_lookup_values(name: str,
+                             key: str | None = Query(default=None),
+                             limit: int = Query(50, ge=1, le=500),
+                             customer: str = Depends(get_current_customer),
+                             db: AsyncSession = Depends(get_session)):
+    """What a lookup currently knows. The screen shows it so a wrong value can be traced to its source."""
+    stmt = select(AnalyticsLookupValue).where(AnalyticsLookupValue.customer_code == customer,
+                                              AnalyticsLookupValue.lookup == name)
+    if key:
+        stmt = stmt.where(AnalyticsLookupValue.key == key)
+    rows = (await db.execute(stmt.order_by(AnalyticsLookupValue.key,
+                                           AnalyticsLookupValue.attribute,
+                                           AnalyticsLookupValue.valid_from)
+                             .limit(limit))).scalars().all()
+    return {"lookup": name, "values": [
+        {"key": r.key, "attribute": r.attribute, "value": r.value,
+         "valid_from": r.valid_from.isoformat(), "valid_to": r.valid_to.isoformat() if r.valid_to else None,
+         "origin": r.origin, "source_method": r.source_method, "observations": r.observations}
+        for r in rows]}
 
 
 @router.post("/registry/fields/prune")

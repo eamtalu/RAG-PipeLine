@@ -41,12 +41,28 @@ from app.config.database import Base
 #:
 #: Four, not more: consumption uses two (method, transaction_name), and a metric sliced by more than
 #: four dimensions has cardinality that defeats pre-aggregation anyway — the doc's own "honest limit",
-#: where genuinely ad-hoc exploration falls back to a bounded fact-table scan instead. Four leaves room
-#: for method + transaction_name + item + warehouse, which is the widest chart worth pre-computing.
+#: where genuinely ad-hoc exploration falls back to a bounded fact-table scan instead.
 #:
 #: Slots rather than JSONB because a dimension is what every query GROUPS BY and filters on, and a
 #: JSONB key cannot carry a composite btree index that serves both.
-DIMENSION_SLOTS = 4
+#:
+#: Chunk 102 raised this from four to six, and the justification is a measurement rather than a
+#: preference. What decides whether pre-aggregation is worth anything is the CARDINALITY of the
+#: dimensions, not how many there are. Measured over 9,569 live facts at day grain:
+#:
+#: | dimensions                                              | rows stored per fact | saving |
+#: |---------------------------------------------------------|----------------------|--------|
+#: | warehouse, user                                           | 0.004                | 245x   |
+#: | warehouse, user, transaction, status                      | 0.015                |  68x   |
+#: | the same plus destination and device (SIX)                | 0.032                |  31x   |
+#: | warehouse, user, item                                     | 0.147                | 6.8x   |
+#: | warehouse, user, item, lot                                | 0.308                | 3.2x   |
+#:
+#: So six LOW-cardinality dimensions still compress thirty-one fold, and the old cap of four was the
+#: only thing preventing a genuinely useful wide, shallow cube. It buys nothing for the
+#: high-cardinality case - item and lot stop compressing whatever the cap is - which is why raising it
+#: further would be pointless.
+DIMENSION_SLOTS = 6
 
 
 class RollupColumns:
@@ -68,6 +84,8 @@ class RollupColumns:
     dim2: Mapped[str | None] = mapped_column(String(128), nullable=True)
     dim3: Mapped[str | None] = mapped_column(String(128), nullable=True)
     dim4: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    dim5: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    dim6: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     # --- additive roles, and ONLY additive roles ---
     sum_value: Mapped[object | None] = mapped_column(Numeric(30, 6), nullable=True)
@@ -98,7 +116,7 @@ class AnalyticsHourlyRollup(RollupColumns, Base):
 
     __table_args__ = (
         UniqueConstraint("customer_code", "definition_id", "measure_name", "bucket_start",
-                         "dim1", "dim2", "dim3", "dim4",
+                         "dim1", "dim2", "dim3", "dim4", "dim5", "dim6",
                          name="uq_analytics_hourly_bucket", postgresql_nulls_not_distinct=True),
         Index("ix_analytics_hourly_read", "customer_code", "definition_id", "bucket_start"),
         # Cut DAILY though the bucket is hourly: a day's worth of hourly rows is the unit retention
@@ -126,7 +144,7 @@ class AnalyticsDailyRollup(RollupColumns, Base):
 
     __table_args__ = (
         UniqueConstraint("customer_code", "definition_id", "measure_name", "business_date",
-                         "dim1", "dim2", "dim3", "dim4",
+                         "dim1", "dim2", "dim3", "dim4", "dim5", "dim6",
                          name="uq_analytics_daily_bucket", postgresql_nulls_not_distinct=True),
         Index("ix_analytics_daily_read", "customer_code", "definition_id", "business_date"),
         # YEARLY partitions: kept forever, and a year of daily rows per key is small.
@@ -146,7 +164,7 @@ class AnalyticsMonthlyRollup(RollupColumns, Base):
 
     __table_args__ = (
         UniqueConstraint("customer_code", "definition_id", "measure_name", "month_start",
-                         "dim1", "dim2", "dim3", "dim4",
+                         "dim1", "dim2", "dim3", "dim4", "dim5", "dim6",
                          name="uq_analytics_monthly_bucket", postgresql_nulls_not_distinct=True),
         Index("ix_analytics_monthly_read", "customer_code", "definition_id", "month_start"),
     )

@@ -354,8 +354,13 @@ async def prune_unseen_fields(db: AsyncSession, customer_code: str, *,
       - `source == "response"` (record and MI rows are not considered);
       - no fact of THAT METHOD within the last `days` carries the key. 60 is the entry retention:
         an older fact cannot be restated, so it says nothing about what the method returns today;
-      - `captured` equals the seeded default for the name, so no person has ticked or un-ticked it.
-        A decision outlives the data that prompted it;
+      - nobody has reviewed it, which chunk 99 made `reviewed_at IS NULL`. The old test was "captured
+        differs from the seeded default", and that only worked while the default was OFF for almost
+        every name. Now that both halves of the exchange default to ticked it is wrong in BOTH
+        directions: a person's tick is indistinguishable from the default, and a legacy row left
+        un-ticked by the old default looks like a deliberate un-tick. `reviewed_at` is stamped by the
+        field endpoint every time `captured` moves, so it says exactly what the heuristic was guessing
+        at. A decision outlives the data that prompted it;
       - no metric of the tenant, in any status, names `attr:<field>`.
     Rows kept for the last two reasons are reported with the reason, so the caller sees them.
     """
@@ -377,7 +382,7 @@ async def prune_unseen_fields(db: AsyncSession, customer_code: str, *,
                  "last_seen_at": r.last_seen_at.isoformat() if r.last_seen_at else None}
         if f'"attr:{r.field}"' in named:
             kept.append({**entry, "reason": "named by a metric"})
-        elif r.captured != pl.seeded(r.field):
+        elif r.reviewed_at is not None:
             kept.append({**entry, "reason": "human decision"})
         else:
             candidates.append(entry)

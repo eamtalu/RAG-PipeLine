@@ -37,10 +37,12 @@ from dataclasses import dataclass
 from datetime import date as date_type, datetime, time as time_type, timedelta, timezone
 from zoneinfo import ZoneInfo
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
+from app.persistence.models.analytics_rollup import DIMENSION_SLOTS
 from app.services.analytics import contract
 from app.services.analytics import definition as d
+from app.services.analytics import lookup as lk
 from app.services.mnp_log_ingestion.pipeline.time_bounds import UtcWindow
 
 logger = logging.getLogger(__name__)
@@ -229,13 +231,21 @@ class Resolution:
     group_by: tuple[str, ...]
 
 
-def resolve(definition: d.MetricDefinition, *, group_by: tuple[str, ...]) -> Resolution:
+def resolve(definition: d.MetricDefinition, *, group_by: tuple[str, ...],
+            lookups: Mapping[str, lk.Lookup] | None = None) -> Resolution:
     """Whether `definition`'s rollups can answer a group-by, or the fact table must be scanned.
 
     A field that is not on the fact row at all raises. A fallback there would scan and return nothing,
     which reads as "no data" rather than "you asked for a field that does not exist" -- and the second is
     the only one anybody can act on.
+
+    Chunk 100: a `lookup:` path is answered by its KEY. Grouping by a delivery's customer is grouping
+    by `delivery_number` and translating afterwards, so the rollups can serve it exactly when they are
+    keyed by the delivery - which is the one price read-time resolution charges, and a cheap one:
+    delivery number alone compresses the tenant's facts 39-fold at day grain, and the same rollup then
+    answers both "by delivery" and "by customer".
     """
+    group_by = lk.plan(group_by, lookups or {}).stored_group_by
     # 18y/chunk 80: source-aware, and `attr:` paths are legal group-bys. An attr path of the WRONG
     # namespace for the source is refused exactly as validate() refuses it on the definition - it
     # can only ever be silently empty. Approval of ad-hoc attr paths is the API layer's check (it
@@ -255,8 +265,8 @@ def resolve(definition: d.MetricDefinition, *, group_by: tuple[str, ...]) -> Res
         elif g not in fields:
             raise ValueError(f"{g!r} is not a field on the {row_name}, so no query can group "
                              f"by it; the {row_name}'s fields are fixed in analytics.contract")
-    if len(group_by) > 4:
-        raise ValueError("group_by is capped at 4 fields (the rollup dimension slots)")
+    if len(group_by) > DIMENSION_SLOTS:
+        raise ValueError(f"group_by is capped at {DIMENSION_SLOTS} fields (the rollup dimension slots)")
 
     outside = [g for g in group_by if g not in definition.dimensions]
     if outside:
@@ -303,6 +313,19 @@ def freshness(*, analytics_watermark: datetime | None, source_watermark: datetim
 
 _ROLE_COLUMN = {role: role.value for role in d.Role}
 
+#: Every role the settled tier reads back, in the order it selects them.
+#:
+#: Chunk 98. This used to be an inline four-entry tuple that omitted `min_value`, `max_value` and
+#: `sum_sq` - roles the fold has always WRITTEN. So an `extent` measure read back empty from the
+#: rollup tier while the live tier answered it correctly, and a `stats` measure silently lost the
+#: spread that is the only reason to ask for `stats` rather than `average`. Named, and asserted
+#: against `definition.roles_for` in the chunk 98 tests, so a new aggregation cannot reintroduce the
+#: gap by declaring a role nobody reads.
+READABLE_ROLES: tuple[d.Role, ...] = (
+    d.Role.sum_value, d.Role.count_value, d.Role.sum_sq, d.Role.min_value, d.Role.max_value,
+    d.Role.distinct_sketch, d.Role.histogram,
+)
+
 
 async def _rollup_points(db, model, customer_code: str, definition_id, *, bucket_column: str,
                          lo, hi, measure: str, group_by: tuple[str, ...],
@@ -319,9 +342,7 @@ async def _rollup_points(db, model, customer_code: str, definition_id, *, bucket
     dim_cols = [getattr(model, f"dim{i + 1}") for i in slots]
 
     stmt = select(column, *dim_cols,
-                  *(getattr(model, _ROLE_COLUMN[r]) for r in
-                    (d.Role.sum_value, d.Role.count_value, d.Role.distinct_sketch,
-                     d.Role.histogram))).where(
+                  *(getattr(model, _ROLE_COLUMN[r]) for r in READABLE_ROLES)).where(
         model.customer_code == customer_code, model.definition_id == definition_id,
         model.measure_name == measure, column >= lo, column < hi)
 
@@ -329,19 +350,40 @@ async def _rollup_points(db, model, customer_code: str, definition_id, *, bucket
     for row in (await db.execute(stmt)).all():
         bucket, *rest = row
         dims = tuple(rest[:len(dim_cols)])
-        total, count, sketch, hist = rest[len(dim_cols):]
         roles = {}
-        if total is not None:
-            roles[d.Role.sum_value] = Decimal(total)
-        if count is not None:
-            roles[d.Role.count_value] = count
-        if sketch is not None:
-            roles[d.Role.distinct_sketch] = bytes(sketch)
-        if hist:
-            roles[d.Role.histogram] = tuple(hist)
+        for role, value in zip(READABLE_ROLES, rest[len(dim_cols):]):
+            if value is None:
+                continue
+            if role is d.Role.count_value:
+                roles[role] = value
+            elif role is d.Role.distinct_sketch:
+                roles[role] = bytes(value)
+            elif role is d.Role.histogram:
+                if value:                       # an empty band list is no data, not a zero histogram
+                    roles[role] = tuple(value)
+            else:                               # every numeric role: sum, sum_sq, min, max
+                roles[role] = Decimal(value)
         key = (bucket, dims)
         out[key] = d.add_roles(out.get(key, {}), roles)
     return out
+
+
+async def _translate(db, customer_code: str, points: dict, translation: lk.Plan) -> dict:
+    """Re-key an answer from stored keys to looked-up values. A no-op unless a lookup was asked for.
+
+    Chunk 100. Only the keys THIS answer names are loaded - an answer has as many keys as it has
+    groups, a few hundred at most, while the table behind it grows with distinct deliveries and items
+    rather than with records. That is the property that makes read-time resolution scale: at ten
+    million facts there are still only a few hundred thousand delivery keys, looked up by key.
+    """
+    if not translation.translates or not points:
+        return points
+    from app.services.analytics import lookup_store
+
+    resolver = await lookup_store.resolver(
+        db, customer_code, translation.keys_needed(points),
+        tuple(step for step in translation.steps if step is not None))
+    return lk.translate(points, translation, resolver, merge=d.add_roles)
 
 
 async def _live_points(db, customer_code: str, definition: d.MetricDefinition,
@@ -432,7 +474,8 @@ def _totals(points: dict) -> tuple[list[dict], dict]:
 async def series(db, customer_code: str, definition_id, definition: d.MetricDefinition, *,
                  window: UtcWindow, measure: str, group_by: tuple[str, ...] = (),
                  watermark: datetime | None, rows_per_bucket: int = 20,
-                 ad_hoc: bool = False, tz: str | None = None) -> dict:
+                 ad_hoc: bool = False, tz: str | None = None,
+                 lookups: Mapping[str, lk.Lookup] | None = None) -> dict:
     """One measure over time, two-tier. The watermark is passed in, never fetched here (see plan_read).
 
     Returns additive ROLE values per bucket, never a finished answer: the caller divides a sum by a count
@@ -459,6 +502,13 @@ async def series(db, customer_code: str, definition_id, definition: d.MetricDefi
         window = UtcWindow(start=bound, end=window.end)
         clamp_note = f"window clamped to rollups_from {bound.isoformat()}"
 
+    # Chunk 100. Every tier reads by `stored`, which is the requested grouping with each `lookup:`
+    # path replaced by its key field. Nothing below this line knows a lookup exists; the translation
+    # back happens once, on the assembled answer, so the settled and live tiers cannot disagree about
+    # what a group means.
+    translation = lk.plan(group_by, lookups or {})
+    stored = translation.stored_group_by
+
     grain = choose_grain(window, available=definition.grains, rows_per_bucket=rows_per_bucket)
     plan = plan_read(window, grain, watermark=watermark, tz=tz)
     reason = "; ".join(x for x in (plan.reason, clamp_note) if x) or None
@@ -471,7 +521,8 @@ async def series(db, customer_code: str, definition_id, definition: d.MetricDefi
     if ad_hoc:
         live = ([(window.start, window.end)] if window.start and window.end else plan.live_windows)
         points = dict(await _live_points(db, customer_code, definition, live,
-                                         grain=grain, measure=measure, group_by=group_by))
+                                         grain=grain, measure=measure, group_by=stored))
+        points = await _translate(db, customer_code, points, translation)
         totals, total = _totals(points)
         return {
             "grain": grain, "measure": measure, "group_by": list(group_by),
@@ -495,13 +546,16 @@ async def series(db, customer_code: str, definition_id, definition: d.MetricDefi
             lo, hi = plan.rollup_dates[0], plan.rollup_dates[1] + timedelta(days=1)
         points = await _rollup_points(db, model, customer_code, definition_id,
                                       bucket_column=column, lo=lo, hi=hi, measure=measure,
-                                      group_by=group_by, dimensions=definition.dimensions)
+                                      group_by=stored, dimensions=definition.dimensions)
 
     for key, roles in (await _live_points(db, customer_code, definition, plan.live_windows,
                                           grain=grain, measure=measure,
-                                          group_by=group_by)).items():
+                                          group_by=stored)).items():
         points[key] = d.add_roles(points.get(key, {}), roles)
 
+    # Translated AFTER the two tiers are merged, so a key that appears in both is resolved once and
+    # its units are added before the re-key rather than after.
+    points = await _translate(db, customer_code, points, translation)
     totals, total = _totals(points)
     return {
         "grain": grain,

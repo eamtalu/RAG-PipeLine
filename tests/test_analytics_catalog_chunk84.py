@@ -67,7 +67,7 @@ def _metric(name, status, *, description=None, dimensions=("method", "transactio
     return AnalyticsMetric(
         customer_code=CC, name=name, description=description, status=status, source=source,
         dimensions=list(dimensions),
-        measures=measures or [{"name": "quantity", "aggregation": "sum", "field": "quantity",
+        measures=measures or [{"name": "quantity", "aggregation": "sum", "field": "quantity", "minus": None,
                                "only": ["pick", "attempt"], "statuses": ["success"]}],
         filter=filt or {"methods": ["ConfirmPickLine"], "transactions": []},
         grains=["hourly", "daily", "monthly"], created_by="test")
@@ -151,7 +151,7 @@ async def test_only_active_metrics_appear_and_each_carries_its_meaning():
     assert picked["filter"] == {"methods": ["ConfirmPickLine"], "transactions": []}
     assert picked["rollups_from"] is None, "part 2 adds the column; None means unbounded"
     (measure,) = picked["measures"]
-    assert measure == {"name": "quantity", "aggregation": "sum", "field": "quantity",
+    assert measure == {"name": "quantity", "aggregation": "sum", "field": "quantity", "minus": None,
                        "unit": None, "approximate": False}
 
 
@@ -317,7 +317,7 @@ def test_shape_is_pure_and_sorted():
     body = catalog.shape(CC, rows)
     assert [m["name"] for m in body["metrics"]] == ["a", "b"]
     assert body["metrics"][1]["dimensions"] == [{"name": "method", "values": [], "truncated": False}]
-    assert body["metrics"][1]["measures"] == [{"name": "n", "aggregation": "count", "field": None,
+    assert body["metrics"][1]["measures"] == [{"name": "n", "aggregation": "count", "field": None, "minus": None,
                                                "unit": None, "approximate": False}]
     assert body["fields"][0]["methods"] == ["M1", "M2"], "methods sorted, never insertion order"
     assert body["transactions"][0]["show"] is False

@@ -148,6 +148,20 @@ class Measure:
     #: Chunk 89: what the number is in ("units", "ms", "kg"). Metadata for the catalog and the chat
     #: agent; the fold never reads it. None for every pre-builder measure.
     unit: str | None = None
+    #: Chunk 101: a second field, subtracted from `field` before the aggregation sees the value.
+    #:
+    #: The most valuable number in a warehouse is a difference, and until this existed no definition
+    #: could express one. Both halves already sit on the same record: a pick carries `QuantityPicked`
+    #: beside `ExpectedQuantity`, a count carries `CountedQuantity` beside `BalanceQuantity`. So pick
+    #: shortfall and count variance need no new data, only the subtraction.
+    #:
+    #: ONE operation, deliberately, not an expression language. Every case measured is "expected
+    #: against actual"; parsing, precedence and their own validation buy nothing the data asks for. A
+    #: second operation can be added the day something needs it.
+    #:
+    #: A row missing EITHER half contributes nothing, by the same rule that skips an absent quantity:
+    #: reading a missing expected quantity as zero would report every such pick as a full shortfall.
+    minus: str | None = None
 
     @property
     def roles(self) -> frozenset[Role]:
@@ -302,6 +316,22 @@ def validate(definition: MetricDefinition,
                 problems.append(f"measure {m.name!r}: {bad}")
         if m.aggregation is not Aggregation.count and not m.field:
             problems.append(f"measure {m.name!r} is a {m.aggregation.value} but names no field")
+        if m.minus:
+            # Validated exactly like `field`, and for a sharper reason: an unapproved or misspelled
+            # second half makes EVERY row contribute nothing, which reads as "no shortfall" - the
+            # most dangerous wrong answer this measure could give.
+            bad = _bad_field(m.minus)
+            if bad:
+                problems.append(f"measure {m.name!r} subtracts {bad}")
+            if not m.field:
+                problems.append(f"measure {m.name!r} subtracts {m.minus!r} but names no field to "
+                                f"subtract it from")
+            if m.aggregation is Aggregation.count:
+                problems.append(f"measure {m.name!r} is a count, which reads no value, so it cannot "
+                                f"subtract {m.minus!r}")
+            if m.aggregation is Aggregation.distinct:
+                problems.append(f"measure {m.name!r} is a distinct count, whose field is an identity "
+                                f"rather than a quantity, so it cannot subtract {m.minus!r}")
         if record_grain and m.statuses:
             problems.append(f"measure {m.name!r} filters on status, but record rows carry no "
                             f"status - the filter would exclude every row and look like no data")
@@ -388,6 +418,14 @@ def fold(rows, definition: MetricDefinition) -> dict:
             value = contract.numeric_or_none(contract.resolve_field(row, m.field)) if m.field else None
             if m.field and value is None:
                 continue          # absent is never zero, so it contributes to nothing at all
+            if m.minus:
+                # Chunk 101. Subtracted BEFORE the aggregation, so a difference composes with sum,
+                # average, stats, extent and percentile rather than being a special kind of sum. The
+                # same "absent is never zero" rule applies to the second half.
+                other = contract.numeric_or_none(contract.resolve_field(row, m.minus))
+                if other is None:
+                    continue
+                value = value - other
             if Role.count_value in bucket:
                 bucket[Role.count_value] += 1
             if Role.sum_value in bucket:
@@ -438,7 +476,19 @@ def add(a: dict, b: dict) -> dict:
 
 
 # ============================================================== finished answers, at READ time
-def public_roles(roles: dict, *, number=str) -> dict:
+def plain_number(value: Decimal) -> str:
+    """A Decimal as plain digits: trailing zeros trimmed, and NEVER in scientific notation.
+
+    Chunk 98. The obvious spelling, `str(value.normalize())`, is wrong in a way that only shows on
+    round numbers: `normalize` trims trailing zeros by RAISING the exponent, so `Decimal("40")`
+    becomes `4E+1` and a chart draws "4E+1" where it means forty. Seen live on a stock move preview.
+    The `f` presentation type is the fixed-point spelling, so it tidies without ever going
+    exponential.
+    """
+    return format(value.normalize(), "f")
+
+
+def public_roles(roles: dict, *, number=plain_number) -> dict:
     """A role bucket as it leaves the service: JSON-safe, and the sketch finished into an integer.
 
     The ONE place a `distinct_sketch` becomes a number and a `histogram` becomes p50 and p95. Every

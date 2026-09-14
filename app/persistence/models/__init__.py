@@ -1,6 +1,8 @@
 from app.persistence.models.consumer_cursor import ConsumerCursor  # noqa: F401
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry  # noqa: F401
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry  # noqa: F401
+from app.persistence.models.analytics_lookup import (AnalyticsLookup,  # noqa: F401
+                                                    AnalyticsLookupValue)
 from app.persistence.models.analytics_record_fact import AnalyticsRecordFact  # noqa: F401
 from app.persistence.models.analytics_ml import (AnalyticsFeatureSet,  # noqa: F401
                                                 AnalyticsPrediction)

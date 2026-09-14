@@ -29,6 +29,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import Numeric
 
 from app.persistence import models as m
+from app.persistence.models.analytics_rollup import DIMENSION_SLOTS
 from app.persistence import partitioning as pt
 from app.services.analytics import contract, definition
 from app.services.workers import log_partition_worker as pw
@@ -376,10 +377,16 @@ def test_a_rollup_row_is_keyed_per_definition_and_measure(table):
 def test_a_rollup_has_a_fixed_number_of_dimension_slots(table):
     """Generic storage: "a definition identifier, a fixed number of dimension slots and additive
     measure slots, rather than a bespoke table per metric". Adding a metric is a row, never a
-    migration."""
+    migration.
+
+    Chunk 102 read the number from the contract rather than pinning 4, and raised it to 6. The point
+    the test defends is that the number is FIXED and shared by all three levels, not what it happens
+    to be: a level with fewer slots than its neighbour would merge rows the level below kept apart,
+    and the totals would still look plausible."""
     cols = _cols(table)
-    slots = [k for k in cols if k.startswith("dim")]
-    assert len(slots) == 4, f"{table} has {len(slots)} dimension slots, expected 4"
+    slots = sorted(k for k in cols if k.startswith("dim"))
+    assert slots == [f"dim{i + 1}" for i in range(DIMENSION_SLOTS)], \
+        f"{table} has {slots}, expected {DIMENSION_SLOTS} slots numbered from one"
 
 
 @pytest.mark.parametrize("table", ROLLUPS)

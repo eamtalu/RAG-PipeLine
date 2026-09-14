@@ -75,6 +75,8 @@ from app.services.analytics import diff as dd
 from app.services.analytics import capture
 from app.services.analytics import payload as pl
 from app.services.analytics import normalizer as n2
+from app.services.analytics import lookup as lk
+from app.services.analytics import lookup_store
 from app.services.analytics import registry
 from app.services.analytics import rollups as n5
 from app.services.mnp_log_ingestion.pipeline.time_bounds import UtcWindow
@@ -933,6 +935,28 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
                 discovered.setdefault(row.get("method"), set()).update(observed)
         await capture.observe_fields(db, customer_code, discovered)
 
+        # Chunk 99: the REQUEST half, registered from the source row's own attributes.
+        #
+        # Every transaction is one exchange, and the fact has always stored both halves - request keys
+        # bare, response keys under `resp.`. Only the response half was ever written here, and
+        # `definition.validate` refuses any `attr:` path absent from the registry, so the request half
+        # was stored and unusable. Measured on tmp-live: a stock move's `Quantity` on 185 records with
+        # 58 distinct values, a stock count's `BalanceQuantity` on 713 with 189, neither measurable.
+        #
+        # `source="request"` is passed explicitly because a bare name carries no prefix for
+        # `observe_fields` to derive from, and filing it as a response would let a request field
+        # silently authorise a response one of the same name.
+        #
+        # No approval gate is needed on the values: `normalizer.normalise` copies this same blob onto
+        # the fact whatever the registry says. The row exists so the field can be REPORTED on, and so
+        # a person can see what is already being kept.
+        sent: dict[str, set[str]] = {}
+        for row in source_rows:
+            names = {k for k in (row.get("attributes") or {}) if not pl.is_bookkeeping(k)}
+            if names:
+                sent.setdefault(row.get("method"), set()).update(names)
+        await capture.observe_fields(db, customer_code, sent, source="request")
+
         # Now the seeded rows exist, so a field on the seed list is captured on the very run that
         # discovers it. Read ONCE for the tenant, like `suppressed`, so every transaction in the run is
         # judged against the same allowlist. An un-ticked field stays un-ticked: `observe_fields` uses
@@ -976,6 +1000,19 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
 
         now = datetime.now(timezone.utc)
         folded = await _apply(db, customer_code, outcomes, now)
+
+        # Chunk 100: the lookup map, harvested from the facts already in hand.
+        #
+        # One pass over memory and no extra query, because the fold has just built these rows anyway.
+        # There is NO ordering requirement here, and that is the whole point of resolving a lookup at
+        # read time: a pick may be folded long before its delivery is named, and nothing has to be
+        # recomputed when the name turns up. Stamping the customer onto the pick instead would make a
+        # fact depend on other facts, which is exactly what the source-fingerprint skip above cannot
+        # survive.
+        lookups = await lookup_store.load(db, customer_code)
+        if lookups:
+            await lookup_store.record(db, customer_code,
+                                      lk.harvest(facts, lookups.values()), lookups)
 
         # R4. After the facts, because it is driven by their diff verdicts, and inside the same
         # transaction so a record set can never describe a fact that was rolled back. (`expanded`

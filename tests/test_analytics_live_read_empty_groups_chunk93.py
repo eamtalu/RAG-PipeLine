@@ -96,4 +96,7 @@ async def test_a_group_that_contributed_nothing_is_absent_from_live_points_and_t
     assert groups == {("BRI",)}, out["points"]
     assert all(p["roles"].get("count_value") for p in out["points"])
     assert [t["dimensions"] for t in out["totals"]] == [["BRI"]]
-    assert out["total"] == {"sum_value": "10.000000", "count_value": 1}
+    # Chunk 98: trailing zeros are trimmed by the shared plain formatter, so this reads "10" rather
+    # than "10.000000". Same number, and the formatter is what stops a round total serialising as
+    # "1E+1".
+    assert out["total"] == {"sum_value": "10", "count_value": 1}

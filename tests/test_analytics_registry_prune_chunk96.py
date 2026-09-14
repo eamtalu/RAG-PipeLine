@@ -57,9 +57,17 @@ def _fact(method, attrs, *, days_ago=1):
                          quantity_classification="non_quantity", attributes=attrs, created_at=t)
 
 
-def _row(method, field, *, captured, source="response"):
+def _row(method, field, *, captured, source="response", reviewed=False):
+    """Chunk 99: `reviewed` is how a human decision is now recorded.
+
+    It used to be inferable - under the old default almost nothing arrived ticked, so `captured=True`
+    could only mean a person. Both halves of the exchange now default to ticked, so a tick is
+    indistinguishable from the default and the stamp the field endpoint already writes is what says a
+    person was here."""
     return AnalyticsFieldRegistry(customer_code=CC, method=method, source=source, field=field,
-                                  captured=captured)
+                                  captured=captured,
+                                  reviewed_at=NOW if reviewed else None,
+                                  reviewed_by="a person" if reviewed else None)
 
 
 async def _plant():
@@ -73,7 +81,7 @@ async def _plant():
             _row("ConfirmPickLine", "resp.ItemNumber", captured=True),          # foreign: prune
             _row("ConfirmPickLine", "resp.Location", captured=True),            # foreign: prune
             _row("ConfirmPickLine", "resp.Ghost", captured=False),              # unseeded default: prune
-            _row("ConfirmPickLine", "resp.Decided", captured=True),             # a person ticked it: keep
+            _row("ConfirmPickLine", "resp.Decided", captured=True, reviewed=True),  # a person ticked it: keep
             _row("ConfirmPickLine", "resp.Metric", captured=True),              # a metric names it: keep
             _row("ConfirmPickLine", "resp.Old", captured=False),                # only on an old fact: prune
             _row("ConfirmPickLine", "rec.BANO", captured=False, source="record"),  # out of scope
@@ -125,10 +133,17 @@ async def test_the_kept_rows_say_why():
     assert "resp.value" not in kept, "a carried field is not a candidate at all, so it is not listed"
 
 
-async def test_a_seeded_field_someone_unticked_is_a_decision_too():
-    """resp.value arrives approved. Un-ticked, it differs from its default: that is a decision, kept."""
+async def test_a_field_someone_unticked_is_a_decision_too():
+    """An un-tick is as much a decision as a tick, and must survive the prune just the same.
+
+    Chunk 99: what identifies it changed. It used to be "differs from the seeded default", which was
+    only ever a proxy - and one that stopped working when both halves of the exchange began defaulting
+    to ticked, because a legacy row left un-ticked by the OLD default is then indistinguishable from a
+    deliberate un-tick. The field endpoint stamps `reviewed_at` whenever `captured` moves, so that is
+    what a decision looks like now.
+    """
     async with async_session() as db:
-        db.add(_row("ConfirmPickLine", "resp.value", captured=False))
+        db.add(_row("ConfirmPickLine", "resp.value", captured=False, reviewed=True))
         await db.commit()
     async with async_session() as db:
         out = await capture.prune_unseen_fields(db, CC, days=60, dry_run=False)

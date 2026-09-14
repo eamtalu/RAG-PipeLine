@@ -143,6 +143,9 @@ def shape(customer_code: str, rows: Rows) -> dict:
             "name": ms.get("name"),
             "aggregation": ms.get("aggregation"),
             "field": ms.get("field"),
+            # Chunk 101: present only for a measure built from two fields, so the interface can say
+            # "picked minus expected" rather than just "picked".
+            "minus": ms.get("minus"),
             "unit": _unit_for(ms, units_by_field),
             "approximate": ms.get("aggregation") in _APPROXIMATE_AGGREGATIONS,
         } for ms in m.measures]

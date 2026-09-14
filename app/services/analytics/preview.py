@@ -84,27 +84,36 @@ def _percent(part: int, whole: int) -> float:
     return round(100.0 * part / whole, 1) if whole else 0.0
 
 
-def field_coverage(rows: Sequence[Mapping[str, Any]], measure: d.Measure) -> dict | None:
-    """How many matching rows carry the measure's field, and how many carry a NUMBER.
-
-    `present` is any non-null value, which is what a count-like aggregation needs; `numeric` is what
-    a sum needs. Both are reported because a field can be present on every row and numeric on none,
-    and the two failures call for different fixes.
-    """
-    if not measure.field:
-        return None
+def _one_field_coverage(rows: Sequence[Mapping[str, Any]], measure: d.Measure,
+                        field: str) -> dict:
     present = numeric = 0
     for row in rows:
-        value = contract.resolve_field(row, measure.field)
+        value = contract.resolve_field(row, field)
         if value is not None:
             present += 1
             if contract.numeric_or_none(value) is not None:
                 numeric += 1
     total = len(rows)
-    return {"measure": measure.name, "field": measure.field, "total": total,
+    return {"measure": measure.name, "field": field, "total": total,
             "present": present, "numeric": numeric,
             "percent_present": _percent(present, total),
             "percent_numeric": _percent(numeric, total)}
+
+
+def field_coverage(rows: Sequence[Mapping[str, Any]], measure: d.Measure) -> list[dict]:
+    """How many matching rows carry the measure's field, and how many carry a NUMBER.
+
+    `present` is any non-null value, which is what a count-like aggregation needs; `numeric` is what
+    a sum needs. Both are reported because a field can be present on every row and numeric on none,
+    and the two failures call for different fixes.
+
+    Chunk 101: a list, because a measure can now name two fields. Reporting only the first would let
+    somebody build a pick shortfall whose expected quantity is missing everywhere, see a confident
+    100% and get an answer of nothing at all - and "no shortfall" is the most dangerous wrong answer
+    this measure could give.
+    """
+    return [_one_field_coverage(rows, measure, field)
+            for field in (measure.field, measure.minus) if field]
 
 
 def dimension_coverage(rows: Sequence[Mapping[str, Any]], dimensions: Sequence[str]) -> list[dict]:
@@ -149,12 +158,6 @@ def budget(rows: Sequence[Mapping[str, Any]], definition: d.MetricDefinition) ->
             "warning": counts[-1] > BUDGET_COMBOS_PER_HOUR}
 
 
-def _role_json(value: Any) -> Any:
-    if isinstance(value, Decimal):
-        return str(value.normalize()) if value == value.to_integral() else str(value)
-    return value
-
-
 def sample(rows: Sequence[Mapping[str, Any]], definition: d.MetricDefinition, *,
            measure: str) -> list[dict]:
     """A daily series of the first measure, folded exactly as the writer would fold it.
@@ -170,7 +173,9 @@ def sample(rows: Sequence[Mapping[str, Any]], definition: d.MetricDefinition, *,
             continue
         points.append({"bucket": str(bucket),
                        "dimensions": list(dims[:len(definition.dimensions)]),
-                       "roles": {k: v for k, v in d.public_roles(roles, number=_role_json).items()
+                       # Chunk 98: the shared plain formatter, not a local one. The local copy
+                       # called `Decimal.normalize()`, which turns 40 into 4E+1.
+                       "roles": {k: v for k, v in d.public_roles(roles).items()
                                  if v not in (None, ())}})
     return points
 
@@ -189,7 +194,7 @@ def assess(rows: Iterable[Mapping[str, Any]], definition: d.MetricDefinition, *,
         refusals.append("no facts match the filter in the preview window: "
                         f"methods={list(definition.method_filter) or 'any'}, "
                         f"transactions={list(definition.transaction_filter) or 'any'}")
-    coverage = [c for c in (field_coverage(m.rows, ms) for ms in definition.measures) if c]
+    coverage = [c for ms in definition.measures for c in field_coverage(m.rows, ms)]
     for c in coverage:
         if m.total and c["percent_present"] < 100.0:
             warnings.append(f"measure {c['measure']!r}: field {c['field']!r} is present on "
