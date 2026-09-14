@@ -1087,6 +1087,62 @@ async def transaction_registry_detail(transaction_name: str,
     }
 
 
+async def _looked_up_fields(db, customer: str, transaction_name: str, since) -> list[dict]:
+    """Chunk 105: the fifth source. What this transaction can reach through a declared lookup.
+
+    A fact records one exchange, and the composition card could only ever describe that. A pick
+    carries its delivery number and no customer name, and the name is one hop away - which is the
+    exact limit lookups exist to lift, so this is where somebody realises they want one.
+
+    Reported with how far it actually reaches, per attribute. Measured live, the customer name is
+    available on 1,528 of 1,530 picks; the two that are not are real, and a card claiming full
+    coverage would be the more useful-looking lie.
+
+    A lookup is not DECLARED here. One delivery lookup serves picking, packing and routing, so it
+    cannot belong to any one of them; this says what is reachable and the section manages them once.
+    """
+    lookups = await lookup_store.load(db, customer)
+    if not lookups:
+        return []
+    out: list[dict] = []
+    for lookup in sorted(lookups.values(), key=lambda x: x.name):
+        key = lookup.key_field
+        # The key is either an `attr:` path or a typed column, and a typed column name reaches SQL,
+        # so it is checked against the contract rather than interpolated on trust.
+        if contract.is_attr_path(key):
+            column, params = "f.attributes ->> :attr", {"attr": contract.attr_key(key)}
+        elif key in contract.FACT_FIELDS:
+            column, params = f"f.{key}", {}
+        else:
+            continue          # a declaration naming something the fact row has not got
+        for attribute in sorted(lookup.attributes, key=lambda a: a.name):
+            row = (await db.execute(text(f"""
+                SELECT count(*) FILTER (WHERE k IS NOT NULL) AS with_key,
+                       count(*) FILTER (WHERE v.value IS NOT NULL) AS resolved
+                FROM (SELECT {column} AS k FROM analytics_facts f
+                      WHERE f.customer_code = :c AND f.transaction_name = :n
+                        AND f.event_time >= :since) s
+                LEFT JOIN analytics_lookup_values v
+                  ON v.customer_code = :c AND v.lookup = :lookup AND v.attribute = :attribute
+                 AND v.key = s.k"""),
+                {"c": customer, "n": transaction_name, "since": since, "lookup": lookup.name,
+                 "attribute": attribute.name, **params})).one()
+            with_key, resolved = int(row[0] or 0), int(row[1] or 0)
+            if not with_key:
+                continue      # not reachable from this transaction at all
+            out.append({
+                "field": lookup_model.path(lookup.name, attribute.name),
+                "lookup": lookup.name,
+                "attribute": attribute.name,
+                "key_field": lookup.key_field,
+                "facts_with_key": with_key,
+                "facts_resolved": resolved,
+                "percent_resolved": round(100.0 * resolved / with_key, 1),
+                "stable": attribute.stable,
+            })
+    return out
+
+
 #: Registry `source` to the card it belongs on. Explicit rather than inferred from the name's prefix:
 #: a bare name means "sent by the handheld" and inferring it as a response is the chunk 104 defect.
 _SOURCE_GROUP = {"request": "request", "response": "response", "mi_result": "mi", "record": "record"}
@@ -1270,7 +1326,8 @@ async def transaction_composition(transaction_name: str,
     # version of these cards showed (`resp.AccessToken` x11 on Brighton Stock Pick). Approval is by
     # name across methods (`capture.approved_attributes`), so `captured` is true if ANY row is, and
     # every row id is carried so the screen can flip them all together.
-    fields: dict[str, list] = {"request": [], "response": [], "mi": [], "record": []}
+    fields: dict[str, list] = {"request": [], "response": [], "mi": [], "record": [],
+                              "looked_up": []}
     if methods:
         grouped: dict[tuple[str, str], dict] = {}
         for r in (await db.execute(
@@ -1315,6 +1372,8 @@ async def transaction_composition(transaction_name: str,
             entry["distinct_values"] = different or None
             entry["useful"] = _worth_grouping_by(facts_seen, different)
             fields[group].append(entry)
+
+    fields["looked_up"] = await _looked_up_fields(db, customer, transaction_name, since)
 
     return {
         "transaction_name": transaction_name,

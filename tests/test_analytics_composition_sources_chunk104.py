@@ -146,7 +146,8 @@ def _one(out, group, field):
 async def test_the_two_halves_of_the_exchange_are_separate_cards():
     await _plant([{QF["ConfirmPickLine"]: "3", "DeliveryNumber": "27383", "ApiPort": "443"}])
     out = await _composition()
-    assert set(out["fields"]) == {"request", "response", "mi", "record"}
+    # Chunk 105 added a fifth: what the transaction can reach through a declared lookup.
+    assert set(out["fields"]) == {"request", "response", "mi", "record", "looked_up"}
 
     sent = {e["field"] for e in out["fields"]["request"]}
     returned = {e["field"] for e in out["fields"]["response"]}
