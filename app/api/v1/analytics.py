@@ -1215,24 +1215,33 @@ async def transaction_composition(transaction_name: str,
     # value on every record of the tenant (the server address, the port, the company, the division)
     # and a few hold a different one on every single record (`ReqId`, `StartDateTime`). Both are
     # useless to group by, and a card that merely listed them would bury the dozen that are not.
+    # GROUPING SETS so ONE scan answers both questions, which are not the same question.
+    #
+    # Frequency is per METHOD: a field regular on the delivery lookup can be a one-off on the pick,
+    # and only the per-method figure means anything under a method group.
+    #
+    # Variety is per TRANSACTION, and the first version got this wrong in a way that defeated the
+    # whole ranking. It counted distinct values per method and ADDED them up, so `ApiPort`, holding
+    # one value on each of a dozen methods, summed to twelve and read as worth slicing by. Checked
+    # against the live tenant, that put the server address, the port, the company, the division and
+    # the locale at the top of every card - exactly the noise the ranking exists to push down.
     recent = (await db.execute(_text("""
         SELECT f.method, kv.key, count(*), count(DISTINCT kv.value)
         FROM analytics_facts f, jsonb_each(f.attributes) kv
         WHERE f.customer_code = :c AND f.transaction_name = :n AND f.event_time >= :since
           AND left(kv.key, 2) <> :bookkeeping
-        GROUP BY f.method, kv.key"""),
+        GROUP BY GROUPING SETS ((f.method, kv.key), (kv.key))"""),
         {"c": customer, "n": transaction_name, "since": since,
          "bookkeeping": pl.BOOKKEEPING_PREFIX})).all()
     recent_by_key: dict[str, dict[str, int]] = {}
-    #: Per field name across methods: how many facts carried it, and how many DIFFERENT values it
-    #: held. Distinct counts are summed across methods rather than unioned, which can only
-    #: overstate variety - and overstating it merely leaves a field in the list a person can ignore,
-    #: while understating it would hide a real slice.
+    #: Per field name over the whole transaction: how many facts carried it, and how many DIFFERENT
+    #: values it held. The row with a NULL method is the transaction-wide one.
     variety: dict[str, tuple[int, int]] = {}
     for method, k, n, different in recent:
-        recent_by_key.setdefault(k, {})[method or "(none)"] = n
-        facts_so_far, different_so_far = variety.get(k, (0, 0))
-        variety[k] = (facts_so_far + n, different_so_far + different)
+        if method is None:
+            variety[k] = (n, different)
+        else:
+            recent_by_key.setdefault(k, {})[method] = n
     recent_by_method = {(m or "(none)"): n for m, n in (await db.execute(
         select(AnalyticsFact.method, func.count())
         .where(AnalyticsFact.customer_code == customer,

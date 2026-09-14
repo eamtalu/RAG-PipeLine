@@ -102,6 +102,36 @@ async def _plant(picks):
     await n3.consume_tenant(CC)
 
 
+async def _plant_two_methods():
+    """One transaction served by two methods, which is the normal shape: `Brighton Stock Pick` is
+    served by eleven. `ApiPort` is constant on both, so any per-method sum overstates its variety."""
+    async with async_session() as db:
+        db.add(AnalyticsTransactionRegistry(customer_code=CC, transaction_name="Pick"))
+        db.add(AnalyticsTenantState(customer_code=CC, source_watermark=T0 + WIDE,
+                                    history_starts_at=T0 - WIDE))
+        job = Job(customer_code=CC, filename="t.log", document_type="transaction_log",
+                  storage_key=f"{CC}/{uuid.uuid4().hex}/t.log", status="completed")
+        db.add(job)
+        await db.flush()
+        # Neither method is on the quantity allow-list, so neither needs a quantity attribute.
+        # `ConfirmPickLine` without one is quarantined as unusable rather than folded, which is
+        # correct and would quietly halve this fixture.
+        rows = [("LoadDeliveryPackage", "A"), ("LoadDeliveryPackage", "B"),
+                ("StockMove", "A"), ("StockMove", "B")]
+        for i, (method, item) in enumerate(rows):
+            at = T0 + timedelta(seconds=i)
+            db.add(LogTransaction(
+                customer_code=CC, job_id=job.id, sealed=True, started_at=at,
+                ended_at=at + timedelta(seconds=1), date=at.date(), duration_ms=100,
+                method=method, transaction_name="Pick", transaction_type="002001",
+                status=LogTransactionStatus.success, item_number=item, user_name="EDA",
+                warehouse="BRI", row_fingerprint=f"two-{i}",
+                attributes={"ApiPort": "443", "ItemNumber": item}))
+        db.add(AnalyticsPendingWindow(customer_code=CC, range_start=T0 - WIDE, range_end=T0 + WIDE))
+        await db.commit()
+    await n3.consume_tenant(CC)
+
+
 async def _composition():
     async with async_session() as db:
         return await api.transaction_composition("Pick", customer=CC, db=db)
@@ -206,6 +236,36 @@ async def test_a_field_whose_values_repeat_is_the_one_worth_offering():
     entry = _one(out, "request", "ItemNumber")
     assert (entry["distinct_values"], entry["recent_facts"]) == (2, 4)
     assert entry["useful"] is True
+
+
+async def test_variety_is_counted_across_the_whole_transaction_not_summed_per_method():
+    """Found by checking the live tenant rather than by a fixture, and it defeated the whole feature.
+
+    A transaction is served by many methods, and the first version counted distinct values PER METHOD
+    and added them up. `ApiPort` holds one value on each of a dozen methods, which summed to twelve
+    and read as "worth slicing by" - so the server address, the port, the company, the division and
+    the locale all sat at the top of the card, which is precisely the noise the ranking exists to
+    push down.
+
+    Variety has to be counted once over the transaction's facts. The per-method COUNTS stay per
+    method, because a field regular on one method can be a one-off on another.
+    """
+    await _plant_two_methods()
+    out = await _composition()
+    port = _one(out, "request", "ApiPort")
+    assert port["distinct_values"] == 1, "one value across both methods, not one per method"
+    assert port["useful"] is False
+    item = _one(out, "request", "ItemNumber")
+    assert item["distinct_values"] == 2
+    assert item["useful"] is True
+
+
+async def test_the_per_method_counts_are_still_per_method():
+    """The other half of the same fix. Variety is transaction-wide; frequency is not."""
+    await _plant_two_methods()
+    out = await _composition()
+    assert _one(out, "request", "ItemNumber")["recent_by_method"] == \
+        {"LoadDeliveryPackage": 2, "StockMove": 2}
 
 
 async def test_a_quantity_that_differs_every_time_is_not_offered_as_a_slice_either():
