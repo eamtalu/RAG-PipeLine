@@ -1087,6 +1087,30 @@ async def transaction_registry_detail(transaction_name: str,
     }
 
 
+#: Registry `source` to the card it belongs on. Explicit rather than inferred from the name's prefix:
+#: a bare name means "sent by the handheld" and inferring it as a response is the chunk 104 defect.
+_SOURCE_GROUP = {"request": "request", "response": "response", "mi_result": "mi", "record": "record"}
+
+
+def _worth_grouping_by(facts: int, different: int) -> bool | None:
+    """Whether a field is worth offering as a slice, or None when nothing recent measures it.
+
+    Two ways to be useless and they look nothing alike. One value on every record groups everything
+    into a single row; a different value on every record groups nothing at all, which is the
+    pathological case the summaries exist to avoid. Both are common: of the 46 request fields on a
+    live pick, 24 are the first kind and `ReqId` and `StartDateTime` are the second.
+
+    None rather than False when no recent fact carries the field. Absent is not zero, and calling a
+    field useless on the strength of no evidence is the same mistake in a different coat.
+    """
+    if not facts:
+        return None
+    if different <= 1:
+        return False
+    # Strictly fewer values than records: one per record is an identifier, not a slice.
+    return different < facts
+
+
 @router.get("/registry/transactions/{transaction_name}/composition")
 async def transaction_composition(transaction_name: str,
                                   customer: str = Depends(get_current_customer),
@@ -1183,14 +1207,32 @@ async def transaction_composition(transaction_name: str,
     # Per METHOD and key, not per name: a name is served by many methods and a field regular on one
     # is a one-off on another. Under ConfirmPickLine, "resp.ItemNumber on 19,198 of 43,020" was the
     # delivery lookups' count dressed as the picks'; the picks carried it on 67.
+    # Chunk 104: every key, not only the `resp.` and `mi.` ones. The request half is on the fact too
+    # and now has a card of its own, so it needs the same frequency the other cards already had.
+    #
+    # `different` comes back beside the count because it is the one signal that separates a useful
+    # slice from protocol noise. Measured live: of the 46 request fields on a pick, 24 hold the SAME
+    # value on every record of the tenant (the server address, the port, the company, the division)
+    # and a few hold a different one on every single record (`ReqId`, `StartDateTime`). Both are
+    # useless to group by, and a card that merely listed them would bury the dozen that are not.
     recent = (await db.execute(_text("""
-        SELECT f.method, k, count(*) FROM analytics_facts f, jsonb_object_keys(f.attributes) k
+        SELECT f.method, kv.key, count(*), count(DISTINCT kv.value)
+        FROM analytics_facts f, jsonb_each(f.attributes) kv
         WHERE f.customer_code = :c AND f.transaction_name = :n AND f.event_time >= :since
-          AND (k LIKE 'resp.%' OR k LIKE 'mi.%')
-        GROUP BY f.method, k"""), {"c": customer, "n": transaction_name, "since": since})).all()
+          AND left(kv.key, 2) <> :bookkeeping
+        GROUP BY f.method, kv.key"""),
+        {"c": customer, "n": transaction_name, "since": since,
+         "bookkeeping": pl.BOOKKEEPING_PREFIX})).all()
     recent_by_key: dict[str, dict[str, int]] = {}
-    for method, k, n in recent:
+    #: Per field name across methods: how many facts carried it, and how many DIFFERENT values it
+    #: held. Distinct counts are summed across methods rather than unioned, which can only
+    #: overstate variety - and overstating it merely leaves a field in the list a person can ignore,
+    #: while understating it would hide a real slice.
+    variety: dict[str, tuple[int, int]] = {}
+    for method, k, n, different in recent:
         recent_by_key.setdefault(k, {})[method or "(none)"] = n
+        facts_so_far, different_so_far = variety.get(k, (0, 0))
+        variety[k] = (facts_so_far + n, different_so_far + different)
     recent_by_method = {(m or "(none)"): n for m, n in (await db.execute(
         select(AnalyticsFact.method, func.count())
         .where(AnalyticsFact.customer_code == customer,
@@ -1209,7 +1251,7 @@ async def transaction_composition(transaction_name: str,
     # version of these cards showed (`resp.AccessToken` x11 on Brighton Stock Pick). Approval is by
     # name across methods (`capture.approved_attributes`), so `captured` is true if ANY row is, and
     # every row id is carried so the screen can flip them all together.
-    fields: dict[str, list] = {"response": [], "mi": [], "record": []}
+    fields: dict[str, list] = {"request": [], "response": [], "mi": [], "record": []}
     if methods:
         grouped: dict[tuple[str, str], dict] = {}
         for r in (await db.execute(
@@ -1218,10 +1260,18 @@ async def transaction_composition(transaction_name: str,
                        AnalyticsFieldRegistry.method.in_(methods))
                 .order_by(AnalyticsFieldRegistry.field, AnalyticsFieldRegistry.method)
                 .limit(2000))).scalars().all():
-            group = ("record" if r.source == "record" else "mi" if r.source == "mi_result" else "response")
+            # Chunk 104: read off the stored source rather than inferred. The old spelling asked
+            # "record? MI? otherwise response", which was right until chunk 99 began registering the
+            # request half - those rows then fell through the last branch, and 77 of them landed
+            # among 36 genuine response names on one card of the live tenant.
+            group = _SOURCE_GROUP.get(r.source, "response")
             entry = grouped.setdefault((group, r.field), {
                 "id": str(r.id), "ids": [], "methods": [], "field": r.field, "captured": False,
-                "description": r.description, "unit": r.unit,
+                "description": r.description, "unit": r.unit, "source": r.source,
+                # What the handheld sent is on the fact whatever anybody ticks, so the tick decides
+                # whether the field may be REPORTED on rather than whether it is stored. The two are
+                # the same box with two meanings and the screen has to be able to say which.
+                "stored_regardless": group == "request",
                 # Credential-shaped names are recorded by name and never approved by default; the
                 # screen says so instead of offering them as ordinary fields.
                 "credential": pl.never_auto_approve(r.field),
@@ -1242,6 +1292,9 @@ async def transaction_composition(transaction_name: str,
             per_method = {} if group == "record" else recent_by_key.get(field, {})
             entry["recent_by_method"] = per_method
             entry["recent_facts"] = None if group == "record" else sum(per_method.values())
+            facts_seen, different = variety.get(field, (0, 0)) if group != "record" else (0, 0)
+            entry["distinct_values"] = different or None
+            entry["useful"] = _worth_grouping_by(facts_seen, different)
             fields[group].append(entry)
 
     return {

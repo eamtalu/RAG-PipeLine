@@ -282,7 +282,10 @@ async def suggest_sources(db: AsyncSession, customer_code: str, *, key_field: st
         WITH pairs AS (
             SELECT f.method, kv.key AS field, kv.value #>> '{}' AS value
             FROM analytics_facts f, jsonb_each(f.attributes) kv
-            WHERE f.customer_code = :c AND f.event_time >= :since AND kv.key NOT LIKE '\\_\\_%'
+            -- `left(key, 2)` rather than a LIKE pattern: in LIKE, `_` is a single-character
+            -- wildcard, so the obvious `NOT LIKE '__%'` excludes every key of two or more
+            -- characters. It read correctly and matched nothing.
+            WHERE f.customer_code = :c AND f.event_time >= :since AND left(kv.key, 2) <> '__'
         )
         SELECT method, field, count(*) AS facts, count(DISTINCT value) AS distinct_values,
                count(*) FILTER (WHERE value = ANY(:keys)) AS matches_a_key
