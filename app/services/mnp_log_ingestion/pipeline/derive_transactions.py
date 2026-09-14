@@ -21,6 +21,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from sqlalchemy import (String, Enum as SAEnum, delete, func, inspect as sa_inspect, or_, select,
                         false as sa_false, text as sa_text, true as sa_true, update)
@@ -138,7 +139,10 @@ class _TxnBuilder:
         response_entry = next((e for e in self.entries if e.entry_type.value == "response"), None)
         mi_calls = sum(1 for e in self.entries if e.entry_type.value == "mi_call")
 
-        method = g("MethodName")
+        # 18ad: a GET without a MethodName parameter (GetAccessToken) is named by its URL's last path
+        # segment. MethodName wins whenever it exists: it is the business name the body declares, and
+        # it differs from the URL segment on 1,088 of 9,215 live transactions.
+        method = g("MethodName") or _method_from_url(url)
         warehouse = g("Warehouse", "WHLO")
         route = g("Route")
         user_name = g("User", "m3user")
@@ -209,6 +213,16 @@ class _TxnBuilder:
 
 
 _INTERNAL = {"mi_call", "mi_result", "sql", "info", "error"}
+
+
+def _method_from_url(url: str | None) -> str | None:
+    """The last path segment of a request URL, or None. `.../api/server/GetAccessToken?Creds=...`
+    -> `GetAccessToken`; a trailing slash is ignored; a bare host yields None."""
+    if not url:
+        return None
+    path = urlparse(url).path.rstrip("/")
+    seg = path.rsplit("/", 1)[-1]
+    return seg or None
 
 
 def _entry_reqid(e: LogEntry) -> str | None:
@@ -398,6 +412,30 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
     def req_user(r: LogEntry) -> str | None:
         return r.user_ctx or _entry_user(r)
 
+    # 18ad: conversations closed by a RESPONSE in the last `LATE_WORK_MS`, by (server, thread, user).
+    # The server writes RESPONSE from another thread the moment the handler returns, and the
+    # handler's own thread may still log one line ("Activity Logged OK", "bearer = HIDDEN") 4 to 6 ms
+    # later. When two requests of one user finish within those milliseconds the response closes the
+    # conversation first, and without this the tail opened a headless builder that the user's NEXT
+    # response then closed - one incomplete row and one headless row per race (8 of 9,233 in two days).
+    recently_closed: dict[tuple, tuple[_TxnBuilder, datetime]] = {}
+
+    def remember_closed(key: tuple, b: _TxnBuilder, e: LogEntry) -> None:
+        if e.timestamp is not None:
+            recently_closed[key] = (b, e.timestamp)
+
+    def rejoin_late_work(key: tuple, e: LogEntry) -> _TxnBuilder | None:
+        """The conversation with this key closed within the window, or None. Older entries are
+        dropped as they are met, so the map stays the size of the live tail."""
+        hit = recently_closed.get(key)
+        if hit is None or e.timestamp is None:
+            return None
+        b, closed_at = hit
+        if e.timestamp - closed_at > LATE_WORK_WINDOW:
+            del recently_closed[key]
+            return None
+        return b
+
     def close(key: tuple) -> _TxnBuilder | None:
         b = open_by_key.pop(key, None)
         # key[:2] is (server, thread) for named and anonymous keys alike (18r).
@@ -477,6 +515,14 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
             if u is not None:
                 key = (srv, th, u)
                 b = open_by_key.get(key)
+                if b is None and not any(_entry_server(r) == srv and r.thread == th and req_user(r) == u
+                                         for r in pending_reqs):
+                    # 18ad: no open work and no fresh request on this thread - a line logged just after
+                    # this thread's conversation was answered is that conversation's tail.
+                    late = rejoin_late_work(key, e)
+                    if late is not None:
+                        late.add(e)
+                        continue
                 if b is None:
                     b = _TxnBuilder()
                     b.open_pos = _stream_pos(e)
@@ -542,11 +588,13 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
                 b = close(best_key)
                 b.add(e)
                 builders.append(b)
+                remember_closed(best_key[:3], b, e)
             elif best_req is not None:
                 pending_reqs.remove(best_req)
                 b = _TxnBuilder()
                 b.add(best_req)
                 b.add(e)
+                remember_closed((srv, best_req.thread, req_user(best_req)), b, e)
                 # S2: set, where it previously stayed at the -1 default. Harmless while it was a batch
                 # index, because these builders are appended immediately and never compared again; not
                 # harmless once S4 reads the field back from a table and expects it to mean something.
@@ -643,6 +691,12 @@ class _Reversed:
 
     def __ge__(self, other):
         return self.pos <= other.pos
+
+
+#: 18ad: how long after its RESPONSE a conversation still accepts a tail line from its own thread and
+#: user. Measured on two live days: every observed tail was 4 to 6 ms late, and the fastest reuse of a
+#: thread by a NEW request of the same user was about a second. 250 ms is far from both.
+LATE_WORK_WINDOW = timedelta(milliseconds=250)
 
 
 #: A position that sorts before every real one, for a builder opened by something with no request to

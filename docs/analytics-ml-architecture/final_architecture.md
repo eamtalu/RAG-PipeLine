@@ -4299,3 +4299,50 @@ Chunk 96 adds the deliberate cleanup for exactly those rows: `POST /analytics/re
 It never touches a row a person ticked or un-ticked away from its seeded default, or a row any metric names as `attr:<field>`; both are returned with the reason.
 Run it once after the rebuild and the ticket queue have finished, dry run first, then with `dry_run=false`.
 Standing check afterwards: under ConfirmPickLine every response field but `resp.value` should read "not seen", and the headless count in the reconciler should stay near the new floor.
+
+## 18ad. Late work rejoins its conversation; a GET without MethodName is named by its URL. 2026-09-14. Chunk 97.
+
+After the fresh start of 2026-09-14 (two London days kept, 9,233 transactions), the response-ownership rules of 18ac were checked from a new angle: for every transaction, how long after its last work line did its response arrive?
+Median 1 ms, 99th percentile 63 ms, no transaction with two responses, none with a response before its own last work line.
+Two structural leftovers remained and were read line by line.
+
+### Late work
+
+The server writes RESPONSE from another thread the moment the handler returns.
+The handler's own thread may still log one line, "Activity Logged OK" or "bearer = HIDDEN", four to six milliseconds later.
+When two requests of one user finish within those milliseconds, the response is matched by recency and closes the conversation before that tail is logged.
+The tail then finds no open builder for its (server, thread, user) and no pending request on its thread, opens a headless builder, and the user's next response closes it.
+Two live shapes: OPRACHASUK 11:39:49, two ReportCount 3 ms apart; HWORREL 12:33:17, three GetAccessToken within 22 ms.
+Eight of the 13 headless rows in two days were this, each paired with one request that reads as never answered.
+
+Rule: a work line with a user, whose (server, thread, user) has no open builder and whose thread has no pending request, rejoins the conversation with that key that a response closed within the last 250 ms (`LATE_WORK_WINDOW`).
+The preference order for such a line is now: open builder, pending request on the same thread, recently closed on the same thread, the user's most recent pending request, a new builder.
+250 ms is far from both measured edges: every observed tail was 4 to 6 ms late, and the fastest reuse of a thread by a new request of the same user was about a second.
+Treating a stored-procedure line as "still busy" was considered and rejected by the data: 39 responses in two days legitimately follow a `sql` line directly.
+
+### Method from the URL
+
+`compute()` took the method only from the `MethodName` request parameter.
+GetAccessToken carries none, so 26 sign-ons a day showed as method NULL and were at first mistaken for headless rows.
+Rule: `MethodName` first, else the URL's last path segment (`_method_from_url`).
+MethodName stays authoritative where both exist: they differ on 1,088 of 9,215 live transactions, because the URL names the endpoint and the body names the business call.
+
+### Measured before deploying
+
+The patched grouper beside the deployed one over the two kept days (158,652 lines):
+
+| | old | new |
+|---|---|---|
+| transactions without a request line | 13 | 6 |
+| transactions without a response | 12 | 5 |
+| transactions with a request but no method | 27 | 0 |
+| wrongly matched responses, dominant-shape oracle | 404 | 399 |
+| methods that got worse | | 0 |
+
+The six that remain are five single "Revoke Failed" narration lines with no request anywhere and one lone list response whose request is not in the log.
+One GetNextDeliveryByRoute split at a live-path window seam with a 340 ms silent gap, once in 9,233; that is the head-lane continuation class of 18s to 18ab, not a grouping rule.
+`_DERIVE_VERSION` 3 -> 4; nine chunk-97 tests reconstruct both live cases and pin that a tail two seconds late does not rejoin and that a new request on the reused thread still opens a new cycle.
+
+### Rollout
+
+Deploy, then a ranged rebuild of the two kept days (`POST /logs/regroup/full?start=2026-09-12T23:00:00Z&end=<now>`) so the paired rows merge and GetAccessToken gains its method.

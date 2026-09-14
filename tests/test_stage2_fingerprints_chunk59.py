@@ -194,7 +194,10 @@ def _derivation_digest() -> str:
 #: response prefers user-less work, and a POST body pairs with the URL line its own thread and user
 #: wrote. `_DERIVE_VERSION` bumped 2 -> 3: measured over three live days, 941 of 22,656 transactions
 #: change their response, method or membership, so every stored row must be recomputed on rebuild.
-_EXPECTED_DERIVATION = "75025b5e9430e0aa"
+#: Changed again by 18ad (chunk 97): a work line logged within 250 ms of its own thread's answered
+#: conversation rejoins it, and a GET without MethodName is named by its URL. `_DERIVE_VERSION` 3 -> 4:
+#: every GetAccessToken row gains a method and the paired headless/incomplete rows merge.
+_EXPECTED_DERIVATION = "2cd4db15166a2c93"
 
 
 def test_the_derivation_is_pinned_to_the_derive_version():
