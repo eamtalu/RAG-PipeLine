@@ -268,6 +268,34 @@ async def test_the_per_method_counts_are_still_per_method():
         {"LoadDeliveryPackage": 2, "StockMove": 2}
 
 
+async def test_too_few_facts_to_judge_is_not_the_same_as_judged_and_useless():
+    """Seen on the live tenant: `Freezer Pick (Brighton)` has TWO facts, and every one of its 30
+    fields was marked useless.
+
+    With two records a field holding one value looks constant and a field holding two looks like an
+    identifier, and neither reading is earned. Three is the fewest that can tell them apart, because
+    two values over three records means one of them genuinely repeats. Below that the honest answer
+    is "not measured yet", which is the same rule as for a field no recent fact carries at all.
+    """
+    await _plant([{QF["ConfirmPickLine"]: "3", "ItemNumber": "A", "ApiPort": "443"},
+                  {QF["ConfirmPickLine"]: "4", "ItemNumber": "B", "ApiPort": "443"}])
+    out = await _composition()
+    for field in ("ItemNumber", "ApiPort"):
+        entry = _one(out, "request", field)
+        assert entry["useful"] is None, f"{field} judged on two records"
+        assert entry["distinct_values"] is not None, "the measurement is still reported"
+
+
+async def test_three_facts_are_enough_to_tell_a_slice_from_an_identifier():
+    await _plant([{QF["ConfirmPickLine"]: "3", "ItemNumber": "A", "ApiPort": "443", "ReqId": "r1"},
+                  {QF["ConfirmPickLine"]: "4", "ItemNumber": "A", "ApiPort": "443", "ReqId": "r2"},
+                  {QF["ConfirmPickLine"]: "5", "ItemNumber": "B", "ApiPort": "443", "ReqId": "r3"}])
+    out = await _composition()
+    assert _one(out, "request", "ItemNumber")["useful"] is True, "two values over three records"
+    assert _one(out, "request", "ApiPort")["useful"] is False
+    assert _one(out, "request", "ReqId")["useful"] is False
+
+
 async def test_a_quantity_that_differs_every_time_is_not_offered_as_a_slice_either():
     """It is a measure, not a slice, and the same rule catches it without a special case."""
     await _plant(_FOUR)

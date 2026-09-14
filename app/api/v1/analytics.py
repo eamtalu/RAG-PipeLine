@@ -1092,18 +1092,28 @@ async def transaction_registry_detail(transaction_name: str,
 _SOURCE_GROUP = {"request": "request", "response": "response", "mi_result": "mi", "record": "record"}
 
 
+#: The fewest facts that can tell a slice from an identifier.
+#:
+#: With two records a field holding one value looks constant and a field holding two looks unique,
+#: and neither reading is earned. Three is the fewest that separates them, because two values over
+#: three records means one of them genuinely repeats. Found on the live tenant, where a transaction
+#: with exactly two facts had all thirty of its fields marked useless.
+_MIN_FACTS_TO_JUDGE = 3
+
+
 def _worth_grouping_by(facts: int, different: int) -> bool | None:
-    """Whether a field is worth offering as a slice, or None when nothing recent measures it.
+    """Whether a field is worth offering as a slice, or None when there is not enough to say.
 
     Two ways to be useless and they look nothing alike. One value on every record groups everything
     into a single row; a different value on every record groups nothing at all, which is the
-    pathological case the summaries exist to avoid. Both are common: of the 46 request fields on a
-    live pick, 24 are the first kind and `ReqId` and `StartDateTime` are the second.
+    pathological case the summaries exist to avoid. Both are common: of the 77 request fields on a
+    live pick, 45 are one or the other.
 
-    None rather than False when no recent fact carries the field. Absent is not zero, and calling a
+    None rather than False in the two cases where the answer is not earned: no recent fact carries
+    the field, or too few do to tell the two failure modes apart. Absent is not zero, and calling a
     field useless on the strength of no evidence is the same mistake in a different coat.
     """
-    if not facts:
+    if facts < _MIN_FACTS_TO_JUDGE:
         return None
     if different <= 1:
         return False
