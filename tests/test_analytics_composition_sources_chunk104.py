@@ -229,6 +229,20 @@ async def test_a_field_with_a_different_value_on_every_record_is_useless_in_the_
     assert _one(out, "request", "ReqId")["useful"] is False
 
 
+async def test_one_single_repeat_does_not_rescue_an_identifier():
+    """Found on the live tenant AFTER the first rule shipped. `ReqId` held 9,292 different values
+    over 9,293 facts - one accidental repeat in nine thousand - and "strictly fewer values than
+    records" duly called it worth slicing by. It sat at the top of the card it was written to push
+    down. Nearly one per record is one per record."""
+    rows = [{QF["ConfirmPickLine"]: str(i), "ReqId": f"r{i}", "ItemNumber": "A"} for i in range(20)]
+    rows[19]["ReqId"] = "r18"          # one repeat in twenty, as live
+    await _plant(rows)
+    out = await _composition()
+    req = _one(out, "request", "ReqId")
+    assert req["distinct_values"] == 19 and req["recent_facts"] == 20
+    assert req["useful"] is False, "19 values over 20 records is an identifier"
+
+
 async def test_a_field_whose_values_repeat_is_the_one_worth_offering():
     """The whole point of the two tests above. A slice is a field that puts SEVERAL records in each
     group, which is neither a constant nor an identifier."""

@@ -1281,6 +1281,10 @@ _SOURCE_GROUP = {"request": "request", "response": "response", "mi_result": "mi"
 #: with exactly two facts had all thirty of its fields marked useless.
 _MIN_FACTS_TO_JUDGE = 3
 
+#: How close to one value per record a field may get before it is called an identifier rather than
+#: a slice. Not 1.0: a handful of accidental repeats does not turn a request id into a category.
+_IDENTIFIER_SHARE = 0.95
+
 
 def _worth_grouping_by(facts: int, different: int) -> bool | None:
     """Whether a field is worth offering as a slice, or None when there is not enough to say.
@@ -1298,8 +1302,11 @@ def _worth_grouping_by(facts: int, different: int) -> bool | None:
         return None
     if different <= 1:
         return False
-    # Strictly fewer values than records: one per record is an identifier, not a slice.
-    return different < facts
+    # NEARLY one per record is one per record. "Strictly fewer" was the first rule and it was too
+    # tight: `ReqId` held 9,292 different values over 9,293 live facts, one accidental repeat in
+    # nine thousand, and duly read as worth slicing by at the top of the card it exists to push
+    # down. The same threshold the lookup check uses, for the same reason.
+    return different < facts * _IDENTIFIER_SHARE
 
 
 @router.get("/registry/transactions/{transaction_name}/composition")
