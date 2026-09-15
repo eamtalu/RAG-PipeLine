@@ -34,6 +34,7 @@ from typing import Any, Mapping, Sequence
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.persistence.models.analytics_field_meaning import AnalyticsFieldMeaning
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_metric import AnalyticsMetric
 from app.persistence.models.analytics_rollup import DIMENSION_SLOTS, AnalyticsHourlyRollup
@@ -227,15 +228,21 @@ async def _fields(db: AsyncSession, customer_code: str) -> list[FieldRow]:
         AnalyticsFieldRegistry.customer_code == customer_code,
         AnalyticsFieldRegistry.captured.is_(True))
         .order_by(AnalyticsFieldRegistry.field, AnalyticsFieldRegistry.method))).scalars().all()
+    # Chunk 108: meaning comes from the NAME, in one read, rather than from whichever per-method
+    # row happened to carry it first. `EmployeeName` is on 44 methods live and means one thing.
+    meanings = {m.field: m for m in (await db.execute(select(AnalyticsFieldMeaning).where(
+        AnalyticsFieldMeaning.customer_code == customer_code))).scalars().all()}
     by_name: dict[str, dict] = {}
     for r in rows:
-        entry = by_name.setdefault(r.field, {"source": r.source, "description": None,
-                                             "unit": None, "methods": []})
+        entry = by_name.setdefault(r.field, {"source": r.source, "methods": []})
         entry["methods"].append(r.method)
-        entry["description"] = entry["description"] or r.description
-        entry["unit"] = entry["unit"] or r.unit
-    return [FieldRow(field=name, source=e["source"], description=e["description"],
-                     unit=e["unit"], methods=tuple(e["methods"])) for name, e in by_name.items()]
+    out = []
+    for name, e in by_name.items():
+        m = meanings.get(name)
+        out.append(FieldRow(field=name, source=e["source"],
+                            description=m.description if m else None,
+                            unit=m.unit if m else None, methods=tuple(e["methods"])))
+    return out
 
 
 async def _transactions(db: AsyncSession, customer_code: str) -> list[TransactionRow]:

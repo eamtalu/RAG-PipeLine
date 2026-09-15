@@ -31,6 +31,7 @@ from sqlalchemy import delete, func, select
 
 from app.api.v1 import analytics as api
 from app.config.database import async_session
+from app.persistence.models.analytics_field_meaning import AnalyticsFieldMeaning
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_metric import AnalyticsMetric
 from app.persistence.models.analytics_pending_window import AnalyticsPendingWindow
@@ -48,7 +49,8 @@ T0 = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
 
 async def _wipe():
     async with async_session() as db:
-        for model in (AnalyticsHourlyRollup, AnalyticsMetric, AnalyticsTransactionRegistry,
+        for model in (AnalyticsHourlyRollup, AnalyticsMetric, AnalyticsFieldMeaning,
+                      AnalyticsTransactionRegistry,
                       AnalyticsFieldRegistry, AnalyticsPendingWindow, AnalyticsTenantState):
             await db.execute(delete(model).where(model.customer_code == CC))
         await db.execute(delete(Customer).where(Customer.customer_code == CC))
@@ -91,10 +93,15 @@ async def _seed() -> uuid.UUID:
                                             description="Picking from the Brighton pick face"))
         db.add(AnalyticsTransactionRegistry(customer_code=CC, transaction_name="Quick Stock Count"))
         db.add(AnalyticsFieldRegistry(customer_code=CC, method="ConfirmPickLine", source="record",
-                                      field="rec.STQT", captured=True,
-                                      description="On-hand quantity of one lot", unit="units"))
+                                      field="rec.STQT", captured=True))
         db.add(AnalyticsFieldRegistry(customer_code=CC, method="ConfirmPickLine", source="record",
-                                      field="rec.ITNO", captured=True, description="Item number"))
+                                      field="rec.ITNO", captured=True))
+        # Chunk 108: meaning is recorded once per NAME, not on each per-method row. A name is on 44
+        # methods live, and describing it forty-four times is why nobody ever did.
+        db.add(AnalyticsFieldMeaning(customer_code=CC, field="rec.STQT",
+                                     description="On-hand quantity of one lot", unit="units"))
+        db.add(AnalyticsFieldMeaning(customer_code=CC, field="rec.ITNO",
+                                     description="Item number"))
         db.add(AnalyticsFieldRegistry(customer_code=CC, method="ConfirmPickLine", source="response",
                                       field="resp.AccessToken", captured=False))
         db.add(AnalyticsTenantState(customer_code=CC, source_watermark=T0,

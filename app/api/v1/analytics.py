@@ -38,6 +38,7 @@ from app.persistence.repositories.customer_repository import get_customer_timezo
 from app.config.database import get_session
 from app.persistence.models.analytics_metric import AnalyticsMetric
 from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
+from app.persistence.models.analytics_field_meaning import KINDS, AnalyticsFieldMeaning
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_lookup import AnalyticsLookup, AnalyticsLookupValue
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
@@ -732,12 +733,26 @@ async def set_field_capture(field_id: str, payload: dict = Body(...),
         row.reviewed_by = payload.get("reviewed_by") or "api"
     # Chunk 84: meaning for the catalog. Metadata, so it neither stamps a review nor publishes a
     # ticket; only `captured` moving changes what a fold stores.
-    if "description" in payload:
-        row.description = (str(payload["description"]).strip() or None
-                           if payload["description"] is not None else None)
-    if "unit" in payload:
-        row.unit = (str(payload["unit"]).strip()[:32] or None
-                    if payload["unit"] is not None else None)
+    #
+    # Chunk 108: written THROUGH to the per-name meanings table, which is now the one source of
+    # truth. Writing it onto this per-method row as well would leave two places to disagree, and
+    # the row's own columns are no longer read by anything.
+    if "description" in payload or "unit" in payload:
+        meaning = await db.scalar(select(AnalyticsFieldMeaning).where(
+            AnalyticsFieldMeaning.customer_code == customer,
+            AnalyticsFieldMeaning.field == row.field))
+        if meaning is None:
+            meaning = AnalyticsFieldMeaning(customer_code=customer, field=row.field)
+            db.add(meaning)
+        if "description" in payload:
+            meaning.description = (str(payload["description"]).strip() or None
+                                   if payload["description"] is not None else None)
+        if "unit" in payload:
+            meaning.unit = (str(payload["unit"]).strip()[:32] or None
+                            if payload["unit"] is not None else None)
+        meaning.reviewed_at = datetime.now(timezone.utc)
+        meaning.reviewed_by = payload.get("reviewed_by") or "api"
+        row.description, row.unit = meaning.description, meaning.unit
     row.updated_at = datetime.now(timezone.utc)
 
     published = 0
@@ -952,6 +967,116 @@ async def prune_field_registry(dry_run: bool = Query(True, description="Report o
     if not dry_run:
         await db.commit()
     return out
+
+
+# ============================================================== chunk 108: what a field MEANS
+#
+# Meaning lived on the field registry, whose rows are per field PER METHOD. That is right for a
+# DECISION - `EmployeeName` may be ticked on picking and not on counting - and wrong for a MEANING,
+# because the name means the same thing on all 44 methods that carry it. Describing it meant writing
+# the same sentence 44 times, so nobody did: 1,492 rows on the live tenant, 0 described.
+#
+# `kind` is the part no amount of looking at the data can supply. Discovery over the live facts
+# classified `ItemNumber`, `DeliveryNumber`, `LotNumber`, `UserID` and `DeviceID` as measures,
+# because they are numeric and they repeat exactly as a quantity does. A delivery number is a name
+# spelled with digits, and only a person can say so.
+
+
+async def _meanings_for(db, customer: str) -> dict[str, AnalyticsFieldMeaning]:
+    """Every recorded meaning for this tenant, by field name. Read once per request."""
+    rows = (await db.execute(select(AnalyticsFieldMeaning).where(
+        AnalyticsFieldMeaning.customer_code == customer))).scalars().all()
+    return {r.field: r for r in rows}
+
+
+@router.get("/registry/meanings")
+async def list_field_meanings(customer: str = Depends(get_current_customer),
+                              db: AsyncSession = Depends(get_session)):
+    """Every registered field NAME, described or not.
+
+    Undescribed names are listed too, and that is the point: a name absent from the list cannot be
+    filled in, and the gap is what somebody is here to close.
+    """
+    registered = (await db.execute(
+        select(AnalyticsFieldRegistry.field, AnalyticsFieldRegistry.source,
+               func.count().label("methods"), func.sum(AnalyticsFieldRegistry.seen_count),
+               func.bool_or(AnalyticsFieldRegistry.captured))
+        .where(AnalyticsFieldRegistry.customer_code == customer)
+        .group_by(AnalyticsFieldRegistry.field, AnalyticsFieldRegistry.source))).all()
+    meanings = await _meanings_for(db, customer)
+
+    out = []
+    for field, source, methods, seen, captured in registered:
+        m = meanings.get(field)
+        out.append({
+            "field": field, "source": source, "methods": int(methods),
+            "seen": int(seen or 0), "captured": bool(captured),
+            "description": m.description if m else None,
+            "unit": m.unit if m else None,
+            "kind": m.kind if m else None,
+            "reviewed_by": m.reviewed_by if m else None,
+            "reviewed_at": m.reviewed_at.isoformat() if m and m.reviewed_at else None,
+        })
+    out.sort(key=lambda e: (-e["seen"], e["field"]))
+    return {"meanings": out, "total": len(out),
+            "described": sum(1 for e in out if e["description"]),
+            "kinds": list(KINDS)}
+
+
+@router.patch("/registry/meanings")
+async def set_field_meaning(body: dict = Body(...),
+                            customer: str = Depends(get_current_customer),
+                            db: AsyncSession = Depends(get_session)):
+    """Record what one field name means. Writes nothing else and starts no storage.
+
+    The field is taken in the BODY rather than the path: a name can contain a dot (`resp.value`) and
+    a colon, and a path segment is the wrong place to carry one.
+    """
+    field = str(body.get("field") or "").strip()
+    if not field:
+        raise HTTPException(400, detail="body must name a field")
+    if not any(k in body for k in ("description", "unit", "kind")):
+        raise HTTPException(400, detail="body must contain at least one of description, unit, kind")
+
+    kind = body.get("kind")
+    if "kind" in body and kind is not None and kind not in KINDS:
+        raise HTTPException(400, detail=f"kind {kind!r} is not one of {', '.join(KINDS)}")
+
+    # Fails closed, like every other name in this system. A typo would otherwise sit in the
+    # catalogue describing a field nothing produces.
+    known = await db.scalar(select(AnalyticsFieldRegistry.id).where(
+        AnalyticsFieldRegistry.customer_code == customer,
+        AnalyticsFieldRegistry.field == field).limit(1))
+    if known is None:
+        raise HTTPException(404, detail=f"nothing has ever produced a field called {field!r}, so "
+                                        f"there is nothing to describe")
+
+    row = await db.scalar(select(AnalyticsFieldMeaning).where(
+        AnalyticsFieldMeaning.customer_code == customer, AnalyticsFieldMeaning.field == field))
+    if row is None:
+        row = AnalyticsFieldMeaning(customer_code=customer, field=field)
+        db.add(row)
+
+    def _text_or_none(value, limit=None):
+        if value is None:
+            return None
+        text_value = str(value).strip()
+        return (text_value[:limit] if limit else text_value) or None
+
+    if "description" in body:
+        row.description = _text_or_none(body["description"])
+    if "unit" in body:
+        row.unit = _text_or_none(body["unit"], 32)
+    if "kind" in body:
+        row.kind = kind
+    row.reviewed_at = datetime.now(timezone.utc)
+    row.reviewed_by = str(body.get("reviewed_by") or "api")[:128]
+    row.updated_at = row.reviewed_at
+    await db.commit()
+    await db.refresh(row)
+    return {"field": row.field, "description": row.description, "unit": row.unit,
+            "kind": row.kind, "reviewed_by": row.reviewed_by,
+            "reviewed_at": row.reviewed_at.isoformat() if row.reviewed_at else None}
 
 
 @router.get("/registry/summary")
@@ -1328,6 +1453,7 @@ async def transaction_composition(transaction_name: str,
     # every row id is carried so the screen can flip them all together.
     fields: dict[str, list] = {"request": [], "response": [], "mi": [], "record": [],
                               "looked_up": []}
+    meanings = await _meanings_for(db, customer)
     if methods:
         grouped: dict[tuple[str, str], dict] = {}
         for r in (await db.execute(
@@ -1341,9 +1467,15 @@ async def transaction_composition(transaction_name: str,
             # request half - those rows then fell through the last branch, and 77 of them landed
             # among 36 genuine response names on one card of the live tenant.
             group = _SOURCE_GROUP.get(r.source, "response")
+            meaning = meanings.get(r.field)
             entry = grouped.setdefault((group, r.field), {
                 "id": str(r.id), "ids": [], "methods": [], "field": r.field, "captured": False,
-                "description": r.description, "unit": r.unit, "source": r.source,
+                # Chunk 108: read from the NAME, not from this method's row, so one sentence
+                # covers every method that carries it.
+                "description": meaning.description if meaning else None,
+                "unit": meaning.unit if meaning else None,
+                "kind": meaning.kind if meaning else None,
+                "source": r.source,
                 # What the handheld sent is on the fact whatever anybody ticks, so the tick decides
                 # whether the field may be REPORTED on rather than whether it is stored. The two are
                 # the same box with two meanings and the screen has to be able to say which.
@@ -1361,8 +1493,6 @@ async def transaction_composition(transaction_name: str,
                 "count": int(r.seen_count or 0),
                 "last_seen_at": r.last_seen_at.isoformat() if r.last_seen_at else None}
             entry["captured"] = entry["captured"] or bool(r.captured)
-            entry["description"] = entry["description"] or r.description
-            entry["unit"] = entry["unit"] or r.unit
         for (group, field), entry in grouped.items():
             # record fields live on record rows, not facts; their frequency is not measured here
             per_method = {} if group == "record" else recent_by_key.get(field, {})
