@@ -63,10 +63,10 @@ def aggregations() -> list[dict]:
         "name": a.value,
         "needs_field": a is not d.Aggregation.count,
         "approximate": a.value in _APPROXIMATE_AGGREGATIONS,
-        # Chunk 109: whether this aggregation may not be applied to a LEVEL. Derived from
-        # `definition.LEVEL_REFUSED`, so the builder greys out the same thing the server refuses and
-        # no screen keeps a second copy of the rule to drift out of step.
-        "refuses_level": d.refuses_level(a),
+        # Chunks 109 and 110: which KINDS of field may not be read this way. Derived from
+        # `definition.REFUSED_BY_KIND`, so a screen greys out exactly what the server refuses and
+        # keeps no second copy of the rule to drift out of step.
+        "refuses_kinds": list(d.refused_kinds(a)),
         "roles": sorted(r.value for r in d.roles_for(a)),
     } for a in d.Aggregation]
 

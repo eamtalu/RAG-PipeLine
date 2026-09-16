@@ -102,13 +102,13 @@ async def test_the_loader_returns_the_full_namespaced_key():
     `QuantityOnHand`. A bare-name match would let a field inherit a marking nobody gave it."""
     await _mark(ON_HAND, "level")
     async with async_session() as db:
-        assert await capture.level_fields(db, CC) == frozenset({ON_HAND})
+        assert await capture.field_kinds(db, CC) == {ON_HAND: "level"}
 
 
 async def test_a_field_marked_something_else_is_not_a_level():
     await _mark(ON_HAND, "measure")
     async with async_session() as db:
-        assert await capture.level_fields(db, CC) == frozenset()
+        assert await capture.field_kinds(db, CC) == {ON_HAND: "measure"}
 
 
 # ==================================================== 2. the gate on the way in
@@ -284,23 +284,23 @@ def test_a_sum_is_never_reported_as_a_level():
     """Decision 3, at the reporting end. The level rule refuses a NEW sum and leaves an existing one
     running, so for that metric the total genuinely is the answer it was built to give. Relabelling
     it now would make an old chart unreadable without making any number more true."""
-    levels = frozenset({ON_HAND})
-    assert api._measure_reads_a_level(_measure(d.Aggregation.sum), levels) is False
-    assert api._measure_reads_a_level(_measure(d.Aggregation.average), levels) is True
+    kinds = {ON_HAND: "level"}
+    assert api._measure_reads_a_level(_measure(d.Aggregation.sum), kinds) is False
+    assert api._measure_reads_a_level(_measure(d.Aggregation.average), kinds) is True
 
 
 def test_a_difference_of_two_levels_is_not_reported_as_a_level():
     """A stock minus a stock is a change, and a change adds like any other amount."""
-    levels = frozenset({"CountedQuantity", "BalanceQuantity"})
+    kinds = {"CountedQuantity": "level", "BalanceQuantity": "level"}
     both = _measure(field="attr:CountedQuantity", minus="attr:BalanceQuantity")
-    assert api._measure_reads_a_level(both, levels) is False
+    assert api._measure_reads_a_level(both, kinds) is False
 
 
 def test_an_unmarked_field_is_not_reported_as_a_level():
-    assert api._measure_reads_a_level(_measure(), frozenset()) is False
-    assert api._measure_reads_a_level(_measure(field="quantity"), frozenset({ON_HAND})) is False
+    assert api._measure_reads_a_level(_measure(), {}) is False
+    assert api._measure_reads_a_level(_measure(field="quantity"), {ON_HAND: "level"}) is False
     assert api._measure_reads_a_level(
-        d.Measure(name="n", aggregation=d.Aggregation.count), frozenset({ON_HAND})) is False
+        d.Measure(name="n", aggregation=d.Aggregation.count), {ON_HAND: "level"}) is False
 
 
 async def test_the_breakdown_says_its_measure_reads_a_level():
@@ -350,6 +350,6 @@ async def test_the_catalogue_says_which_aggregation_refuses_a_level():
     and no screen keeps a second copy of the rule."""
     async with async_session() as db:
         body = await catalog.build(db, CC)
-    refusing = {a["name"] for a in body["aggregations"] if a["refuses_level"]}
+    refusing = {a["name"] for a in body["aggregations"] if "level" in a["refuses_kinds"]}
     assert refusing == {"sum"}
     assert len(body["aggregations"]) == len(d.Aggregation)

@@ -37,6 +37,7 @@ against the doc's 3.2M estimate. Small enough to accept, large enough to state.
 """
 
 import enum
+from collections.abc import Mapping
 from dataclasses import dataclass, field as dc_field
 from datetime import datetime
 from decimal import Decimal
@@ -106,26 +107,56 @@ def roles_for(aggregation: Aggregation) -> frozenset[Role]:
     return _ROLES[aggregation]
 
 
-#: Chunk 109. What a LEVEL refuses. A level is how much there IS at a moment - stock on hand, a
-#: balance - as against how much HAPPENED, which is what every other measure holds.
+#: Aggregations that read the VALUE and do arithmetic on it, as against those that read the row.
+#: `count` counts rows and `distinct` counts how many different values there were; neither cares what
+#: the value means. Everything else adds, divides or orders it.
+_ARITHMETIC: frozenset[Aggregation] = frozenset({
+    Aggregation.sum, Aggregation.average, Aggregation.stats,
+    Aggregation.extent, Aggregation.percentile,
+})
+
+#: What each KIND of field refuses (chunks 109 and 110). Keyed by the strings in
+#: `analytics_field_meaning.KINDS`, named here rather than imported so this module keeps its
+#: "no database" property, exactly as `_STATUSES` is. A test asserts the two agree, and asserts every
+#: kind appears, so a fifth one cannot be added to the model and silently refuse nothing.
 #:
-#: Exactly one entry, and that is the point: the rule fits in a sentence. Adding readings of the same
-#: shelf produces a number nothing ever was. Measured on the live tenant, 73 on-hand readings of
-#: item 104353 add to 41,206 where 427 are on the shelf, and every on-hand reading on the tenant adds
-#: to 340,206 where the stock is 18,248 (tmp-live, 16 September 2026).
+#: `measure` refuses nothing: a number that says how much HAPPENED is what every aggregation is for.
 #:
-#: Everything else is allowed and deliberately so. `count` reads no value at all. `average` and
-#: `percentile` answer "what was the stock typically", `extent` answers "how low and how high did it
-#: go", `stats` answers "how much does it swing" - all real questions about a level, and none of them
-#: publishes a total. Refusing a harmless aggregation teaches people the rule is arbitrary, and they
-#: then work around the useful part of it too.
-LEVEL_REFUSED: frozenset[Aggregation] = frozenset({Aggregation.sum})
+#: `level` refuses only the sum. A level says how much there IS at a moment, so adding readings gives
+#: a number nothing ever was - 73 on-hand readings of one item add to 41,206 where 427 are on the
+#: shelf. The average, the extent, the median and the spread are all real questions about a level, and
+#: refusing a harmless one teaches people the rule is arbitrary so they work around the useful part.
+#:
+#: `slice` refuses all arithmetic. A name has no size. Measured on tmp-live: `DeliveryNumber` holds
+#: 8,841 values that are 100 per cent digits and `ExpectedQuantity` holds 3,556 that are also 100 per
+#: cent digits; one is a name and one is a quantity, and nothing in the values says which. Adding up
+#: `PackageNumber` parses nothing and reads as no data, which is loud; adding up `DeliveryNumber`
+#: gives a confident seven-figure total that is meaningless, which is not. Counting rows and counting
+#: different values stay allowed, because those are the two questions a name answers.
+#:
+#: `noise` refuses nothing. It says "nobody will report on this", not "this is forbidden". Somebody
+#: reporting on it means the marking was wrong, and the fix is to change the marking.
+REFUSED_BY_KIND: dict[str, frozenset[Aggregation]] = {
+    "measure": frozenset(),
+    "level": frozenset({Aggregation.sum}),
+    "slice": _ARITHMETIC,
+    "noise": frozenset(),
+}
 
 
-def refuses_level(aggregation: Aggregation) -> bool:
-    """Whether `aggregation` may not be applied to a level. The single source of truth: the catalog
-    publishes this per aggregation so no screen keeps a second copy of the list."""
-    return aggregation in LEVEL_REFUSED
+def refuses(kind: str | None, aggregation: Aggregation) -> bool:
+    """Whether a field of this kind may not be read that way.
+
+    An unknown or absent kind refuses nothing. Nobody has decided, and a screen that refused on a
+    blank would punish people for not having got to the field yet.
+    """
+    return aggregation in REFUSED_BY_KIND.get(kind or "", frozenset())
+
+
+def refused_kinds(aggregation: Aggregation) -> tuple[str, ...]:
+    """Which kinds refuse this aggregation. Published in the catalog so a screen greys out exactly
+    what the server refuses and keeps no second copy of the rule."""
+    return tuple(sorted(k for k, refused in REFUSED_BY_KIND.items() if aggregation in refused))
 
 
 class Status(enum.Enum):
@@ -278,7 +309,7 @@ _STATUSES = frozenset({"success", "soft", "error", "incomplete"})
 def validate(definition: MetricDefinition,
              known_attributes: frozenset[str] | set[str] | None = None,
              *,
-             level_fields: frozenset[str] | set[str] | None = None) -> list[str]:
+             field_kinds: Mapping[str, str] | None = None) -> list[str]:
     """Problems with `definition`, empty when it is registrable.
 
     Returns a list rather than raising: the interface shows all of them at once, and a half-valid
@@ -293,23 +324,26 @@ def validate(definition: MetricDefinition,
     forgot the argument must not accidentally accept any attribute path at all, because that would make
     the allowlist optional for a table that is KEEP_FOREVER.
 
-    Chunk 109. `level_fields` are the attribute keys a PERSON has marked as levels - how much there IS
-    at a moment rather than how much happened. Supplied the same way and for the same reason: this
-    module never learns that `analytics_field_meanings` exists.
+    Chunks 109 and 110. `field_kinds` maps an attribute key to what a PERSON said it IS: a measure, a
+    level, a slice or noise. Supplied the same way and for the same reason: this module never learns
+    that `analytics_field_meanings` exists. `REFUSED_BY_KIND` says what each kind refuses.
 
     Its default is the exact INVERSE of `known_attributes`', and the inversion is the whole design.
     Omitting `known_attributes` refuses everything, because an unapproved field would write to a table
-    kept forever. Omitting `level_fields` refuses NOTHING, because the caller that omits it is the
+    kept forever. Omitting `field_kinds` refuses NOTHING, because the caller that omits it is the
     fold, and a fold that stopped folding a metric somebody has been reading for months is a far worse
     failure than a wrong label on a chart. This refusal is a gate on the way IN - preview, create, a
     reshaped metric, a draft first going live - never a re-argument of a decision already taken.
+
+    An undecided field also refuses nothing. Absent is not a decision, and refusing on a blank would
+    punish people for not yet having reached the field.
     """
     problems: list[str] = []
     known = frozenset(known_attributes or ())
-    levels = frozenset(level_fields or ())
+    kinds = dict(field_kinds or {})
 
-    def _is_level(name: str | None) -> bool:
-        """Whether `name` names a field a person has marked a level.
+    def _kind_of(name: str | None) -> str | None:
+        """What a person said this field IS, or None when nobody has said.
 
         Matched on the KEY, because a metric addresses a field as `attr:resp.QuantityOnHand` while the
         meaning row stores `resp.QuantityOnHand`; comparing the two spellings would match nothing and
@@ -317,9 +351,11 @@ def validate(definition: MetricDefinition,
         `resp.QuantityOnHand` being a level says nothing about a request field spelled
         `QuantityOnHand`, and inheriting a marking nobody made is how the wrong field gets trusted.
 
-        A typed column such as `quantity` is never a level: no meaning row can describe one.
+        A typed column such as `quantity` has no kind: no meaning row can describe one.
         """
-        return bool(name) and contract.is_attr_path(name) and contract.attr_key(name) in levels
+        if not name or not contract.is_attr_path(name):
+            return None
+        return kinds.get(contract.attr_key(name))
 
     record_grain = definition.source == "record"
     if definition.source not in ("transaction", "record"):
@@ -386,16 +422,30 @@ def validate(definition: MetricDefinition,
             if m.aggregation is Aggregation.distinct:
                 problems.append(f"measure {m.name!r} is a distinct count, whose field is an identity "
                                 f"rather than a quantity, so it cannot subtract {m.minus!r}")
-        # Chunk 109. A level is how much there IS at a moment. Adding readings of the same shelf
-        # produces a number nothing ever was: 73 on-hand readings of item 104353 add to 41,206
-        # where 427 are on the shelf. Only `sum` is refused, and only when there is no second level
-        # to subtract, because a stock minus a stock is a CHANGE and changes add - that difference is
-        # count variance, which is the whole reason `minus` exists.
-        if refuses_level(m.aggregation) and (_is_level(m.field) or _is_level(m.minus)):
-            both = _is_level(m.field) and _is_level(m.minus)
-            if not both:
+        # Chunks 109 and 110. What a person said the field IS decides how it may be read.
+        #
+        # A SLICE is checked first, because it is the stronger refusal and the quieter failure. A
+        # name has no size: the average of delivery 24960 and delivery 27946 is not a delivery.
+        # `PackageNumber` is never numeric so adding it up reads as no data, which is loud; every
+        # `DeliveryNumber` on the live tenant IS numeric, so adding those up gives a confident
+        # seven-figure total that is meaningless, which is not.
+        slice_names = [n for n in (m.field, m.minus) if _kind_of(n) == "slice"]
+        if slice_names and refuses("slice", m.aggregation):
+            problems.append(
+                f"measure {m.name!r} does arithmetic on {', '.join(repr(n) for n in slice_names)}, "
+                f"which is a NAME you group by, not a quantity - it has no size, so a total, an "
+                f"average and a highest are all meaningless. Group by it instead, or count the rows "
+                f"with `count`, or count how many different ones there were with `distinct`.")
+        # A LEVEL is how much there IS at a moment. Adding readings of the same shelf produces a
+        # number nothing ever was: 73 on-hand readings of item 104353 add to 41,206 where 427 are on
+        # the shelf. Only `sum` is refused, and only when there is no second level to subtract,
+        # because a stock minus a stock is a CHANGE and changes add - that difference is count
+        # variance, which is the whole reason `minus` exists.
+        elif refuses("level", m.aggregation) and "level" in (_kind_of(m.field), _kind_of(m.minus)):
+            if _kind_of(m.field) != "level" or _kind_of(m.minus) != "level":
                 if m.minus:
-                    stock, flow = (m.field, m.minus) if _is_level(m.field) else (m.minus, m.field)
+                    is_level = _kind_of(m.field) == "level"
+                    stock, flow = (m.field, m.minus) if is_level else (m.minus, m.field)
                     problems.append(
                         f"measure {m.name!r} adds up {stock!r}, which is a LEVEL - how much there is "
                         f"at a moment - against {flow!r}, which is an amount. A stock minus a flow is "

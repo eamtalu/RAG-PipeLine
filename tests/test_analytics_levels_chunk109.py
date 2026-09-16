@@ -22,7 +22,7 @@ Six live fields are levels and all six are ticked and available to a metric toda
 through it.
 
 **The default is the whole design.** `known_attributes=None` refuses everything, because an unapproved
-field would write to a table kept forever. `level_fields=None` refuses NOTHING, because the caller that
+field would write to a table kept forever. `field_kinds=None` refuses NOTHING, because the caller that
 omits it is the fold, and a fold that stopped folding a metric somebody has read for months is worse
 than a wrong label on a chart. The refusal is a gate on the way in, never a re-argument of a decision
 already taken.
@@ -39,8 +39,9 @@ APPROVED = frozenset({
     "ExpectedQuantity", "rec.STQT", "rec.ITNO",
 })
 
-#: What a person has said is a level. Namespaced exactly as it appears in `attributes`.
-LEVELS = frozenset({"resp.QuantityOnHand", "BalanceQuantity", "CountedQuantity"})
+#: What a person has said each field IS. Namespaced exactly as it appears in `attributes`.
+#: Chunk 110 generalised the single level set into this map, so a fourth kind costs no new argument.
+LEVELS = {"resp.QuantityOnHand": "level", "BalanceQuantity": "level", "CountedQuantity": "level"}
 
 
 def _metric(aggregation=d.Aggregation.sum, field="attr:resp.QuantityOnHand", minus=None,
@@ -53,7 +54,7 @@ def _metric(aggregation=d.Aggregation.sum, field="attr:resp.QuantityOnHand", min
 
 
 def _problems(definition, *, levels=LEVELS, approved=APPROVED):
-    return d.validate(definition, known_attributes=approved, level_fields=levels)
+    return d.validate(definition, known_attributes=approved, field_kinds=levels)
 
 
 def _about_levels(problems):
@@ -84,11 +85,11 @@ def test_the_refusal_names_the_field_and_says_what_to_use_instead():
 def test_only_adding_up_is_refused():
     """Asserted against the enum itself, so adding an eighth aggregation forces a decision rather than
     quietly inheriting whichever default the loop happens to give it."""
-    assert d.LEVEL_REFUSED == frozenset({d.Aggregation.sum})
-    assert d.refuses_level(d.Aggregation.sum) is True
+    assert d.REFUSED_BY_KIND["level"] == frozenset({d.Aggregation.sum})
+    assert d.refuses("level", d.Aggregation.sum) is True
     for other in d.Aggregation:
         if other is not d.Aggregation.sum:
-            assert d.refuses_level(other) is False
+            assert d.refuses("level", other) is False
 
 
 # ==================================================================== 2. the default that protects live metrics
@@ -106,7 +107,7 @@ def test_omitting_the_level_set_refuses_nothing():
 
 def test_an_empty_level_set_also_refuses_nothing():
     """Nobody has marked anything yet, which is the state every tenant starts in."""
-    assert _about_levels(_problems(_metric(), levels=frozenset())) == []
+    assert _about_levels(_problems(_metric(), levels={})) == []
 
 
 # ==================================================================== 3. what a level may still do
@@ -195,17 +196,17 @@ def test_a_level_on_a_record_metric_is_refused_too():
     """Record facts carry stock readings as readily as transaction facts do, and the arithmetic does
     not change because the row came from a different table."""
     definition = _metric(field="attr:rec.STQT", source="record", dimensions=("attr:rec.ITNO",))
-    problems = _about_levels(_problems(definition, levels=frozenset({"rec.STQT"})))
+    problems = _about_levels(_problems(definition, levels={"rec.STQT": "level"}))
     assert len(problems) == 1
 
 
 # ==================================================================== 6. the module stays pure
 
 def test_the_rule_needs_no_database():
-    """`validate` is handed a set of names, exactly as it is handed `known_attributes`. It never learns
+    """`validate` is handed a map of names, exactly as it is handed `known_attributes`. It never learns
     that `analytics_field_meanings` exists, which is what keeps the whole module testable without one.
     """
     import inspect
     source = inspect.getsource(d)
     assert "AnalyticsFieldMeaning" not in source
-    assert "level_fields" in inspect.signature(d.validate).parameters
+    assert "field_kinds" in inspect.signature(d.validate).parameters

@@ -247,31 +247,27 @@ async def approved_attributes(db: AsyncSession, customer_code: str) -> frozenset
     return frozenset(rows)
 
 
-async def level_fields(db: AsyncSession, customer_code: str) -> frozenset[str]:
-    """The `attributes` keys somebody has marked as LEVELS (chunk 109).
+async def field_kinds(db: AsyncSession, customer_code: str) -> dict[str, str]:
+    """What a person has said each field IS: `measure`, `level`, `slice` or `noise` (chunks 109-110).
 
-    A level is how much there IS at a moment - stock on hand, a balance - as against how much
-    HAPPENED, which is what an ordinary measure holds. Adding readings of the same shelf produces a
-    number nothing ever was: 73 on-hand readings of item 104353 add to 41,206 where 427 are on the
-    shelf, and every on-hand reading on the live tenant adds to 340,206 where the stock is 18,248
-    (tmp-live, 16 September 2026).
-
-    Fed to `definition.validate` as `level_fields`, exactly as `approved_attributes` is fed in as
+    Fed to `definition.validate` as `field_kinds`, exactly as `approved_attributes` is fed in as
     `known_attributes`, and for the same reason: `definition.py` never learns that
-    `analytics_field_meanings` exists.
+    `analytics_field_meanings` exists. `REFUSED_BY_KIND` there says what each kind refuses.
 
-    Returns the FULL key including its namespace prefix, for the same reason `approved_attributes`
-    does: `resp.QuantityOnHand` being a level says nothing about a request field spelled
+    Keyed by the FULL name including its namespace prefix, for the same reason `approved_attributes`
+    is: `resp.QuantityOnHand` being a level says nothing about a request field spelled
     `QuantityOnHand`, and a bare-name match would let a field inherit a marking nobody gave it.
 
-    Only the callers where somebody is CHOOSING a measure pass this set. The fold does not, so a
-    metric that has been running for months keeps running the day somebody describes a field.
+    Undecided fields are simply absent, and absent refuses nothing.
+
+    Only the callers where somebody is CHOOSING a measure pass this. The fold does not, so a metric
+    that has been running for months keeps running the day somebody describes a field.
     """
     rows = (await db.execute(
-        select(AnalyticsFieldMeaning.field).where(
+        select(AnalyticsFieldMeaning.field, AnalyticsFieldMeaning.kind).where(
             AnalyticsFieldMeaning.customer_code == customer_code,
-            AnalyticsFieldMeaning.kind == "level"))).scalars().all()
-    return frozenset(rows)
+            AnalyticsFieldMeaning.kind.is_not(None)))).all()
+    return {field: kind for field, kind in rows}
 
 
 async def observe_fields(db: AsyncSession, customer_code: str,

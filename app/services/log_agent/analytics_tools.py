@@ -231,10 +231,10 @@ async def query_metric(db: AsyncSession, args: dict, customer_code: str) -> dict
     # the reader divides it to get the average; it is a component, never an answer, and this is the
     # one consumer likely to paste it into a confident sentence.
     if m.field and contract.is_attr_path(m.field):
-        levels = await capture.level_fields(db, customer_code)
+        kinds = await capture.field_kinds(db, customer_code)
         subtracts_a_level = bool(m.minus) and contract.is_attr_path(m.minus) \
-            and contract.attr_key(m.minus) in levels
-        if contract.attr_key(m.field) in levels and not subtracts_a_level:
+            and kinds.get(contract.attr_key(m.minus)) == "level"
+        if kinds.get(contract.attr_key(m.field)) == "level" and not subtracts_a_level:
             notes.append("this measure reads a LEVEL - how much there is at a moment, such as stock "
                          "on hand - so sum_value in the roles is a component of the average, not an "
                          "answer. Never quote it and never add levels across buckets: 73 on-hand "
