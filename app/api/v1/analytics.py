@@ -245,8 +245,16 @@ async def update_metric(metric_id: str, payload: dict = Body(...),
     activating = target == d.Status.active.value and row.status != d.Status.active.value
 
     if shape_edits or activating:
-        problems = d.validate(definition,
-                              known_attributes=await capture.approved_attributes(db, customer))
+        # Chunk 109. The level refusal is a gate on the way IN, so it applies when somebody is
+        # CHOOSING the measure: a reshaped metric, or a draft going live for the first time. It is
+        # deliberately NOT applied when an inactive metric is reactivated - that metric already ran,
+        # `_TRANSITIONS` allows a pause and a resume, and refusing it now would strand it paused for
+        # ever over a decision taken long before anybody described the field.
+        choosing = bool(shape_edits) or row.status == d.Status.draft.value
+        problems = d.validate(
+            definition,
+            known_attributes=await capture.approved_attributes(db, customer),
+            level_fields=await capture.level_fields(db, customer) if choosing else None)
         if problems:
             raise HTTPException(400, detail=problems)
     for k in shape_edits:
@@ -361,7 +369,8 @@ async def preview_metric(payload: dict = Body(...),
     if not definition.measures:
         raise HTTPException(400, detail="at least one measure is required.")
     problems = d.validate(definition,
-                          known_attributes=await capture.approved_attributes(db, customer))
+                          known_attributes=await capture.approved_attributes(db, customer),
+                          level_fields=await capture.level_fields(db, customer))
     hours = window_hours or settings.analytics_preview_window_hours
     return await n9.run(db, customer, definition, problems=problems, window_hours=hours)
 
@@ -391,8 +400,12 @@ async def create_metric(payload: dict = Body(...),
     # R1b. The field registry decides which `attr:` paths are usable, so a metric naming an
     # unapproved or misspelled attribute is refused HERE, at save time, with a message naming the
     # field - rather than being accepted and producing a silently empty chart.
+    #
+    # Chunk 109: the same gate refuses adding up a LEVEL. A brand new metric is the one moment where
+    # somebody is choosing the measure, so it is the right and only place to say no.
     problems = d.validate(definition,
-                          known_attributes=await capture.approved_attributes(db, customer))
+                          known_attributes=await capture.approved_attributes(db, customer),
+                          level_fields=await capture.level_fields(db, customer))
     if problems:
         raise HTTPException(400, detail=problems)
 
@@ -483,6 +496,26 @@ async def analytics_series(customer: str = Depends(get_current_customer),
             "window": {"start": window.start.isoformat(), "end": window.end.isoformat()}}
 
 
+def _measure_reads_a_level(measure: d.Measure, levels: frozenset[str]) -> bool:
+    """Chunk 109. Whether this measure's answer is a stock level rather than an amount.
+
+    False for a `sum`, which the level rule refuses on the way in and deliberately leaves alone for a
+    metric that was already running: for one of those the total genuinely is the answer it was built
+    to give, and relabelling it now would only make an old chart unreadable.
+
+    False for a difference of two levels: a stock minus a stock is a change, and changes add.
+    """
+    if measure.aggregation is d.Aggregation.sum:
+        return False
+    field = measure.field
+    if not field or not contract.is_attr_path(field) or contract.attr_key(field) not in levels:
+        return False
+    other = measure.minus
+    if other and contract.is_attr_path(other) and contract.attr_key(other) in levels:
+        return False
+    return True
+
+
 @router.get("/breakdown")
 async def analytics_breakdown(customer: str = Depends(get_current_customer),
                              db: AsyncSession = Depends(get_session),
@@ -520,10 +553,26 @@ async def analytics_breakdown(customer: str = Depends(get_current_customer),
         bucket["sum_value"] = str(_D(str(bucket["sum_value"])) + _D(roles.get("sum_value", "0")))
         bucket["count_value"] += roles.get("count_value", 0) or 0
 
+    # Chunk 109. `sum_value` is still summed and still returned, because the reader divides it by
+    # `count_value` to get the mean at whatever grouping was asked for. What changes for a measure
+    # that reads a LEVEL is the RANKING: ordering warehouses by the sum of their stock readings puts
+    # the most frequently scanned one on top rather than the fullest, and the order of a top-N list
+    # is the whole answer. The typical level is the honest weight, so the fullest leads.
+    chosen = next(m for m in definition.measures if m.name == measure)
+    is_level = _measure_reads_a_level(chosen, await capture.level_fields(db, customer))
+
     from decimal import Decimal as _D
-    ranked = sorted(totals.items(), key=lambda kv: -abs(_D(str(kv[1]["sum_value"]))))[:top]
+
+    def _weight(bucket: dict) -> _D:
+        total = _D(str(bucket["sum_value"]))
+        if not is_level:
+            return abs(total)
+        readings = bucket["count_value"] or 0
+        return abs(total / _D(readings)) if readings else _D(0)
+
+    ranked = sorted(totals.items(), key=lambda kv: -_weight(kv[1]))[:top]
     return {"metric": metric, "measure": measure, "dimension": dimension, "grain": out["grain"],
-            "ad_hoc": decision.ad_hoc, "resolution": decision.reason,
+            "ad_hoc": decision.ad_hoc, "resolution": decision.reason, "level": is_level,
             "window": {"start": window.start.isoformat(), "end": window.end.isoformat()},
             "rows": [{"value": k, **v} for k, v in ranked]}
 

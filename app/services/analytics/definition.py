@@ -106,6 +106,28 @@ def roles_for(aggregation: Aggregation) -> frozenset[Role]:
     return _ROLES[aggregation]
 
 
+#: Chunk 109. What a LEVEL refuses. A level is how much there IS at a moment - stock on hand, a
+#: balance - as against how much HAPPENED, which is what every other measure holds.
+#:
+#: Exactly one entry, and that is the point: the rule fits in a sentence. Adding readings of the same
+#: shelf produces a number nothing ever was. Measured on the live tenant, 73 on-hand readings of
+#: item 104353 add to 41,206 where 427 are on the shelf, and every on-hand reading on the tenant adds
+#: to 340,206 where the stock is 18,248 (tmp-live, 16 September 2026).
+#:
+#: Everything else is allowed and deliberately so. `count` reads no value at all. `average` and
+#: `percentile` answer "what was the stock typically", `extent` answers "how low and how high did it
+#: go", `stats` answers "how much does it swing" - all real questions about a level, and none of them
+#: publishes a total. Refusing a harmless aggregation teaches people the rule is arbitrary, and they
+#: then work around the useful part of it too.
+LEVEL_REFUSED: frozenset[Aggregation] = frozenset({Aggregation.sum})
+
+
+def refuses_level(aggregation: Aggregation) -> bool:
+    """Whether `aggregation` may not be applied to a level. The single source of truth: the catalog
+    publishes this per aggregation so no screen keeps a second copy of the list."""
+    return aggregation in LEVEL_REFUSED
+
+
 class Status(enum.Enum):
     """N4's lifecycle. A definition cannot go active until its backfill has run, or its chart shows a
     false start date: no history, drawn as though there were none to have."""
@@ -161,6 +183,11 @@ class Measure:
     #:
     #: A row missing EITHER half contributes nothing, by the same rule that skips an absent quantity:
     #: reading a missing expected quantity as zero would report every such pick as a full shortfall.
+    #:
+    #: Chunk 109 made this subtraction the one way a LEVEL may still be added up. `CountedQuantity`
+    #: and `BalanceQuantity` are both stock readings, and adding readings is refused - but a stock
+    #: minus a stock is a CHANGE, and changes add. So count variance keeps working, and needs both
+    #: halves marked a level for the rule to recognise it as a difference rather than a mixture.
     minus: str | None = None
 
     @property
@@ -249,7 +276,9 @@ _STATUSES = frozenset({"success", "soft", "error", "incomplete"})
 
 
 def validate(definition: MetricDefinition,
-             known_attributes: frozenset[str] | set[str] | None = None) -> list[str]:
+             known_attributes: frozenset[str] | set[str] | None = None,
+             *,
+             level_fields: frozenset[str] | set[str] | None = None) -> list[str]:
     """Problems with `definition`, empty when it is registrable.
 
     Returns a list rather than raising: the interface shows all of them at once, and a half-valid
@@ -263,9 +292,34 @@ def validate(definition: MetricDefinition,
     Omitting it refuses every `attr:` path. That is failing CLOSED, and it is deliberate: a caller who
     forgot the argument must not accidentally accept any attribute path at all, because that would make
     the allowlist optional for a table that is KEEP_FOREVER.
+
+    Chunk 109. `level_fields` are the attribute keys a PERSON has marked as levels - how much there IS
+    at a moment rather than how much happened. Supplied the same way and for the same reason: this
+    module never learns that `analytics_field_meanings` exists.
+
+    Its default is the exact INVERSE of `known_attributes`', and the inversion is the whole design.
+    Omitting `known_attributes` refuses everything, because an unapproved field would write to a table
+    kept forever. Omitting `level_fields` refuses NOTHING, because the caller that omits it is the
+    fold, and a fold that stopped folding a metric somebody has been reading for months is a far worse
+    failure than a wrong label on a chart. This refusal is a gate on the way IN - preview, create, a
+    reshaped metric, a draft first going live - never a re-argument of a decision already taken.
     """
     problems: list[str] = []
     known = frozenset(known_attributes or ())
+    levels = frozenset(level_fields or ())
+
+    def _is_level(name: str | None) -> bool:
+        """Whether `name` names a field a person has marked a level.
+
+        Matched on the KEY, because a metric addresses a field as `attr:resp.QuantityOnHand` while the
+        meaning row stores `resp.QuantityOnHand`; comparing the two spellings would match nothing and
+        refuse nothing, which is a silent failure rather than a loud one. Namespaced in full, because
+        `resp.QuantityOnHand` being a level says nothing about a request field spelled
+        `QuantityOnHand`, and inheriting a marking nobody made is how the wrong field gets trusted.
+
+        A typed column such as `quantity` is never a level: no meaning row can describe one.
+        """
+        return bool(name) and contract.is_attr_path(name) and contract.attr_key(name) in levels
 
     record_grain = definition.source == "record"
     if definition.source not in ("transaction", "record"):
@@ -332,6 +386,28 @@ def validate(definition: MetricDefinition,
             if m.aggregation is Aggregation.distinct:
                 problems.append(f"measure {m.name!r} is a distinct count, whose field is an identity "
                                 f"rather than a quantity, so it cannot subtract {m.minus!r}")
+        # Chunk 109. A level is how much there IS at a moment. Adding readings of the same shelf
+        # produces a number nothing ever was: 73 on-hand readings of item 104353 add to 41,206
+        # where 427 are on the shelf. Only `sum` is refused, and only when there is no second level
+        # to subtract, because a stock minus a stock is a CHANGE and changes add - that difference is
+        # count variance, which is the whole reason `minus` exists.
+        if refuses_level(m.aggregation) and (_is_level(m.field) or _is_level(m.minus)):
+            both = _is_level(m.field) and _is_level(m.minus)
+            if not both:
+                if m.minus:
+                    stock, flow = (m.field, m.minus) if _is_level(m.field) else (m.minus, m.field)
+                    problems.append(
+                        f"measure {m.name!r} adds up {stock!r}, which is a LEVEL - how much there is "
+                        f"at a moment - against {flow!r}, which is an amount. A stock minus a flow is "
+                        f"neither, so the total means nothing. Subtract a second level to get a "
+                        f"change, or use average, extent or percentile.")
+                else:
+                    problems.append(
+                        f"measure {m.name!r} adds up {m.field!r}, which is a LEVEL: how much there is "
+                        f"at a moment, not how much happened. Adding readings produces a number "
+                        f"nothing ever was - 73 on-hand readings of one item add to 41,206 where "
+                        f"427 are on the shelf. Use average, extent or percentile, or subtract a "
+                        f"second level to get a change.")
         if record_grain and m.statuses:
             problems.append(f"measure {m.name!r} filters on status, but record rows carry no "
                             f"status - the filter would exclude every row and look like no data")

@@ -52,6 +52,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
+from app.persistence.models.analytics_field_meaning import AnalyticsFieldMeaning
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_metric import AnalyticsMetric
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
@@ -243,6 +244,33 @@ async def approved_attributes(db: AsyncSession, customer_code: str) -> frozenset
         select(AnalyticsFieldRegistry.field).where(
             AnalyticsFieldRegistry.customer_code == customer_code,
             AnalyticsFieldRegistry.captured.is_(True)))).scalars().all()
+    return frozenset(rows)
+
+
+async def level_fields(db: AsyncSession, customer_code: str) -> frozenset[str]:
+    """The `attributes` keys somebody has marked as LEVELS (chunk 109).
+
+    A level is how much there IS at a moment - stock on hand, a balance - as against how much
+    HAPPENED, which is what an ordinary measure holds. Adding readings of the same shelf produces a
+    number nothing ever was: 73 on-hand readings of item 104353 add to 41,206 where 427 are on the
+    shelf, and every on-hand reading on the live tenant adds to 340,206 where the stock is 18,248
+    (tmp-live, 16 September 2026).
+
+    Fed to `definition.validate` as `level_fields`, exactly as `approved_attributes` is fed in as
+    `known_attributes`, and for the same reason: `definition.py` never learns that
+    `analytics_field_meanings` exists.
+
+    Returns the FULL key including its namespace prefix, for the same reason `approved_attributes`
+    does: `resp.QuantityOnHand` being a level says nothing about a request field spelled
+    `QuantityOnHand`, and a bare-name match would let a field inherit a marking nobody gave it.
+
+    Only the callers where somebody is CHOOSING a measure pass this set. The fold does not, so a
+    metric that has been running for months keeps running the day somebody describes a field.
+    """
+    rows = (await db.execute(
+        select(AnalyticsFieldMeaning.field).where(
+            AnalyticsFieldMeaning.customer_code == customer_code,
+            AnalyticsFieldMeaning.kind == "level"))).scalars().all()
     return frozenset(rows)
 
 

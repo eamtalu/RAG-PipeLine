@@ -16,6 +16,12 @@ measured is "expected against actual", a general expression surface would need p
 its own validation, and none of that is bought by the data in front of us. A second operation can be
 added the day something needs it.
 
+**Chunk 109: this is the one way a level may still be added up.** `CountedQuantity` and
+`BalanceQuantity` are both stock readings, and adding stock readings is refused because 73 on-hand
+readings of one item add to 41,206 where 427 are on the shelf. A stock minus a stock is a CHANGE
+though, and changes add, so count variance survives - provided both halves are marked as levels, so
+the rule sees a difference rather than a stock mixed with a flow.
+
 **Absent is still never zero.** A row missing EITHER half contributes nothing. Treating a missing
 expected quantity as zero would turn every such pick into a full shortfall, which is the exact
 "no data reads as a number" failure this station keeps refusing.

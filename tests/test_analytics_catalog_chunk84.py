@@ -159,7 +159,10 @@ async def test_only_active_metrics_appear_and_each_carries_its_meaning():
     assert picked["rollups_from"] is None, "part 2 adds the column; None means unbounded"
     (measure,) = picked["measures"]
     assert measure == {"name": "quantity", "aggregation": "sum", "field": "quantity", "minus": None,
-                       "unit": None, "approximate": False}
+                       "unit": None, "approximate": False,
+                       # Chunk 109: `quantity` is a typed column, so no meaning row can call it a
+                       # level and this measure can never be one.
+                       "level": False}
 
 
 async def test_a_measure_on_an_approved_attribute_takes_the_field_registry_unit():
@@ -199,6 +202,9 @@ async def test_fields_and_transaction_names_carry_descriptions():
     assert set(fields) == {"rec.STQT", "rec.ITNO"}, "captured fields only; names nobody approved stay out"
     assert fields["rec.STQT"] == {"field": "rec.STQT", "source": "record",
                                  "description": "On-hand quantity of one lot", "unit": "units",
+                                 # Chunk 109: nobody has said what this field IS yet, and undecided is
+                                 # not the same as "noise".
+                                 "kind": None,
                                  "methods": ["ConfirmPickLine"]}
     assert fields["rec.ITNO"]["unit"] is None
     txns = {t["transaction_name"]: t for t in body["transactions"]}
@@ -325,6 +331,6 @@ def test_shape_is_pure_and_sorted():
     assert [m["name"] for m in body["metrics"]] == ["a", "b"]
     assert body["metrics"][1]["dimensions"] == [{"name": "method", "values": [], "truncated": False}]
     assert body["metrics"][1]["measures"] == [{"name": "n", "aggregation": "count", "field": None, "minus": None,
-                                               "unit": None, "approximate": False}]
+                                               "unit": None, "approximate": False, "level": False}]
     assert body["fields"][0]["methods"] == ["M1", "M2"], "methods sorted, never insertion order"
     assert body["transactions"][0]["show"] is False

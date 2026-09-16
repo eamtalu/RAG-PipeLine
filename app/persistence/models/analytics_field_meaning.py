@@ -25,7 +25,15 @@ from app.config.database import Base
 
 #: What a field IS, once somebody has said so. None means nobody has yet, which is not the same as
 #: "noise" and must not be shown as though it were.
-KINDS = ("measure", "slice", "noise")
+#:
+#: Chunk 109 added `level`, the distinction no amount of looking at the values can supply. A measure
+#: is how much HAPPENED and adding two of them is the point; a level is how much there IS at a moment
+#: and adding two of them produces a number nothing ever was. Measured on the live tenant: eight
+#: on-hand readings of item 104353 add to 41,206 where 427 are on the shelf, and every on-hand reading
+#: on the tenant adds to 340,206 where the stock is 18,248 (tmp-live, 16 September 2026; the figures
+#: drift as facts arrive, the order of magnitude does not). `level` sits beside `measure` because that
+#: is the pair a person confuses.
+KINDS = ("measure", "level", "slice", "noise")
 
 
 class AnalyticsFieldMeaning(Base):
@@ -47,7 +55,7 @@ class AnalyticsFieldMeaning(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     #: What the number is in: units, ms, kg. Meaningless for a slice, and left null there.
     unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    #: `measure`, `slice` or `noise`. NULL until a person decides, and absent is not "noise".
+    #: `measure`, `level`, `slice` or `noise`. NULL until a person decides, and absent is not "noise".
     kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

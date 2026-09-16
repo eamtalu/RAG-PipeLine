@@ -63,6 +63,10 @@ def aggregations() -> list[dict]:
         "name": a.value,
         "needs_field": a is not d.Aggregation.count,
         "approximate": a.value in _APPROXIMATE_AGGREGATIONS,
+        # Chunk 109: whether this aggregation may not be applied to a LEVEL. Derived from
+        # `definition.LEVEL_REFUSED`, so the builder greys out the same thing the server refuses and
+        # no screen keeps a second copy of the rule to drift out of step.
+        "refuses_level": d.refuses_level(a),
         "roles": sorted(r.value for r in d.roles_for(a)),
     } for a in d.Aggregation]
 
@@ -90,6 +94,10 @@ class FieldRow:
     description: str | None
     unit: str | None
     methods: Sequence[str]
+    #: Chunk 109. `measure`, `level`, `slice`, `noise`, or None when nobody has decided. Carried so an
+    #: agent reading this catalogue knows a stock reading from a quantity picked: that difference is
+    #: 18,248 units in stock against 340,206, and nothing in the values supplies it.
+    kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,9 +139,32 @@ def _unit_for(measure: Mapping[str, Any], units_by_field: Mapping[str, str | Non
     return measure.get("unit")
 
 
+def _level_for(measure: Mapping[str, Any], kinds_by_field: Mapping[str, str | None]) -> bool:
+    """Whether a measure reads a LEVEL: how much there is at a moment rather than how much happened.
+
+    Mirrors `_unit_for`, including its `attr:` handling. Published per MEASURE rather than left for a
+    reader to join back to the field list, because the screen that must not print a summed level under
+    the word "total" has the measure in hand and not the field catalogue.
+
+    A measure built from two levels subtracted is NOT one: a stock minus a stock is a change, and a
+    change is an ordinary amount that adds.
+    """
+    name = measure.get("field")
+    if not isinstance(name, str) or not contract.is_attr_path(name):
+        return False
+    if kinds_by_field.get(contract.attr_key(name)) != "level":
+        return False
+    other = measure.get("minus")
+    if isinstance(other, str) and contract.is_attr_path(other):
+        if kinds_by_field.get(contract.attr_key(other)) == "level":
+            return False
+    return True
+
+
 def shape(customer_code: str, rows: Rows) -> dict:
     """The catalog body from rows already in memory. No database, no clock."""
     units_by_field = {f.field: f.unit for f in rows.fields}
+    kinds_by_field = {f.field: f.kind for f in rows.fields}
     metrics = []
     for m in sorted(rows.metrics, key=lambda r: r.name):
         dims = []
@@ -149,6 +180,9 @@ def shape(customer_code: str, rows: Rows) -> dict:
             "minus": ms.get("minus"),
             "unit": _unit_for(ms, units_by_field),
             "approximate": ms.get("aggregation") in _APPROXIMATE_AGGREGATIONS,
+            # Chunk 109: true when this measure reads a stock level. The reader needs it to stop
+            # labelling the stored `sum_value` component "total" on a screen.
+            "level": _level_for(ms, kinds_by_field),
         } for ms in m.measures]
         metrics.append({
             "id": str(m.id), "name": m.name, "description": m.description, "source": m.source,
@@ -157,7 +191,7 @@ def shape(customer_code: str, rows: Rows) -> dict:
         })
     fields = [{
         "field": f.field, "source": f.source, "description": f.description, "unit": f.unit,
-        "methods": sorted(f.methods),
+        "kind": f.kind, "methods": sorted(f.methods),
     } for f in sorted(rows.fields, key=lambda r: r.field)]
     transactions = [{
         "transaction_name": t.transaction_name, "description": t.description,
@@ -241,7 +275,10 @@ async def _fields(db: AsyncSession, customer_code: str) -> list[FieldRow]:
         m = meanings.get(name)
         out.append(FieldRow(field=name, source=e["source"],
                             description=m.description if m else None,
-                            unit=m.unit if m else None, methods=tuple(e["methods"])))
+                            unit=m.unit if m else None, methods=tuple(e["methods"]),
+                            # Chunk 109. Loaded and then thrown away until now, which is why nothing
+                            # downstream could tell a stock reading from a quantity picked.
+                            kind=m.kind if m else None))
     return out
 
 

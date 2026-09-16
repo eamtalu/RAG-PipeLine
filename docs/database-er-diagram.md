@@ -831,6 +831,20 @@ erDiagram
         datetime reviewed_at
         string reviewed_by
     }
+    %% chunk 108: meaning is per NAME, not per name-per-method. `EmployeeName` is on 44 methods live
+    %% and means one thing; describing it 44 times is why nobody ever described it at all.
+    analytics_field_meanings {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string field "the namespaced name, as a metric addresses it after attr:"
+        text description "a sentence somebody new would understand"
+        string unit "units | ms | kg; set for a measure or a level, null for a name"
+        string kind "measure | level | slice | noise; NULL = nobody has decided, which is not noise"
+        datetime reviewed_at
+        string reviewed_by
+        datetime created_at
+        datetime updated_at
+    }
     %% 18y: + source column (transaction | record) - which fact table the metric folds and reads
     analytics_metrics {
         uuid id PK

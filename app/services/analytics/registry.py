@@ -131,6 +131,12 @@ async def active_definitions(db: AsyncSession, customer_code: str
             logger.error("Analytics: registry row %s (%r) for %s could not be read (%s) - skipped; "
                          "the tenant's other metrics still fold", row.id, row.name, customer_code, exc)
             continue
+        # Chunk 109: `level_fields` is deliberately NOT passed. This is the fold, and a fold that
+        # stopped folding a metric somebody has been reading for months - because a colleague ticked
+        # a box on a describe form this morning - is a far worse failure than a wrong label on a
+        # chart. A failed definition here is SKIPPED, three lines below, so handing it the level set
+        # would silently switch a live metric off. The refusal belongs at the moment somebody chooses
+        # the measure, which is preview, create, a reshape and a draft first going live.
         problems = d.validate(definition, known_attributes=known)
         if problems:
             logger.error("Analytics: definition %r for %s is invalid and will not be folded: %s",
