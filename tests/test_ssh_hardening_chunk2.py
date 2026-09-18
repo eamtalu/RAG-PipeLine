@@ -14,6 +14,7 @@ Edge cases / exceptional scenarios covered:
 import asyncio
 from contextlib import asynccontextmanager
 
+import asyncssh
 import pytest
 
 from app.settings import settings
@@ -105,11 +106,18 @@ async def test_host_lock_blocking_times_out(committed_source, monkeypatch):
 
 # =========================================================== gap 3: _fetch_source flow (fake SFTP)
 class _FakeFile:
-    def __init__(self, data: bytes):
+    """One open handle. Snapshots bytes + mtime at open, as a real SFTP handle stays bound to the
+    file it opened even if the path is renamed underneath it (that is what makes `stat()` on the
+    handle a coherent sample alongside `read()`)."""
+    def __init__(self, data: bytes, mtime: float = 0.0):
         self._data = data
+        self._mtime = mtime
 
     async def read(self, size, offset):
         return self._data[offset:offset + size]
+
+    async def stat(self):
+        return _FakeAttrs(len(self._data), self._mtime)
 
     async def close(self):
         pass
@@ -122,25 +130,35 @@ class _FakeAttrs:
 
 
 class _FakeSftp:
-    """Minimal SFTP client: files is {path: (bytes, mtime)}."""
-    def __init__(self, files):
+    """Minimal SFTP client: files is {path: (bytes, mtime)}. A missing path raises SFTPNoSuchFile like
+    the real client. `before_open(path)` runs before every open - the hook a test uses to mutate
+    `files` mid-poll and reproduce a rotation racing the fetch loop."""
+    def __init__(self, files, *, before_open=None):
         self.files = files
+        self.before_open = before_open
 
     async def glob(self, pattern):
         return list(self.files.keys())
 
     async def stat(self, path):
+        if path not in self.files:
+            raise asyncssh.SFTPNoSuchFile("No such file")
         data, mtime = self.files[path]
         return _FakeAttrs(len(data), mtime)
 
     async def open(self, path, mode):
-        return _FakeFile(self.files[path][0])
+        if self.before_open is not None:
+            self.before_open(path)
+        if path not in self.files:
+            raise asyncssh.SFTPNoSuchFile("No such file")
+        data, mtime = self.files[path]
+        return _FakeFile(data, mtime)
 
 
-def _patch_sftp(monkeypatch, files):
+def _patch_sftp(monkeypatch, files, *, before_open=None):
     @asynccontextmanager
     async def fake_sftp(source):
-        yield _FakeSftp(files), "SHA256:fakefingerprint"
+        yield _FakeSftp(files, before_open=before_open), "SHA256:fakefingerprint"
     monkeypatch.setattr(remote_fetcher.ssh_client, "sftp", fake_sftp)
 
 

@@ -207,10 +207,12 @@ async def _stage_range(client, remote_path: str, start: int, size: int, *,
 
     Each window is checkpointed with its own queue row, so a long catch-up becomes several
     independently retryable units and partial progress survives a crash mid-file.
+
+    The handle comes from `_open_verified`, so the bytes saved here are the bytes `head_fp` names.
     """
     storage = LocalStorage(settings.upload_dir)
     offset, bytes_read, queued = start, 0, 0
-    f = await ssh_client.op(client.open(remote_path, "rb"), f"open {remote_path}")
+    f = await _open_verified(client, remote_path, size, head_fp)
     try:
         while offset < size:
             window = min(settings.ssh_max_file_size, size - offset)
@@ -236,13 +238,14 @@ async def _stage_range(client, remote_path: str, start: int, size: int, *,
 
 
 async def _pull_range(client, remote_path: str, start: int, size: int, *,
-                      source: LogSshSource) -> tuple[int, int, int]:
+                      source: LogSshSource, head_fp: str | None = None) -> tuple[int, int, int]:
     """Read [start, size) of a remote file in newline-aligned windows (≤ ssh_max_file_size each),
     ingesting each. Never ingests a partial trailing line: a window that doesn't reach EOF is trimmed
     to its last newline. Every SFTP call is bounded by ssh_client.op; no DB session is held across a
-    read. Returns (new_offset, bytes_read, entries_inserted)."""
+    read. The handle comes from `_open_verified`, so with a `head_fp` the bytes ingested are the bytes
+    that fingerprint names. Returns (new_offset, bytes_read, entries_inserted)."""
     offset, bytes_read, inserted = start, 0, 0
-    f = await ssh_client.op(client.open(remote_path, "rb"), f"open {remote_path}")
+    f = await _open_verified(client, remote_path, size, head_fp)
     try:
         while offset < size:
             window = min(settings.ssh_max_file_size, size - offset)
@@ -310,16 +313,72 @@ async def _save_ckpt(source: LogSshSource, remote_path: str, size: int, mtime: f
         await db.commit()
 
 
-async def _read_head_fp(client, remote_path: str) -> str:
-    """sha256 of the first ssh_fingerprint_bytes of the file — the content signature used to detect a
-    rotated/replaced file at a reused path. Cheap: one small open+read+close, each timeout-bounded."""
-    f = await ssh_client.op(client.open(remote_path, "rb"), f"open-head {remote_path}")
+def _head_hash(data: bytes | None) -> str:
+    """sha256 of a file's first ssh_fingerprint_bytes - the content signature behind rotation detection."""
+    return hashlib.sha256(data or b"").hexdigest()
+
+
+@dataclass(frozen=True)
+class _Probe:
+    """A file's identity sampled at ONE instant: size, mtime and head hash of the same bytes."""
+    size: int
+    mtime: float
+    head_fp: str
+
+
+async def _probe(client, remote_path: str) -> _Probe | None:
+    """Open the file once and take size, mtime AND the head hash from that single handle. None when
+    the path no longer exists.
+
+    Why one handle, rather than the listing's stat plus a later read: `_list` stats every file at
+    poll start and the loop reaches a given file seconds to tens of seconds later. The remote rotates
+    by rename cascade, so a rotation in between pairs the OLD file's (size, mtime) with the NEW
+    file's head. That torn triple never matches the content-identity index, reads as "rotated", and
+    re-downloads the whole chain - then gets written to the checkpoint and poisons the next poll too
+    (chunk 116: TMP-AZ-BEC01, 2026-09-17). An SFTP handle stays bound to the file it opened even if
+    the path is renamed underneath it, so fstat + read on that handle describe one file.
+
+    None, not an exception, for a vanished path: mid-cascade a name is briefly absent, and that must
+    cost this file one poll, not the whole source. Each op is timeout-bounded as before.
+    """
     try:
+        f = await ssh_client.op(client.open(remote_path, "rb"), f"open-head {remote_path}")
+    except asyncssh.SFTPNoSuchFile:
+        return None
+    try:
+        attrs = await ssh_client.op(f.stat(), "fstat-head")
         data = await ssh_client.op(
             f.read(size=settings.ssh_fingerprint_bytes, offset=0), "read-head")
     finally:
         await f.close()
-    return hashlib.sha256(data or b"").hexdigest()
+    return _Probe(int(attrs.size or 0), float(attrs.mtime or 0.0), _head_hash(data))
+
+
+class _FileChanged(Exception):
+    """The file at a path is not the one `_probe` described (swapped or gone before the download)."""
+
+
+async def _open_verified(client, remote_path: str, size: int, head_fp: str | None):
+    """Open for download and confirm it is still the file `_probe` described, by re-hashing the head
+    on the download handle. This closes the probe-to-download gap: a file swapped in that window
+    would otherwise be ingested and checkpointed under the wrong identity. Files shorter than
+    ssh_fingerprint_bytes have no reliable head identity (same rule as `_plan_incremental`) and open
+    unverified, exactly as before. Raises _FileChanged so the caller skips just this file."""
+    try:
+        f = await ssh_client.op(client.open(remote_path, "rb"), f"open {remote_path}")
+    except asyncssh.SFTPNoSuchFile as exc:
+        raise _FileChanged(remote_path) from exc
+    n = settings.ssh_fingerprint_bytes
+    if head_fp is not None and size >= n:
+        try:
+            head = await ssh_client.op(f.read(size=n, offset=0), "read-head-verify")
+        except BaseException:
+            await f.close()
+            raise
+        if _head_hash(head) != head_fp:
+            await f.close()
+            raise _FileChanged(remote_path)
+    return f
 
 
 async def _prune_checkpoints(source: LogSshSource, present_paths: set[str]) -> None:
@@ -406,6 +465,7 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
     globbed; `on_file(files_done, files_total, current_file, bytes_so_far, entries_so_far)` fires
     after EVERY listed file — including unchanged/skipped ones — so a progress bar advances smoothly."""
     considered = fetched = entries = total_bytes = content_skipped = io_skipped = queued = 0
+    vanished = changed = 0
     per_file: list[dict] = []
     # Queue mode: download + save + record a work row, and let the parse worker do Stage 1. With the
     # flag off, every line below behaves exactly as it did before this feature existed.
@@ -435,29 +495,41 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
         # timestamp mode: narrow to the files whose mtime could hold entries at/after from_ts.
         selected = (_select_timestamp_files(listing, from_ts)
                     if (mode == LogSshFetchMode.timestamp and from_ts) else None)
-        for idx, (path, size, mtime) in enumerate(listing):
-            start, do_pull, head_fp = 0, True, None
+        for idx, (path, _listed_size, _listed_mtime) in enumerate(listing):
+            start, do_pull = 0, True
+            # ONE sample per file: size, mtime and head hash from a single handle (see _probe). The
+            # listing's size/mtime were taken at poll start and serve only enumeration and the
+            # timestamp-mode selection above; after a rotation they describe a different file, and
+            # pairing them with a fresh head hash is exactly the torn checkpoint chunk 116 fixes.
+            probe = await _probe(client, path)
+            if probe is None:
+                vanished += 1
+                logger.warning(
+                    "%s/%s vanished between listing and read (rotation in progress); skipping it "
+                    "this poll", source.name, _basename(path))
+                per_file.append({"file": path, "vanished": True})
+                if on_file:
+                    await on_file(idx + 1, considered, path, total_bytes, entries)
+                continue
+            size, mtime, head_fp = probe.size, probe.mtime, probe.head_fp
             if mode == LogSshFetchMode.seed:
                 # "start from now": mark this file as fully consumed up to its current end WITHOUT
                 # ingesting anything, so a later poll only picks up new appends (zero backfill).
                 do_pull = False
-                head_fp = await _read_head_fp(client, path)
                 await _save_ckpt(source, path, size, mtime, size, head_fp)
             elif selected is not None and path not in selected:
                 # timestamp resume: seed this pre-window file's checkpoint to its current end WITHOUT
                 # ingesting, so once auto-polling resumes the incremental poller only appends new
                 # bytes and never backfills the pre-window history (forward-only resume, §4.4).
                 do_pull = False
-                head_fp = await _read_head_fp(client, path)
                 await _save_ckpt(source, path, size, mtime, size, head_fp)
             elif mode == LogSshFetchMode.incremental:
-                # Fingerprint the file head (first N bytes) to identify content: it detects a reused
-                # path (rotation) even when size + mtime coincidentally match, AND — via sig_consumed —
+                # The head hash (first N bytes) identifies content: it detects a reused path
+                # (rotation) even when size + mtime coincidentally match, AND — via sig_consumed —
                 # recognises content we already ingested that has cascaded to a new path, so we skip
                 # re-downloading it. The first-N-bytes hash is a STABLE identity once size >= N
                 # (append-only logs never rewrite their first N bytes); below N we fall back to
                 # size/mtime and never mistake a small-file append for a rotation.
-                head_fp = await _read_head_fp(client, path)
                 plan = _plan_incremental(ckpts.get(path), sig_consumed, size, mtime, head_fp,
                                          settings.ssh_fingerprint_bytes)
                 do_pull, start = plan.do_pull, plan.start
@@ -468,8 +540,6 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
             # timestamp (selected) / full: do_pull stays True, start stays 0 — dedup drops any overlap
 
             if do_pull:
-                if head_fp is None:  # non-incremental path hasn't fingerprinted yet
-                    head_fp = await _read_head_fp(client, path)
                 try:
                     if queue_mode:
                         # Download + save + queue. _stage_range advances the checkpoint itself, in
@@ -477,7 +547,16 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
                         new_off, read, ins = await _stage_range(
                             client, path, start, size, source=source, mtime=mtime, head_fp=head_fp)
                     else:
-                        new_off, read, ins = await _pull_range(client, path, start, size, source=source)
+                        new_off, read, ins = await _pull_range(
+                            client, path, start, size, source=source, head_fp=head_fp)
+                except _FileChanged:
+                    # Swapped or removed between probe and download (a rotation landing in that
+                    # window). Nothing was read or checkpointed; the next poll re-probes it.
+                    changed += 1
+                    logger.warning(
+                        "%s/%s changed between probe and download (rotation in progress); skipping "
+                        "it this poll", source.name, _basename(path))
+                    per_file.append({"file": path, "changed": True})
                 except Exception as exc:
                     # A dead disk sector hit while ingesting THIS file must not abort the whole source
                     # (nor the poll). Skip this file, record it, and move to the next — the checkpoint
@@ -516,7 +595,8 @@ async def _fetch_source(source: LogSshSource, mode: LogSshFetchMode,
     return {"source": source.name, "files_considered": considered, "files_fetched": fetched,
             "bytes_fetched": total_bytes, "entries_ingested": entries,
             "objects_queued": queued,
-            "content_skipped": content_skipped, "io_skipped": io_skipped, "by_file": per_file}
+            "content_skipped": content_skipped, "io_skipped": io_skipped,
+            "vanished": vanished, "changed": changed, "by_file": per_file}
 
 
 def _select_timestamp_files(listing: list[tuple[str, int, float]], from_ts: datetime) -> set[str]:
@@ -633,7 +713,8 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
     agg = {"customer_code": customer_code, "mode": mode.value, "sources": len(sources),
            "files_considered": 0, "files_fetched": 0, "bytes_fetched": 0,
            "entries_ingested": 0, "objects_queued": 0,
-           "content_skipped": 0, "io_skipped": 0, "by_source": [], "errors": []}
+           "content_skipped": 0, "io_skipped": 0, "vanished": 0, "changed": 0,
+           "by_source": [], "errors": []}
 
     async def _regrouping() -> None:
         if on_progress is not None:
@@ -712,6 +793,8 @@ async def fetch_now(db: AsyncSession, customer_code: str, *, source_id: UUID | N
             agg["objects_queued"] += stats.get("objects_queued", 0)
             agg["content_skipped"] += stats.get("content_skipped", 0)
             agg["io_skipped"] += stats.get("io_skipped", 0)
+            agg["vanished"] += stats.get("vanished", 0)
+            agg["changed"] += stats.get("changed", 0)
             base["considered"] += stats["files_considered"]
             base["bytes"] += stats["bytes_fetched"]
             base["entries"] += stats["entries_ingested"]
