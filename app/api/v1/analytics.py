@@ -1753,7 +1753,7 @@ async def read_settlement_rows(name: str,
                                group_by: list[str] = Query(default=[]),
                                start: datetime | None = Query(default=None),
                                end: datetime | None = Query(default=None),
-                               limit: int = Query(500, ge=1, le=5000),
+                               limit: int = Query(500, ge=1, le=50000),
                                customer: str = Depends(get_current_customer),
                                db: AsyncSession = Depends(get_session)):
     """Settled rows grouped and summed on request, with `lookup:` paths resolved exactly as they are
@@ -1794,7 +1794,11 @@ async def read_settlement_rows(name: str,
                     out[k] = format((Decimal(str(x)) + Decimal(str(y))).normalize(), "f")
             return out
         points = lookup_model.translate(points, translation, resolver, merge=_merge)
+    # Grouped by its own key a settlement has as many groups as rows - 6,252 on the live tenant -
+    # and a silent cap would drop whole releases from the bottom of a drill-down. So the cap is
+    # high, and hitting it is reported rather than hidden.
     return {"settlement": name, "group_by": list(group_by),
             "values": [v.name for v in declared.values],
+            "truncated": len(grouped) >= limit,
             "rows": [{"dimensions": [d.replace(settle_store.KEY_SEP, " · ") if isinstance(d, str) else d
                                      for d in dims], **v} for (_at, dims), v in points.items()]}

@@ -300,3 +300,18 @@ async def test_grouping_by_the_key_itself_reaches_one_release():
                                              start=None, end=None, limit=500, customer=CC, db=db)
     rows = {tuple(r["dimensions"]): r for r in out["rows"]}
     assert rows[("27907", "540551")]["picked"] == "9" and rows[("27907", "540551")]["rows"] == 1
+
+
+async def test_a_grouped_read_says_when_it_hit_its_limit():
+    """Grouped by its own key a settlement has as many groups as rows, 6,252 on the live tenant, and
+    a silent cap dropped whole releases from the bottom of the drill-down. Hitting the cap is now
+    reported, and the cap is high enough that the screen never has to."""
+    await _plant_two_deliveries()
+    async with async_session() as db:
+        await api.create_settlement(body=BODY, backfill=True, customer=CC, db=db)
+        capped = await api.read_settlement_rows(name="pick_release", group_by=["key"], start=None, end=None,
+                                                limit=2, customer=CC, db=db)
+        whole = await api.read_settlement_rows(name="pick_release", group_by=["key"], start=None, end=None,
+                                               limit=500, customer=CC, db=db)
+    assert capped["truncated"] is True and len(capped["rows"]) == 2
+    assert whole["truncated"] is False and len(whole["rows"]) == 4
