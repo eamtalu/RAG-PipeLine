@@ -77,6 +77,7 @@ from app.services.analytics import payload as pl
 from app.services.analytics import normalizer as n2
 from app.services.analytics import lookup as lk
 from app.services.analytics import lookup_store
+from app.services.analytics import settle_store
 from app.services.analytics import registry
 from app.services.analytics import rollups as n5
 from app.services.mnp_log_ingestion.pipeline.time_bounds import UtcWindow
@@ -1013,6 +1014,16 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         if lookups:
             await lookup_store.record(db, customer_code,
                                       lk.harvest(facts, lookups.values()), lookups)
+
+        # Chunk 117: the settlements, recomputed for every key these facts touched.
+        #
+        # Same place and same reasoning as the lookups: the facts are in hand, and this is inside
+        # the transaction so a settled row can never describe a fact that was rolled back. Unlike
+        # the lookups there IS a dependency on other facts - a release is recomputed from ALL of its
+        # calls, not just this window's - and that is exactly why it is a separate row keyed by the
+        # release rather than a value stamped onto each fact. The fact rows stay independent and
+        # the source-fingerprint skip survives; the settled row absorbs the dependency instead.
+        settled = await settle_store.settle_touched(db, customer_code, facts)
 
         # R4. After the facts, because it is driven by their diff verdicts, and inside the same
         # transaction so a record set can never describe a fact that was rolled back. (`expanded`

@@ -26,10 +26,11 @@ that is the half of Phase 4 that survived.
 import hashlib
 import json
 import logging
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Response
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings import settings
@@ -41,6 +42,7 @@ from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
 from app.persistence.models.analytics_field_meaning import KINDS, AnalyticsFieldMeaning
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_lookup import AnalyticsLookup, AnalyticsLookupValue
+from app.persistence.models.analytics_settlement import AnalyticsSettledRow, AnalyticsSettlement
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
 from app.services.analytics import capture
 from app.services.analytics import contract
@@ -51,6 +53,8 @@ from app.services.analytics import pending_windows
 from app.services.analytics import definition as d
 from app.services.analytics import lookup as lookup_model
 from app.services.analytics import lookup_store
+from app.services.analytics import settle as settle_model
+from app.services.analytics import settle_store
 from app.services.analytics import read as n6
 from app.services.analytics import reconcile as rc
 from app.services.analytics import registry
@@ -1573,3 +1577,203 @@ async def transaction_composition(transaction_name: str,
                    "recent_by_method": recent_by_method},
         "fields": fields,
     }
+
+# ============================================================== chunk 117: settlements
+#
+# A settlement turns the many call rows that share a key into one row, by rules a person writes. It
+# exists because a pick-list release is confirmed in several calls and its expected quantity is
+# stamped on every one: release 540551 picked 9 and summed to 17, and across 6,160 releases the
+# shortfall read -5,576 summed every call and -4,344 settled. The rules and the measurements are at
+# the top of `app/services/analytics/settle.py`. Nothing about picking is coded here.
+
+def _settlement_json(row, rows_count: int | None = None) -> dict:
+    out = {"id": str(row.id), "name": row.name, "description": row.description,
+           "enabled": row.enabled, "created_by": row.created_by,
+           "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+           **(row.definition or {})}
+    if rows_count is not None:
+        out["rows"] = rows_count
+    return out
+
+
+def _settlement_from_payload(name: str, body: dict) -> settle_model.Settlement:
+    try:
+        return settle_store.from_json(name, body)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HTTPException(400, detail=str(exc)) from None
+
+
+async def _settlement_row(db, customer: str, name: str) -> AnalyticsSettlement:
+    row = await db.scalar(select(AnalyticsSettlement).where(
+        AnalyticsSettlement.customer_code == customer, AnalyticsSettlement.name == name))
+    if row is None:
+        raise HTTPException(404, detail=f"no settlement called {name!r} for this logspace")
+    return row
+
+
+async def _validate_settlement(db, customer: str, declared: settle_model.Settlement) -> None:
+    """The pure rules, plus the one thing they cannot know: which attributes this tenant approved."""
+    problems = settle_model.validate(declared)
+    known = await capture.approved_attributes(db, customer)
+    named = list(declared.key) + list(declared.carry) + [v.field for v in declared.values if v.field]
+    for field in named:
+        if contract.is_attr_path(field) and contract.attr_key(field) not in known:
+            problems.append(f"{field!r} is not an approved attribute: tick it in fact composition first")
+        elif not contract.is_attr_path(field) and field not in contract.FACT_FIELDS \
+                and field not in ("event_time", "business_date"):
+            problems.append(f"{field!r} is not a field on the fact row")
+    if problems:
+        raise HTTPException(400, detail=problems)
+
+
+@router.get("/settlements")
+async def list_settlements(customer: str = Depends(get_current_customer),
+                           db: AsyncSession = Depends(get_session)):
+    """Every declared settlement, enabled or not, with how many rows each holds."""
+    rows = (await db.execute(select(AnalyticsSettlement).where(
+        AnalyticsSettlement.customer_code == customer).order_by(AnalyticsSettlement.name))).scalars().all()
+    counts = dict((await db.execute(
+        select(AnalyticsSettledRow.settlement, func.count())
+        .where(AnalyticsSettledRow.customer_code == customer)
+        .group_by(AnalyticsSettledRow.settlement))).all())
+    return {"settlements": [_settlement_json(r, counts.get(r.name, 0)) for r in rows],
+            "rules": [r.value for r in settle_model.Rule]}
+
+
+@router.post("/settlements", status_code=201)
+async def create_settlement(body: dict = Body(...),
+                            backfill: bool = Query(True, description="Settle every existing key now"),
+                            customer: str = Depends(get_current_customer),
+                            db: AsyncSession = Depends(get_session)):
+    """Declare a settlement and, by default, settle every key the facts already hold, so the rows
+    exist the moment the declaration does rather than trickling in with the next fold."""
+    name = str(body.get("name") or "").strip()
+    if not name or ":" in name or "." in name:
+        raise HTTPException(400, detail="a settlement needs a name without ':' or '.'")
+    declared = _settlement_from_payload(name, body)
+    await _validate_settlement(db, customer, declared)
+    exists = await db.scalar(select(AnalyticsSettlement.id).where(
+        AnalyticsSettlement.customer_code == customer, AnalyticsSettlement.name == name))
+    if exists:
+        raise HTTPException(409, detail=f"a settlement called {name!r} already exists")
+    row = AnalyticsSettlement(customer_code=customer, name=name,
+                              description=(str(body.get("description") or "").strip() or None),
+                              definition=settle_store.to_json(declared),
+                              enabled=bool(body.get("enabled", True)),
+                              created_by=str(body.get("created_by") or "api"))
+    db.add(row)
+    written = 0
+    if backfill and row.enabled:
+        written = await settle_store.resettle_all(db, customer, declared)
+    await db.commit()
+    await db.refresh(row)
+    return {**_settlement_json(row, written), "detail": f"settled {written} key(s)"}
+
+
+@router.patch("/settlements/{name}")
+async def update_settlement(name: str, body: dict = Body(...),
+                            customer: str = Depends(get_current_customer),
+                            db: AsyncSession = Depends(get_session)):
+    """Change a declaration. A changed rule set makes every existing row wrong, so the rows are
+    rebuilt from scratch under the new rules; a change to the description or the switch is not."""
+    row = await _settlement_row(db, customer, name)
+    rebuilt = None
+    shape = {k: body[k] for k in ("reads", "key", "carry", "values") if k in body}
+    if shape:
+        declared = _settlement_from_payload(name, {**(row.definition or {}), **shape})
+        await _validate_settlement(db, customer, declared)
+        row.definition = settle_store.to_json(declared)
+        await db.execute(delete(AnalyticsSettledRow).where(
+            AnalyticsSettledRow.customer_code == customer, AnalyticsSettledRow.settlement == name))
+        rebuilt = await settle_store.resettle_all(db, customer, declared) if row.enabled else 0
+    if "enabled" in body:
+        row.enabled = bool(body["enabled"])
+    if "description" in body:
+        row.description = (str(body["description"]).strip() or None
+                           if body["description"] is not None else None)
+    row.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(row)
+    out = _settlement_json(row)
+    if rebuilt is not None:
+        out["detail"] = f"rules changed; rebuilt {rebuilt} row(s)"
+    return out
+
+
+@router.get("/settlements/{name}/preview")
+async def preview_settlement_key(name: str, key: list[str] = Query(...),
+                                 customer: str = Depends(get_current_customer),
+                                 db: AsyncSession = Depends(get_session)):
+    """One key: its calls on one side and the row they settle to on the other, computed live from
+    the calls so it is right before any fold has run. This is how somebody checks a rule."""
+    row = await _settlement_row(db, customer, name)
+    declared = settle_store.from_json(name, row.definition or {})
+    if len(key) != len(declared.key):
+        raise HTTPException(400, detail=f"this settlement's key has {len(declared.key)} part(s): "
+                                        f"{list(declared.key)}")
+    calls, settled = await settle_store.read_key(db, customer, declared, tuple(key))
+    shown = []
+    for c in calls:
+        entry = {"event_time": c["event_time"].isoformat() if c.get("event_time") else None,
+                 "status": c.get("status"), "classification": c.get("quantity_classification")}
+        for v in declared.values:
+            if v.field and contract.is_attr_path(v.field):
+                entry[contract.attr_key(v.field)] = (c.get("attributes") or {}).get(contract.attr_key(v.field))
+        shown.append(entry)
+    return {"settlement": name, "key": list(key), "calls": shown,
+            "settled": None if settled is None else {
+                "event_time": settled.event_time.isoformat() if settled.event_time else None,
+                "carried": {k: settle_store._stringify(v) for k, v in settled.carried.items()},
+                "values": {k: settle_store._stringify(v) for k, v in settled.values.items()},
+                "calls": settled.calls}}
+
+
+@router.get("/settlements/{name}/rows")
+async def read_settlement_rows(name: str,
+                               group_by: list[str] = Query(default=[]),
+                               start: datetime | None = Query(default=None),
+                               end: datetime | None = Query(default=None),
+                               limit: int = Query(500, ge=1, le=5000),
+                               customer: str = Depends(get_current_customer),
+                               db: AsyncSession = Depends(get_session)):
+    """Settled rows grouped and summed on request, with `lookup:` paths resolved exactly as they are
+    for a metric: the rows are grouped by the lookup's KEY and re-labelled afterwards. No roll-up
+    stands between the reader and the rows; one row per release is already the aggregation."""
+    row = await _settlement_row(db, customer, name)
+    declared = settle_store.from_json(name, row.definition or {})
+    lookups = await lookup_store.load(db, customer)
+    try:
+        translation = lookup_model.plan(tuple(group_by), lookups)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from None
+    grouped = await settle_store.read_grouped(db, customer, declared,
+                                              group_by=translation.stored_group_by,
+                                              since=start, until=end, limit=limit)
+    numeric = [k for k in (grouped[0].keys() if grouped else []) if k not in ("dimensions",)]
+    # `translate` re-keys `(instant, dims)` pairs and reads each lookup as at that instant, because
+    # a metric's points are time buckets. A grouped read over settled rows has one instant: the end
+    # of the window, or now, so a customer's name is the one it has as things stand.
+    as_at = end or datetime.now(timezone.utc)
+    points = {(as_at, tuple(g["dimensions"])): {k: g[k] for k in numeric} for g in grouped}
+    if translation.translates and points:
+        resolver = await lookup_store.resolver(
+            db, customer, translation.keys_needed(points),
+            tuple(step for step in translation.steps if step is not None))
+
+        def _merge(a: dict, b: dict) -> dict:
+            """Two groups that resolve to one label: counts add as ints, settled values add as the
+            strings they are stored as, and an absent side contributes nothing."""
+            out = {}
+            for k in set(a) | set(b):
+                x, y = a.get(k), b.get(k)
+                if x is None or y is None:
+                    out[k] = x if y is None else y
+                elif isinstance(x, int) and isinstance(y, int):
+                    out[k] = x + y
+                else:
+                    out[k] = format((Decimal(str(x)) + Decimal(str(y))).normalize(), "f")
+            return out
+        points = lookup_model.translate(points, translation, resolver, merge=_merge)
+    return {"settlement": name, "group_by": list(group_by),
+            "values": [v.name for v in declared.values],
+            "rows": [{"dimensions": list(dims), **v} for (_at, dims), v in points.items()]}

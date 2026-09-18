@@ -282,7 +282,7 @@ async def test_a_distinct_metric_previews_with_an_estimate():
             "name": "items", "dimensions": ["method"],
             "measures": [{"name": "items", "aggregation": "distinct", "field": "item_number"}],
             "filter": {"methods": ["ConfirmPickLine"], "transactions": []},
-            "grains": ["daily"], "source": "transaction"}, window_hours=None, customer=CC, db=db)
+            "grains": ["daily"], "source": "transaction"}, window_hours=24 * 365, customer=CC, db=db)  # T0 is fixed; the default week window drifts past it
     assert out["ok"], out["problems"]
     point = out["sample"]["points"][0]
     assert point["roles"]["distinct_estimate"] == 2

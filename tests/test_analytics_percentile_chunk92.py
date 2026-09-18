@@ -278,7 +278,7 @@ async def test_a_percentile_metric_previews_with_finished_values():
             "name": "pick-time", "dimensions": ["method"], "source": "transaction",
             "measures": [{"name": "ms", "aggregation": "percentile", "field": "duration_ms", "unit": "ms"}],
             "filter": {"methods": ["ConfirmPickLine"], "transactions": []},
-            "grains": ["daily"]}, window_hours=None, customer=CC, db=db)
+            "grains": ["daily"]}, window_hours=24 * 365, customer=CC, db=db)  # T0 is fixed; the default week window drifts past it
     assert out["ok"], out["problems"] + out["refusals"]
     point = out["sample"]["points"][0]
     assert "p50" in point["roles"] and "p95" in point["roles"] and point["roles"]["count_value"] == 3

@@ -348,7 +348,10 @@ async def test_resp_value_is_pickable_in_a_metric_preview():
             "name": "echoed", "dimensions": ["method"], "source": "transaction",
             "measures": [{"name": "echo", "aggregation": "sum", "field": "attr:resp.value"}],
             "filter": {"methods": ["ConfirmPickLine"], "transactions": []}, "grains": ["daily"]},
-            window_hours=None, customer=CC, db=db)
+            # The default window is the last week and T0 is a fixed date, so this test began failing
+            # on its own eight days after it was written. It is about numeric coverage, not about the
+            # default window, so it asks for a window that always reaches T0.
+            window_hours=24 * 365, customer=CC, db=db)
     assert out["ok"], out["problems"] + out["refusals"]
     assert out["field_coverage"][0]["percent_numeric"] == 100.0
 

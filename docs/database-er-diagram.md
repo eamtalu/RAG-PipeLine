@@ -845,6 +845,41 @@ erDiagram
         datetime created_at
         datetime updated_at
     }
+    %% chunk 117: a settlement turns the many call rows sharing a key into ONE row, by rules a person
+    %% writes. A pick-list release is confirmed in several calls with the expected quantity on every
+    %% one; release 540551 picked 9 and summed to 17. Definition and rows, like the lookups.
+    analytics_settlements {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string name "addressed as a source; no ':' or '.'"
+        text description
+        jsonb definition "reads, key, carry, values[{name, rule, field, statuses, only, left, right, op, right_value}]"
+        bool enabled "off = declared but not maintained; rows are kept as history"
+        string created_by
+        datetime created_at
+        datetime updated_at
+    }
+    %% one row per distinct key of one settlement; recompute-and-replace whenever a call for the key
+    %% arrives. Shaped like a fact row so the existing group-by and lookups read it unchanged.
+    analytics_settled_rows {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string settlement "the settlement's name"
+        string key "key parts joined by a unit separator; UNIQUE with settlement"
+        jsonb key_parts
+        datetime event_time "when the key was first seen: a release counts in the hour it began"
+        date business_date
+        string method
+        string transaction_name
+        string warehouse
+        string item_number
+        string delivery_number
+        string lot_number
+        string user_name
+        jsonb attributes "every carried field and settled value, numbers as strings like a fact's"
+        int calls "how many calls stood behind the row when last settled"
+        datetime settled_at
+    }
     %% 18y: + source column (transaction | record) - which fact table the metric folds and reads
     analytics_metrics {
         uuid id PK
