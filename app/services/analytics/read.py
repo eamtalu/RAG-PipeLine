@@ -324,6 +324,7 @@ _ROLE_COLUMN = {role: role.value for role in d.Role}
 READABLE_ROLES: tuple[d.Role, ...] = (
     d.Role.sum_value, d.Role.count_value, d.Role.sum_sq, d.Role.min_value, d.Role.max_value,
     d.Role.distinct_sketch, d.Role.histogram,
+    d.Role.latest,  # chunk 115
 )
 
 

@@ -173,8 +173,11 @@ def test_what_each_kind_refuses_in_full():
     assert d.REFUSED_BY_KIND["measure"] == frozenset()
     assert d.REFUSED_BY_KIND["noise"] == frozenset()
     assert d.REFUSED_BY_KIND["level"] == frozenset({A.sum})
+    # `latest` joined this set in chunk 115. It does no arithmetic, but it reads the value as a
+    # NUMBER exactly as the others do, so on a name every row is skipped and the answer is silently
+    # absent rather than visibly wrong.
     assert d.REFUSED_BY_KIND["slice"] == frozenset(
-        {A.sum, A.average, A.stats, A.extent, A.percentile})
+        {A.sum, A.average, A.stats, A.extent, A.percentile, A.latest})
     # The two a name still answers.
     assert not d.refuses("slice", A.count) and not d.refuses("slice", A.distinct)
 

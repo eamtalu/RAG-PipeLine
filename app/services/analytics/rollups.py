@@ -256,6 +256,10 @@ def _is_empty(roles: Mapping[d.Role, Any]) -> bool:
         return False
     if roles.get(d.Role.min_value) is not None or roles.get(d.Role.max_value) is not None:
         return False
+    # Chunk 115: a latest of zero is a real reading - a shelf that is empty right now - and dropping
+    # the row would read as "nobody looked" rather than "there is none".
+    if roles.get(d.Role.latest) is not None:
+        return False
     return True
 
 

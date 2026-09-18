@@ -29,12 +29,27 @@ from app.services.analytics import definition as d
 
 
 # ==================================================== the additive primitives
-def test_the_roles_are_exactly_the_additive_primitives_the_doc_allows():
+def test_the_roles_are_exactly_the_composable_primitives_the_doc_allows():
     """Sums and counts direct; averages as sum+count; variance as sum, sum_sq, count; percentiles as a
     20-bucket log histogram; first and last as min and max; distinct counts as a HyperLogLog sketch
-    (chunk 88), which unions register-wise. Nothing else composes, so nothing else is a role."""
+    (chunk 88), which unions register-wise.
+
+    Chunk 115 added `latest`, and it is worth saying exactly what it does to this rule. The rule was
+    "every role ADDS". `latest` does not add; it is merged by taking the later of two readings. What
+    the rule was protecting is that a month must be foldable from its days without re-reading the
+    facts, and a merge that compares instants satisfies that as completely as one that sums. So the
+    rule is now "every role COMPOSES", which is the property that was always load-bearing.
+
+    The price is real and is paid in one place. `latest` is the only role that cannot be merged into a
+    PARENT row: the latest expected quantity across a warehouse is whichever delivery line somebody
+    touched last, not a total. `NON_ADDITIVE_ROLES` names it and every reader blanks it there, exactly
+    as it already blanks a median.
+    """
     assert {r.value for r in d.Role} == {
-        "sum_value", "count_value", "sum_sq", "min_value", "max_value", "histogram", "distinct_sketch"}
+        "sum_value", "count_value", "sum_sq", "min_value", "max_value", "histogram",
+        "distinct_sketch", "latest"}
+    assert d.NON_ADDITIVE_ROLES == frozenset({d.Role.latest}), \
+        "every other role must still add, or a subtotal is a guess"
 
 
 def test_no_role_can_hold_a_finished_answer():

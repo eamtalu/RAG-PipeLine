@@ -67,6 +67,10 @@ class Role(enum.Enum):
     #: Chunk 88: a HyperLogLog sketch, `bytes`. Unions register-wise, so a month's distinct count is
     #: folded from its days like every other role. An estimate; the catalog says so.
     distinct_sketch = "distinct_sketch"
+    #: Chunk 115. `{"at": iso instant, "value": number}` - the reading from the latest event in the
+    #: bucket. ONE role rather than two, so `add_roles` keeps its uniformity and never pairs one
+    #: hour's value with another hour's clock.
+    latest = "latest"
 
 
 class Aggregation(enum.Enum):
@@ -84,6 +88,10 @@ class Aggregation(enum.Enum):
     extent = "extent"          # min and max -> first and last
     percentile = "percentile"  # 20-bucket log histogram -> median, p95 at read time
     distinct = "distinct"      # HyperLogLog sketch -> approximate count of different values at read time
+    #: Chunk 115. The value as it stands, rather than a question about a set of rows. A level is
+    #: revised over time - a delivery line's expectation went 9, then 6, then 15 - and every other
+    #: aggregation answers the wrong question about it.
+    latest = "latest"
 
 
 #: The doc's composition table, executable. This is the single place that decides what a rollup row
@@ -100,7 +108,18 @@ _ROLES: dict[Aggregation, frozenset[Role]] = {
     # The count beside the sketch is exact and free: rows that carried a value, which is the honest
     # denominator for "N different items over M picks" and what `_is_empty` reads.
     Aggregation.distinct: frozenset({Role.distinct_sketch, Role.count_value}),
+    # The count beside it is the honest denominator, as for `distinct` and `percentile`: how many
+    # readings stood behind the one that survived, and what `_is_empty` reads.
+    Aggregation.latest: frozenset({Role.latest, Role.count_value}),
 }
+
+#: Roles whose value belongs to ONE group and cannot be merged into a parent's.
+#:
+#: `latest` is one value per group. Asked at a grouping coarser than the thing it belongs to it
+#: returns one member's reading rather than a total: the latest expected quantity across a warehouse
+#: is whichever line somebody touched last. Named here so every reader blanks it on a parent row
+#: exactly as it already blanks a median, which makes the limit visible instead of silent.
+NON_ADDITIVE_ROLES: frozenset[Role] = frozenset({Role.latest})
 
 
 def roles_for(aggregation: Aggregation) -> frozenset[Role]:
@@ -113,6 +132,10 @@ def roles_for(aggregation: Aggregation) -> frozenset[Role]:
 _ARITHMETIC: frozenset[Aggregation] = frozenset({
     Aggregation.sum, Aggregation.average, Aggregation.stats,
     Aggregation.extent, Aggregation.percentile,
+    # Chunk 115. `latest` does no arithmetic, but it reads the value as a NUMBER exactly as the
+    # others do, so on a name every row is skipped and the answer is silently absent rather than
+    # wrong. Refused for the same reason and in the same breath.
+    Aggregation.latest,
 })
 
 #: What each KIND of field refuses (chunks 109 and 110). Keyed by the strings in
@@ -485,7 +508,9 @@ def _empty_roles(measure: Measure) -> dict:
     competing with a sentinel that could never be exceeded."""
     zero = {Role.sum_value: Decimal(0), Role.count_value: 0, Role.sum_sq: Decimal(0),
             Role.min_value: None, Role.max_value: None, Role.histogram: hg.EMPTY,
-            Role.distinct_sketch: hll.EMPTY}
+            Role.distinct_sketch: hll.EMPTY,
+            # None rather than a sentinel instant, so the first real reading wins outright.
+            Role.latest: None}
     return {r: zero[r] for r in measure.roles}
 
 
@@ -568,7 +593,25 @@ def fold(rows, definition: MetricDefinition) -> dict:
                 # Chunk 92: one band count per value. Band counts add across hours and days, which is
                 # the only reason a percentile is storable in a rollup at all.
                 bucket[Role.histogram] = hg.add(bucket[Role.histogram], value)
+            if Role.latest in bucket:
+                # Chunk 115. Ordered by the row's own event_time, never by arrival: a fold reads
+                # whatever the query returns, and a rebuild can hand them back in any order. A row
+                # with no event_time cannot be placed in time, so it cannot be the latest either.
+                when = row.get("event_time")
+                if when is not None:
+                    bucket[Role.latest] = _later(bucket[Role.latest],
+                                                 {"at": when.isoformat(), "value": value})
     return out
+
+
+def _later(x: dict | None, y: dict | None) -> dict | None:
+    """Whichever of two `latest` readings happened later. None is "no reading", never a reading of
+    nothing, so it always loses to a real one."""
+    if x is None:
+        return y
+    if y is None:
+        return x
+    return y if y["at"] > x["at"] else x
 
 
 def add_roles(a: dict, b: dict) -> dict:
@@ -586,6 +629,11 @@ def add_roles(a: dict, b: dict) -> dict:
             out[role] = min([v for v in (x, y) if v is not None], default=None)
         elif role is Role.max_value:
             out[role] = max([v for v in (x, y) if v is not None], default=None)
+        elif role is Role.latest:
+            # Chunk 115: the later instant wins outright, value and clock together. Ties keep the
+            # left-hand side, which makes the merge commutative in the only way that matters: two
+            # readings sharing an instant are the same reading seen twice.
+            out[role] = _later(x, y)
         elif role is Role.distinct_sketch:
             out[role] = hll.union(x or hll.EMPTY, y or hll.EMPTY)
         else:  # histogram: bucket counts add, which is why percentiles are stored this way
@@ -628,6 +676,12 @@ def public_roles(roles: dict, *, number=plain_number) -> dict:
         if role is Role.distinct_sketch:
             if value:
                 out["distinct_estimate"] = hll.estimate(value)
+        elif role is Role.latest:
+            # Chunk 115: the reader needs the number AND how stale it is, and never the raw pair.
+            if value:
+                out["latest"] = number(value["value"]) if isinstance(value["value"], Decimal) \
+                    else value["value"]
+                out["latest_at"] = value["at"]
         elif role is Role.histogram:
             # Chunk 92: finished here, once. The band list never leaves the service; p50 and p95 are
             # what a chart, the wizard and the chat agent need, and a band is a factor of two wide,

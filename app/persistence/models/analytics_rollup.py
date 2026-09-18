@@ -100,6 +100,12 @@ class RollupColumns:
     #: bytea because registers union with `max`, which is the only reason a distinct count is storable
     #: as a role at all: an exact set would be unbounded, and a finished count would not compose.
     distinct_sketch: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    #: Chunk 115. `{"at": iso instant, "value": number}` - the reading from the latest event in the
+    #: bucket. JSONB and ONE column because the value and its clock must never be merged apart, and
+    #: because the merge is "take the later" rather than an addition. It is the one role here that
+    #: is NOT additive: read at a grouping coarser than the thing it belongs to it gives one
+    #: member's reading, so every reader blanks it on a parent row.
+    latest: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     #: Every write is recompute-and-replace, never increment — an additive upsert double-counts on the
     #: first retry. This records when the replacement happened, so a stale level is visible.
