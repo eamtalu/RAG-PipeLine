@@ -1743,8 +1743,35 @@ async def list_settlement_rows(name: str,
     declared = settle_store.from_json(name, row.definition or {})
     rows, total = await settle_store.list_rows(db, customer, declared, since=start, until=end,
                                                search=search, limit=limit, offset=offset)
+
+    # What a lookup can reach from a carried key, resolved for THESE rows only. A settled row
+    # carries the delivery number and the item number and nothing else about them, exactly as a
+    # fact does; the customer name and the item description live in the lookups. Listing the rows
+    # without them would show the person the keys and hide the names, which is the opposite of
+    # what "show me the data" means.
+    carried = {c.split(":", 1)[1] if contract.is_attr_path(c) else c for c in declared.carry}
+    lookups = await lookup_store.load(db, customer)
+    reachable = [(lk, a.name) for lk in lookups.values() if lk.key_field in carried for a in lk.attributes]
+    looked_up_columns = [f"{lk.name}.{attr}" for lk, attr in reachable]
+    if reachable and rows:
+        needed: dict[str, set[str]] = {}
+        for lk, _attr in reachable:
+            for r in rows:
+                key = r.get(lk.key_field) or (r.get("attributes") or {}).get(lk.key_field)
+                if key:
+                    needed.setdefault(lk.name, set()).add(str(key))
+        resolver = await lookup_store.resolver(db, customer, needed,
+                                               tuple((lk.name, attr) for lk, attr in reachable))
+        now = datetime.now(timezone.utc)
+        for r in rows:
+            at = datetime.fromisoformat(r["event_time"]) if r.get("event_time") else now
+            r["looked_up"] = {}
+            for lk, attr in reachable:
+                key = r.get(lk.key_field) or (r.get("attributes") or {}).get(lk.key_field)
+                r["looked_up"][f"{lk.name}.{attr}"] = (
+                    resolver.value(lk.name, str(key), attr, at) if key else None)
     return {"settlement": name, "key": list(declared.key), "carry": list(declared.carry),
-            "values": [v.name for v in declared.values],
+            "values": [v.name for v in declared.values], "looked_up": looked_up_columns,
             "rows": rows, "total": total, "limit": limit, "offset": offset}
 
 

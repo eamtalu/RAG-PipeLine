@@ -315,3 +315,26 @@ async def test_a_grouped_read_says_when_it_hit_its_limit():
                                                limit=500, customer=CC, db=db)
     assert capped["truncated"] is True and len(capped["rows"]) == 2
     assert whole["truncated"] is False and len(whole["rows"]) == 4
+
+
+async def test_the_list_resolves_what_a_lookup_can_reach_from_a_carried_key():
+    """A settled row carries the delivery number and nothing else about the delivery, as a fact
+    does. Listing rows without the customer name would show the keys and hide the names."""
+    await _plant_two_deliveries()
+    async with async_session() as db:
+        db.add(AnalyticsLookup(customer_code=CC, name="delivery", key_field="delivery_number",
+                               attributes=[{"name": "customer_name", "stable": True,
+                                            "on_conflict": "first_wins", "sources": []}], enabled=True))
+        db.add(AnalyticsLookupValue(customer_code=CC, lookup="delivery", key="27907",
+                                    attribute="customer_name", value="GOODWOOD",
+                                    valid_from=datetime(1970, 1, 1, tzinfo=timezone.utc),
+                                    origin="observed", observations=1, first_seen_at=T0, last_seen_at=T0))
+        await db.commit()
+        await api.create_settlement(body=BODY, backfill=True, customer=CC, db=db)
+        out = await api.list_settlement_rows(name="pick_release", start=None, end=None, search=None,
+                                             limit=100, offset=0, customer=CC, db=db)
+    assert out["looked_up"] == ["delivery.customer_name"]
+    by_key = {r["key"][0]: r for r in out["rows"]}
+    assert by_key["540551"]["looked_up"]["delivery.customer_name"] == "GOODWOOD"
+    # Delivery 25810 has no value in the lookup: honest absence, never a blank that reads as a name.
+    assert by_key["B1"]["looked_up"]["delivery.customer_name"] is None
