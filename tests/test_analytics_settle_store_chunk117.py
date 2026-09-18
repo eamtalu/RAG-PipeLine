@@ -347,3 +347,51 @@ async def test_a_release_with_no_lot_is_written_beside_one_that_has_a_lot():
     assert rows["540551"].lot_number == "2609161191"
     assert rows["NOLOT"].lot_number is None
     assert "lot_number" not in rows["NOLOT"].attributes
+
+
+# ==================================================== how long a release took (chunk 118)
+
+def _timed_release():
+    """Release 540551 with the handheld's start time on every call, as a London-clock string."""
+    rows = _release_540551()
+    starts = ["2026-09-18 06:43:42.000"] + [f"2026-09-18 06:5{i}:00.000" for i in range(8)]
+    for f, s in zip(rows, starts):
+        f.attributes = {**f.attributes, "StartDateTime": s}
+    return rows
+
+
+TIMED_RELEASE = st.Settlement(
+    name="pick_release", reads=("ConfirmPickLine",), key=("attr:ReportingNumber",),
+    carry=("delivery_number",),
+    values=PICK_RELEASE.values + (
+        st.Settled("started_at", st.Rule.first, field="attr:StartDateTime"),
+        st.Settled("finished_at", st.Rule.max, field="event_time"),
+        st.Settled("duration_s", st.Rule.difference, left="finished_at", right="started_at")))
+
+
+async def test_the_store_reads_a_start_time_in_the_tenant_zone_and_stores_it_as_iso():
+    """The tenant is Europe/London; 06:43:42 on its clock is 05:43:42 UTC. The row keeps the zone."""
+    release = _timed_release()
+    await _declare(TIMED_RELEASE)
+    async with async_session() as db:
+        db.add_all(release)
+        await settle_store.settle_touched(db, CC, [_fact_dict(f) for f in release])
+        await db.commit()
+        row = (await db.execute(select(AnalyticsSettledRow).where(AnalyticsSettledRow.customer_code == CC))).scalar_one()
+    assert row.attributes["started_at"] == "2026-09-18T06:43:42+01:00"
+    assert row.attributes["finished_at"] == "2026-09-18T05:58:42+00:00"
+    assert row.attributes["duration_s"] == "900"
+
+
+async def test_a_grouped_read_sums_the_seconds_and_leaves_a_time_blank():
+    """A grouped read casts every settled value to a number. A time is not one, and until this the
+    cast raised inside PostgreSQL and the whole read failed."""
+    release = _timed_release()
+    await _declare(TIMED_RELEASE)
+    async with async_session() as db:
+        db.add_all(release)
+        await settle_store.settle_touched(db, CC, [_fact_dict(f) for f in release])
+        await db.commit()
+        out = await settle_store.read_grouped(db, CC, TIMED_RELEASE, group_by=["delivery_number"],
+                                              since=None, until=None)
+    assert out[0]["duration_s"] == "900" and out[0]["started_at"] is None and out[0]["picked"] == "9"

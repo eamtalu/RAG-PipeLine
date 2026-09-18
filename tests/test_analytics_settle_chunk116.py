@@ -276,3 +276,75 @@ def test_the_module_needs_no_database():
     import inspect
     source = inspect.getsource(st)
     assert "sqlalchemy" not in source and "async_session" not in source
+
+
+# ==================================================== 5. how long a release took (chunk 118)
+
+from zoneinfo import ZoneInfo  # noqa: E402
+
+LONDON = ZoneInfo("Europe/London")
+
+
+def _timed(minutes, expected, picked, started, **over):
+    """A call whose handheld stamped when the picker began, as M3 logs it: a LOCAL time string with
+    no zone, `2026-09-18 06:42:34.003`. On tmp-live every one of 6,453 ConfirmPickLine calls has it."""
+    row = _call(minutes, expected, picked, **over)
+    row["attributes"] = {**row["attributes"], "StartDateTime": started}
+    return row
+
+
+TIMED = st.Settlement(
+    name="t", reads=("ConfirmPickLine",), key=("attr:ReportingNumber",), carry=(),
+    values=(st.Settled("started_at", st.Rule.first, field="attr:StartDateTime"),
+            st.Settled("finished_at", st.Rule.max, field="event_time"),
+            st.Settled("duration_s", st.Rule.difference, left="finished_at", right="started_at")))
+
+
+def test_a_local_time_string_is_read_as_a_time_in_the_tenant_zone():
+    """T0 is 05:44:42 UTC, which is 06:44:42 in London in September. A start stamped one minute
+    before, in London's clock, must come back as 05:43:42 UTC, not as a string and not as UTC."""
+    rows = [_timed(0, 10, 9, "2026-09-18 06:43:42.000")]
+    v = st.settle(rows, TIMED, tz=LONDON)[("540551",)].values
+    assert v["started_at"] == T0 - timedelta(minutes=1)
+    assert v["started_at"].tzinfo is not None
+
+
+def test_a_difference_of_two_times_is_the_seconds_between_them():
+    """Release 540551 began one minute before its first confirm and its ninth call landed fourteen
+    minutes after: fifteen minutes, 900 seconds, whatever order the rows arrive in."""
+    rows = [_timed(0, 10, 9, "2026-09-18 06:43:42.000")] + \
+           [_timed(7 + i, 1, 1, f"2026-09-18 06:5{i}:00.000", status="error") for i in range(8)]
+    v = st.settle(reversed(rows), TIMED, tz=LONDON)[("540551",)].values
+    assert v["finished_at"] == T0 + timedelta(minutes=14)
+    assert v["duration_s"] == Decimal("900")
+
+
+def test_fractional_seconds_survive_the_difference_exactly():
+    rows = [_timed(0, 10, 9, "2026-09-18 06:44:41.875")]
+    v = st.settle(rows, TIMED, tz=LONDON)[("540551",)].values
+    assert v["duration_s"] == Decimal("0.125")
+
+
+def test_a_numeric_string_stays_a_number_and_is_never_mistaken_for_a_date():
+    """M3 also writes dates as bare numbers, `20260918`. That is a number to this module; only a
+    string shaped like a timestamp becomes a time."""
+    s = st.Settlement(name="t", reads=("ConfirmPickLine",), key=("attr:ReportingNumber",), carry=(),
+                      values=(st.Settled("d", st.Rule.first, field="attr:StartDateTime"),))
+    assert st.settle([_timed(0, 10, 9, "20260918")], s, tz=LONDON)[("540551",)].values["d"] == Decimal("20260918")
+    assert st.settle([_timed(0, 10, 9, "not a time")], s, tz=LONDON)[("540551",)].values["d"] is None
+
+
+def test_without_a_zone_a_naive_time_is_read_as_utc():
+    rows = [_timed(0, 10, 9, "2026-09-18 05:43:42.000")]
+    v = st.settle(rows, TIMED)[("540551",)].values
+    assert v["started_at"] == T0 - timedelta(minutes=1) and v["duration_s"] == Decimal("60")
+
+
+def test_a_difference_of_a_time_and_a_number_is_unknown_not_an_error():
+    s = st.Settlement(name="t", reads=("ConfirmPickLine",), key=("attr:ReportingNumber",), carry=(),
+                      values=(st.Settled("a", st.Rule.first, field="attr:ExpectedQuantity"),
+                              st.Settled("b", st.Rule.max, field="event_time"),
+                              st.Settled("d", st.Rule.difference, left="b", right="a"),
+                              st.Settled("f", st.Rule.flag, left="b", op="<", right_value=Decimal(0))))
+    v = st.settle(RELEASE_540551, s)[("540551",)].values
+    assert v["d"] is None and v["f"] is None

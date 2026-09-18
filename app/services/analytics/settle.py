@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field as dc_field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 from typing import Any, Iterable, Mapping
 
@@ -129,16 +129,48 @@ def _qualifies(row: Mapping[str, Any], settled: Settled) -> bool:
     return True
 
 
-def _numeric_or_time(value: Any) -> Any:
-    """`min`/`max`/`first`/`last` may read a time as readily as a number; `sum` needs a number."""
+def _numeric_or_time(value: Any, tz: tzinfo | None) -> Any:
+    """`min`/`max`/`first`/`last` may read a time as readily as a number; `sum` needs a number.
+
+    A time may arrive as the row's own `event_time`, or as a STRING an attribute carries. M3 stamps
+    `StartDateTime` on every ConfirmPickLine call as `2026-09-18 06:42:34.003`: the handheld's clock,
+    in the tenant's zone, with no zone written. `tz` is that zone. A number is tried first, so a
+    bare M3 date such as `20260918` stays the number it is."""
     if isinstance(value, datetime):
-        return value
-    return contract.numeric_or_none(value)
+        return _aware(value, tz)
+    number = contract.numeric_or_none(value)
+    if number is not None:
+        return number
+    return _time_or_none(value, tz)
+
+
+def _time_or_none(value: Any, tz: tzinfo | None) -> datetime | None:
+    if not isinstance(value, str) or len(value) < 10 or value[4] != "-":
+        return None
+    try:
+        return _aware(datetime.fromisoformat(value.strip()), tz)
+    except ValueError:
+        return None
+
+
+def _aware(when: datetime, tz: tzinfo | None) -> datetime:
+    return when if when.tzinfo is not None else when.replace(tzinfo=tz or timezone.utc)
+
+
+def _subtract(a: Any, b: Any) -> Decimal | None:
+    """Two numbers give a number. Two times give the SECONDS between them, exact to the microsecond,
+    so `last confirm minus first start` is how long a release took. Anything else is unknown."""
+    if isinstance(a, Decimal) and isinstance(b, Decimal):
+        return a - b
+    if isinstance(a, datetime) and isinstance(b, datetime):
+        gap: timedelta = a - b
+        return Decimal(gap.days * 86400 + gap.seconds) + Decimal(gap.microseconds) / Decimal(1_000_000)
+    return None
 
 
 # ============================================================== settling one key
 
-def _settle_key(rows: list[Mapping[str, Any]], settlement: Settlement) -> SettledRow:
+def _settle_key(rows: list[Mapping[str, Any]], settlement: Settlement, tz: tzinfo | None) -> SettledRow:
     ordered = sorted(rows, key=lambda r: (r.get("event_time") is None, r.get("event_time")))
     first_at = next((r["event_time"] for r in ordered if r.get("event_time") is not None), None)
 
@@ -158,13 +190,13 @@ def _settle_key(rows: list[Mapping[str, Any]], settlement: Settlement) -> Settle
             seen = [(r, _read(r, s.field)) for r in qualifying]
             present = [(r, v) for r, v in seen if v is not None]
             if s.rule is Rule.first:
-                values[s.name] = _numeric_or_time(present[0][1]) if present else None
+                values[s.name] = _numeric_or_time(present[0][1], tz) if present else None
             elif s.rule is Rule.last:
-                values[s.name] = _numeric_or_time(present[-1][1]) if present else None
+                values[s.name] = _numeric_or_time(present[-1][1], tz) if present else None
             elif s.rule is Rule.distinct_count:
                 values[s.name] = len({str(v) for _, v in present})
             else:
-                nums = [x for x in (_numeric_or_time(v) for _, v in present) if x is not None]
+                nums = [x for x in (_numeric_or_time(v, tz) for _, v in present) if x is not None]
                 if s.rule is Rule.sum:
                     # Zero is a real answer here: the release picked nothing. Unlike `first`, a sum
                     # over no qualifying rows is not "unknown", it is nought.
@@ -176,8 +208,7 @@ def _settle_key(rows: list[Mapping[str, Any]], settlement: Settlement) -> Settle
         elif s.rule is Rule.count:
             values[s.name] = len(qualifying)
         elif s.rule is Rule.difference:
-            a, b = values.get(s.left), values.get(s.right)
-            values[s.name] = (a - b) if isinstance(a, Decimal) and isinstance(b, Decimal) else None
+            values[s.name] = _subtract(values.get(s.left), values.get(s.right))
         elif s.rule is Rule.flag:
             a = values.get(s.left)
             b = values.get(s.right) if s.right else s.right_value
@@ -188,13 +219,19 @@ def _settle_key(rows: list[Mapping[str, Any]], settlement: Settlement) -> Settle
 def _compare(a: Any, op: str | None, b: Any) -> int | None:
     if a is None or b is None:
         return None
-    ops = {"<": a < b, "<=": a <= b, "==": a == b, "!=": a != b, ">=": a >= b, ">": a > b}
+    try:
+        ops = {"<": a < b, "<=": a <= b, "==": a == b, "!=": a != b, ">=": a >= b, ">": a > b}
+    except TypeError:
+        # A time against a number. Unknown, not a crash inside the fold's transaction.
+        return None
     return 1 if ops[op] else 0
 
 
-def settle(rows: Iterable[Mapping[str, Any]], settlement: Settlement) -> dict[tuple[str, ...], SettledRow]:
+def settle(rows: Iterable[Mapping[str, Any]], settlement: Settlement, *,
+           tz: tzinfo | None = None) -> dict[tuple[str, ...], SettledRow]:
     """One settled row per distinct key among `rows`, ignoring rows from other methods and rows with
-    no key. Pure: give it the same rows in any order and it returns the same answer."""
+    no key. Pure: give it the same rows in any order and it returns the same answer. `tz` is the
+    tenant's zone, used only to read a time an attribute carries as a zoneless string."""
     by_key: dict[tuple[str, ...], list[Mapping[str, Any]]] = {}
     for row in rows:
         if row.get("method") not in settlement.reads:
@@ -205,7 +242,7 @@ def settle(rows: Iterable[Mapping[str, Any]], settlement: Settlement) -> dict[tu
         by_key.setdefault(tuple(str(p) for p in parts), []).append(row)
     out: dict[tuple[str, ...], SettledRow] = {}
     for key, group in by_key.items():
-        settled = _settle_key(group, settlement)
+        settled = _settle_key(group, settlement, tz)
         settled.key = key
         out[key] = settled
     return out

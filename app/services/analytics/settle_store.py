@@ -19,16 +19,18 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import Numeric, and_, func, or_, select
+from sqlalchemy import Numeric, and_, case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.analytics_fact import AnalyticsFact
 from app.persistence.models.analytics_settlement import AnalyticsSettledRow, AnalyticsSettlement
+from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.services.analytics import contract
 from app.services.analytics import settle as st
 
@@ -98,6 +100,12 @@ def keys_touched(facts: Iterable[Mapping[str, Any]], settlement: st.Settlement) 
     """The keys among these facts that this settlement would settle. One pass over memory, no query,
     because the fold has just built these rows anyway."""
     return set(st.settle(facts, settlement).keys())
+
+
+async def _tenant_zone(db: AsyncSession, customer_code: str) -> tzinfo:
+    """The zone a handheld's clock is in, so a time an attribute carries without one can be read.
+    The same source the normaliser uses for `business_date`."""
+    return ZoneInfo(await get_customer_timezone(db, customer_code))
 
 
 async def _calls_for(db: AsyncSession, customer_code: str, settlement: st.Settlement,
@@ -174,7 +182,7 @@ async def settle_keys(db: AsyncSession, customer_code: str, settlement: st.Settl
         return 0
     now = now or datetime.now(timezone.utc)
     calls = await _calls_for(db, customer_code, settlement, keys)
-    settled = st.settle(calls, settlement)
+    settled = st.settle(calls, settlement, tz=await _tenant_zone(db, customer_code))
     rows = [_to_row(customer_code, settlement, s, now) for s in settled.values()]
     if not rows:
         return 0
@@ -219,6 +227,9 @@ async def resettle_all(db: AsyncSession, customer_code: str, settlement: st.Sett
 
 # ============================================================== reading
 
+#: What a stored settled value must look like to be summed: a plain decimal, nothing else.
+NUMBER_SHAPE = r"^\s*-?[0-9]+(\.[0-9]+)?\s*$"
+
 def _group_expr(name: str):
     """A group-by field on a settled row: the key itself, a typed column, or a name in the bag.
 
@@ -235,14 +246,18 @@ async def read_grouped(db: AsyncSession, customer_code: str, settlement: st.Sett
                        group_by: Sequence[str], since: datetime | None, until: datetime | None,
                        limit: int = 500) -> list[dict]:
     """Settled rows grouped and summed on request. Every settled value that is a number is summed;
-    `calls` is summed; rows are counted. No roll-up stands between the reader and the rows."""
-    numeric = [v.name for v in settlement.values
-               if v.rule in (st.Rule.sum, st.Rule.count, st.Rule.first, st.Rule.last, st.Rule.min,
-                             st.Rule.max, st.Rule.distinct_count, st.Rule.difference, st.Rule.flag)
-               and v.field != "event_time"]
+    `calls` is summed; rows are counted. No roll-up stands between the reader and the rows.
+
+    A settled value may be a time rather than a number: `started_at`, or a `max` of `event_time`.
+    Only what looks like a number is cast, so a time sums to nothing instead of failing the read
+    inside PostgreSQL."""
+    numeric = [v.name for v in settlement.values]
     groups = [_group_expr(g).label(f"g{i}") for i, g in enumerate(group_by)]
-    sums = [func.sum(func.nullif(AnalyticsSettledRow.attributes[n].astext, "").cast(
-        Numeric(30, 6))).label(n) for n in numeric]
+    sums = []
+    for n in numeric:
+        text = AnalyticsSettledRow.attributes[n].astext
+        sums.append(func.sum(case((text.op("~")(NUMBER_SHAPE), text.cast(Numeric(30, 6))),
+                                  else_=None)).label(n))
     q = select(*groups, func.count().label("rows"), func.sum(AnalyticsSettledRow.calls).label("calls"), *sums).where(
         AnalyticsSettledRow.customer_code == customer_code,
         AnalyticsSettledRow.settlement == settlement.name)
@@ -269,7 +284,7 @@ async def read_key(db: AsyncSession, customer_code: str, settlement: st.Settleme
     """The preview: every call for one key, and the row they settle to. Computed live from the
     calls, so it is right even before the fold has run."""
     calls = await _calls_for(db, customer_code, settlement, [key])
-    settled = st.settle(calls, settlement).get(key)
+    settled = st.settle(calls, settlement, tz=await _tenant_zone(db, customer_code)).get(key)
     calls.sort(key=lambda r: (r.get("event_time") is None, r.get("event_time")))
     return calls, settled
 
