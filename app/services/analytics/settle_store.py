@@ -153,9 +153,15 @@ def _to_row(customer_code: str, settlement: st.Settlement, settled: st.SettledRo
         "method": settlement.reads[0] if len(settlement.reads) == 1 else None,
         "attributes": attributes, "calls": settled.calls, "settled_at": now,
     }
+    # Every typed column is present on EVERY row, None where the settlement did not carry it or
+    # the calls had nothing to carry. A multi-row insert needs every row to name the same columns,
+    # and on the live tenant 1,025 of 6,245 releases have no lot: the first backfill was one
+    # 500 for as long as that column was only set when a value existed.
     for col in TYPED:
-        if col in settled.carried and col != "method":
-            row[col] = _stringify(settled.carried[col])
+        if col == "method":
+            continue
+        value = settled.carried.get(col)
+        row[col] = None if value is None else _stringify(value)
     return row
 
 

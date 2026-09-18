@@ -327,3 +327,23 @@ async def test_the_preview_of_an_unknown_key_is_honest():
     async with async_session() as db:
         calls, settled = await settle_store.read_key(db, CC, PICK_RELEASE, ("nope",))
     assert calls == [] and settled is None
+
+
+async def test_a_release_with_no_lot_is_written_beside_one_that_has_a_lot():
+    """The first live backfill was a 500. 1,025 of 6,245 releases carry no lot, so their rows lacked
+    a column the others had, and a multi-row insert needs every row to name the same columns. Every
+    typed column is now on every row, None where there was nothing to carry."""
+    await _declare()
+    with_lot = _release_540551()
+    without = [_fact(60, 4, 4, rep="NOLOT", item="100606", lot="")]
+    async with async_session() as db:
+        for f in with_lot + without:
+            db.add(f)
+        await db.commit()
+        written = await settle_store.resettle_all(db, CC, PICK_RELEASE)
+        await db.commit()
+    assert written == 2
+    rows = {r.key: r for r in await _rows()}
+    assert rows["540551"].lot_number == "2609161191"
+    assert rows["NOLOT"].lot_number is None
+    assert "lot_number" not in rows["NOLOT"].attributes
