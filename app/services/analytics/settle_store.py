@@ -220,7 +220,12 @@ async def resettle_all(db: AsyncSession, customer_code: str, settlement: st.Sett
 # ============================================================== reading
 
 def _group_expr(name: str):
-    """A group-by field on a settled row: a typed column, or a name in the attribute bag."""
+    """A group-by field on a settled row: the key itself, a typed column, or a name in the bag.
+
+    `key` is what lets a reader drill all the way down to one release: grouped by it, every row is
+    one settled row and the sums are the row's own values."""
+    if name == "key":
+        return AnalyticsSettledRow.key
     if name in TYPED or name in ("event_time", "business_date"):
         return getattr(AnalyticsSettledRow, name)
     return AnalyticsSettledRow.attributes[contract.attr_key(name) if contract.is_attr_path(name) else name].astext
@@ -267,3 +272,40 @@ async def read_key(db: AsyncSession, customer_code: str, settlement: st.Settleme
     settled = st.settle(calls, settlement).get(key)
     calls.sort(key=lambda r: (r.get("event_time") is None, r.get("event_time")))
     return calls, settled
+
+
+def _row_json(r: AnalyticsSettledRow) -> dict:
+    return {"key": r.key.split(KEY_SEP), "event_time": r.event_time.isoformat() if r.event_time else None,
+            "business_date": r.business_date.isoformat() if r.business_date else None,
+            "method": r.method, "transaction_name": r.transaction_name, "warehouse": r.warehouse,
+            "item_number": r.item_number, "delivery_number": r.delivery_number,
+            "lot_number": r.lot_number, "user_name": r.user_name,
+            "attributes": r.attributes or {}, "calls": r.calls,
+            "settled_at": r.settled_at.isoformat() if r.settled_at else None}
+
+
+async def list_rows(db: AsyncSession, customer_code: str, settlement: st.Settlement, *,
+                    since: datetime | None, until: datetime | None, search: str | None,
+                    limit: int, offset: int) -> tuple[list[dict], int]:
+    """The settled rows themselves, newest first, with a total so a screen can page.
+
+    `search` matches the key, the delivery, the item or the lot, because those are the four things
+    somebody types when they are looking for one release. A grouped read answers "how much"; this
+    answers "show me", and both are needed."""
+    q = select(AnalyticsSettledRow).where(AnalyticsSettledRow.customer_code == customer_code,
+                                          AnalyticsSettledRow.settlement == settlement.name)
+    if since is not None:
+        q = q.where(AnalyticsSettledRow.event_time >= since)
+    if until is not None:
+        q = q.where(AnalyticsSettledRow.event_time < until)
+    if search:
+        needle = f"%{search.strip()}%"
+        q = q.where(or_(AnalyticsSettledRow.key.ilike(needle),
+                        AnalyticsSettledRow.delivery_number.ilike(needle),
+                        AnalyticsSettledRow.item_number.ilike(needle),
+                        AnalyticsSettledRow.lot_number.ilike(needle)))
+    total = await db.scalar(select(func.count()).select_from(q.subquery()))
+    rows = (await db.execute(q.order_by(AnalyticsSettledRow.event_time.desc().nullslast(),
+                                        AnalyticsSettledRow.key)
+                             .limit(limit).offset(offset))).scalars().all()
+    return [_row_json(r) for r in rows], int(total or 0)

@@ -1728,6 +1728,26 @@ async def preview_settlement_key(name: str, key: list[str] = Query(...),
                 "calls": settled.calls}}
 
 
+@router.get("/settlements/{name}/list")
+async def list_settlement_rows(name: str,
+                               start: datetime | None = Query(default=None),
+                               end: datetime | None = Query(default=None),
+                               search: str | None = Query(default=None),
+                               limit: int = Query(100, ge=1, le=1000),
+                               offset: int = Query(0, ge=0),
+                               customer: str = Depends(get_current_customer),
+                               db: AsyncSession = Depends(get_session)):
+    """The settled rows themselves, newest first. A grouped read answers "how much"; this answers
+    "show me the rows", which is the other half of seeing the data."""
+    row = await _settlement_row(db, customer, name)
+    declared = settle_store.from_json(name, row.definition or {})
+    rows, total = await settle_store.list_rows(db, customer, declared, since=start, until=end,
+                                               search=search, limit=limit, offset=offset)
+    return {"settlement": name, "key": list(declared.key), "carry": list(declared.carry),
+            "values": [v.name for v in declared.values],
+            "rows": rows, "total": total, "limit": limit, "offset": offset}
+
+
 @router.get("/settlements/{name}/rows")
 async def read_settlement_rows(name: str,
                                group_by: list[str] = Query(default=[]),
@@ -1776,4 +1796,5 @@ async def read_settlement_rows(name: str,
         points = lookup_model.translate(points, translation, resolver, merge=_merge)
     return {"settlement": name, "group_by": list(group_by),
             "values": [v.name for v in declared.values],
-            "rows": [{"dimensions": list(dims), **v} for (_at, dims), v in points.items()]}
+            "rows": [{"dimensions": [d.replace(settle_store.KEY_SEP, " · ") if isinstance(d, str) else d
+                                     for d in dims], **v} for (_at, dims), v in points.items()]}

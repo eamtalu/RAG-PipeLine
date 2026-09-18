@@ -263,3 +263,40 @@ async def test_rows_can_be_windowed_on_when_the_release_began():
                                              start=T0 + timedelta(minutes=35), end=None, limit=500,
                                              customer=CC, db=db)
     assert out["rows"][0]["rows"] == 2
+
+
+# ==================================================== 5. seeing the rows themselves
+
+async def test_the_rows_can_be_listed_newest_first_with_a_total():
+    """A grouped read answers "how much"; this answers "show me"."""
+    await _plant_two_deliveries()
+    async with async_session() as db:
+        await api.create_settlement(body=BODY, backfill=True, customer=CC, db=db)
+        out = await api.list_settlement_rows(name="pick_release", start=None, end=None, search=None,
+                                             limit=2, offset=0, customer=CC, db=db)
+    assert out["total"] == 4 and len(out["rows"]) == 2
+    assert out["rows"][0]["key"] == ["B2"]          # +50 minutes, the newest
+    assert out["rows"][0]["attributes"]["expected"] == "7"
+    assert out["values"] == ["expected", "picked", "calls", "refused", "shortfall", "is_short"]
+
+
+async def test_the_list_can_be_searched_by_the_things_somebody_types():
+    await _plant_two_deliveries()
+    async with async_session() as db:
+        await api.create_settlement(body=BODY, backfill=True, customer=CC, db=db)
+        by_delivery = await api.list_settlement_rows(name="pick_release", start=None, end=None,
+                                                     search="25810", limit=100, offset=0, customer=CC, db=db)
+        by_key = await api.list_settlement_rows(name="pick_release", start=None, end=None,
+                                                search="540551", limit=100, offset=0, customer=CC, db=db)
+    assert by_delivery["total"] == 2 and by_key["total"] == 1
+
+
+async def test_grouping_by_the_key_itself_reaches_one_release():
+    """The bottom of the drill-down: one row per release, and the sums are its own values."""
+    await _plant_two_deliveries()
+    async with async_session() as db:
+        await api.create_settlement(body=BODY, backfill=True, customer=CC, db=db)
+        out = await api.read_settlement_rows(name="pick_release", group_by=["delivery_number", "key"],
+                                             start=None, end=None, limit=500, customer=CC, db=db)
+    rows = {tuple(r["dimensions"]): r for r in out["rows"]}
+    assert rows[("27907", "540551")]["picked"] == "9" and rows[("27907", "540551")]["rows"] == 1
