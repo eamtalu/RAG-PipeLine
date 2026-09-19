@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Response
@@ -54,6 +55,7 @@ from app.services.analytics import definition as d
 from app.services.analytics import lookup as lookup_model
 from app.services.analytics import lookup_store
 from app.services.analytics import settle as settle_model
+from app.services.analytics import settle_query
 from app.services.analytics import settle_store
 from app.services.analytics import read as n6
 from app.services.analytics import reconcile as rc
@@ -1733,16 +1735,27 @@ async def list_settlement_rows(name: str,
                                start: datetime | None = Query(default=None),
                                end: datetime | None = Query(default=None),
                                search: str | None = Query(default=None),
+                               where: list[str] = Query(default=[]),
+                               sort: str | None = Query(default=None),
+                               dir: str = Query("desc", pattern="^(asc|desc)$"),
                                limit: int = Query(100, ge=1, le=1000),
                                offset: int = Query(0, ge=0),
                                customer: str = Depends(get_current_customer),
                                db: AsyncSession = Depends(get_session)):
     """The settled rows themselves, newest first. A grouped read answers "how much"; this answers
-    "show me the rows", which is the other half of seeing the data."""
+    "show me the rows", which is the other half of seeing the data.
+
+    `where=picked==0` keeps only the zero-picks; `sort=duration_s&dir=desc` puts the longest line
+    first. Chunk 120."""
     row = await _settlement_row(db, customer, name)
     declared = settle_store.from_json(name, row.definition or {})
+    filters, sort, direction = _parse_filters(where), _query_str(sort), _query_str(dir, "desc")
+    problems = settle_query.validate(declared, filters=filters, sort=sort)
+    if problems:
+        raise HTTPException(400, detail=problems)
     rows, total = await settle_store.list_rows(db, customer, declared, since=start, until=end,
-                                               search=search, limit=limit, offset=offset)
+                                               search=search, limit=limit, offset=offset,
+                                               filters=filters, sort=sort, descending=direction != "asc")
 
     # What a lookup can reach from a carried key, resolved for THESE rows only. A settled row
     # carries the delivery number and the item number and nothing else about them, exactly as a
@@ -1775,19 +1788,53 @@ async def list_settlement_rows(name: str,
             "rows": rows, "total": total, "limit": limit, "offset": offset}
 
 
+def _query_list(value) -> list[str]:
+    """A repeated query parameter, or nothing when the endpoint is called as a plain function and
+    the FastAPI default object arrives instead of a list."""
+    return value if isinstance(value, list) else []
+
+
+def _query_str(value, default=None):
+    return value if isinstance(value, str) else default
+
+
+def _parse_filters(where: list[str]) -> tuple[settle_query.Filter, ...]:
+    try:
+        return tuple(settle_query.parse_filter(w) for w in _query_list(where))
+    except ValueError as exc:
+        raise HTTPException(400, detail=[str(exc)]) from None
+
+
+def _parse_stats(stat: list[str]) -> tuple[settle_query.Stat, ...]:
+    try:
+        return tuple(settle_query.parse_stat(x) for x in _query_list(stat))
+    except ValueError as exc:
+        raise HTTPException(400, detail=[str(exc)]) from None
+
+
 @router.get("/settlements/{name}/rows")
 async def read_settlement_rows(name: str,
                                group_by: list[str] = Query(default=[]),
                                start: datetime | None = Query(default=None),
                                end: datetime | None = Query(default=None),
+                               where: list[str] = Query(default=[]),
+                               stat: list[str] = Query(default=[]),
                                limit: int = Query(500, ge=1, le=50000),
                                customer: str = Depends(get_current_customer),
                                db: AsyncSession = Depends(get_session)):
     """Settled rows grouped and summed on request, with `lookup:` paths resolved exactly as they are
     for a metric: the rows are grouped by the lookup's KEY and re-labelled afterwards. No roll-up
-    stands between the reader and the rows; one row per release is already the aggregation."""
+    stands between the reader and the rows; one row per release is already the aggregation.
+
+    Chunk 120: `where=is_short==1` filters; `stat=median:duration_s` and `stat=distinct:user_name`
+    add a per-group statistic; `group_by=hour_start` buckets by the tenant's clock."""
     row = await _settlement_row(db, customer, name)
     declared = settle_store.from_json(name, row.definition or {})
+    filters, stats = _parse_filters(where), _parse_stats(stat)
+    problems = settle_query.validate(declared, filters=filters, stats=stats,
+                                     group_by=tuple(g for g in group_by if not lookup_model.is_lookup_path(g)))
+    if problems:
+        raise HTTPException(400, detail=problems)
     lookups = await lookup_store.load(db, customer)
     try:
         translation = lookup_model.plan(tuple(group_by), lookups)
@@ -1795,7 +1842,9 @@ async def read_settlement_rows(name: str,
         raise HTTPException(400, detail=str(exc)) from None
     grouped = await settle_store.read_grouped(db, customer, declared,
                                               group_by=translation.stored_group_by,
-                                              since=start, until=end, limit=limit)
+                                              since=start, until=end, limit=limit,
+                                              filters=filters, stats=stats,
+                                              tz=ZoneInfo(await get_customer_timezone(db, customer)))
     numeric = [k for k in (grouped[0].keys() if grouped else []) if k not in ("dimensions",)]
     # `translate` re-keys `(instant, dims)` pairs and reads each lookup as at that instant, because
     # a metric's points are time buckets. A grouped read over settled rows has one instant: the end
@@ -1826,6 +1875,7 @@ async def read_settlement_rows(name: str,
     # high, and hitting it is reported rather than hidden.
     return {"settlement": name, "group_by": list(group_by),
             "values": [v.name for v in declared.values],
+            "stats": [s.label for s in stats],
             "truncated": len(grouped) >= limit,
             "rows": [{"dimensions": [d.replace(settle_store.KEY_SEP, " · ") if isinstance(d, str) else d
                                      for d in dims], **v} for (_at, dims), v in points.items()]}

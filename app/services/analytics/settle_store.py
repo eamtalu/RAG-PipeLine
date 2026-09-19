@@ -17,6 +17,7 @@ read over them is a single indexed query.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone, tzinfo
@@ -24,7 +25,7 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Numeric, and_, case, func, or_, select
+from sqlalchemy import Date, Integer, Numeric, and_, case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +34,7 @@ from app.persistence.models.analytics_settlement import AnalyticsSettledRow, Ana
 from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.services.analytics import contract
 from app.services.analytics import settle as st
+from app.services.analytics import settle_query as sq
 
 #: Joins a composite key into one string. A unit separator, which no warehouse identifier contains.
 KEY_SEP = "\x1f"
@@ -230,51 +232,126 @@ async def resettle_all(db: AsyncSession, customer_code: str, settlement: st.Sett
 #: What a stored settled value must look like to be summed: a plain decimal, nothing else.
 NUMBER_SHAPE = r"^\s*-?[0-9]+(\.[0-9]+)?\s*$"
 
-def _group_expr(name: str):
-    """A group-by field on a settled row: the key itself, a typed column, or a name in the bag.
-
-    `key` is what lets a reader drill all the way down to one release: grouped by it, every row is
-    one settled row and the sums are the row's own values."""
+def _field_expr(name: str):
+    """A field on a settled row as text: the key, a typed column, or a name in the bag."""
     if name == "key":
         return AnalyticsSettledRow.key
+    if name == "calls":
+        return AnalyticsSettledRow.calls
     if name in TYPED or name in ("event_time", "business_date"):
         return getattr(AnalyticsSettledRow, name)
-    return AnalyticsSettledRow.attributes[contract.attr_key(name) if contract.is_attr_path(name) else name].astext
+    return AnalyticsSettledRow.attributes[sq.plain(name)].astext
+
+
+def _numeric_expr(name: str):
+    """The same field as a number, NULL where it is not shaped like one, so a time or a blank
+    never fails the cast inside PostgreSQL."""
+    if name == "calls":
+        return AnalyticsSettledRow.calls
+    text = _field_expr(name)
+    return case((text.op("~")(NUMBER_SHAPE), text.cast(Numeric(30, 6))), else_=None)
+
+
+def _local(tz: tzinfo | None):
+    """`event_time` on the tenant's clock, so an hour bucket is the hour the pickers lived in."""
+    zone = getattr(tz, "key", None) or "UTC"
+    return func.timezone(zone, AnalyticsSettledRow.event_time)
+
+
+def _group_expr(name: str, tz: tzinfo | None = None):
+    """A group-by field: the key itself, a typed column, a name in the bag, or a time bucket.
+
+    `key` is what lets a reader drill all the way down to one release: grouped by it, every row is
+    one settled row and the sums are the row's own values. The buckets are in the tenant's zone."""
+    if name == "hour":
+        return func.extract("hour", _local(tz)).cast(Integer)
+    if name == "hour_start":
+        return func.date_trunc("hour", _local(tz))
+    if name == "day":
+        return _local(tz).cast(Date)
+    if name == "week":
+        return func.date_trunc("week", _local(tz)).cast(Date)
+    return _field_expr(name)
+
+
+def _filter_clause(f: sq.Filter):
+    """One `where`. A number compares as a number, a time as a time, anything else as text."""
+    if f.field in ("event_time",):
+        left, right = AnalyticsSettledRow.event_time, datetime.fromisoformat(f.value)
+    elif f.field == "business_date":
+        left, right = AnalyticsSettledRow.business_date, datetime.fromisoformat(f.value).date()
+    elif re.match(NUMBER_SHAPE, f.value) and f.field not in ("key", *TYPED):
+        left, right = _numeric_expr(f.field), Decimal(f.value)
+    else:
+        left, right = _field_expr(f.field), f.value
+    ops = {"==": left == right, "!=": left != right, "<": left < right, "<=": left <= right,
+           ">": left > right, ">=": left >= right}
+    return ops[f.op]
+
+
+def _stat_expr(s: sq.Stat):
+    if s.kind == "distinct":
+        return func.count(func.distinct(_field_expr(s.field)))
+    num = _numeric_expr(s.field)
+    if s.kind == "mean":
+        return func.avg(num)
+    if s.kind == "min":
+        return func.min(num)
+    if s.kind == "max":
+        return func.max(num)
+    quantile = {"median": 0.5, "p90": 0.9, "p95": 0.95, "p99": 0.99}[s.kind]
+    return func.percentile_cont(quantile).within_group(num)
+
+
+def _dimension_json(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def _number_json(value: Any) -> str | None:
+    return None if value is None else format(Decimal(str(value)).normalize(), "f")
 
 
 async def read_grouped(db: AsyncSession, customer_code: str, settlement: st.Settlement, *,
                        group_by: Sequence[str], since: datetime | None, until: datetime | None,
-                       limit: int = 500) -> list[dict]:
+                       limit: int = 500, filters: Sequence[sq.Filter] = (), stats: Sequence[sq.Stat] = (),
+                       tz: tzinfo | None = None) -> list[dict]:
     """Settled rows grouped and summed on request. Every settled value that is a number is summed;
     `calls` is summed; rows are counted. No roll-up stands between the reader and the rows.
 
+    `filters` keep only the rows that pass every one. `stats` add a median, a percentile, a mean,
+    an extreme or a distinct count per group, named `median_duration_s`, `distinct_user_name`.
     A settled value may be a time rather than a number: `started_at`, or a `max` of `event_time`.
-    Only what looks like a number is cast, so a time sums to nothing instead of failing the read
-    inside PostgreSQL."""
+    Only what looks like a number is cast, so a time sums to nothing instead of failing the read."""
     numeric = [v.name for v in settlement.values]
-    groups = [_group_expr(g).label(f"g{i}") for i, g in enumerate(group_by)]
-    sums = []
-    for n in numeric:
-        text = AnalyticsSettledRow.attributes[n].astext
-        sums.append(func.sum(case((text.op("~")(NUMBER_SHAPE), text.cast(Numeric(30, 6))),
-                                  else_=None)).label(n))
-    q = select(*groups, func.count().label("rows"), func.sum(AnalyticsSettledRow.calls).label("calls"), *sums).where(
+    groups = [_group_expr(g, tz).label(f"g{i}") for i, g in enumerate(group_by)]
+    sums = [func.sum(_numeric_expr(n)).label(n) for n in numeric]
+    extras = [_stat_expr(s).label(s.label) for s in stats]
+    q = select(*groups, func.count().label("rows"), func.sum(AnalyticsSettledRow.calls).label("calls"),
+               *sums, *extras).where(
         AnalyticsSettledRow.customer_code == customer_code,
         AnalyticsSettledRow.settlement == settlement.name)
     if since is not None:
         q = q.where(AnalyticsSettledRow.event_time >= since)
     if until is not None:
         q = q.where(AnalyticsSettledRow.event_time < until)
+    for f in filters:
+        q = q.where(_filter_clause(f))
     if groups:
         q = q.group_by(*groups)
     q = q.order_by(func.count().desc()).limit(limit)
     out = []
     for r in (await db.execute(q)).mappings().all():
-        entry = {"dimensions": [r[f"g{i}"] for i in range(len(group_by))],
+        entry = {"dimensions": [_dimension_json(r[f"g{i}"]) for i in range(len(group_by))],
                  "rows": int(r["rows"]), "calls": int(r["calls"] or 0)}
         for n in numeric:
-            v = r[n]
-            entry[n] = None if v is None else format(Decimal(v).normalize(), "f")
+            entry[n] = _number_json(r[n])
+        for s in stats:
+            v = r[s.label]
+            entry[s.label] = int(v) if s.kind == "distinct" and v is not None else _number_json(v)
         out.append(entry)
     return out
 
@@ -301,12 +378,15 @@ def _row_json(r: AnalyticsSettledRow) -> dict:
 
 async def list_rows(db: AsyncSession, customer_code: str, settlement: st.Settlement, *,
                     since: datetime | None, until: datetime | None, search: str | None,
-                    limit: int, offset: int) -> tuple[list[dict], int]:
-    """The settled rows themselves, newest first, with a total so a screen can page.
+                    limit: int, offset: int, filters: Sequence[sq.Filter] = (),
+                    sort: str | None = None, descending: bool = True) -> tuple[list[dict], int]:
+    """The settled rows themselves, newest first unless sorted otherwise, with a total so a screen
+    can page.
 
     `search` matches the key, the delivery, the item or the lot, because those are the four things
-    somebody types when they are looking for one release. A grouped read answers "how much"; this
-    answers "show me", and both are needed."""
+    somebody types when they are looking for one release. `filters` narrow to "the zero-picks" or
+    "lines over five minutes"; `sort` orders by any field, as a number when it is one, so "the
+    twenty longest lines" is one call. A grouped read answers "how much"; this answers "show me"."""
     q = select(AnalyticsSettledRow).where(AnalyticsSettledRow.customer_code == customer_code,
                                           AnalyticsSettledRow.settlement == settlement.name)
     if since is not None:
@@ -319,8 +399,17 @@ async def list_rows(db: AsyncSession, customer_code: str, settlement: st.Settlem
                         AnalyticsSettledRow.delivery_number.ilike(needle),
                         AnalyticsSettledRow.item_number.ilike(needle),
                         AnalyticsSettledRow.lot_number.ilike(needle)))
+    for f in filters:
+        q = q.where(_filter_clause(f))
     total = await db.scalar(select(func.count()).select_from(q.subquery()))
-    rows = (await db.execute(q.order_by(AnalyticsSettledRow.event_time.desc().nullslast(),
+    if sort is None or sort == "event_time":
+        primary = AnalyticsSettledRow.event_time
+    elif sort in ("key", "business_date", *TYPED):
+        primary = _field_expr(sort)
+    else:
+        primary = _numeric_expr(sort)
+    ordered = primary.desc().nullslast() if descending else primary.asc().nullslast()
+    rows = (await db.execute(q.order_by(ordered, AnalyticsSettledRow.event_time.desc().nullslast(),
                                         AnalyticsSettledRow.key)
                              .limit(limit).offset(offset))).scalars().all()
     return [_row_json(r) for r in rows], int(total or 0)

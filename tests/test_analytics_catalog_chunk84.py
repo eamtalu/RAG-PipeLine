@@ -42,7 +42,9 @@ from app.persistence.models.customer import Customer
 from app.services.analytics import catalog
 
 CC = "test_chunk84"
-T0 = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
+# Relative, not fixed: the dimension domains read the last `domain_days` from NOW, so a fixed T0
+# aged out of the window a week after it was written and the test failed on the calendar.
+T0 = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
 
 # =============================================================== fixtures

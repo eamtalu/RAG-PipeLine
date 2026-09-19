@@ -395,3 +395,69 @@ async def test_a_grouped_read_sums_the_seconds_and_leaves_a_time_blank():
         out = await settle_store.read_grouped(db, CC, TIMED_RELEASE, group_by=["delivery_number"],
                                               since=None, until=None)
     assert out[0]["duration_s"] == "900" and out[0]["started_at"] is None and out[0]["picked"] == "9"
+
+
+# ==================================================== the query language (chunk 120)
+
+from zoneinfo import ZoneInfo as _Zone  # noqa: E402
+
+from app.services.analytics import settle_query as sq  # noqa: E402
+
+
+async def test_a_filter_keeps_only_the_rows_that_pass():
+    """`is_short==1` is the short lines; `picked==0` the zero-picks; a text field compares as text."""
+    await _seed_two_deliveries()
+    async with async_session() as db:
+        short = await settle_store.read_grouped(db, CC, PICK_RELEASE, group_by=["delivery_number"], since=None, until=None,
+                                                filters=[sq.Filter("is_short", "==", "1")])
+        zero = await settle_store.read_grouped(db, CC, PICK_RELEASE, group_by=[], since=None, until=None,
+                                               filters=[sq.Filter("picked", "==", "0")])
+        one = await settle_store.read_grouped(db, CC, PICK_RELEASE, group_by=[], since=None, until=None,
+                                              filters=[sq.Filter("delivery_number", "==", "25810"), sq.Filter("expected", ">=", "7")])
+    by = {o["dimensions"][0]: o for o in short}
+    assert by["27907"]["rows"] == 1 and by["25810"]["rows"] == 2
+    assert zero[0]["rows"] == 1 and zero[0]["expected"] == "7"
+    assert one[0]["rows"] == 2
+
+
+async def test_stats_give_a_median_a_percentile_a_mean_and_a_distinct_count_per_group():
+    await _seed_two_deliveries()
+    async with async_session() as db:
+        out = await settle_store.read_grouped(db, CC, PICK_RELEASE, group_by=[], since=None, until=None,
+                                              stats=[sq.Stat("median", "expected"), sq.Stat("p95", "expected"),
+                                                     sq.Stat("mean", "picked"), sq.Stat("distinct", "delivery_number"),
+                                                     sq.Stat("max", "calls")])
+    o = out[0]
+    # expected 10, 4, 7, 7 -> median 7, p95 9.55 (interpolated); picked 9, 4, 4, 0 -> mean 4.25
+    assert o["median_expected"] == "7" and o["p95_expected"] == "9.55" and o["mean_picked"] == "4.25"
+    assert o["distinct_delivery_number"] == 2 and o["max_calls"] == "9"
+
+
+async def test_time_buckets_are_on_the_tenant_clock():
+    """T0 is 05:44 UTC. London in September is UTC+1, so the hour is 6, not 5."""
+    await _seed_two_deliveries()
+    async with async_session() as db:
+        by_hour = await settle_store.read_grouped(db, CC, PICK_RELEASE, group_by=["hour"], since=None, until=None,
+                                                  tz=_Zone("Europe/London"))
+        by_start = await settle_store.read_grouped(db, CC, PICK_RELEASE, group_by=["hour_start"], since=None, until=None,
+                                                   tz=_Zone("Europe/London"))
+        by_day = await settle_store.read_grouped(db, CC, PICK_RELEASE, group_by=["day", "week"], since=None, until=None,
+                                                 tz=_Zone("Europe/London"))
+    # 540551 at 05:44 UTC is the 06:00 London hour; the other three, 30 to 50 minutes later, the 07:00 hour.
+    assert {o["dimensions"][0]: o["rows"] for o in by_hour} == {6: 1, 7: 3}
+    assert {o["dimensions"][0] for o in by_start} == {"2026-09-18T06:00:00", "2026-09-18T07:00:00"}
+    assert len(by_day) == 1 and by_day[0]["dimensions"] == ["2026-09-18", "2026-09-14"] and by_day[0]["rows"] == 4
+
+
+async def test_the_list_can_be_filtered_and_sorted_as_a_number():
+    await _seed_two_deliveries()
+    async with async_session() as db:
+        longest, total = await settle_store.list_rows(db, CC, PICK_RELEASE, since=None, until=None, search=None,
+                                                      limit=10, offset=0, sort="expected", descending=True)
+        zero, n = await settle_store.list_rows(db, CC, PICK_RELEASE, since=None, until=None, search=None, limit=10, offset=0,
+                                               filters=[sq.Filter("picked", "==", "0")])
+        by_user, _ = await settle_store.list_rows(db, CC, PICK_RELEASE, since=None, until=None, search=None, limit=10, offset=0,
+                                                  sort="delivery_number", descending=False)
+    assert total == 4 and [r["attributes"]["expected"] for r in longest] == ["10", "7", "7", "4"]
+    assert n == 1 and zero[0]["key"] == ["B2"]
+    assert by_user[0]["delivery_number"] == "25810"

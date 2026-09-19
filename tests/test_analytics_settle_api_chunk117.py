@@ -338,3 +338,45 @@ async def test_the_list_resolves_what_a_lookup_can_reach_from_a_carried_key():
     assert by_key["540551"]["looked_up"]["delivery.customer_name"] == "GOODWOOD"
     # Delivery 25810 has no value in the lookup: honest absence, never a blank that reads as a name.
     assert by_key["B1"]["looked_up"]["delivery.customer_name"] is None
+
+
+# ==================================================== the query language on the wire (chunk 120)
+
+async def test_rows_accept_filters_stats_and_an_hour_bucket():
+    await _plant_two_deliveries()
+    async with async_session() as db:
+        await api.create_settlement(body=BODY, backfill=True, customer=CC, db=db)
+        out = await api.read_settlement_rows(name="pick_release", group_by=["hour_start"], start=None, end=None,
+                                             where=["is_short==1"], stat=["median:expected", "distinct:delivery_number"],
+                                             limit=500, customer=CC, db=db)
+    assert out["stats"] == ["median_expected", "distinct_delivery_number"]
+    # The three short releases: 540551 in the 06:00 London hour, B1 and B2 in the 07:00 hour.
+    by = {r["dimensions"][0]: r for r in out["rows"]}
+    assert set(by) == {"2026-09-18T06:00:00", "2026-09-18T07:00:00"}
+    seven = by["2026-09-18T07:00:00"]
+    assert seven["rows"] == 2 and seven["distinct_delivery_number"] == 1 and seven["median_expected"] == "7"
+    assert by["2026-09-18T06:00:00"]["median_expected"] == "10"
+
+
+async def test_a_bad_filter_field_is_refused_by_name_before_any_sql():
+    await _plant_two_deliveries()
+    async with async_session() as db:
+        await api.create_settlement(body=BODY, backfill=True, customer=CC, db=db)
+        with pytest.raises(HTTPException) as e:
+            await api.read_settlement_rows(name="pick_release", group_by=[], start=None, end=None,
+                                           where=["shortfal==1"], stat=[], limit=500, customer=CC, db=db)
+        assert e.value.status_code == 400 and "shortfal" in e.value.detail[0]
+        with pytest.raises(HTTPException) as e2:
+            await api.read_settlement_rows(name="pick_release", group_by=[], start=None, end=None,
+                                           where=["is_short"], stat=[], limit=500, customer=CC, db=db)
+        assert "is_short==1" in e2.value.detail[0]
+
+
+async def test_the_list_takes_a_filter_and_a_sort():
+    await _plant_two_deliveries()
+    async with async_session() as db:
+        await api.create_settlement(body=BODY, backfill=True, customer=CC, db=db)
+        out = await api.list_settlement_rows(name="pick_release", start=None, end=None, search=None,
+                                             where=["is_short==1"], sort="expected", dir="asc",
+                                             limit=10, offset=0, customer=CC, db=db)
+    assert out["total"] == 3 and [r["attributes"]["expected"] for r in out["rows"]] == ["7", "7", "10"]
