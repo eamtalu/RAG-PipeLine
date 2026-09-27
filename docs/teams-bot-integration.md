@@ -45,6 +45,11 @@ Settings are the `TEAMS_*` variables in `.env.example`.
 AWS credentials go in `/etc/fastapirag/teams-consumer.env`, read by the unit's `EnvironmentFile`, never in `.env`, whose loader rejects unknown keys.
 Concurrency per process is `teams_consumer_concurrency`; the Anthropic client retries on rate limits with `log_agent_max_retries`.
 
+## The evidence on the card
+
+When the answer rests on rows, `AnswerPayload.evidence` carries them as data (title, columns, rows, facts, link) so the edge draws a real Adaptive Card table.
+The contract and the card layout are in `docs/teams-evidence-card.md`; the edge must mirror the `Evidence` model into its `contracts.py`.
+
 ## Why the agent replays plain text only
 
 Only the text of earlier questions and answers is sent back to the model, never earlier tool calls or results.

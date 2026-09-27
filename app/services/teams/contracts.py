@@ -1,4 +1,5 @@
 # COPIED VERBATIM from the edge repository (teams-agent-edge/app/contracts.py). Change there first.
+# Exception, 2026-09-27: `Evidence` and `AnswerPayload.evidence` were added HERE first; the edge must mirror them.
 """The two messages that cross the edge/backend boundary.
 
 These models are the contract with the backend worker (RAG FAST API, `teams_question_worker`).
@@ -40,6 +41,23 @@ class QuestionJob(BaseModel):
     enqueued_at: datetime = Field(default_factory=_now)
 
 
+class EvidenceColumn(BaseModel):
+    name: str
+    align: Literal["left", "right"] = "left"
+
+
+class Evidence(BaseModel):
+    """The rows behind the answer, as data, so the edge draws a real table on the card instead of
+    guessing widths from markdown. Optional: absent for answers that rest on no rows. ADDED on the
+    backend side on 2026-09-27; mirror into the edge's contracts.py and its card builder."""
+
+    title: str
+    columns: list[EvidenceColumn]
+    rows: list[list[str]]
+    facts: dict[str, str] = Field(default_factory=dict, description="Small labelled facts under the table: window, sorted by, grain.")
+    link: str | None = Field(default=None, description="Where the same view lives in the app, for an open-in button.")
+
+
 class AnswerPayload(BaseModel):
     """The worker's answer, POSTed to the edge at /internal/answers."""
 
@@ -51,3 +69,4 @@ class AnswerPayload(BaseModel):
     cited_transaction_ids: list[str] = Field(default_factory=list)
     tool_call_count: int = 0
     duration_seconds: float | None = None
+    evidence: Evidence | None = None

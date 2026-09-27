@@ -190,3 +190,91 @@ def _list_table(result: dict, max_rows: int) -> str:
     total = result.get("total")
     caption = f"From the data: {min(len(result['rows']), max_rows)} of {total} matching release(s)."
     return caption + "\n\n" + "\n".join(lines)
+
+
+# ============================================================== the same rows, as data for a card
+
+def structured(trace: list[dict], max_rows: int | None = None, *, link: str | None = None) -> dict | None:
+    """The evidence as DATA, for a client that draws its own table: Teams renders an Adaptive Card
+    Table from this, with widths and right-aligned numbers, instead of guessing from markdown.
+
+    {"title", "columns": [{"name", "align"}], "rows": [[str, …]], "facts": {…}, "link"}
+    Same source and same rows as `render`, so the text and the card never disagree."""
+    for t in reversed(trace):
+        if t["tool"] not in ("aggregate_releases", "list_releases"):
+            continue
+        try:
+            result = json.loads(t.get("result") or "")
+        except (TypeError, ValueError):
+            continue
+        if "error" in result or not result.get("rows"):
+            continue
+        asked = (t.get("input") or {}).get("limit")
+        try:
+            n = max_rows or min(int(asked), MAX_ROWS) if asked else (max_rows or DEFAULT_ROWS)
+        except (TypeError, ValueError):
+            n = max_rows or DEFAULT_ROWS
+        if t["tool"] == "aggregate_releases":
+            if not (t.get("input") or {}).get("sort"):
+                continue
+            out = _aggregate_data(result, n)
+        else:
+            out = _list_data(result, n)
+        if link:
+            out["link"] = link
+        return out
+    return None
+
+
+def _window_words(result: dict) -> str | None:
+    window = result.get("window") or {}
+    if not window:
+        return None
+    return f"{window['start'][:10]} to {window['end'][:10]}"
+
+
+def _aggregate_data(result: dict, max_rows: int) -> dict:
+    dims = [_label(g) for g in result.get("group_by") or []]
+    sort = result.get("sort") or {}
+    by, direction = sort.get("by", "rows"), sort.get("dir", "desc")
+    columns = [{"name": d, "align": "left"} for d in dims] + [{"name": "releases", "align": "right"}]
+    key = None
+    if by == "units_short":
+        columns.append({"name": "units short", "align": "right"})
+        key = "shortfall"
+    elif by not in ("rows", "calls") and by:
+        columns.append({"name": _label(by), "align": "right"})
+        key = by
+    rows = []
+    for r in result["rows"][:max_rows]:
+        cells = [_cell(d) for d in r.get("dimensions", [])] + [_cell(r.get("rows"))]
+        if key:
+            v = r.get(key)
+            if by == "units_short" and v is not None:
+                d = _decimal(str(v))
+                v = _cell(str(-d)) if d is not None else _cell(v)
+            cells.append(_cell(v))
+        rows.append(cells)
+    sorted_by = "units short, biggest first" if by == "units_short" else f"{_label(by)}, {'largest' if direction == 'desc' else 'smallest'} first"
+    title = f"Top {len(rows)} by {'units short' if by == 'units_short' else _label(by)}" + (f" per {' and '.join(dims)}" if dims else "")
+    facts = {"sorted by": sorted_by, "groups": f"{len(rows)} of {len(result['rows'])}",
+             "grain": f"{result.get('total_rows', '')} releases across the groups returned"}
+    if _window_words(result):
+        facts["window"] = _window_words(result)
+    return {"title": title, "columns": columns, "rows": rows, "facts": facts}
+
+
+def _list_data(result: dict, max_rows: int) -> dict:
+    columns = [{"name": "release", "align": "left"}, {"name": "picker", "align": "left"}, {"name": "item", "align": "left"},
+               {"name": "expected", "align": "right"}, {"name": "picked", "align": "right"}, {"name": "duration s", "align": "right"}]
+    rows = []
+    for r in result["rows"][:max_rows]:
+        a = r.get("attributes") or {}
+        looked = r.get("looked_up") or {}
+        item = (r.get("item_number") or "") + ((" " + looked["item description.ItemDescription"]) if looked.get("item description.ItemDescription") else "")
+        rows.append([" · ".join(r.get("key") or []), r.get("user_name") or "", item,
+                     _cell(a.get("expected")), _cell(a.get("picked")), _cell(a.get("duration_s"))])
+    facts = {"shown": f"{len(rows)} of {result.get('total')} matching releases"}
+    if _window_words(result):
+        facts["window"] = _window_words(result)
+    return {"title": "Releases", "columns": columns, "rows": rows, "facts": facts}

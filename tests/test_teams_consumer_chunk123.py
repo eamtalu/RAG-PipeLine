@@ -289,3 +289,17 @@ async def test_sweep_pushes_stale_bindings_and_skips_failures(_sweep_rows):
         assert (await repo.get_by_tenant(T_OK)).needs_mirror is False
         assert (await repo.get_by_tenant(T_BAD)).needs_mirror is True
     assert await sweep_once(mirror) == 0 or T_BAD not in mirror.items  # nothing new for T_OK
+
+
+# ==================================================== the evidence rides on the answer (chunk 126)
+
+def test_the_answer_payload_carries_evidence_when_the_agent_has_rows():
+    from app.services.teams.contracts import AnswerPayload, Evidence
+    payload = AnswerPayload(job_id="j", conversation_id="c", answer="Southdowns Manor is short by 309 units.",
+                            evidence={"title": "Top 2 by units short per customer name",
+                                      "columns": [{"name": "customer name"}, {"name": "units short", "align": "right"}],
+                                      "rows": [["SOUTHDOWNS MANOR", "309"], ["GOODWOOD CLUB KENNELS", "208"]],
+                                      "facts": {"window": "2026-09-20 to 2026-09-27"}, "link": None})
+    assert isinstance(payload.evidence, Evidence) and payload.evidence.columns[0].align == "left"
+    assert payload.schema_version == 1  # optional field, no bump: an edge that ignores it still validates
+    assert AnswerPayload(job_id="j", conversation_id="c", answer="no rows behind this one").evidence is None

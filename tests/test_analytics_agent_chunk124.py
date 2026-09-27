@@ -417,3 +417,18 @@ async def test_units_short_is_a_sort_the_model_can_name_and_shortfall_desc_on_sh
     assert [r["dimensions"][0] for r in named["rows"]] == ["100230", "104568"] and named["sort"] == {"by": "units_short", "dir": "desc"}
     assert [r["dimensions"][0] for r in flipped["rows"]] == ["100230", "104568"] and "biggest shortfall first" in flipped["notes"][0]
     assert plain["rows"][0]["dimensions"][0] == "100606" and plain["sort"] == {"by": "shortfall", "dir": "desc"}
+
+
+async def test_the_result_carries_the_evidence_as_data_with_the_page_link(monkeypatch):
+    await _plant()
+    monkeypatch.setattr(settings, "app_public_base_url", "https://eye.example/")
+    model = _scripted(
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "aggregate_releases",
+                                           "args": {"group_by": ["item_number"], "where": ["shortfall<0"], "sort": "units_short", "limit": 5, **_window()}}]),
+        AIMessage(content="Two items were short."),
+    )
+    async with async_session() as db:
+        result = await AnalyticsAgent(db, CC, model=model).ask("top 5 shorted items")
+    data = result["evidence_data"]
+    assert data["rows"] == [["100230", "2", "10"], ["104568", "1", "1"]] and data["link"] == "https://eye.example/matrix/releases"
+    assert data["columns"][-1] == {"name": "units short", "align": "right"}

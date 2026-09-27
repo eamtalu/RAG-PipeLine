@@ -235,7 +235,8 @@ class TeamsQuestionConsumer:
             await self._record(job.conversation_id, job.customer_code, job.question, answer, job.job_id)
             return AnswerPayload(**base, status="ok", answer=answer,
                                  cited_transaction_ids=cited_transaction_ids(result),
-                                 tool_call_count=len(result.get("tool_calls") or []))
+                                 tool_call_count=len(result.get("tool_calls") or []),
+                                 evidence=result.get("evidence_data") or None)
         except Exception as exc:
             message = failure_message(exc)
             log = logger.critical if message == MODEL_UNAVAILABLE else logger.exception

@@ -80,3 +80,17 @@ def test_the_table_shows_the_n_the_model_asked_for_else_ten():
     assert ev.render(trace).count("\n| ") == 3          # header + 2 rows
     trace[0]["input"].pop("limit")
     assert ev.render(trace).count("\n| ") == 5          # header + all 4 rows (fewer than ten)
+
+
+def test_the_same_rows_come_out_as_data_for_a_card():
+    trace = [{"tool": "aggregate_releases", "input": {"sort": "units_short", "limit": 2}, "result": RESULT}]
+    data = ev.structured(trace, link="https://eye.example/matrix/releases")
+    assert data["title"] == "Top 2 by units short per item number and ItemDescription"
+    assert data["columns"] == [{"name": "item number", "align": "left"}, {"name": "ItemDescription", "align": "left"},
+                               {"name": "releases", "align": "right"}, {"name": "units short", "align": "right"}]
+    assert data["rows"] == [["104607", "POTATO AGRIA", "25", "809"], ["100622", "MILK SEMI SKIMMED _2ltr", "38", "329"]]
+    assert data["facts"] == {"sorted by": "units short, biggest first", "groups": "2 of 4",
+                             "grain": "93 releases across the groups returned", "window": "2026-09-20 to 2026-09-27"}
+    assert data["link"] == "https://eye.example/matrix/releases"
+    # the markdown table and the data table show the same cells
+    assert "| 104607 | POTATO AGRIA | 25 | 809 |" in ev.render(trace)

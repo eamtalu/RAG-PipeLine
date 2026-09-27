@@ -148,6 +148,7 @@ class AnalyticsAgent:
         fabricated = _looks_fabricated(answer, trace)
         withheld_figures: list[str] = []
         table: str | None = None
+        data: dict | None = None
         if fabricated:
             logger.warning("agent answer withheld for %s: figures with no successful data call: %s",
                            self.customer_code, answer[:200])
@@ -166,10 +167,17 @@ class AnalyticsAgent:
             table = evidence.render(trace)
             if table:
                 answer = (evidence.strip_tables(answer) + "\n\n" + table).strip()
+                data = evidence.structured(trace, link=_page_link())
         return {"answer": answer, "stop_reason": stop_reason,
                 "tool_calls": [{"tool": t["tool"], "input": t["input"]} for t in trace],
                 "iterations": len(trace), "model": self.model_name,
-                "evidence": table, "withheld_figures": withheld_figures}
+                "evidence": table, "evidence_data": data, "withheld_figures": withheld_figures}
+
+
+def _page_link() -> str | None:
+    """The pick releases page, when the app has a public address; a card can then open it."""
+    base = (settings.app_public_base_url or "").rstrip("/")
+    return f"{base}/matrix/releases" if base else None
 
 
 #: Tools that describe the schema rather than read data. A numeric answer resting only on these
