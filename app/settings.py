@@ -391,6 +391,11 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     analytics_agent_max_iterations: int = 10      # tool-call rounds before the agent must answer
     analytics_agent_max_tokens: int = 4000
+    # Ollama only. Qwen3 "thinks" for a thousand tokens before every reply unless told not to, which
+    # turns a two-second tool call into a minute; off by default. The context must hold twelve tool
+    # schemas plus a grouped read, so it is raised from Ollama's 4k default.
+    analytics_agent_think: bool = False
+    analytics_agent_context_tokens: int = 16384
     # Which agent answers Teams questions: the LangGraph one (any provider) or the Claude one.
     teams_agent: Literal["langgraph", "claude"] = "langgraph"
 

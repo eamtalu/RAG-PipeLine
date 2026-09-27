@@ -26,6 +26,7 @@ from app.persistence.models.analytics_lookup import AnalyticsLookup, AnalyticsLo
 from app.persistence.models.analytics_settlement import AnalyticsSettledRow, AnalyticsSettlement
 from app.persistence.models.customer import Customer
 from app.services.analytics_agent import tools as agent_tools
+from app.services.analytics_agent import agent as agent_module
 from app.services.analytics_agent.agent import AnalyticsAgent, tool_trace
 from app.settings import settings
 
@@ -274,3 +275,16 @@ async def test_teams_uses_the_langgraph_agent_unless_told_otherwise(monkeypatch)
 async def _record(calls, which, q):
     calls.append((which, q))
     return {"answer": "", "tool_calls": []}
+
+
+# ==================================================== 4. the model is one setting
+
+def test_an_ollama_model_gets_the_base_url_thinking_off_and_a_wide_context(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(agent_module, "init_chat_model", lambda name, **kw: seen.update(name=name, **kw) or object())
+    monkeypatch.setattr(settings, "ollama_base_url", "http://127.0.0.1:11434")
+    agent_module.make_model("ollama:qwen3:8b")
+    assert seen == {"name": "ollama:qwen3:8b", "base_url": "http://127.0.0.1:11434", "reasoning": False, "num_ctx": 16384}
+    seen.clear()
+    agent_module.make_model("anthropic:claude-sonnet-5")
+    assert seen == {"name": "anthropic:claude-sonnet-5"}

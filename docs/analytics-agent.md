@@ -26,6 +26,7 @@ The model is a setting; nothing else changes when it does.
 | `openai:gpt-…` | `pip install langchain-openai`, `OPENAI_API_KEY` | production |
 | `bedrock:…` | `pip install langchain-aws`, AWS credentials | production on AWS |
 
+On Ollama, `ANALYTICS_AGENT_THINK=false` (the default) stops Qwen3 reasoning at length before every reply, and `ANALYTICS_AGENT_CONTEXT_TOKENS=16384` gives the twelve tool schemas and a grouped read room.
 The model must support tool calling; every hosted model above does, and Qwen3 and Llama 3.1 do on Ollama.
 
 ## Local testing with Ollama on a laptop

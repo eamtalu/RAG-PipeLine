@@ -65,6 +65,8 @@ def make_model(model_name: str | None = None) -> BaseChatModel:
     kwargs: dict[str, Any] = {}
     if name.startswith("ollama:"):
         kwargs["base_url"] = settings.ollama_base_url
+        kwargs["reasoning"] = settings.analytics_agent_think
+        kwargs["num_ctx"] = settings.analytics_agent_context_tokens
     return init_chat_model(name, **kwargs)
 
 
