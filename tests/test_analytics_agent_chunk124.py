@@ -242,7 +242,7 @@ def test_the_trace_pairs_each_call_with_a_preview_of_its_result():
     from langchain_core.messages import ToolMessage
     msgs = [AIMessage(content="", tool_calls=[{"id": "x", "name": "list_releases", "args": {"limit": 2}}]),
             ToolMessage(content='{"total": 4}', tool_call_id="x"), AIMessage(content="done")]
-    assert tool_trace(msgs) == [{"tool": "list_releases", "input": {"limit": 2}, "result_preview": '{"total": 4}'}]
+    assert tool_trace(msgs) == [{"tool": "list_releases", "input": {"limit": 2}, "result_preview": '{"total": 4}', "result": '{"total": 4}'}]
 
 
 # ==================================================== 3. the endpoint and the Teams switch
@@ -284,7 +284,8 @@ def test_an_ollama_model_gets_the_base_url_thinking_off_and_a_wide_context(monke
     monkeypatch.setattr(agent_module, "init_chat_model", lambda name, **kw: seen.update(name=name, **kw) or object())
     monkeypatch.setattr(settings, "ollama_base_url", "http://127.0.0.1:11434")
     agent_module.make_model("ollama:qwen3:8b")
-    assert seen == {"name": "ollama:qwen3:8b", "base_url": "http://127.0.0.1:11434", "reasoning": False, "num_ctx": 16384}
+    assert seen == {"name": "ollama:qwen3:8b", "base_url": "http://127.0.0.1:11434", "reasoning": False, "num_ctx": 16384,
+                    "temperature": 0}
     seen.clear()
     agent_module.make_model("anthropic:claude-sonnet-5")
     assert seen == {"name": "anthropic:claude-sonnet-5"}
@@ -333,3 +334,42 @@ async def test_an_unknown_sort_is_a_readable_problem():
     async with async_session() as db:
         out = json.loads(await agent_tools.run_release_tool("aggregate_releases", {"sort": "speed", **_window()}, db, CC))
     assert "cannot be ordered by 'speed'" in out["problems"][0]
+
+
+# ==================================================== 6. an invented answer is withheld
+
+async def test_figures_with_no_successful_data_call_are_withheld(monkeypatch):
+    """The first live Teams run: refused on a field that does not exist, the model answered with
+    Customer A to J and round numbers, all invented. That answer never reaches a person."""
+    await _plant()
+    model = _scripted(
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "describe_releases", "args": {}}]),
+        AIMessage(content="", tool_calls=[{"id": "c2", "name": "aggregate_releases", "args": {"group_by": ["customer_number"]}}]),
+        AIMessage(content="Top customers: Customer A -1,200 units, Customer B -950 units."),
+    )
+    async with async_session() as db:
+        result = await AnalyticsAgent(db, CC, model=model).ask("top customers by units short")
+    assert result["stop_reason"] == "withheld"
+    assert result["answer"].startswith("I could not get the data") and "customer_number" in result["answer"]
+    assert "Customer A" not in result["answer"]
+
+
+async def test_a_real_answer_after_a_corrected_call_is_kept():
+    await _plant()
+    model = _scripted(
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "aggregate_releases", "args": {"where": ["shortfal<0"]}}]),
+        AIMessage(content="", tool_calls=[{"id": "c2", "name": "aggregate_releases", "args": {"where": ["shortfall<0"], **_window()}}]),
+        AIMessage(content="Across 3 releases, 11 units were short."),
+    )
+    async with async_session() as db:
+        result = await AnalyticsAgent(db, CC, model=model).ask("how many units short?")
+    assert result["stop_reason"] == "end_turn" and result["answer"] == "Across 3 releases, 11 units were short."
+
+
+async def test_a_plain_sentence_without_figures_is_never_withheld():
+    await _plant()
+    model = _scripted(AIMessage(content="", tool_calls=[{"id": "c1", "name": "describe_releases", "args": {}}]),
+                      AIMessage(content="I can answer questions about releases, pickers, customers and items."))
+    async with async_session() as db:
+        result = await AnalyticsAgent(db, CC, model=model).ask("what can you do?")
+    assert result["stop_reason"] == "end_turn"

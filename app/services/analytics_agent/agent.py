@@ -62,6 +62,10 @@ Rules for release answers:
   is that date minus one day) and leave start and end out.
 - Speed (duration_s) depends on the transaction: milk lines run about 16 s, freezer about 130 s.
   Compare pickers within a transaction, never across, and say so.
+- NEVER invent a name, a number or a row. Every figure in your answer must come from a tool result
+  in this conversation. If the data call failed and you cannot fix it, say what failed and stop;
+  a short honest "I could not get that" is the right answer. Customer name and number are lookups:
+  group_by ["lookup:delivery.customer_name"] (or customer_number); they are not fields.
 - Answer in plain sentences, short, with the numbers, then a compact table if there are several rows.
   Cite the release key (reporting number) when you explain one release.
 """
@@ -75,6 +79,7 @@ def make_model(model_name: str | None = None) -> BaseChatModel:
         kwargs["base_url"] = settings.ollama_base_url
         kwargs["reasoning"] = settings.analytics_agent_think
         kwargs["num_ctx"] = settings.analytics_agent_context_tokens
+        kwargs["temperature"] = 0  # a small model invents less at zero, and a run can be repeated
     return init_chat_model(name, **kwargs)
 
 
@@ -98,7 +103,7 @@ def tool_trace(messages: list[BaseMessage]) -> list[dict]:
                 result = results.get(call.get("id"))
                 text = str(result.content) if result is not None else ""
                 trace.append({"tool": call["name"], "input": call.get("args") or {},
-                              "result_preview": text[:200]})
+                              "result_preview": text[:200], "result": text})
     return trace
 
 
@@ -135,9 +140,51 @@ class AnalyticsAgent:
             answer = ("I could not settle on an answer within the allowed number of tool calls. "
                       "Ask a narrower question, or name the field or window you want.")
         trace = tool_trace(seen)
+        for t in trace:
+            logger.info("agent tool %s %s -> %s", t["tool"], _short(t["input"]), t["result_preview"][:160])
+        fabricated = _looks_fabricated(answer, trace)
+        if fabricated:
+            logger.warning("agent answer withheld for %s: figures with no successful data call: %s",
+                           self.customer_code, answer[:200])
+            answer = fabricated
+            stop_reason = "withheld"
         return {"answer": answer, "stop_reason": stop_reason,
                 "tool_calls": [{"tool": t["tool"], "input": t["input"]} for t in trace],
                 "iterations": len(trace), "model": self.model_name}
+
+
+#: Tools that describe the schema rather than read data. A numeric answer resting only on these
+#: was made up.
+SCHEMA_TOOLS = frozenset({"describe_releases", "list_metrics", "explain_freshness"})
+
+
+def _looks_fabricated(answer: str, trace: list[dict]) -> str | None:
+    """A guard the model cannot talk its way past. On the first live Teams run an 8B model was
+    refused for a field that does not exist, and instead of retrying with the lookup it answered
+    with "Customer A … Customer J" and round numbers, every one invented. An answer that carries
+    figures while no data tool returned a result without an error is replaced by an honest one."""
+    if not any(ch.isdigit() for ch in answer):
+        return None
+    failed = lambda t: t.get("result", t["result_preview"]).lstrip().startswith('{"error"')  # noqa: E731
+    if any(t["tool"] not in SCHEMA_TOOLS and not failed(t) for t in trace):
+        return None
+    problems = [t.get("result", t["result_preview"]) for t in trace if failed(t)]
+    why = ""
+    if problems:
+        try:
+            import json
+            last = json.loads(problems[-1])
+            why = " " + "; ".join(last.get("problems") or [last.get("error", "")])
+        except Exception:  # noqa: BLE001 - the preview may be cut mid-JSON
+            why = ""
+    return ("I could not get the data for that question, so I have no figures to give." + why +
+            " Ask again naming the field or window, or ask me to describe what is available.")
+
+
+def _short(value: Any, n: int = 200) -> str:
+    import json
+    text = json.dumps(value, default=str)
+    return text if len(text) <= n else text[:n] + "…"
 
 
 def _text(message: AIMessage) -> str:
