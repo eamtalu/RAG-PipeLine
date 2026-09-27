@@ -72,3 +72,10 @@ def test_a_listing_is_rendered_too():
 def test_the_models_own_table_is_dropped_and_the_sentences_kept():
     text = "Here are the top 5:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nThese had the largest shortfalls."
     assert ev.strip_tables(text) == "Here are the top 5:\n\nThese had the largest shortfalls."
+
+
+def test_the_table_shows_the_n_the_model_asked_for_else_ten():
+    trace = [{"tool": "aggregate_releases", "input": {"sort": "shortfall", "dir": "asc", "limit": 2}, "result": RESULT}]
+    assert ev.render(trace).count("\n| ") == 3          # header + 2 rows
+    trace[0]["input"].pop("limit")
+    assert ev.render(trace).count("\n| ") == 5          # header + all 4 rows (fewer than ten)

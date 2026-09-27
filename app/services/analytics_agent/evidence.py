@@ -112,8 +112,13 @@ def strip_tables(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", out).strip()
 
 
-def render(trace: list[dict], max_rows: int = 25) -> str | None:
-    """A markdown table from the last sorted aggregate or the last listing in the trace, or None."""
+DEFAULT_ROWS = 10
+MAX_ROWS = 25
+
+
+def render(trace: list[dict], max_rows: int | None = None) -> str | None:
+    """A markdown table from the last sorted aggregate or the last listing in the trace, or None.
+    Rows shown: the limit the model asked the tool for, else 10, never more than 25."""
     for t in reversed(trace):
         if t["tool"] not in ("aggregate_releases", "list_releases"):
             continue
@@ -123,11 +128,16 @@ def render(trace: list[dict], max_rows: int = 25) -> str | None:
             continue
         if "error" in result or not result.get("rows"):
             continue
+        asked = (t.get("input") or {}).get("limit")
+        try:
+            n = max_rows or min(int(asked), MAX_ROWS) if asked else (max_rows or DEFAULT_ROWS)
+        except (TypeError, ValueError):
+            n = max_rows or DEFAULT_ROWS
         if t["tool"] == "aggregate_releases":
             if not (t.get("input") or {}).get("sort"):
                 continue
-            return _aggregate_table(result, max_rows)
-        return _list_table(result, max_rows)
+            return _aggregate_table(result, n)
+        return _list_table(result, n)
     return None
 
 

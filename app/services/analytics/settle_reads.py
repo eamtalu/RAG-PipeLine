@@ -10,7 +10,7 @@ and correct itself.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -83,8 +83,13 @@ async def grouped(db: AsyncSession, customer: str, name: str, *, group_by: list[
         translation = lookup_model.plan(tuple(group_by), lookups)
     except ValueError as exc:
         raise ReadProblem([str(exc)]) from None
+    # With a lookup in the grouping the server groups by the lookup's KEY (one row per delivery)
+    # and the customers are made by merging afterwards. A sort or a limit applied to the keys would
+    # be wrong for the customers: the first live "top 10 customers" came back out of order for
+    # exactly that reason. So: read the keys unbounded, merge, then sort and cut here.
+    stored_limit = LOOKUP_SCAN_CAP if translation.translates else limit
     rows = await settle_store.read_grouped(db, customer, settlement, group_by=translation.stored_group_by,
-                                           since=start, until=end, limit=limit, filters=filters, stats=stats,
+                                           since=start, until=end, limit=stored_limit, filters=filters, stats=stats,
                                            tz=ZoneInfo(await get_customer_timezone(db, customer)),
                                            order_by=sort, descending=descending)
     numeric = [k for k in (rows[0].keys() if rows else []) if k not in ("dimensions",)]
@@ -98,6 +103,13 @@ async def grouped(db: AsyncSession, customer: str, name: str, *, group_by: list[
             db, customer, translation.keys_needed(points),
             tuple(step for step in translation.steps if step is not None))
         points = lookup_model.translate(points, translation, resolver, merge=_merge)
+    out_rows = [{"dimensions": [d.replace(settle_store.KEY_SEP, " · ") if isinstance(d, str) else d
+                                for d in dims], **v} for (_at, dims), v in points.items()]
+    truncated = len(rows) >= limit
+    if translation.translates:
+        out_rows.sort(key=lambda r: _sort_key(r, sort or "rows"), reverse=descending)
+        truncated = len(out_rows) > limit or len(rows) >= LOOKUP_SCAN_CAP
+        out_rows = out_rows[:limit]
     # Grouped by its own key a settlement has as many groups as rows - 6,252 on the live tenant -
     # and a silent cap would drop whole releases from the bottom of a drill-down. So the cap is
     # high, and hitting it is reported rather than hidden.
@@ -105,9 +117,22 @@ async def grouped(db: AsyncSession, customer: str, name: str, *, group_by: list[
             "values": [v.name for v in settlement.values],
             "stats": [s.label for s in stats],
             "sort": {"by": sort or "rows", "dir": "desc" if descending else "asc"},
-            "truncated": len(rows) >= limit,
-            "rows": [{"dimensions": [d.replace(settle_store.KEY_SEP, " · ") if isinstance(d, str) else d
-                                     for d in dims], **v} for (_at, dims), v in points.items()]}
+            "truncated": truncated,
+            "rows": out_rows}
+
+
+LOOKUP_SCAN_CAP = 50000
+
+
+def _sort_key(row: dict, by: str):
+    """Order merged groups by a count or a summed value; a missing value sorts last either way."""
+    v = row.get(by)
+    if v is None:
+        return (1, Decimal(0))
+    try:
+        return (0, Decimal(str(v)))
+    except (InvalidOperation, ValueError):
+        return (1, Decimal(0))
 
 
 def _merge(a: dict, b: dict) -> dict:

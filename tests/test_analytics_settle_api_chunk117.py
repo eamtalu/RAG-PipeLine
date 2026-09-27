@@ -380,3 +380,31 @@ async def test_the_list_takes_a_filter_and_a_sort():
                                              where=["is_short==1"], sort="expected", dir="asc",
                                              limit=10, offset=0, customer=CC, db=db)
     assert out["total"] == 3 and [r["attributes"]["expected"] for r in out["rows"]] == ["7", "7", "10"]
+
+
+async def test_a_sort_on_a_lookup_grouping_orders_the_merged_groups_not_the_keys():
+    """Two customers: GOODWOOD (deliveries 27907 and 25810, shortfall -11 in all) and BOK (a third delivery,
+    shortfall -20 on one release). Sorted by shortfall ascending BOK must come first even though by
+    rows GOODWOOD is far bigger, and a limit of 1 must keep BOK. On the live tenant the first
+    "top 10 customers" came back out of order because the sort was applied per delivery."""
+    await _plant_two_deliveries()
+    await _plant([_fact(70, 24, 4, rep="C1", delivery="30001", item="100777")])
+    async with async_session() as db:
+        db.add(AnalyticsLookup(customer_code=CC, name="delivery", key_field="delivery_number",
+                               attributes=[{"name": "customer_name", "stable": True,
+                                            "on_conflict": "first_wins", "sources": []}], enabled=True))
+        for key, name in (("27907", "GOODWOOD"), ("25810", "GOODWOOD"), ("30001", "BOK")):
+            db.add(AnalyticsLookupValue(customer_code=CC, lookup="delivery", key=key,
+                                        attribute="customer_name", value=name,
+                                        valid_from=datetime(1970, 1, 1, tzinfo=timezone.utc),
+                                        origin="observed", observations=1,
+                                        first_seen_at=T0, last_seen_at=T0))
+        await db.commit()
+        await api.create_settlement(body=BODY, backfill=True, customer=CC, db=db)
+        out = await api.read_settlement_rows(name="pick_release", group_by=["lookup:delivery.customer_name"],
+                                             start=None, end=None, sort="shortfall", dir="asc", limit=1, customer=CC, db=db)
+        both = await api.read_settlement_rows(name="pick_release", group_by=["lookup:delivery.customer_name"],
+                                              start=None, end=None, sort="shortfall", dir="asc", limit=5, customer=CC, db=db)
+    assert [r["dimensions"][0] for r in out["rows"]] == ["BOK"] and out["truncated"] is True
+    assert [(r["dimensions"][0], r["shortfall"]) for r in both["rows"]] == [("BOK", "-20"), ("GOODWOOD", "-11")]
+    assert both["truncated"] is False
