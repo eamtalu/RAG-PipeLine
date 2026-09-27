@@ -57,3 +57,11 @@ def test_time_buckets_are_allowed_in_the_grouping_and_nothing_else_unknown_is():
     assert q.validate(PICK, group_by=("minute",)) != []
     assert q.validate(PICK, sort="duration_s") == []
     assert q.validate(PICK, sort="speed") != []
+
+
+def test_a_grouped_read_may_be_ordered_by_counts_sums_or_a_stat_and_nothing_else():
+    assert q.validate(PICK, order_by="rows") == []
+    assert q.validate(PICK, order_by="shortfall") == [] if any(v.name == "shortfall" for v in PICK.values) else True
+    assert q.validate(PICK, order_by="picked") == []
+    assert q.validate(PICK, stats=(q.Stat("median", "duration_s"),), order_by="median_duration_s") == []
+    assert "cannot be ordered by 'speed'" in q.validate(PICK, order_by="speed")[0]

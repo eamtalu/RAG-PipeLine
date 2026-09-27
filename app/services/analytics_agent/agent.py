@@ -21,6 +21,7 @@ from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langgraph.errors import GraphRecursionError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.analytics_agent.tools import build_tools
@@ -41,17 +42,24 @@ Two kinds of data, two kinds of tool:
 
 Rules for release answers:
 - Call describe_releases once before your first aggregate_releases or list_releases, so every field
-  name is real. If a tool returns "problems", fix the spelling and call again; do not apologise.
+  name is real. If a tool returns "problems", fix exactly what it names and call once more. If the
+  same call fails twice, stop retrying: answer with what you have and say what you could not get.
+- aggregate_releases always returns rows and the SUM of every settled value per group. Never ask for
+  sum:… or count:… as a stat; use stat only for median, p95, mean, min, max or distinct.
 - One row = one release. Every figure you quote is over releases, never over handheld calls. Say the
   grain in every answer: "across 1,375 releases today".
 - Zero-pick (picked == 0, a stock-out) and partial (short but picked > 0) are different things. Never
   add them into one "short" number; report them apart. A ratio is computed from numbers returned by
   ONE call (for a rate, make one call for the numerator filter and read the denominator from the
   unfiltered call in the same window).
-- "Top N shorted products" means group_by item_number with the item description lookup, where
-  shortfall<0, sorted by the sum of shortfall ascending (most negative first); units short is
-  -shortfall. "This week" is the last 7 days unless the person says otherwise. Default window is
-  the last 24 hours; say the window you used.
+- "Top N shorted products" means group_by ["item_number", "lookup:item description.ItemDescription"],
+  where ["shortfall<0"], sort "shortfall", dir "asc" (most negative first), limit N; units short is
+  -shortfall. Always pass sort for any "top", "most", "biggest", "longest" question; the groups come
+  back in that order, keep it. Use total_rows from the result as the grain, never add groups up.
+  "This week" is the last 7 days unless the person says otherwise. Default window is the last 24
+  hours; say the window you used. For "today" or "yesterday" do not compute start and end: filter
+  with where ["business_date==YYYY-MM-DD"] using the date line at the top of the question (yesterday
+  is that date minus one day) and leave start and end out.
 - Speed (duration_s) depends on the transaction: milk lines run about 16 s, freezer about 130 s.
   Compare pickers within a transaction, never across, and say so.
 - Answer in plain sentences, short, with the numbers, then a compact table if there are several rows.
@@ -112,13 +120,22 @@ class AnalyticsAgent:
         today = date.today().isoformat()
         messages = _history_as_messages(history) + [HumanMessage(content=f"(Today is {today}.)\n\n{question}")]
         # recursion_limit counts graph steps; a tool round is two (model, tools), plus the final answer.
-        state = await graph.ainvoke({"messages": messages},
-                                    config={"recursion_limit": settings.analytics_agent_max_iterations * 2 + 1})
-        out: list[BaseMessage] = state["messages"]
-        final = next((m for m in reversed(out) if isinstance(m, AIMessage) and not m.tool_calls), None)
+        seen: list[BaseMessage] = list(messages)
+        stop_reason = "end_turn"
+        try:
+            # Stream by graph step so a run that hits the limit still yields every message before it.
+            async for step in graph.astream({"messages": messages}, stream_mode="values",
+                                            config={"recursion_limit": settings.analytics_agent_max_iterations * 2 + 1}):
+                seen = step["messages"]
+        except GraphRecursionError:
+            stop_reason = "max_iterations"
+        final = next((m for m in reversed(seen) if isinstance(m, AIMessage) and not m.tool_calls), None)
         answer = _text(final) if final is not None else ""
-        trace = tool_trace(out)
-        return {"answer": answer, "stop_reason": "end_turn" if answer else "max_iterations",
+        if stop_reason == "max_iterations" and not answer:
+            answer = ("I could not settle on an answer within the allowed number of tool calls. "
+                      "Ask a narrower question, or name the field or window you want.")
+        trace = tool_trace(seen)
+        return {"answer": answer, "stop_reason": stop_reason,
                 "tool_calls": [{"tool": t["tool"], "input": t["input"]} for t in trace],
                 "iterations": len(trace), "model": self.model_name}
 

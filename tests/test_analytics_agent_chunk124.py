@@ -288,3 +288,48 @@ def test_an_ollama_model_gets_the_base_url_thinking_off_and_a_wide_context(monke
     seen.clear()
     agent_module.make_model("anthropic:claude-sonnet-5")
     assert seen == {"name": "anthropic:claude-sonnet-5"}
+
+
+# ==================================================== 5. what the first live run taught
+
+def test_stats_a_model_invents_for_sums_and_counts_are_dropped_with_a_note():
+    kept, notes = agent_tools._stats_asked(["count:releases", "sum:picked", "median:duration_s", "distinct:user_name", "count"])
+    assert kept == ["median:duration_s", "distinct:user_name"]
+    assert len(notes) == 3 and "always returned" in notes[0]
+
+
+async def test_a_sum_stat_no_longer_refuses_the_whole_call():
+    await _plant()
+    async with async_session() as db:
+        out = json.loads(await agent_tools.run_release_tool(
+            "aggregate_releases", {"group_by": ["user_name"], "stat": ["sum:picked", "median:expected"], **_window()}, db, CC))
+    assert "problems" not in out and out["stats"] == ["median_expected"]
+    assert any("'sum:picked' dropped" in n for n in out["notes"])
+
+
+async def test_running_out_of_tool_rounds_ends_with_a_plain_sentence_not_an_error(monkeypatch):
+    await _plant()
+    monkeypatch.setattr(settings, "analytics_agent_max_iterations", 2)
+    call = AIMessage(content="", tool_calls=[{"id": "c", "name": "describe_releases", "args": {}}])
+    model = _scripted(*[AIMessage(content="", tool_calls=[{"id": f"c{i}", "name": "describe_releases", "args": {}}]) for i in range(6)])
+    async with async_session() as db:
+        result = await AnalyticsAgent(db, CC, model=model).ask("loop forever")
+    assert result["stop_reason"] == "max_iterations" and result["iterations"] >= 2
+    assert result["answer"].startswith("I could not settle on an answer")
+    del call
+
+
+async def test_top_shorted_items_come_back_in_shortfall_order_with_the_grain_counted():
+    await _plant()
+    async with async_session() as db:
+        out = await agent_tools.aggregate_releases(db, {
+            "group_by": ["item_number"], "where": ["shortfall<0"], "sort": "shortfall", "dir": "asc", "limit": 1, **_window()}, CC)
+    assert [r["dimensions"][0] for r in out["rows"]] == ["100230"] and out["sort"] == {"by": "shortfall", "dir": "asc"}
+    assert out["total_rows"] == 2 and out["groups"] == 1 and out["truncated"] is True
+
+
+async def test_an_unknown_sort_is_a_readable_problem():
+    await _plant()
+    async with async_session() as db:
+        out = json.loads(await agent_tools.run_release_tool("aggregate_releases", {"sort": "speed", **_window()}, db, CC))
+    assert "cannot be ordered by 'speed'" in out["problems"][0]

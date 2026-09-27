@@ -461,3 +461,15 @@ async def test_the_list_can_be_filtered_and_sorted_as_a_number():
     assert total == 4 and [r["attributes"]["expected"] for r in longest] == ["10", "7", "7", "4"]
     assert n == 1 and zero[0]["key"] == ["B2"]
     assert by_user[0]["delivery_number"] == "25810"
+
+
+async def test_a_grouped_read_can_be_ordered_by_a_sum_before_the_limit():
+    """"Top N by units short" needs the order on the server: under a limit the default order by
+    rows would keep the most frequent groups and drop the biggest shortfall."""
+    await _seed_two_deliveries()
+    async with async_session() as db:
+        by_short = await settle_store.read_grouped(db, CC, PICK_RELEASE, group_by=["delivery_number"], since=None, until=None,
+                                                   order_by="shortfall", descending=False, limit=1)
+        by_rows = await settle_store.read_grouped(db, CC, PICK_RELEASE, group_by=["delivery_number"], since=None, until=None, limit=1)
+    assert by_short[0]["dimensions"] == ["25810"] and by_short[0]["shortfall"] == "-10"
+    assert by_rows[0]["rows"] == 2

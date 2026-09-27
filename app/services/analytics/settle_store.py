@@ -318,7 +318,7 @@ def _number_json(value: Any) -> str | None:
 async def read_grouped(db: AsyncSession, customer_code: str, settlement: st.Settlement, *,
                        group_by: Sequence[str], since: datetime | None, until: datetime | None,
                        limit: int = 500, filters: Sequence[sq.Filter] = (), stats: Sequence[sq.Stat] = (),
-                       tz: tzinfo | None = None) -> list[dict]:
+                       tz: tzinfo | None = None, order_by: str | None = None, descending: bool = True) -> list[dict]:
     """Settled rows grouped and summed on request. Every settled value that is a number is summed;
     `calls` is summed; rows are counted. No roll-up stands between the reader and the rows.
 
@@ -342,7 +342,19 @@ async def read_grouped(db: AsyncSession, customer_code: str, settlement: st.Sett
         q = q.where(_filter_clause(f))
     if groups:
         q = q.group_by(*groups)
-    q = q.order_by(func.count().desc()).limit(limit)
+    # The order matters under a limit: "top 5 by units short" must sort by the shortfall sum on the
+    # server, or the cap keeps the most frequent groups and drops the biggest.
+    sums_by_name = {c.name: c for c in sums}
+    stats_by_name = {c.name: c for c in extras}
+    if order_by in (None, "rows"):
+        key = func.count()
+    elif order_by == "calls":
+        key = func.sum(AnalyticsSettledRow.calls)
+    elif order_by in sums_by_name:
+        key = sums_by_name[order_by]
+    else:
+        key = stats_by_name[order_by]
+    q = q.order_by(key.desc().nullslast() if descending else key.asc().nullslast()).limit(limit)
     out = []
     for r in (await db.execute(q)).mappings().all():
         entry = {"dimensions": [_dimension_json(r[f"g{i}"]) for i in range(len(group_by))],

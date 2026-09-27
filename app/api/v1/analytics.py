@@ -1761,6 +1761,8 @@ async def read_settlement_rows(name: str,
                                end: datetime | None = Query(default=None),
                                where: list[str] = Query(default=[]),
                                stat: list[str] = Query(default=[]),
+                               sort: str | None = Query(default=None),
+                               dir: str = Query("desc", pattern="^(asc|desc)$"),
                                limit: int = Query(500, ge=1, le=50000),
                                customer: str = Depends(get_current_customer),
                                db: AsyncSession = Depends(get_session)):
@@ -1773,7 +1775,8 @@ async def read_settlement_rows(name: str,
     `settle_reads.grouped`, shared with the agent's tools."""
     try:
         return await settle_reads.grouped(db, customer, name, group_by=_query_list(group_by), start=start, end=end,
-                                          where=_query_list(where), stat=_query_list(stat), limit=limit)
+                                          where=_query_list(where), stat=_query_list(stat), limit=limit,
+                                          sort=_query_str(sort), descending=_query_str(dir, "desc") != "asc")
     except settle_reads.UnknownSettlement as exc:
         raise HTTPException(404, detail=str(exc)) from None
     except settle_reads.ReadProblem as exc:

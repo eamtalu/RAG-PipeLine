@@ -81,11 +81,12 @@ RELEASE_TOOLS: list[dict] = [
         "description": (
             "Count and sum settled releases (one row = one pick-list release) grouped by fields, "
             "lookups or time buckets, with optional filters and per-group statistics. This answers "
-            "'how many / how much / what share, by X'. Returns per group: rows, calls, the sum of every "
-            "settled value (expected, picked, shortfall, is_short, refused, duration_s …) and any stats "
-            "asked for. Ratios are yours to compute from one call's numbers: zero-pick rate = rows with "
-            "picked==0 (a second call with that filter) over rows. Never add zero-pick and partial "
-            "together; they are different things."
+            "'how many / how much / what share, by X'. EVERY call returns per group, without asking: "
+            "rows (how many releases), calls, and the SUM of every settled value (expected, picked, "
+            "shortfall, is_short, refused, empty_visits, duration_s). Do NOT put sum:… or count:… in "
+            "stat; stat is only for median, p90, p95, p99, mean, min, max and distinct. Ratios are "
+            "yours to compute from one call's numbers: zero-pick rate = rows with picked==0 (a second "
+            "call with that filter) over rows. Never add zero-pick and partial together."
         ),
         "input_schema": {
             "type": "object",
@@ -100,8 +101,14 @@ RELEASE_TOOLS: list[dict] = [
                                          "\"picked==0\", \"shortfall<0\", \"duration_s>300\", "
                                          "\"user_name==BCHAM\". Comparisons: == != < <= > >=."},
                 "stat": {"type": "array", "items": {"type": "string"},
-                         "description": "Per-group statistics as kind:field: median:duration_s, "
-                                        "p95:duration_s, mean:duration_s, min, max, distinct:user_name."},
+                         "description": "Optional per-group statistics as kind:field, kinds median, p90, "
+                                        "p95, p99, mean, min, max, distinct only: median:duration_s, "
+                                        "distinct:delivery_number. Sums and counts need no stat."},
+                "sort": {"type": "string",
+                         "description": "Order the groups by this before the limit: rows, calls, any settled "
+                                        "value's sum (shortfall, picked, expected, refused, duration_s …) or "
+                                        "a stat label. 'Top N by units short' = sort shortfall, dir asc."},
+                "dir": {"type": "string", "enum": ["asc", "desc"], "description": "Sort direction, default desc."},
                 "start": {"type": "string", "description": "ISO-8601 start (inclusive). Default: 24 hours before end."},
                 "end": {"type": "string", "description": "ISO-8601 end (exclusive). Default: now."},
                 "limit": {"type": "integer", "description": f"Max groups (default 200, max {GROUP_LIMIT})."},
@@ -198,14 +205,38 @@ async def describe_releases(db: AsyncSession, args: dict, customer_code: str) ->
                             "the last confirm. Say the grain ('across N releases') in every answer.")}
 
 
+ALWAYS_RETURNED = ("sum", "count", "total", "rows")
+
+
+def _stats_asked(stat: list) -> tuple[list[str], list[str]]:
+    """Keep the stats the read understands; drop, with a note, the ones a model invents for things
+    that every grouped read returns anyway. Qwen3 8B asked for `sum:picked` and `count:releases`
+    seven times in a row on the first live run, refused each time, and never answered."""
+    kept, notes = [], []
+    for raw in stat or []:
+        text = str(raw).strip()
+        kind = text.split(":", 1)[0].strip().lower() if ":" in text else text.lower()
+        if kind in ALWAYS_RETURNED:
+            notes.append(f"'{text}' dropped: rows and the sum of every settled value are always returned")
+        else:
+            kept.append(text)
+    return kept, notes
+
+
 async def aggregate_releases(db: AsyncSession, args: dict, customer_code: str) -> dict:
     name = str(args.get("settlement") or "pick_release")
     since, until, notes = _window(args.get("start"), args.get("end"))
+    stats, dropped = _stats_asked(list(args.get("stat") or []))
+    notes += dropped
     out = await settle_reads.grouped(db, customer_code, name, group_by=list(args.get("group_by") or []),
                                      start=since, end=until, where=list(args.get("where") or []),
-                                     stat=list(args.get("stat") or []),
-                                     limit=_clamp(args.get("limit"), 200, GROUP_LIMIT))
+                                     stat=stats, limit=_clamp(args.get("limit"), 200, GROUP_LIMIT),
+                                     sort=(str(args["sort"]).strip() or None) if args.get("sort") else None,
+                                     descending=(args.get("dir") or "desc") != "asc")
     out["window"] = {"start": since.isoformat(), "end": until.isoformat()}
+    # The grain figure, added here so the model never has to add the groups up itself.
+    out["total_rows"] = sum(int(r.get("rows") or 0) for r in out["rows"])
+    out["groups"] = len(out["rows"])
     out["grain"] = "one row = one pick-list release; every figure is over releases, not calls"
     if notes:
         out["notes"] = notes

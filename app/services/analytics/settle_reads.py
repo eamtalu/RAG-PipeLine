@@ -67,13 +67,14 @@ def _stats(stat: list[str]) -> tuple[settle_query.Stat, ...]:
 
 
 async def grouped(db: AsyncSession, customer: str, name: str, *, group_by: list[str], start: datetime | None,
-                  end: datetime | None, where: list[str] = (), stat: list[str] = (), limit: int = 500) -> dict:
+                  end: datetime | None, where: list[str] = (), stat: list[str] = (), limit: int = 500,
+                  sort: str | None = None, descending: bool = True) -> dict:
     """Settled rows grouped and summed, with `lookup:` paths resolved exactly as they are for a
     metric: the rows are grouped by the lookup's KEY and re-labelled afterwards. Filters, stats
     and time buckets as `settle_query` spells them."""
     _row, settlement = await declared(db, customer, name)
     filters, stats = _filters(list(where)), _stats(list(stat))
-    problems = settle_query.validate(settlement, filters=filters, stats=stats,
+    problems = settle_query.validate(settlement, filters=filters, stats=stats, order_by=sort,
                                      group_by=tuple(g for g in group_by if not lookup_model.is_lookup_path(g)))
     if problems:
         raise ReadProblem(problems)
@@ -84,7 +85,8 @@ async def grouped(db: AsyncSession, customer: str, name: str, *, group_by: list[
         raise ReadProblem([str(exc)]) from None
     rows = await settle_store.read_grouped(db, customer, settlement, group_by=translation.stored_group_by,
                                            since=start, until=end, limit=limit, filters=filters, stats=stats,
-                                           tz=ZoneInfo(await get_customer_timezone(db, customer)))
+                                           tz=ZoneInfo(await get_customer_timezone(db, customer)),
+                                           order_by=sort, descending=descending)
     numeric = [k for k in (rows[0].keys() if rows else []) if k not in ("dimensions",)]
     # `translate` re-keys `(instant, dims)` pairs and reads each lookup as at that instant, because
     # a metric's points are time buckets. A grouped read over settled rows has one instant: the end
@@ -102,6 +104,7 @@ async def grouped(db: AsyncSession, customer: str, name: str, *, group_by: list[
     return {"settlement": name, "group_by": list(group_by),
             "values": [v.name for v in settlement.values],
             "stats": [s.label for s in stats],
+            "sort": {"by": sort or "rows", "dir": "desc" if descending else "asc"},
             "truncated": len(rows) >= limit,
             "rows": [{"dimensions": [d.replace(settle_store.KEY_SEP, " · ") if isinstance(d, str) else d
                                      for d in dims], **v} for (_at, dims), v in points.items()]}

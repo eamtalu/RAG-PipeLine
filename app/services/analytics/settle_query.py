@@ -81,8 +81,13 @@ def known_fields(settlement: st.Settlement) -> set[str]:
     return out
 
 
+def orderable(settlement: st.Settlement, stats: tuple[Stat, ...] = ()) -> set[str]:
+    """What a grouped read can be ordered by: the counts, any settled value's sum, any stat asked for."""
+    return {"rows", "calls", *(v.name for v in settlement.values), *(s.label for s in stats)}
+
+
 def validate(settlement: st.Settlement, *, filters: tuple[Filter, ...] = (), stats: tuple[Stat, ...] = (),
-             group_by: tuple[str, ...] = (), sort: str | None = None) -> list[str]:
+             group_by: tuple[str, ...] = (), sort: str | None = None, order_by: str | None = None) -> list[str]:
     """Problems, in words, empty when the question can be asked. A list so a screen or an agent
     sees every problem at once rather than the first."""
     known = known_fields(settlement)
@@ -105,4 +110,7 @@ def validate(settlement: st.Settlement, *, filters: tuple[Filter, ...] = (), sta
                         f"{', '.join(BUCKETS)}")
     if sort is not None and plain(sort) not in known:
         problems.append(f"sort field {sort!r} is not on the settled row")
+    if order_by is not None and order_by not in orderable(settlement, stats):
+        problems.append(f"a grouped read cannot be ordered by {order_by!r}; it can by "
+                        f"{', '.join(sorted(orderable(settlement, stats)))}")
     return problems
