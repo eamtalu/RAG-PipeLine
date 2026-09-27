@@ -15,7 +15,8 @@ it and corrects the field name instead of the turn failing.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -23,6 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.analytics_settlement import AnalyticsSettledRow
+from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.services.analytics import lookup_store
 from app.services.analytics import settle_query
 from app.services.analytics import settle_reads
@@ -82,7 +84,8 @@ RELEASE_TOOLS: list[dict] = [
             "Count and sum settled releases (one row = one pick-list release) grouped by fields, "
             "lookups or time buckets, with optional filters and per-group statistics. This answers "
             "'how many / how much / what share, by X'. EVERY call returns per group, without asking: "
-            "rows (how many releases), calls, and the SUM of every settled value (expected, picked, "
+            "rows (how many releases), deliveries (distinct deliveries), calls, and the SUM of every "
+            "settled value (expected, picked, "
             "shortfall, is_short, refused, empty_visits, duration_s). Do NOT put sum:… or count:… in "
             "stat; stat is only for median, p90, p95, p99, mean, min, max and distinct. Ratios are "
             "yours to compute from one call's numbers: zero-pick rate = rows with picked==0 (a second "
@@ -110,6 +113,12 @@ RELEASE_TOOLS: list[dict] = [
                                         "calls, any settled value's sum (picked, expected, refused, "
                                         "duration_s …) or a stat label."},
                 "dir": {"type": "string", "enum": ["asc", "desc"], "description": "Sort direction, default desc."},
+                "day": {"type": "string", "description": "One whole day on the warehouse's clock: 'today', "
+                                                          "'yesterday' or YYYY-MM-DD. Use this for a single "
+                                                          "day instead of start and end."},
+                "day": {"type": "string", "description": "One whole day on the warehouse's clock: 'today', "
+                                                          "'yesterday' or YYYY-MM-DD. Use this for a single "
+                                                          "day instead of start and end."},
                 "start": {"type": "string", "description": "ISO-8601 start (inclusive). Default: 24 hours before end."},
                 "end": {"type": "string", "description": "ISO-8601 end (exclusive). Default: now."},
                 "limit": {"type": "integer", "description": f"Max groups (default 200, max {GROUP_LIMIT})."},
@@ -162,6 +171,52 @@ RELEASE_TOOLS: list[dict] = [
 ]
 
 
+def _sort_words(sort, direction) -> tuple[str | None, bool]:
+    """`sort="calls desc"` means field calls, direction desc: a model writes SQL habits into one
+    string, and refusing it twice cost a live question two tool rounds. Returns (field, descending)."""
+    field = (str(sort).strip() or None) if sort else None
+    descending = (direction or "desc") != "asc"
+    if field and " " in field:
+        head, _, tail = field.partition(" ")
+        if tail.strip().lower() in ("asc", "desc"):
+            field, descending = head.strip(), tail.strip().lower() == "desc"
+    return field, descending
+
+
+#: Worked examples a model copies rather than reasons about. Each is the exact aggregate_releases
+#: call for a question people ask; a live question about "deliveries per day" went to the metric
+#: tools, was refused, and came back as a table of pickers by volume.
+RECIPES: list[dict] = [
+    {"question": "trend of deliveries per day over the last 7 days",
+     "call": {"group_by": ["day"], "start": "<7 days ago>", "end": "<now>"},
+     "read": "one row per day; 'deliveries' is the distinct delivery count, 'rows' the lines"},
+    {"question": "lines per hour today", "call": {"group_by": ["hour"], "day": "today"}},
+    {"question": "top 5 shorted products this week",
+     "call": {"group_by": ["item_number", "lookup:item description.ItemDescription"], "where": ["shortfall<0"],
+              "sort": "units_short", "limit": 5, "start": "<7 days ago>", "end": "<now>"}},
+    {"question": "top 10 customers by units short this week",
+     "call": {"group_by": ["lookup:delivery.customer_name"], "where": ["shortfall<0"], "sort": "units_short", "limit": 10,
+              "start": "<7 days ago>", "end": "<now>"}},
+    {"question": "who picked the most lines yesterday", "call": {"group_by": ["user_name"], "sort": "rows", "day": "yesterday"}},
+    {"question": "who picked the most units today", "call": {"group_by": ["user_name"], "sort": "picked", "day": "today"}},
+    {"question": "how many zero-picks (stock-outs) today", "call": {"where": ["picked==0"], "day": "today"},
+     "read": "rows is the number of zero-pick releases"},
+    {"question": "zero-pick rate by picker today",
+     "call": {"group_by": ["user_name"], "day": "today"},
+     "read": "then a second call with where ['picked==0'] and the same group_by; divide rows by rows"},
+    {"question": "median seconds per line by picker yesterday",
+     "call": {"group_by": ["user_name"], "stat": ["median:duration_s"], "day": "yesterday"}},
+    {"question": "which items came up empty most in the last 7 days",
+     "call": {"group_by": ["item_number", "lookup:item description.ItemDescription"], "where": ["picked==0"], "sort": "rows",
+              "limit": 15, "start": "<7 days ago>", "end": "<now>"}},
+    {"question": "refusals by picker this week",
+     "call": {"group_by": ["user_name"], "sort": "refused", "start": "<7 days ago>", "end": "<now>"}},
+]
+
+#: Counted on every aggregate: how many distinct deliveries the rows in each group touch.
+ALWAYS_STATS = ("distinct:delivery_number",)
+
+
 def _clamp(value, default: int, hi: int) -> int:
     try:
         n = int(value) if value is not None else default
@@ -198,6 +253,7 @@ async def describe_releases(db: AsyncSession, args: dict, customer_code: str) ->
             "stat_kinds": list(settle_query.STAT_KINDS),
         })
     return {"settlements": out,
+            "recipes": RECIPES,
             "how_to_read": ("Every number from aggregate_releases is a sum or count over releases, never "
                             "over handheld calls. expected is the amount asked for, picked what was "
                             "accepted, shortfall = picked - expected (negative = short). is_short is 1 on "
@@ -224,14 +280,38 @@ def _stats_asked(stat: list) -> tuple[list[str], list[str]]:
     return kept, notes
 
 
+async def _day(db: AsyncSession, customer_code: str, args: dict) -> tuple[str | None, list[str]]:
+    """`day` resolved on the tenant's clock into a business_date filter, so the model never does date
+    arithmetic: twice a live question read "yesterday" or "today" as the day before."""
+    raw = str(args.get("day") or "").strip().lower()
+    if not raw:
+        return None, []
+    tz = ZoneInfo(await get_customer_timezone(db, customer_code))
+    today = datetime.now(tz).date()
+    if raw == "today":
+        d = today
+    elif raw == "yesterday":
+        d = today - timedelta(days=1)
+    else:
+        try:
+            d = date.fromisoformat(raw)
+        except ValueError:
+            raise ValueError(f"`day` must be today, yesterday or YYYY-MM-DD, not {raw!r}")
+    return d.isoformat(), [f"day {raw} is {d.isoformat()} on the warehouse's clock; start and end were ignored"]
+
+
 async def aggregate_releases(db: AsyncSession, args: dict, customer_code: str) -> dict:
     name = str(args.get("settlement") or "pick_release")
-    since, until, notes = _window(args.get("start"), args.get("end"))
+    day, day_notes = await _day(db, customer_code, args)
+    since, until, notes = _window(None if day else args.get("start"), None if day else args.get("end"))
+    if day:
+        since, until = datetime.fromisoformat(day).replace(tzinfo=timezone.utc) - timedelta(days=1), datetime.fromisoformat(day).replace(tzinfo=timezone.utc) + timedelta(days=2)
+    notes += day_notes
     stats, dropped = _stats_asked(list(args.get("stat") or []))
     notes += dropped
-    where = list(args.get("where") or [])
-    sort = (str(args["sort"]).strip() or None) if args.get("sort") else None
-    descending = (args.get("dir") or "desc") != "asc"
+    stats += [x for x in ALWAYS_STATS if x not in stats]
+    where = list(args.get("where") or []) + ([f"business_date=={day}"] if day else [])
+    sort, descending = _sort_words(args.get("sort"), args.get("dir"))
     # "units short" is the shortfall with the sign turned round; the biggest shortfall is the most
     # negative sum. A model that asks for shortfall descending on short releases wants the biggest
     # shortfalls, not the smallest: the first Web Chat run listed ten customers short by 1 unit as
@@ -246,10 +326,19 @@ async def aggregate_releases(db: AsyncSession, args: dict, customer_code: str) -
                                      limit=_clamp(args.get("limit"), 200, GROUP_LIMIT), sort=sort, descending=descending)
     if units_short:
         out["sort"] = {"by": "units_short", "dir": "desc"}
+    group_by = list(args.get("group_by") or [])
+    if not sort and group_by and group_by[0] in ("day", "hour", "hour_start", "week", "business_date"):
+        # a trend reads in time order, not by size
+        out["rows"].sort(key=lambda r: str(r["dimensions"][0]))
+        out["sort"] = {"by": group_by[0], "dir": "asc"}
     out["window"] = {"start": since.isoformat(), "end": until.isoformat()}
     # The grain figure, added here so the model never has to add the groups up itself.
     out["total_rows"] = sum(int(r.get("rows") or 0) for r in out["rows"])
     out["groups"] = len(out["rows"])
+    for r in out["rows"]:
+        if "distinct_delivery_number" in r:
+            r["deliveries"] = r.pop("distinct_delivery_number")
+    out["stats"] = ["deliveries" if x == "distinct_delivery_number" else x for x in out.get("stats", [])]
     out["grain"] = "one row = one pick-list release; every figure is over releases, not calls"
     if notes:
         out["notes"] = notes
@@ -258,11 +347,16 @@ async def aggregate_releases(db: AsyncSession, args: dict, customer_code: str) -
 
 async def list_releases(db: AsyncSession, args: dict, customer_code: str) -> dict:
     name = str(args.get("settlement") or "pick_release")
-    since, until, notes = _window(args.get("start"), args.get("end"))
+    day, day_notes = await _day(db, customer_code, args)
+    since, until, notes = _window(None if day else args.get("start"), None if day else args.get("end"))
+    if day:
+        since, until = datetime.fromisoformat(day).replace(tzinfo=timezone.utc) - timedelta(days=1), datetime.fromisoformat(day).replace(tzinfo=timezone.utc) + timedelta(days=2)
+    notes += day_notes
+    sort, descending = _sort_words(args.get("sort"), args.get("dir"))
     out = await settle_reads.listed(db, customer_code, name, start=since, end=until,
                                     search=(str(args["search"]).strip() if args.get("search") else None),
-                                    where=list(args.get("where") or []), sort=args.get("sort") or None,
-                                    descending=(args.get("dir") or "desc") != "asc",
+                                    where=list(args.get("where") or []) + ([f"business_date=={day}"] if day else []),
+                                    sort=sort, descending=descending,
                                     limit=_clamp(args.get("limit"), 20, LIST_LIMIT), offset=0)
     out["window"] = {"start": since.isoformat(), "end": until.isoformat()}
     if notes:

@@ -51,7 +51,7 @@ def test_the_ranked_table_is_rendered_from_the_rows_in_the_servers_order():
     assert lines[2] == "| item number | ItemDescription | releases | units short |"
     assert lines[4] == "| 104607 | POTATO AGRIA | 25 | 809 |"
     assert lines[5] == "| 100622 | MILK SEMI SKIMMED _2ltr | 38 | 329 |"
-    assert lines[7] == "| 104516 | CABBAGE WHITE | 7 | 92.584545 |"
+    assert lines[7] == "| 104516 | CABBAGE WHITE | 7 | 92.58 |"
 
 
 def test_no_table_without_a_sort_or_without_rows():
@@ -66,7 +66,7 @@ def test_a_listing_is_rendered_too():
                                                  "looked_up": {"item description.ItemDescription": "POTATO AGRIA"}}]})
     table = ev.render([{"tool": "list_releases", "input": {"where": ["duration_s>300"]}, "result": listing}])
     assert table.startswith("From the data: 1 of 6 matching release(s).")
-    assert "| 550671 | SGIAMPORCA | 104607 | POTATO AGRIA | 10 | 9 | 750.819 |" in table
+    assert "| 550671 | SGIAMPORCA | 104607 | POTATO AGRIA | 10 | 9 | 750.82 |" in table
 
 
 def test_the_models_own_table_and_ranked_list_are_dropped_and_the_sentences_kept():
@@ -94,3 +94,13 @@ def test_the_same_rows_come_out_as_data_for_a_card():
     assert data["link"] == "https://eye.example/matrix/releases"
     # the markdown table and the data table show the same cells
     assert "| 104607 | POTATO AGRIA | 25 | 809 |" in ev.render(trace)
+
+
+def test_a_day_trend_is_rendered_without_a_sort_with_the_deliveries_column():
+    result = json.dumps({"group_by": ["day"], "sort": {"by": "day", "dir": "asc"}, "total_rows": 3,
+                         "rows": [{"dimensions": ["2026-09-25"], "rows": 1, "deliveries": 1}, {"dimensions": ["2026-09-26"], "rows": 2, "deliveries": 2}]})
+    table = ev.render([{"tool": "aggregate_releases", "input": {"group_by": ["day"]}, "result": result}])
+    assert table.splitlines()[2] == "| day | releases | deliveries |"
+    assert table.splitlines()[4] == "| 2026-09-25 | 1 | 1 |"
+    data = ev.structured([{"tool": "aggregate_releases", "input": {"group_by": ["day"]}, "result": result}])
+    assert data["columns"][-1] == {"name": "deliveries", "align": "right"} and data["rows"][1] == ["2026-09-26", "2", "2"]

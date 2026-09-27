@@ -132,7 +132,7 @@ async def test_aggregate_releases_takes_stats_and_clamps_the_window():
             "group_by": ["user_name"], "stat": ["median:expected", "distinct:delivery_number"],
             "start": (T0 - timedelta(days=400)).isoformat(), "end": (T0 + timedelta(hours=2)).isoformat()}, CC)
     by = {r["dimensions"][0]: r for r in out["rows"]}
-    assert by["DBOBOC"]["median_expected"] == "7" and by["DBOBOC"]["distinct_delivery_number"] == 2
+    assert by["DBOBOC"]["median_expected"] == "7" and by["DBOBOC"]["deliveries"] == 2
     assert out["notes"] and "clamped" in out["notes"][0]
 
 
@@ -304,7 +304,7 @@ async def test_a_sum_stat_no_longer_refuses_the_whole_call():
     async with async_session() as db:
         out = json.loads(await agent_tools.run_release_tool(
             "aggregate_releases", {"group_by": ["user_name"], "stat": ["sum:picked", "median:expected"], **_window()}, db, CC))
-    assert "problems" not in out and out["stats"] == ["median_expected"]
+    assert "problems" not in out and out["stats"] == ["median_expected", "deliveries"]
     assert any("'sum:picked' dropped" in n for n in out["notes"])
 
 
@@ -432,3 +432,42 @@ async def test_the_result_carries_the_evidence_as_data_with_the_page_link(monkey
     data = result["evidence_data"]
     assert data["rows"] == [["100230", "2", "10"], ["104568", "1", "1"]] and data["link"] == "https://eye.example/matrix/releases"
     assert data["columns"][-1] == {"name": "units short", "align": "right"}
+
+
+def test_a_direction_written_into_the_sort_string_is_understood():
+    """A live question spent two refused rounds on sort="calls desc" before it found sort="picked"."""
+    assert agent_tools._sort_words("calls desc", None) == ("calls", True)
+    assert agent_tools._sort_words("duration_s asc", "desc") == ("duration_s", False)
+    assert agent_tools._sort_words("picked", "asc") == ("picked", False)
+    assert agent_tools._sort_words(None, None) == (None, True)
+    assert agent_tools._sort_words("units short", None) == ("units short", True)
+
+
+async def test_day_is_resolved_on_the_warehouse_clock_into_a_business_date_filter(monkeypatch):
+    """"yesterday" is the day before today in Europe/London, never the model's arithmetic."""
+    await _plant()
+    import app.services.analytics_agent.tools as tools_mod
+
+    class FixedNow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 19, 0, 30, tzinfo=timezone.utc).astimezone(tz)  # 01:30 on 19 Sep in London
+    monkeypatch.setattr(tools_mod, "datetime", FixedNow)
+    async with async_session() as db:
+        out = await tools_mod.aggregate_releases(db, {"group_by": ["user_name"], "day": "yesterday"}, CC)
+        bad = json.loads(await tools_mod.run_release_tool("aggregate_releases", {"day": "last tuesday"}, db, CC))
+    assert out["notes"][0].startswith("day yesterday is 2026-09-18")
+    assert out["total_rows"] == 4                       # every planted release is on 18 Sep
+    assert "`day` must be today, yesterday or YYYY-MM-DD" in bad["error"]
+
+
+async def test_deliveries_are_counted_on_every_aggregate_and_a_day_trend_reads_in_time_order():
+    """A live question about deliveries per day came back as pickers by volume. Every aggregate now
+    carries a deliveries count, a day grouping comes back oldest first, and the recipe is spelled out."""
+    await _plant()
+    async with async_session() as db:
+        out = await agent_tools.aggregate_releases(db, {"group_by": ["day"], **_window()}, CC)
+        described = await agent_tools.describe_releases(db, {}, CC)
+    assert out["sort"] == {"by": "day", "dir": "asc"} and out["rows"][0]["deliveries"] == 2 and out["rows"][0]["rows"] == 4
+    assert "deliveries" in out["stats"] and "distinct_delivery_number" not in out["rows"][0]
+    assert any(r["question"].startswith("trend of deliveries per day") and r["call"]["group_by"] == ["day"] for r in described["recipes"])

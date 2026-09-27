@@ -97,12 +97,16 @@ def _label(name: str) -> str:
 
 
 def _cell(value) -> str:
+    """A cell as a person reads it: whole numbers plain, fractions to two decimals (683.108138 is
+    noise on a card), text as it is."""
     if value is None:
         return ""
     if isinstance(value, str):
         d = _decimal(value)
         if d is not None:
-            return format(d.normalize(), "f") if d != d.to_integral_value() else str(int(d))
+            if d == d.to_integral_value():
+                return str(int(d))
+            return format(d.quantize(Decimal("0.01")).normalize(), "f")
         return value
     return str(value)
 
@@ -138,11 +142,16 @@ def render(trace: list[dict], max_rows: int | None = None) -> str | None:
         except (TypeError, ValueError):
             n = max_rows or DEFAULT_ROWS
         if t["tool"] == "aggregate_releases":
-            if not (t.get("input") or {}).get("sort"):
+            if not (t.get("input") or {}).get("sort") and not _is_trend(result):
                 continue
-            return _aggregate_table(result, n)
+            return _aggregate_table(result, n if (t.get("input") or {}).get("sort") else MAX_ROWS)
         return _list_table(result, n)
     return None
+
+
+def _is_trend(result: dict) -> bool:
+    """Grouped by a time bucket: a table of every bucket in time order is the answer."""
+    return any(g in ("day", "hour", "hour_start", "week", "business_date") for g in result.get("group_by") or [])
 
 
 def _aggregate_table(result: dict, max_rows: int) -> str:
@@ -156,12 +165,17 @@ def _aggregate_table(result: dict, max_rows: int) -> str:
     if by == "units_short":
         columns.append("units short")
         key = "shortfall"
-    elif by not in ("rows", "calls") and by:
+    elif by not in ("rows", "calls", *(result.get("group_by") or [])) and by:
         columns.append(_label(by))
         key = by
+    show_deliveries = key is None and any("deliveries" in r for r in result["rows"])
+    if show_deliveries:
+        columns.append("deliveries")
     lines = ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
     for r in result["rows"][:max_rows]:
         cells = [_cell(d) for d in r.get("dimensions", [])] + [_cell(r.get("rows"))]
+        if show_deliveries:
+            cells.append(_cell(r.get("deliveries")))
         if key:
             v = r.get(key)
             if by == "units_short" and v is not None:
@@ -215,9 +229,9 @@ def structured(trace: list[dict], max_rows: int | None = None, *, link: str | No
         except (TypeError, ValueError):
             n = max_rows or DEFAULT_ROWS
         if t["tool"] == "aggregate_releases":
-            if not (t.get("input") or {}).get("sort"):
+            if not (t.get("input") or {}).get("sort") and not _is_trend(result):
                 continue
-            out = _aggregate_data(result, n)
+            out = _aggregate_data(result, n if (t.get("input") or {}).get("sort") else MAX_ROWS)
         else:
             out = _list_data(result, n)
         if link:
@@ -242,12 +256,17 @@ def _aggregate_data(result: dict, max_rows: int) -> dict:
     if by == "units_short":
         columns.append({"name": "units short", "align": "right"})
         key = "shortfall"
-    elif by not in ("rows", "calls") and by:
+    elif by not in ("rows", "calls", *(result.get("group_by") or [])) and by:
         columns.append({"name": _label(by), "align": "right"})
         key = by
+    show_deliveries = key is None and any("deliveries" in r for r in result["rows"])
+    if show_deliveries:
+        columns.append({"name": "deliveries", "align": "right"})
     rows = []
     for r in result["rows"][:max_rows]:
         cells = [_cell(d) for d in r.get("dimensions", [])] + [_cell(r.get("rows"))]
+        if show_deliveries:
+            cells.append(_cell(r.get("deliveries")))
         if key:
             v = r.get(key)
             if by == "units_short" and v is not None:
