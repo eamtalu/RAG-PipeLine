@@ -46,3 +46,8 @@ httpx>=0.27
 
 # --- Microsoft Teams bot consumer: SQS receive + DynamoDB binding mirror to the AWS edge ---
 boto3>=1.40
+
+# --- Analytics agent on LangGraph (chunk 124), provider chosen by ANALYTICS_AGENT_MODEL ---
+langchain>=1.0
+langgraph>=1.0
+langchain-ollama>=1.0

@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -382,6 +383,16 @@ class Settings(BaseSettings):
     # Retries the Anthropic client performs itself on 429/5xx/connection errors (exponential backoff).
     # Several Teams questions run concurrently and share one rate limit, so this is not optional.
     log_agent_max_retries: int = 4
+
+    # --- Analytics agent on LangGraph (chunk 124): provider-neutral, one string picks the model ---
+    # "ollama:qwen3:8b" for local testing (Ollama on a laptop, reached through an SSH tunnel to
+    # localhost:11434), "anthropic:claude-sonnet-5", "openai:gpt-…" or "bedrock:…" for production.
+    analytics_agent_model: str = "ollama:qwen3:8b"
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    analytics_agent_max_iterations: int = 10      # tool-call rounds before the agent must answer
+    analytics_agent_max_tokens: int = 4000
+    # Which agent answers Teams questions: the LangGraph one (any provider) or the Claude one.
+    teams_agent: Literal["langgraph", "claude"] = "langgraph"
 
     # --- Microsoft Teams bot (edge on AWS -> SQS -> consumer here -> HTTP answer back to the edge) ---
     # The consumer is its OWN process (`python -m app.teams_consumer`), not one of the singleton

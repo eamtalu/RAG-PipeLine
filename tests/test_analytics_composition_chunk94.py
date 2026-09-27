@@ -54,7 +54,9 @@ from app.services.analytics import payload as p
 from app.services.analytics.contract import QUANTITY_FIELD as QF
 
 CC = "test_chunk94"
-T0 = datetime(2026, 9, 10, 9, 0, tzinfo=timezone.utc)
+# Relative, not fixed: "recent" is the last 14 days from NOW, so a fixed T0 aged out of the window
+# two weeks after it was written and the frequency tests failed on the calendar.
+T0 = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(days=1)
 WIDE = timedelta(hours=6)
 
 MODELS = (AnalyticsHourlyRollup, AnalyticsDailyRollup, AnalyticsMonthlyRollup, AnalyticsFact,

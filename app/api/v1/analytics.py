@@ -56,6 +56,7 @@ from app.services.analytics import lookup as lookup_model
 from app.services.analytics import lookup_store
 from app.services.analytics import settle as settle_model
 from app.services.analytics import settle_query
+from app.services.analytics import settle_reads
 from app.services.analytics import settle_store
 from app.services.analytics import read as n6
 from app.services.analytics import reconcile as rc
@@ -1708,26 +1709,12 @@ async def preview_settlement_key(name: str, key: list[str] = Query(...),
                                  db: AsyncSession = Depends(get_session)):
     """One key: its calls on one side and the row they settle to on the other, computed live from
     the calls so it is right before any fold has run. This is how somebody checks a rule."""
-    row = await _settlement_row(db, customer, name)
-    declared = settle_store.from_json(name, row.definition or {})
-    if len(key) != len(declared.key):
-        raise HTTPException(400, detail=f"this settlement's key has {len(declared.key)} part(s): "
-                                        f"{list(declared.key)}")
-    calls, settled = await settle_store.read_key(db, customer, declared, tuple(key))
-    shown = []
-    for c in calls:
-        entry = {"event_time": c["event_time"].isoformat() if c.get("event_time") else None,
-                 "status": c.get("status"), "classification": c.get("quantity_classification")}
-        for v in declared.values:
-            if v.field and contract.is_attr_path(v.field):
-                entry[contract.attr_key(v.field)] = (c.get("attributes") or {}).get(contract.attr_key(v.field))
-        shown.append(entry)
-    return {"settlement": name, "key": list(key), "calls": shown,
-            "settled": None if settled is None else {
-                "event_time": settled.event_time.isoformat() if settled.event_time else None,
-                "carried": {k: settle_store._stringify(v) for k, v in settled.carried.items()},
-                "values": {k: settle_store._stringify(v) for k, v in settled.values.items()},
-                "calls": settled.calls}}
+    try:
+        return await settle_reads.explained(db, customer, name, list(key))
+    except settle_reads.UnknownSettlement as exc:
+        raise HTTPException(404, detail=str(exc)) from None
+    except settle_reads.ReadProblem as exc:
+        raise HTTPException(400, detail=exc.problems[0]) from None
 
 
 @router.get("/settlements/{name}/list")
@@ -1746,46 +1733,15 @@ async def list_settlement_rows(name: str,
     "show me the rows", which is the other half of seeing the data.
 
     `where=picked==0` keeps only the zero-picks; `sort=duration_s&dir=desc` puts the longest line
-    first. Chunk 120."""
-    row = await _settlement_row(db, customer, name)
-    declared = settle_store.from_json(name, row.definition or {})
-    filters, sort, direction = _parse_filters(where), _query_str(sort), _query_str(dir, "desc")
-    problems = settle_query.validate(declared, filters=filters, sort=sort)
-    if problems:
-        raise HTTPException(400, detail=problems)
-    rows, total = await settle_store.list_rows(db, customer, declared, since=start, until=end,
-                                               search=search, limit=limit, offset=offset,
-                                               filters=filters, sort=sort, descending=direction != "asc")
-
-    # What a lookup can reach from a carried key, resolved for THESE rows only. A settled row
-    # carries the delivery number and the item number and nothing else about them, exactly as a
-    # fact does; the customer name and the item description live in the lookups. Listing the rows
-    # without them would show the person the keys and hide the names, which is the opposite of
-    # what "show me the data" means.
-    carried = {c.split(":", 1)[1] if contract.is_attr_path(c) else c for c in declared.carry}
-    lookups = await lookup_store.load(db, customer)
-    reachable = [(lk, a.name) for lk in lookups.values() if lk.key_field in carried for a in lk.attributes]
-    looked_up_columns = [f"{lk.name}.{attr}" for lk, attr in reachable]
-    if reachable and rows:
-        needed: dict[str, set[str]] = {}
-        for lk, _attr in reachable:
-            for r in rows:
-                key = r.get(lk.key_field) or (r.get("attributes") or {}).get(lk.key_field)
-                if key:
-                    needed.setdefault(lk.name, set()).add(str(key))
-        resolver = await lookup_store.resolver(db, customer, needed,
-                                               tuple((lk.name, attr) for lk, attr in reachable))
-        now = datetime.now(timezone.utc)
-        for r in rows:
-            at = datetime.fromisoformat(r["event_time"]) if r.get("event_time") else now
-            r["looked_up"] = {}
-            for lk, attr in reachable:
-                key = r.get(lk.key_field) or (r.get("attributes") or {}).get(lk.key_field)
-                r["looked_up"][f"{lk.name}.{attr}"] = (
-                    resolver.value(lk.name, str(key), attr, at) if key else None)
-    return {"settlement": name, "key": list(declared.key), "carry": list(declared.carry),
-            "values": [v.name for v in declared.values], "looked_up": looked_up_columns,
-            "rows": rows, "total": total, "limit": limit, "offset": offset}
+    first. Chunk 120. The work is `settle_reads.listed`, shared with the agent's tools."""
+    try:
+        return await settle_reads.listed(db, customer, name, start=start, end=end, search=_query_str(search),
+                                         where=_query_list(where), sort=_query_str(sort),
+                                         descending=_query_str(dir, "desc") != "asc", limit=limit, offset=offset)
+    except settle_reads.UnknownSettlement as exc:
+        raise HTTPException(404, detail=str(exc)) from None
+    except settle_reads.ReadProblem as exc:
+        raise HTTPException(400, detail=exc.problems) from None
 
 
 def _query_list(value) -> list[str]:
@@ -1796,20 +1752,6 @@ def _query_list(value) -> list[str]:
 
 def _query_str(value, default=None):
     return value if isinstance(value, str) else default
-
-
-def _parse_filters(where: list[str]) -> tuple[settle_query.Filter, ...]:
-    try:
-        return tuple(settle_query.parse_filter(w) for w in _query_list(where))
-    except ValueError as exc:
-        raise HTTPException(400, detail=[str(exc)]) from None
-
-
-def _parse_stats(stat: list[str]) -> tuple[settle_query.Stat, ...]:
-    try:
-        return tuple(settle_query.parse_stat(x) for x in _query_list(stat))
-    except ValueError as exc:
-        raise HTTPException(400, detail=[str(exc)]) from None
 
 
 @router.get("/settlements/{name}/rows")
@@ -1827,55 +1769,12 @@ async def read_settlement_rows(name: str,
     stands between the reader and the rows; one row per release is already the aggregation.
 
     Chunk 120: `where=is_short==1` filters; `stat=median:duration_s` and `stat=distinct:user_name`
-    add a per-group statistic; `group_by=hour_start` buckets by the tenant's clock."""
-    row = await _settlement_row(db, customer, name)
-    declared = settle_store.from_json(name, row.definition or {})
-    filters, stats = _parse_filters(where), _parse_stats(stat)
-    problems = settle_query.validate(declared, filters=filters, stats=stats,
-                                     group_by=tuple(g for g in group_by if not lookup_model.is_lookup_path(g)))
-    if problems:
-        raise HTTPException(400, detail=problems)
-    lookups = await lookup_store.load(db, customer)
+    add a per-group statistic; `group_by=hour_start` buckets by the tenant's clock. The work is
+    `settle_reads.grouped`, shared with the agent's tools."""
     try:
-        translation = lookup_model.plan(tuple(group_by), lookups)
-    except ValueError as exc:
-        raise HTTPException(400, detail=str(exc)) from None
-    grouped = await settle_store.read_grouped(db, customer, declared,
-                                              group_by=translation.stored_group_by,
-                                              since=start, until=end, limit=limit,
-                                              filters=filters, stats=stats,
-                                              tz=ZoneInfo(await get_customer_timezone(db, customer)))
-    numeric = [k for k in (grouped[0].keys() if grouped else []) if k not in ("dimensions",)]
-    # `translate` re-keys `(instant, dims)` pairs and reads each lookup as at that instant, because
-    # a metric's points are time buckets. A grouped read over settled rows has one instant: the end
-    # of the window, or now, so a customer's name is the one it has as things stand.
-    as_at = end or datetime.now(timezone.utc)
-    points = {(as_at, tuple(g["dimensions"])): {k: g[k] for k in numeric} for g in grouped}
-    if translation.translates and points:
-        resolver = await lookup_store.resolver(
-            db, customer, translation.keys_needed(points),
-            tuple(step for step in translation.steps if step is not None))
-
-        def _merge(a: dict, b: dict) -> dict:
-            """Two groups that resolve to one label: counts add as ints, settled values add as the
-            strings they are stored as, and an absent side contributes nothing."""
-            out = {}
-            for k in set(a) | set(b):
-                x, y = a.get(k), b.get(k)
-                if x is None or y is None:
-                    out[k] = x if y is None else y
-                elif isinstance(x, int) and isinstance(y, int):
-                    out[k] = x + y
-                else:
-                    out[k] = format((Decimal(str(x)) + Decimal(str(y))).normalize(), "f")
-            return out
-        points = lookup_model.translate(points, translation, resolver, merge=_merge)
-    # Grouped by its own key a settlement has as many groups as rows - 6,252 on the live tenant -
-    # and a silent cap would drop whole releases from the bottom of a drill-down. So the cap is
-    # high, and hitting it is reported rather than hidden.
-    return {"settlement": name, "group_by": list(group_by),
-            "values": [v.name for v in declared.values],
-            "stats": [s.label for s in stats],
-            "truncated": len(grouped) >= limit,
-            "rows": [{"dimensions": [d.replace(settle_store.KEY_SEP, " · ") if isinstance(d, str) else d
-                                     for d in dims], **v} for (_at, dims), v in points.items()]}
+        return await settle_reads.grouped(db, customer, name, group_by=_query_list(group_by), start=start, end=end,
+                                          where=_query_list(where), stat=_query_list(stat), limit=limit)
+    except settle_reads.UnknownSettlement as exc:
+        raise HTTPException(404, detail=str(exc)) from None
+    except settle_reads.ReadProblem as exc:
+        raise HTTPException(400, detail=exc.problems) from None

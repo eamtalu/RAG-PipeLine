@@ -15,6 +15,7 @@ import boto3
 from app.background import setup_logging
 from app.config.database import async_session, engine
 from app.persistence.repositories.customer_repository import CustomerRepository
+from app.services.analytics_agent.agent import AnalyticsAgent
 from app.services.log_agent.agent import LogDebugAgent
 from app.services.teams.binding_mirror import build_mirror_from_settings
 from app.services.teams.binding_sweep import sweep_once
@@ -26,8 +27,12 @@ logger = logging.getLogger(__name__)
 
 
 async def _run_agent(customer_code: str, question: str, history: list[dict]) -> dict:
+    """Which agent answers is one setting: the LangGraph one runs on any provider (Ollama, Claude,
+    OpenAI, Bedrock); the Claude one needs an Anthropic key. Same signature, same result shape."""
     async with async_session() as db:
-        return await LogDebugAgent(db, customer_code).ask(question, history=history)
+        if settings.teams_agent == "claude":
+            return await LogDebugAgent(db, customer_code).ask(question, history=history)
+        return await AnalyticsAgent(db, customer_code).ask(question, history=history)
 
 
 async def _load_history(conversation_id: str, customer_code: str) -> list[dict]:
