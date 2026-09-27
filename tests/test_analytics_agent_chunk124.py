@@ -373,3 +373,34 @@ async def test_a_plain_sentence_without_figures_is_never_withheld():
     async with async_session() as db:
         result = await AnalyticsAgent(db, CC, model=model).ask("what can you do?")
     assert result["stop_reason"] == "end_turn"
+
+
+# ==================================================== 7. figures checked, tables from the rows
+
+async def test_a_figure_no_tool_returned_is_withheld_by_name():
+    await _plant()
+    model = _scripted(
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "aggregate_releases", "args": {"group_by": ["item_number"], "where": ["shortfall<0"], **_window()}}]),
+        AIMessage(content="Two items were short, 100230 by 10 units and 104568 by 1; overall 2,000 units were short."),
+    )
+    async with async_session() as db:
+        result = await AnalyticsAgent(db, CC, model=model).ask("which products were short?")
+    assert result["stop_reason"] == "withheld" and result["withheld_figures"] == ["2,000"]
+    assert result["answer"].startswith("I could not verify these figures") and "2,000" in result["answer"]
+
+
+async def test_a_top_n_answer_carries_the_table_from_the_rows_not_the_models_own():
+    await _plant()
+    model = _scripted(
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "aggregate_releases",
+                                           "args": {"group_by": ["item_number"], "where": ["shortfall<0"], "sort": "shortfall", "dir": "asc", **_window()}}]),
+        AIMessage(content="The most short items:\n\n| item | short |\n|---|---|\n| 104568 | 1 |\n| 100230 | 10 |\n\nAcross 3 releases."),
+    )
+    async with async_session() as db:
+        result = await AnalyticsAgent(db, CC, model=model).ask("top 2 shorted items")
+    assert result["stop_reason"] == "end_turn"
+    assert "| item | short |" not in result["answer"]             # the model's table, in the wrong order, is gone
+    assert result["evidence"].startswith("From the data: 2 group(s), sorted by shortfall asc")
+    lines = result["answer"].splitlines()
+    assert lines[-2] == "| 100230 | 2 | 10 | 4 | 14 |" and lines[-1] == "| 104568 | 1 | 1 | 9 | 10 |"
+    assert result["answer"].startswith("The most short items:")

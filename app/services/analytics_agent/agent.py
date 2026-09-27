@@ -24,6 +24,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langgraph.errors import GraphRecursionError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.analytics_agent import evidence
 from app.services.analytics_agent.tools import build_tools
 from app.settings import settings
 
@@ -143,14 +144,30 @@ class AnalyticsAgent:
         for t in trace:
             logger.info("agent tool %s %s -> %s", t["tool"], _short(t["input"]), t["result_preview"][:160])
         fabricated = _looks_fabricated(answer, trace)
+        withheld_figures: list[str] = []
+        table: str | None = None
         if fabricated:
             logger.warning("agent answer withheld for %s: figures with no successful data call: %s",
                            self.customer_code, answer[:200])
             answer = fabricated
             stop_reason = "withheld"
+        else:
+            # Chunk 125: every figure must be in a tool result; a ranked table comes from the rows.
+            results = [t["result"] for t in trace if not t["result"].lstrip().startswith('{"error"')]
+            withheld_figures = evidence.ungrounded(answer, results, question)
+            if withheld_figures:
+                logger.warning("agent answer withheld for %s: figures not in any tool result %s: %s",
+                               self.customer_code, withheld_figures, answer[:200])
+                answer = ("I could not verify these figures against the data, so I am not giving them: "
+                          + ", ".join(withheld_figures) + ". Ask again more narrowly, or ask me to show the rows.")
+                stop_reason = "withheld"
+            table = evidence.render(trace)
+            if table:
+                answer = (evidence.strip_tables(answer) + "\n\n" + table).strip()
         return {"answer": answer, "stop_reason": stop_reason,
                 "tool_calls": [{"tool": t["tool"], "input": t["input"]} for t in trace],
-                "iterations": len(trace), "model": self.model_name}
+                "iterations": len(trace), "model": self.model_name,
+                "evidence": table, "withheld_figures": withheld_figures}
 
 
 #: Tools that describe the schema rather than read data. A numeric answer resting only on these
