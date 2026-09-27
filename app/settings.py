@@ -379,6 +379,24 @@ class Settings(BaseSettings):
     log_agent_model: str = "claude-opus-4-8"
     log_agent_max_tokens: int = 8000
     log_agent_max_iterations: int = 12  # safety cap on the tool-use loop
+    # Retries the Anthropic client performs itself on 429/5xx/connection errors (exponential backoff).
+    # Several Teams questions run concurrently and share one rate limit, so this is not optional.
+    log_agent_max_retries: int = 4
+
+    # --- Microsoft Teams bot (edge on AWS -> SQS -> consumer here -> HTTP answer back to the edge) ---
+    # The consumer is its OWN process (`python -m app.teams_consumer`), not one of the singleton
+    # worker's loops, so it can run more than one copy; SQS hands each copy different messages.
+    teams_sqs_queue_url: str = ""                 # empty = Teams integration off
+    teams_aws_region: str = "eu-west-2"
+    teams_aws_endpoint_url: str = ""              # LocalStack / moto server for local runs
+    teams_edge_dynamodb_table: str = ""           # the edge's single table; bindings are mirrored here
+    teams_edge_answers_url: str = ""              # https://<edge>/internal/answers
+    teams_edge_shared_secret: str = ""            # X-Edge-Secret the edge expects
+    teams_consumer_concurrency: int = 4           # agent runs in flight per consumer process
+    teams_sqs_visibility_seconds: int = 600       # must exceed the slowest agent run; extended while running
+    teams_sqs_wait_seconds: int = 20              # long-poll wait (SQS max)
+    teams_history_turns: int = 6                  # prior turns replayed to the agent (3 exchanges)
+    teams_binding_mirror_sweep_seconds: float = 60.0  # how often the consumer re-pushes stale bindings
 
     # --- Notifications (rules → in-process bus → channels: Teams/Slack/WhatsApp) ---
     # Background worker: evaluates rules over recently-finalized transactions, publishes events to

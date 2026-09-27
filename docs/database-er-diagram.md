@@ -37,7 +37,7 @@ The schema is built around two "spines" that hold everything together.
    Deleting a job cascades and deletes all of its derived rows (chunks, entities, embedding queue items, log entries, log transactions).
 2. **The tenant spine: `customer_code`.**
    Nearly every table carries a `customer_code` string so data is partitioned per customer.
-   It is enforced as a foreign key only from `customer_display_names` and `logspace_presence` into `customers`; everywhere else it is a soft convention.
+   It is enforced as a foreign key only from `customer_display_names`, `logspace_presence` and `teams_tenant_bindings` into `customers`; everywhere else it is a soft convention.
 
 The tables fall into eight subsystems: RAG documents/embeddings, WMS log ingestion, remote SSH log fetching, the customer registry, saved views, notifications, idempotency keys, and the warehouse analytics platform.
 
@@ -65,6 +65,7 @@ erDiagram
 
     customers ||--o{ customer_display_names : "aliases"
     customers ||--o{ logspace_presence : "presence"
+    customers ||--o{ teams_tenant_bindings : "Teams tenant"
 
     notification_events ||--o{ notification_deliveries : "fans out to"
     customer_notification_channels ||--o{ notification_deliveries : "sent via"
@@ -73,13 +74,15 @@ erDiagram
 ### Tenant partitioning (`customer_code`, soft links)
 
 `customer_code` is the multi-tenant key.
-It is a real foreign key only from `customer_display_names` and `logspace_presence` to `customers` (solid lines below).
+It is a real foreign key only from `customer_display_names`, `logspace_presence` and `teams_tenant_bindings` to `customers` (solid lines below).
 On every other table it is a soft convention with no constraint (dashed lines below).
 
 ```mermaid
 erDiagram
     customers ||--o{ customer_display_names : "FK (enforced)"
     customers ||--o{ logspace_presence : "FK (enforced)"
+    customers ||--o{ teams_tenant_bindings : "FK (enforced)"
+    customers ||..o{ teams_conversation_turns : "soft"
 
     customers ||..o{ jobs : "tenant key (soft)"
     customers ||..o{ log_entries : "tenant key (soft)"
@@ -1092,6 +1095,48 @@ Allowing a NULL there would mean a row that no bucket owns, sitting in a `DEFAUL
 
 Every partitioned table still gets a `DEFAULT` partition, but here it is insurance against a key falling outside the provisioned runway rather than against a NULL.
 
+## Subsystem 9: Microsoft Teams bot
+
+The Teams bot is one Microsoft registration serving many customer organisations.
+Every message carries the sender's Entra tenant id, set by Microsoft, and `teams_tenant_bindings` turns that id into a `customer_code`, the only key the debugging agent understands.
+Postgres is the source of truth; the bot edge on AWS reads a mirrored DynamoDB copy, and `mirrored_at` older than `updated_at` means the consumer must push the row again.
+`teams_conversation_turns` keeps the last questions and answers per Teams conversation so a follow-up question carries context.
+The binding's `customer_code` is an enforced foreign key: a binding to a missing log space must fail at write time.
+The turns carry the soft tenant key like the log tables, so a tenant purge can remove them and a turn can never be replayed into another tenant's question.
+
+```mermaid
+erDiagram
+    customers {
+        string customer_code UK
+    }
+
+    teams_tenant_bindings {
+        uuid id PK
+        string tenant_id UK "Entra tenant GUID"
+        string customer_code FK "-> customers.customer_code (CASCADE)"
+        bool enabled "false switches the bot off for the tenant"
+        string display_name
+        string created_by
+        datetime mirrored_at "when the edge copy last matched; NULL = never"
+        datetime created_at
+        datetime updated_at
+    }
+
+    teams_conversation_turns {
+        uuid id PK
+        string conversation_id "Teams conversation id; indexed with created_at"
+        string customer_code "soft tenant key"
+        string role "user | assistant"
+        smallint position "0 question, 1 answer; orders within one instant"
+        text content
+        string job_id "edge job that produced it"
+        datetime created_at
+    }
+
+    customers ||--o{ teams_tenant_bindings : "is answered from"
+    customers ||..o{ teams_conversation_turns : "tenant of"
+```
+
 ## Full relationship reference
 
 ### Enforced foreign keys (solid lines)
@@ -1110,6 +1155,7 @@ Every partitioned table still gets a `DEFAULT` partition, but here it is insuran
 | `log_ssh_sources.id` | `log_ssh_file_checkpoints.source_id` | CASCADE |
 | `customers.customer_code` | `customer_display_names.customer_code` | CASCADE |
 | `customers.customer_code` | `logspace_presence.customer_code` | CASCADE |
+| `customers.customer_code` | `teams_tenant_bindings.customer_code` | CASCADE |
 | `notification_events.id` | `notification_deliveries.event_id` | CASCADE |
 | `customer_notification_channels.id` | `notification_deliveries.channel_id` | SET NULL |
 
@@ -1119,7 +1165,7 @@ The nine `analytics_*` tables add **no rows to this table**. They have no enforc
 
 | Logical parent | Referencing column | Meaning |
 | --- | --- | --- |
-| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, the notification tables, and all nine `analytics_*` tables | tenant partition key |
+| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, the notification tables, and all nine `analytics_*` tables | tenant partition key |
 | `analytics_metrics.id` | `definition_id` on the three rollup tables | which definition a rollup row belongs to; no FK because a FK from a partitioned child made the log partitions undroppable once already |
 | `log_transactions.id` | `analytics_facts.source_transaction_id` | which transaction this fact was derived from; no FK, and deliberately survives the transaction being dropped at 60 days |
 | `log_transactions.id` | `analytics_fact_ledger.source_transaction_id` | same, per version |

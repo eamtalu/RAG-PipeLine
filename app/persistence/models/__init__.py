@@ -47,6 +47,8 @@ from app.persistence.models.analytics_rollup import (AnalyticsHourlyRollup, Anal
                                                      AnalyticsMonthlyRollup, DIMENSION_SLOTS)
 from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
 from app.persistence.models.analytics_quality_issue import AnalyticsQualityIssue
+from app.persistence.models.teams_binding import TeamsTenantBinding
+from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
 
 __all__ = [
     "Base",
@@ -97,4 +99,7 @@ __all__ = [
     # --- stage 2 stream state (S4) ---
     "LogOpenStream",
     "LogPendingRequest",
+    # --- Teams bot (tenant binding + conversation memory) ---
+    "TeamsTenantBinding",
+    "TeamsConversationTurn",
 ]

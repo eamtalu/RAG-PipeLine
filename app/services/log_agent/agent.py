@@ -60,23 +60,62 @@ snapshot per response, not units picked. Transaction-source metrics such as `con
 ones about movement."""
 
 
+# Prompt caching: the system prompt and the tool definitions are identical on every call, and a
+# question makes up to a dozen calls. Marking them cacheable means only the growing message list is
+# billed at full input price after the first call. The marker goes on the LAST tool because the
+# cache prefix runs tools -> system -> messages, so one breakpoint after the tools covers both.
+_CACHED_SYSTEM: list[dict] = [
+    {"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+]
+_CACHED_TOOLS: list[dict] = [*TOOLS[:-1], {**TOOLS[-1], "cache_control": {"type": "ephemeral"}}]
+
+
+def _history_as_messages(history: list[dict] | None) -> list[dict]:
+    """Validate prior turns into alternating text messages. Drops anything malformed rather than
+    letting one bad row make the whole question fail; the API rejects two consecutive same-role
+    turns, so a same-role run is collapsed onto the earlier one."""
+    out: list[dict] = []
+    for turn in history or []:
+        role = turn.get("role")
+        content = (turn.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        if out and out[-1]["role"] == role:
+            out[-1]["content"] += "\n\n" + content
+            continue
+        out.append({"role": role, "content": content})
+    # a history must start with the user and end with the assistant to precede the new question
+    if out and out[0]["role"] != "user":
+        out.pop(0)
+    if out and out[-1]["role"] != "assistant":
+        out.pop()
+    return out
+
+
 class LogDebugAgent:
     """Runs the tool-use loop for a single question against a request-scoped DB session."""
 
     def __init__(self, db: AsyncSession, customer_code: str):
         self.db = db
         self.customer_code = customer_code  # every tool call is hard-scoped to this tenant
-        self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
+        self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None,
+                                               max_retries=settings.log_agent_max_retries)
 
-    async def ask(self, question: str) -> dict:
-        """Answer one question. Returns the final text plus a trace of tool calls made."""
+    async def ask(self, question: str, history: list[dict] | None = None) -> dict:
+        """Answer one question. Returns the final text plus a trace of tool calls made.
+
+        `history` is optional prior turns of the same conversation, oldest first, as
+        {"role": "user"|"assistant", "content": str}. The web endpoint passes none (one question, one
+        answer, as before); the Teams consumer passes the last few so follow-ups carry context. Only
+        plain text is replayed, never earlier tool calls, so the model re-reads the data fresh.
+        """
         if not settings.anthropic_api_key:
             raise RuntimeError(
                 "anthropic_api_key is not configured — set it in .env to use the debugging agent."
             )
 
         today = date.today().isoformat()
-        messages: list[dict] = [
+        messages: list[dict] = _history_as_messages(history) + [
             {"role": "user", "content": f"(Today is {today}.)\n\n{question}"}
         ]
         tool_calls: list[dict] = []
@@ -86,8 +125,8 @@ class LogDebugAgent:
                 model=settings.log_agent_model,
                 max_tokens=settings.log_agent_max_tokens,
                 thinking={"type": "adaptive"},
-                system=_SYSTEM_PROMPT,
-                tools=TOOLS,
+                system=_CACHED_SYSTEM,
+                tools=_CACHED_TOOLS,
                 messages=messages,
             )
 
@@ -120,7 +159,7 @@ class LogDebugAgent:
         final = await self.client.messages.create(
             model=settings.log_agent_model,
             max_tokens=settings.log_agent_max_tokens,
-            system=_SYSTEM_PROMPT,
+            system=_CACHED_SYSTEM,
             messages=messages + [{
                 "role": "user",
                 "content": "Stop investigating and answer now using what you already found. "

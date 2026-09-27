@@ -1,0 +1,39 @@
+# Teams question consumer: pulls QuestionJobs from SQS (outbound only, no inbound port), runs the
+# debugging agent, and posts the answer to the bot edge on AWS. Its OWN unit, separate from the
+# singleton background worker, so it can be scaled by running more instances (see the template
+# form below). Install once:
+#
+#   sudo cp deploy/fastapirag-teams-consumer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fastapirag-teams-consumer.service
+#
+# Required in /opt/RAG-Pipeline/RAG-PipeLine/.env: TEAMS_SQS_QUEUE_URL, TEAMS_EDGE_ANSWERS_URL,
+# TEAMS_EDGE_SHARED_SECRET, TEAMS_EDGE_DYNAMODB_TABLE, TEAMS_AWS_REGION.
+# AWS credentials must NOT go in .env (the app settings reject unknown keys there). Put them in
+# /etc/fastapirag/teams-consumer.env (root:amin, mode 640) as
+#   AWS_ACCESS_KEY_ID=...
+#   AWS_SECRET_ACCESS_KEY=...
+# and they reach only this process through EnvironmentFile below.
+#
+# To run a second copy on the same machine, copy this file to
+# fastapirag-teams-consumer@.service (unchanged body) and `systemctl enable --now
+# fastapirag-teams-consumer@2.service`.
+
+[Unit]
+Description=RAG Pipeline Teams question consumer (SQS -> debugging agent -> edge)
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=amin
+WorkingDirectory=/opt/RAG-Pipeline/RAG-PipeLine
+EnvironmentFile=/etc/fastapirag/teams-consumer.env
+ExecStart=/opt/RAG-Pipeline/RAG-PipeLine/venv/bin/python -m app.teams_consumer
+Restart=always
+RestartSec=5
+# let in-flight questions finish and their answers be posted before SIGKILL
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

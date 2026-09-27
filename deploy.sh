@@ -28,4 +28,9 @@ else
     echo "    Install it (see docs/background-workers-web-worker-split.md) before relying on polling."
 fi
 
+# Teams consumer: its own unit, only restarted when installed (see deploy/fastapirag-teams-consumer.service).
+if systemctl list-unit-files | grep -q '^fastapirag-teams-consumer\.service'; then
+    sudo systemctl restart fastapirag-teams-consumer.service
+fi
+
 echo "Deployed ✅"

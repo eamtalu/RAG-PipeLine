@@ -43,3 +43,6 @@ asyncssh>=2.14  # pulls in `cryptography` (Fernet used to encrypt stored key mat
 
 # --- Notifications: async HTTP client for posting alerts to Teams/Slack webhooks ---
 httpx>=0.27
+
+# --- Microsoft Teams bot consumer: SQS receive + DynamoDB binding mirror to the AWS edge ---
+boto3>=1.40
