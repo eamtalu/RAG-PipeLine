@@ -22,6 +22,7 @@ _NUMBER = re.compile(r"(?<![\w.\-/:])[-−]?\d[\d,]*(?:\.\d+)?%?(?![\w.\-/:])")
 _DATE_OR_TIME = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}(?::\d{2})?|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*", re.I)
 _ORDINAL = re.compile(r"^\s*\d+\.\s", re.M)
 _TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$", re.M)
+_LIST_LINE = re.compile(r"^\s*(?:\d+\.|[-*•])\s+.*$", re.M)
 _RESULT_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 SMALL = 31  # a bare integer up to this is a count, an ordinal, a day or a "top N": never withheld
@@ -107,8 +108,11 @@ def _cell(value) -> str:
 
 
 def strip_tables(text: str) -> str:
-    """The model's own markdown tables, removed; the sentences around them stay."""
+    """The model's own markdown tables and ranked lists, removed; the sentences around them stay.
+    When the rows are rendered from the data, a list the model wrote from the same rows is at best
+    a duplicate and, on the first Web Chat run, contradicted the table's order."""
     out = _TABLE_LINE.sub("", text)
+    out = _LIST_LINE.sub("", out)
     return re.sub(r"\n{3,}", "\n\n", out).strip()
 
 
@@ -145,29 +149,31 @@ def _aggregate_table(result: dict, max_rows: int) -> str:
     dims = [_label(g) for g in result.get("group_by") or []]
     sort = result.get("sort") or {}
     by, direction = sort.get("by", "rows"), sort.get("dir", "desc")
+    # Few columns on purpose: a Teams card is narrow and a customer name is long. The dimensions,
+    # the release count, and the one column the rows are sorted by.
     columns = list(dims) + ["releases"]
-    keys: list[str] = []
-    if by not in ("rows", "calls") and by:
-        columns.append("units short" if by == "shortfall" else _label(by))
-        keys.append(by)
-    for extra in ("shortfall", "picked", "expected"):
-        if extra != by and any(extra in r for r in result["rows"]):
-            columns.append(_label(extra))
-            keys.append(extra)
+    key = None
+    if by == "units_short":
+        columns.append("units short")
+        key = "shortfall"
+    elif by not in ("rows", "calls") and by:
+        columns.append(_label(by))
+        key = by
     lines = ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
     for r in result["rows"][:max_rows]:
         cells = [_cell(d) for d in r.get("dimensions", [])] + [_cell(r.get("rows"))]
-        for k in keys:
-            v = r.get(k)
-            if k == by == "shortfall" and v is not None:
+        if key:
+            v = r.get(key)
+            if by == "units_short" and v is not None:
                 d = _decimal(str(v))
-                v = format(-d.normalize(), "f") if d is not None and d < 0 else _cell(v)
+                v = _cell(str(-d)) if d is not None else _cell(v)
             cells.append(_cell(v))
         lines.append("| " + " | ".join(cells) + " |")
     window = result.get("window") or {}
-    caption = (f"From the data: {len(result['rows'])} group(s), sorted by {_label(by)} {direction}"
+    shown = min(len(result["rows"]), max_rows)
+    caption = (f"From the data: {shown} of {len(result['rows'])} group(s), sorted by {_label(by)} {direction}"
                f"{', ' + window['start'][:10] + ' to ' + window['end'][:10] if window else ''}"
-               f"; {result.get('total_rows', '')} releases in all.")
+               f"; {result.get('total_rows', '')} releases across the groups returned.")
     return caption + "\n\n" + "\n".join(lines)
 
 

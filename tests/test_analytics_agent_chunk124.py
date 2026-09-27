@@ -400,7 +400,20 @@ async def test_a_top_n_answer_carries_the_table_from_the_rows_not_the_models_own
         result = await AnalyticsAgent(db, CC, model=model).ask("top 2 shorted items")
     assert result["stop_reason"] == "end_turn"
     assert "| item | short |" not in result["answer"]             # the model's table, in the wrong order, is gone
-    assert result["evidence"].startswith("From the data: 2 group(s), sorted by shortfall asc")
+    assert result["evidence"].startswith("From the data: 2 of 2 group(s), sorted by shortfall asc")
     lines = result["answer"].splitlines()
-    assert lines[-2] == "| 100230 | 2 | 10 | 4 | 14 |" and lines[-1] == "| 104568 | 1 | 1 | 9 | 10 |"
+    assert lines[-2] == "| 100230 | 2 | -10 |" and lines[-1] == "| 104568 | 1 | -1 |"
     assert result["answer"].startswith("The most short items:")
+
+
+async def test_units_short_is_a_sort_the_model_can_name_and_shortfall_desc_on_short_rows_means_the_same():
+    """The first Web Chat run asked for shortfall descending over the short releases and got the ten
+    customers short by one unit as the 'top 10'. Both spellings now mean biggest shortfall first."""
+    await _plant()
+    async with async_session() as db:
+        named = await agent_tools.aggregate_releases(db, {"group_by": ["item_number"], "where": ["shortfall<0"], "sort": "units_short", **_window()}, CC)
+        flipped = await agent_tools.aggregate_releases(db, {"group_by": ["item_number"], "where": ["is_short==1"], "sort": "shortfall", "dir": "desc", **_window()}, CC)
+        plain = await agent_tools.aggregate_releases(db, {"group_by": ["item_number"], "sort": "shortfall", "dir": "desc", **_window()}, CC)
+    assert [r["dimensions"][0] for r in named["rows"]] == ["100230", "104568"] and named["sort"] == {"by": "units_short", "dir": "desc"}
+    assert [r["dimensions"][0] for r in flipped["rows"]] == ["100230", "104568"] and "biggest shortfall first" in flipped["notes"][0]
+    assert plain["rows"][0]["dimensions"][0] == "100606" and plain["sort"] == {"by": "shortfall", "dir": "desc"}

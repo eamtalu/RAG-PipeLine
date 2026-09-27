@@ -10,7 +10,7 @@ import json
 from app.services.analytics_agent import evidence as ev
 
 RESULT = json.dumps({
-    "group_by": ["item_number", "lookup:item description.ItemDescription"], "sort": {"by": "shortfall", "dir": "asc"},
+    "group_by": ["item_number", "lookup:item description.ItemDescription"], "sort": {"by": "units_short", "dir": "desc"},
     "window": {"start": "2026-09-20T00:00:00+00:00", "end": "2026-09-27T23:59:59+00:00"}, "total_rows": 93,
     "rows": [
         {"dimensions": ["104607", "POTATO AGRIA"], "rows": 25, "shortfall": "-809", "picked": "225", "expected": "1034"},
@@ -46,12 +46,12 @@ def test_the_ranked_table_is_rendered_from_the_rows_in_the_servers_order():
     trace = [{"tool": "describe_releases", "input": {}, "result": "{}"},
              {"tool": "aggregate_releases", "input": {"sort": "shortfall", "dir": "asc"}, "result": RESULT}]
     table = ev.render(trace)
-    assert table.startswith("From the data: 4 group(s), sorted by shortfall asc, 2026-09-20 to 2026-09-27; 93 releases in all.")
+    assert table.startswith("From the data: 4 of 4 group(s), sorted by units short desc, 2026-09-20 to 2026-09-27; 93 releases across the groups returned.")
     lines = table.splitlines()
-    assert lines[2] == "| item number | ItemDescription | releases | units short | picked | expected |"
-    assert lines[4] == "| 104607 | POTATO AGRIA | 25 | 809 | 225 | 1034 |"
-    assert lines[5].startswith("| 100622 | MILK SEMI SKIMMED _2ltr | 38 | 329 |")
-    assert "92.584545" in lines[7]
+    assert lines[2] == "| item number | ItemDescription | releases | units short |"
+    assert lines[4] == "| 104607 | POTATO AGRIA | 25 | 809 |"
+    assert lines[5] == "| 100622 | MILK SEMI SKIMMED _2ltr | 38 | 329 |"
+    assert lines[7] == "| 104516 | CABBAGE WHITE | 7 | 92.584545 |"
 
 
 def test_no_table_without_a_sort_or_without_rows():
@@ -69,8 +69,9 @@ def test_a_listing_is_rendered_too():
     assert "| 550671 | SGIAMPORCA | 104607 | POTATO AGRIA | 10 | 9 | 750.819 |" in table
 
 
-def test_the_models_own_table_is_dropped_and_the_sentences_kept():
-    text = "Here are the top 5:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nThese had the largest shortfalls."
+def test_the_models_own_table_and_ranked_list_are_dropped_and_the_sentences_kept():
+    text = ("Here are the top 5:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n1. **LA PIAZZA** - Shortfall: -2 units\n"
+            "2. **VIOS** - Shortfall: -1 unit\n\nThese had the largest shortfalls.")
     assert ev.strip_tables(text) == "Here are the top 5:\n\nThese had the largest shortfalls."
 
 

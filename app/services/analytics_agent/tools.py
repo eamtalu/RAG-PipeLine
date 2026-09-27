@@ -105,9 +105,10 @@ RELEASE_TOOLS: list[dict] = [
                                         "p95, p99, mean, min, max, distinct only: median:duration_s, "
                                         "distinct:delivery_number. Sums and counts need no stat."},
                 "sort": {"type": "string",
-                         "description": "Order the groups by this before the limit: rows, calls, any settled "
-                                        "value's sum (shortfall, picked, expected, refused, duration_s …) or "
-                                        "a stat label. 'Top N by units short' = sort shortfall, dir asc."},
+                         "description": "Order the groups by this before the limit: units_short (biggest "
+                                        "shortfall first; use this for 'top N shorted / by units short'), rows, "
+                                        "calls, any settled value's sum (picked, expected, refused, "
+                                        "duration_s …) or a stat label."},
                 "dir": {"type": "string", "enum": ["asc", "desc"], "description": "Sort direction, default desc."},
                 "start": {"type": "string", "description": "ISO-8601 start (inclusive). Default: 24 hours before end."},
                 "end": {"type": "string", "description": "ISO-8601 end (exclusive). Default: now."},
@@ -228,11 +229,23 @@ async def aggregate_releases(db: AsyncSession, args: dict, customer_code: str) -
     since, until, notes = _window(args.get("start"), args.get("end"))
     stats, dropped = _stats_asked(list(args.get("stat") or []))
     notes += dropped
+    where = list(args.get("where") or [])
+    sort = (str(args["sort"]).strip() or None) if args.get("sort") else None
+    descending = (args.get("dir") or "desc") != "asc"
+    # "units short" is the shortfall with the sign turned round; the biggest shortfall is the most
+    # negative sum. A model that asks for shortfall descending on short releases wants the biggest
+    # shortfalls, not the smallest: the first Web Chat run listed ten customers short by 1 unit as
+    # the "top 10". Both spellings mean the same read.
+    units_short = sort == "units_short" or (
+        sort == "shortfall" and descending and any(w.replace(" ", "") in ("shortfall<0", "is_short==1") for w in where))
+    if units_short:
+        sort, descending = "shortfall", False
+        notes.append("sorted by units short, biggest shortfall first")
     out = await settle_reads.grouped(db, customer_code, name, group_by=list(args.get("group_by") or []),
-                                     start=since, end=until, where=list(args.get("where") or []),
-                                     stat=stats, limit=_clamp(args.get("limit"), 200, GROUP_LIMIT),
-                                     sort=(str(args["sort"]).strip() or None) if args.get("sort") else None,
-                                     descending=(args.get("dir") or "desc") != "asc")
+                                     start=since, end=until, where=where, stat=stats,
+                                     limit=_clamp(args.get("limit"), 200, GROUP_LIMIT), sort=sort, descending=descending)
+    if units_short:
+        out["sort"] = {"by": "units_short", "dir": "desc"}
     out["window"] = {"start": since.isoformat(), "end": until.isoformat()}
     # The grain figure, added here so the model never has to add the groups up itself.
     out["total_rows"] = sum(int(r.get("rows") or 0) for r in out["rows"])

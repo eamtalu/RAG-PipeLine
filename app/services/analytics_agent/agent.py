@@ -54,9 +54,11 @@ Rules for release answers:
   ONE call (for a rate, make one call for the numerator filter and read the denominator from the
   unfiltered call in the same window).
 - "Top N shorted products" means group_by ["item_number", "lookup:item description.ItemDescription"],
-  where ["shortfall<0"], sort "shortfall", dir "asc" (most negative first), limit N; units short is
-  -shortfall. Always pass sort for any "top", "most", "biggest", "longest" question; the groups come
-  back in that order, keep it. Use total_rows from the result as the grain, never add groups up.
+  where ["shortfall<0"], sort "units_short", limit N. "Top N customers by units short" is the same
+  with group_by ["lookup:delivery.customer_name"]. Always pass sort for any "top", "most",
+  "biggest", "longest" question; the groups come back in that order, keep it. The table in your
+  answer is drawn from the rows for you: write one or two sentences and do not repeat the rows as a
+  list. Use total_rows from the result as the grain, never add groups up.
   "This week" is the last 7 days unless the person says otherwise. Default window is the last 24
   hours; say the window you used. For "today" or "yesterday" do not compute start and end: filter
   with where ["business_date==YYYY-MM-DD"] using the date line at the top of the question (yesterday
