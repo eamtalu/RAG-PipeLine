@@ -32,6 +32,13 @@ Qwen3 235B A22B 2507 is the instruct version, so it answers without a thinking p
 On Ollama, `ANALYTICS_AGENT_THINK=false` (the default) stops Qwen3 reasoning at length before every reply, and `ANALYTICS_AGENT_CONTEXT_TOKENS=16384` gives the twelve tool schemas and a grouped read room.
 The model must support tool calling; every hosted model above does, and Qwen3 and Llama 3.1 do on Ollama.
 
+## Guards, and the one retry
+
+Every answer is checked before it leaves: a figure with no successful data call in this turn, or a figure that appears in no tool result, is not shown.
+Since chunk 126 such a draft is discarded and the question asked once more with a nudge that names the problem (stale figures from an earlier turn, or arithmetic the model did itself); only a second bad draft is withheld.
+Prior turns are replayed to the model without their tables, ranked lists or "From the data" lines, so there are no stale figures to copy.
+`retries` in the result says whether the nudge was needed.
+
 ## Local testing with Ollama on a laptop
 
 The Matrix server has no GPU and a 2010 CPU without AVX, so the model runs on a laptop and the server reaches it through a reverse SSH tunnel:

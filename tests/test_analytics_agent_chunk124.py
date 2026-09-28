@@ -355,14 +355,15 @@ async def test_figures_with_no_successful_data_call_are_withheld(monkeypatch):
     """The first live Teams run: refused on a field that does not exist, the model answered with
     Customer A to J and round numbers, all invented. That answer never reaches a person."""
     await _plant()
-    model = _scripted(
+    invented = [
         AIMessage(content="", tool_calls=[{"id": "c1", "name": "describe_releases", "args": {}}]),
         AIMessage(content="", tool_calls=[{"id": "c2", "name": "aggregate_releases", "args": {"group_by": ["customer_number"]}}]),
         AIMessage(content="Top customers: Customer A -1,200 units, Customer B -950 units."),
-    )
+    ]
+    model = _scripted(*invented, *invented)  # chunk 126: the draft earns one retry; this model repeats itself
     async with async_session() as db:
         result = await AnalyticsAgent(db, CC, model=model).ask("top customers by units short")
-    assert result["stop_reason"] == "withheld"
+    assert result["stop_reason"] == "withheld" and result["retries"] == 1
     assert result["answer"].startswith("I could not get the data") and "customer_number" in result["answer"]
     assert "Customer A" not in result["answer"]
 
@@ -392,13 +393,14 @@ async def test_a_plain_sentence_without_figures_is_never_withheld():
 
 async def test_a_figure_no_tool_returned_is_withheld_by_name():
     await _plant()
-    model = _scripted(
+    padded = [
         AIMessage(content="", tool_calls=[{"id": "c1", "name": "aggregate_releases", "args": {"group_by": ["item_number"], "where": ["shortfall<0"], **_window()}}]),
         AIMessage(content="Two items were short, 100230 by 10 units and 104568 by 1; overall 2,000 units were short."),
-    )
+    ]
+    model = _scripted(*padded, *padded)  # chunk 126: one retry, same invented total again
     async with async_session() as db:
         result = await AnalyticsAgent(db, CC, model=model).ask("which products were short?")
-    assert result["stop_reason"] == "withheld" and result["withheld_figures"] == ["2,000"]
+    assert result["stop_reason"] == "withheld" and result["withheld_figures"] == ["2,000"] and result["retries"] == 1
     assert result["answer"].startswith("I could not verify these figures") and "2,000" in result["answer"]
 
 
