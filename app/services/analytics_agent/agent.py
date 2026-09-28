@@ -85,6 +85,10 @@ def make_model(model_name: str | None = None) -> BaseChatModel:
         kwargs["reasoning"] = settings.analytics_agent_think
         kwargs["num_ctx"] = settings.analytics_agent_context_tokens
         kwargs["temperature"] = 0  # a small model invents less at zero, and a run can be repeated
+    elif name.startswith(("bedrock:", "bedrock_converse:")):
+        kwargs["region_name"] = settings.bedrock_region
+        kwargs["temperature"] = 0
+        kwargs["max_tokens"] = settings.analytics_agent_max_tokens
     return init_chat_model(name, **kwargs)
 
 

@@ -24,7 +24,10 @@ The model is a setting; nothing else changes when it does.
 | `ollama:qwen3:8b` | Ollama reachable at `OLLAMA_BASE_URL` | local testing |
 | `anthropic:claude-sonnet-5` | `pip install langchain-anthropic`, `ANTHROPIC_API_KEY` | production |
 | `openai:gpt-…` | `pip install langchain-openai`, `OPENAI_API_KEY` | production |
-| `bedrock:…` | `pip install langchain-aws`, AWS credentials | production on AWS |
+| `bedrock_converse:qwen.qwen3-235b-a22b-2507-v1:0` | `langchain-aws` (in requirements), AWS credentials in the process environment, `BEDROCK_REGION` | production |
+
+On Bedrock the credentials are the same IAM user the Teams consumer uses (`/etc/fastapirag/teams-consumer.env`, read by both the consumer and the web service units), granted `bedrock:InvokeModel` on that one model by the edge Terraform.
+Qwen3 235B A22B 2507 is the instruct version, so it answers without a thinking preamble; London (`eu-west-2`) keeps the data in the UK region.
 
 On Ollama, `ANALYTICS_AGENT_THINK=false` (the default) stops Qwen3 reasoning at length before every reply, and `ANALYTICS_AGENT_CONTEXT_TOKENS=16384` gives the twelve tool schemas and a grouped read room.
 The model must support tool calling; every hosted model above does, and Qwen3 and Llama 3.1 do on Ollama.

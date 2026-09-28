@@ -389,6 +389,9 @@ class Settings(BaseSettings):
     # localhost:11434), "anthropic:claude-sonnet-5", "openai:gpt-…" or "bedrock:…" for production.
     analytics_agent_model: str = "ollama:qwen3:8b"
     ollama_base_url: str = "http://127.0.0.1:11434"
+    # Bedrock only ("bedrock_converse:<model id>"). Credentials come from the process environment
+    # (the consumer's EnvironmentFile), never from .env. London keeps the data in the UK region.
+    bedrock_region: str = "eu-west-2"
     analytics_agent_max_iterations: int = 10      # tool-call rounds before the agent must answer
     analytics_agent_max_tokens: int = 4000
     # Ollama only. Qwen3 "thinks" for a thousand tokens before every reply unless told not to, which

@@ -291,6 +291,19 @@ def test_an_ollama_model_gets_the_base_url_thinking_off_and_a_wide_context(monke
     assert seen == {"name": "anthropic:claude-sonnet-5"}
 
 
+def test_a_bedrock_model_gets_the_region_zero_temperature_and_the_output_cap(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(agent_module, "init_chat_model", lambda name, **kw: seen.update(name=name, **kw) or object())
+    monkeypatch.setattr(settings, "bedrock_region", "eu-west-2")
+    monkeypatch.setattr(settings, "analytics_agent_max_tokens", 4000)
+    agent_module.make_model("bedrock_converse:qwen.qwen3-235b-a22b-2507-v1:0")
+    assert seen == {"name": "bedrock_converse:qwen.qwen3-235b-a22b-2507-v1:0", "region_name": "eu-west-2",
+                    "temperature": 0, "max_tokens": 4000}
+    seen.clear()
+    agent_module.make_model("bedrock:qwen.qwen3-32b-v1:0")
+    assert seen["region_name"] == "eu-west-2" and seen["temperature"] == 0
+
+
 # ==================================================== 5. what the first live run taught
 
 def test_stats_a_model_invents_for_sums_and_counts_are_dropped_with_a_note():
