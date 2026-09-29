@@ -1,0 +1,335 @@
+2026-09-16 16:13:13,552 () [10] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST (ReqID = 25171E0100-2026-06-12_21:18:24.784-3615) - : http://192.168.0.124:60948/api/server/CheckServer?User=&DeviceID=25171E0100&ReqId=25171E0100-2026-06-12_21%3a18%3a24.784-3615&MethodName=CheckServer&Retry=False&VersionNumber=0.1.57&M3Credentials=HIDDEN&Password=HIDDEN&AccessToken=HIDDEN
+2026-09-16 16:13:13,735 () [10] INFO  Server.Controllers.ServerController CheckServer - Server Check by device: 25171E0100. Device is Running App Version: 0.1.57
+2026-09-16 16:13:13,740 () [10] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceFacility - Getting Facility for DeviceName: 25171E0100
+2026-09-16 16:13:13,759 () [10] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceFacility - Stored Procedure Executed is >>
+usp_DeviceDetailGetDeviceFacility
+@Name NVARCHAR(MAX /* Specified as 10 */) = '25171E0100';
+
+2026-09-16 16:13:13,759 () [10] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceFacility - Device Returned Facility: TMP
+2026-09-16 16:13:13,771 () [10] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceHostDetails - Getting Facility for DeviceName: 25171E0100
+2026-09-16 16:13:13,771 () [10] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceHostDetails - Stored Procedure Executed is >>
+usp_DeviceDetailGetDeviceHostDetails
+@Name NVARCHAR(MAX /* Specified as 10 */) = '25171E0100';
+
+2026-09-16 16:13:13,775 () [10] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceHostDetails - Device Returned HostDetails: CMP:920 DIV:TMP FAC:TMP WHS:LON 
+2026-09-16 16:13:13,865 () [9] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__1 - RESPONSE (ReqID = 25171E0100-2026-06-12_21:18:24.784-3615): {"Cipher":"78ab86ab0b6a34794e9c6ec077a064cf7533a3275e178b8f","Company":"920","Division":"TMP","Facility":"TMP","Warehouse":"LON","M3UserCredentials":"HIDDEN","AccessToken":"HIDDEN"}
+2026-09-16 16:13:17,965 (BECWHLO) [10] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734) - : http://192.168.0.124:60948/api/operator/CheckOperator?DeviceLanguage=en&User=BECWHLO&ReqId=25171E0100-2026-06-12_21%3a18%3a34.594-6734&IpAddress=&DeviceLocale=en-GB&MethodName=CheckOperator&Retry=False&UserIdentifier=123&DeviceName=25171E0100&M3Credentials=HIDDEN&Password=HIDDEN&AccessToken=HIDDEN
+2026-09-16 16:13:17,990 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.DeviceManager CheckDevice - Getting Device Details for DeviceName: 25171E0100
+2026-09-16 16:13:17,990 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.DeviceManager CheckDevice - Stored Procedure Executed is >>
+usp_DeviceDetailSelectByDeviceName
+@Name NVARCHAR(MAX /* Specified as 10 */) = '25171E0100';
+
+2026-09-16 16:13:17,997 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.DeviceManager CheckDevice - Device Returned: ID: 1, DeviceName: 25171E0100,  Type: Em
+2026-09-16 16:13:17,997 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager CheckOperator - Getting Details for Operator with identifier 123
+2026-09-16 16:13:17,997 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager CheckOperator - Stored Procedure Executed is >>
+usp_OperatorDetailSelectByUserIdentifier
+@UserIdentifier NVARCHAR(MAX /* Specified as 3 */) = '123';
+@WarehouseID INT = 3;
+
+2026-09-16 16:13:18,161 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager CheckOperator - Operator Returned: ID|1, EmployeeName|BEC, WHS|3
+2026-09-16 16:13:18,161 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager GetOperatorDisabledProcesses - Getting Details for Operator BECWHLO
+2026-09-16 16:13:18,161 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager GetOperatorDisabledProcesses - Stored Procedure Executed is >>
+usp_DisabledProcessesGetByWarehouseOperatorGroup
+@WarehouseID INT = 3;
+@WebGroupID INT = 1;
+
+2026-09-16 16:13:18,161 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager GetOperatorDisabledProcesses - Disabled Process: Dry Pick (Bicester)
+2026-09-16 16:13:18,161 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager GetOperatorDisabledProcesses - Disabled Process: JIT and Shorts Pick (Brighton)
+2026-09-16 16:13:18,161 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager GetOperatorDisabledProcesses - Disabled Process: Freezer Pick (Bicester)
+2026-09-16 16:13:18,161 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager GetOperatorDisabledProcesses - Disabled Process: Brighton Stock Pick
+2026-09-16 16:13:18,161 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager GetOperatorDisabledProcesses - Disabled Process: Milk Pick (Brighton)
+2026-09-16 16:13:18,161 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager GetOperatorDisabledProcesses - Disabled Process: Frozen Load (Bicester)
+2026-09-16 16:13:18,161 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager GetOperatorDisabledProcesses - Disabled Process: Milk Load (Brighton)
+2026-09-16 16:13:18,161 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.OperatorManager GetOperatorDisabledProcesses - Disabled Process: Freezer Pick (Brighton)
+2026-09-16 16:13:18,398 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.OAuthHelpers GetTokenWeb - bearer = HIDDEN
+2026-09-16 16:13:18,427 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3UserManager GetUserData - Calling MNS150MI - GetUserData for : BECWHLO 
+2026-09-16 16:13:18,461 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPICall - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734):
+Calling WebService: >>
+MI Program: MNS150MI  Transaction: GetUserData  NumberOfRecs: DEFAULT
+URL: https://mingle-ionapi.eu1.inforcloudsuite.com:443/U7LY7UGZWXXLQB9J_TST/M3/m3api-rest/v2/execute/MNS150MI/GetUserData;returncols=NAME?USID=BECWHLO&m3user=BECWHLO
+
+Inputs:
+   USID :  BECWHLO
+
+Outputs:
+   NAME
+
+2026-09-16 16:13:18,771 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPIResult - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734) - MI Program: MNS150MI  Transaction: GetUserData     Result: OK 
+ Record: 1
+    NAME = BEC Warehousing
+
+2026-09-16 16:13:18,789 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3UserManager GetUserData - API Returned UserName BEC Warehousing - OK
+2026-09-16 16:13:18,802 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3RouteManager ListRoutes - Calling DRS005MI - SelRoute
+2026-09-16 16:13:18,805 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPICall - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734):
+Calling WebService: >>
+MI Program: DRS005MI  Transaction: SelRoute  NumberOfRecs: 100
+URL: https://mingle-ionapi.eu1.inforcloudsuite.com:443/U7LY7UGZWXXLQB9J_TST/M3/m3api-rest/v2/execute/DRS005MI/SelRoute;maxrecs=100;returncols=ROUT?WHLO=LON&m3user=BECWHLO
+
+Inputs:
+   WHLO :  LON
+
+Outputs:
+   ROUT
+
+2026-09-16 16:13:19,062 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPIResult - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734) - MI Program: DRS005MI  Transaction: SelRoute     Result: OK 
+ Record: 1
+    ROUT = LONBIC
+Record: 2
+    ROUT = LONBRI
+Record: 3
+    ROUT = LONWLK
+Record: 4
+    ROUT = R01-A
+Record: 5
+    ROUT = R05-A
+Record: 6
+    ROUT = R11-A
+Record: 7
+    ROUT = R19-A
+Record: 8
+    ROUT = R41 2A
+Record: 9
+    ROUT = R44-B
+Record: 10
+    ROUT = TBT
+Record: 11
+    ROUT = ZBCLON
+
+2026-09-16 16:13:19,083 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3RouteManager UpdateAndExecuteVoid2 - Downloaded 11 Records
+2026-09-16 16:13:19,094 (BECWHLO) [10] DEBUG M3WebServiceClassLib.Managers.M3RouteManager ListRoutes - Data:System.Collections.Generic.List`1[M3WebServiceClassLib.Models.DeliveryRouteModel]
+2026-09-16 16:13:19,094 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.CustomerGroupsManager GetCustomerGroupsByWarehouse - Getting all Customer Groups for WarehouseID: 3
+2026-09-16 16:13:19,094 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.CustomerGroupsManager GetCustomerGroupsByWarehouse - Stored Procedure Executed is >>
+usp_CustomerGroupsSelectByWarehouse
+@WarehouseID INT = 3;
+
+2026-09-16 16:13:19,105 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3StockZoneManager ListStockZones - Calling MMS040MI - LstStockZone
+2026-09-16 16:13:19,105 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPICall - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734):
+Calling WebService: >>
+MI Program: MMS040MI  Transaction: LstStockZone  NumberOfRecs: 100
+URL: https://mingle-ionapi.eu1.inforcloudsuite.com:443/U7LY7UGZWXXLQB9J_TST/M3/m3api-rest/v2/execute/MMS040MI/LstStockZone;maxrecs=100;returncols=WHLO,SLTP,ARNM?WHLO=LON&m3user=BECWHLO
+
+Inputs:
+   WHLO :  LON
+
+Outputs:
+   WHLO
+   SLTP
+   ARNM
+
+2026-09-16 16:13:19,355 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPIResult - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734) - MI Program: MMS040MI  Transaction: LstStockZone     Result: OK 
+ Record: 1
+    WHLO = LON
+    SLTP = AB
+    ARNM = AMBIENT BULK
+Record: 2
+    WHLO = LON
+    SLTP = AM
+    ARNM = AMBIENT
+Record: 3
+    WHLO = LON
+    SLTP = C1
+    ARNM = CHILLER 1
+Record: 4
+    WHLO = LON
+    SLTP = C2
+    ARNM = CHILLER 2
+Record: 5
+    WHLO = LON
+    SLTP = CH
+    ARNM = CHILLER
+Record: 6
+    WHLO = LON
+    SLTP = DO
+    ARNM = DOCK
+Record: 7
+    WHLO = LON
+    SLTP = FZ
+    ARNM = FREEZER
+Record: 8
+    WHLO = LON
+    SLTP = GI
+    ARNM = GOODS IN
+Record: 9
+    WHLO = LON
+    SLTP = JT
+    ARNM = JIT PRODUCT
+Record: 10
+    WHLO = LON
+    SLTP = NP
+    ARNM = NEW PRODUCT
+Record: 11
+    WHLO = LON
+    SLTP = PA
+    ARNM = PACK
+Record: 12
+    WHLO = LON
+    SLTP = QC
+    ARNM = QUALITY CONTROL
+Record: 13
+    WHLO = LON
+    SLTP = RJ
+    ARNM = REJECTION
+Record: 14
+    WHLO = LON
+    SLTP = SH
+    ARNM = SHORTS
+Record: 15
+    WHLO = LON
+    SLTP = SP
+    ARNM = SPLIT ROOM
+
+2026-09-16 16:13:19,365 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3StockZoneManager UpdateAndExecuteVoid2 - Downloaded 15 Records
+2026-09-16 16:13:19,371 (BECWHLO) [10] DEBUG M3WebServiceClassLib.Managers.M3StockZoneManager ListStockZones - Data:System.Collections.Generic.List`1[M3WebServiceClassLib.Models.StockZoneModel]
+2026-09-16 16:13:19,371 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3LocationManager GetLocationCheckDigit - Calling MMS010 - GetLocationCheckDigit for : JIT 
+2026-09-16 16:13:19,371 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPICall - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734):
+Calling WebService: >>
+MI Program: MMS010MI  Transaction: GetLocation  NumberOfRecs: DEFAULT
+URL: https://mingle-ionapi.eu1.inforcloudsuite.com:443/U7LY7UGZWXXLQB9J_TST/M3/m3api-rest/v2/execute/MMS010MI/GetLocation;returncols=WHSL,LCHK?CONO=920&WHLO=LON&WHSL=JIT&m3user=BECWHLO
+
+Inputs:
+   CONO :  920
+   WHLO :  LON
+   WHSL :  JIT
+
+Outputs:
+   WHSL
+   LCHK
+
+2026-09-16 16:13:19,452 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPIResult - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734) - MI Program: MMS010MI  Transaction: GetLocation     Result: OK 
+ Record: 1
+    WHSL = JIT
+    LCHK = 
+
+2026-09-16 16:13:19,467 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3LocationManager GetLocationCheckDigit - API Returned CD  for location JIT - OK
+2026-09-16 16:13:19,467 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3LocationManager GetLocationCheckDigit - Calling MMS010 - GetLocationCheckDigit for :  
+2026-09-16 16:13:19,467 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPICall - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734):
+Calling WebService: >>
+MI Program: MMS010MI  Transaction: GetLocation  NumberOfRecs: DEFAULT
+URL: https://mingle-ionapi.eu1.inforcloudsuite.com:443/U7LY7UGZWXXLQB9J_TST/M3/m3api-rest/v2/execute/MMS010MI/GetLocation;returncols=WHSL,LCHK?CONO=920&WHLO=LON&m3user=BECWHLO
+
+Inputs:
+   CONO :  920
+   WHLO :  LON
+   WHSL :  
+
+Outputs:
+   WHSL
+   LCHK
+
+2026-09-16 16:13:19,521 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPIResult - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734) - MI Program: MMS010MI  Transaction: GetLocation     Result: Transaction GetLocation in program MMS010MI requires a value for field WHSL 
+ 
+2026-09-16 16:13:19,521 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3LocationManager GetLocationCheckDigit - No Record found. Transaction GetLocation in program MMS010MI requires a value for field WHSL
+2026-09-16 16:13:19,521 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3LocationManager GetLocationCheckDigit - Calling MMS010 - GetLocationCheckDigit for :  
+2026-09-16 16:13:19,521 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPICall - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734):
+Calling WebService: >>
+MI Program: MMS010MI  Transaction: GetLocation  NumberOfRecs: DEFAULT
+URL: https://mingle-ionapi.eu1.inforcloudsuite.com:443/U7LY7UGZWXXLQB9J_TST/M3/m3api-rest/v2/execute/MMS010MI/GetLocation;returncols=WHSL,LCHK?CONO=920&WHLO=LON&WHSL=&m3user=BECWHLO
+
+Inputs:
+   CONO :  920
+   WHLO :  LON
+   WHSL :  
+
+Outputs:
+   WHSL
+   LCHK
+
+2026-09-16 16:13:19,597 (BECWHLO) [10] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPIResult - (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734) - MI Program: MMS010MI  Transaction: GetLocation     Result: Location  does not exist 
+ 
+2026-09-16 16:13:19,599 (BECWHLO) [10] INFO  M3WebServiceClassLib.Managers.M3LocationManager GetLocationCheckDigit - No Record found. Location  does not exist
+2026-09-16 16:13:19,603 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.ActivityManager WriteActivityLog - Logging Activity of Transaction Type 000001 via unified object model
+2026-09-16 16:13:19,626 (BECWHLO) [10] DEBUG SQLServerClassLib.ModelManagers.ActivityManager WriteActivityLog - Stored Procedure Executed is >>
+usp_ActivityLog_InsertJson
+@JsonData NVARCHAR(MAX /* Specified as -1 */) = '{"TerminalNumber":3091,"DeviceName":"25171E0100","CardNumber":"BECWHLO","EmployeeName":"BEC","Company":"920","Division":"TMP","Facility":"TMP","Warehouse":"LON","TransactionType":"000001","TransactionName":"Logon"}';
+
+2026-09-16 16:13:19,637 (BECWHLO) [10] INFO  SQLServerClassLib.ModelManagers.ActivityManager WriteActivityLog - Activity Logged OK
+2026-09-16 16:13:19,677 (BECWHLO) [9] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__1 - RESPONSE (ReqID = 25171E0100-2026-06-12_21:18:34.594-6734): {"WarehouseID":3,"SiteID":5,"CompanyID":1,"HostWarehouse":"LON","HostCompany":"920","HostSite":"TMP","HostDivision":"TMP","UserName":"BECWHLO","EmployeeName":"BEC","CardNumber":"BECWHLO","OperatorID":1,"WebGroupID":1,"M3Partner":"BEC","PackingAuditPhotoStorageLocation":"C:\\PackingPhotos","PhotoScalePercentage":40,"PhotoQuality":100,"DeviceIndex":1,"DeviceNumber":3091,"DeviceName":"25171E0100","TerminalNumber":"99","TransitLocation":"N/A","DefaultReceivingLocation":"JIT","DefaultReceivingLocationCD":"","DefaultDockLocation":null,"DefaultDockLocationCD":"","MOStagingLocation":"","FinishedGoodsLocation":"","FinishedGoodsLocationCD":"","SkipPutAwayLocation":"NO","OverridePutAwayLocation":"NO","UseLocationCheckDigits":false,"CheckDigitSeparator":"","MaxReceiptPallets":50,"LowTempLimit":-50.0,"HighTempLimit":50.0,"PickTransitLocation":"PACK","UsePackages":false,"SendDeliveryNumberOnVehicleLoad":false,"VehicleLoadFlattenContainersEnabled":false,"VehicleLoadShipmentShowLoadConfirmationMessage":true,"VehicleLoadShipmentHideLoadedContainers":false,"VehicleLoadShipmentAutoDespatchEnabled":false,"VehicleLoadShipmentSortByContainer":false,"AutoLogoutInMinutes":60,"ReclassExpiryDateReasonCode":"W10","OpenStockCountLoStatus":40,"OpenStockCountHiStatus":69,"StockCountReportingType":2,"PickingLowerWeightTolerance":20,"PickingUpperWeightTolerance":20,"PickingMaxUpperWeightLimitTolerance":100,"SplitPickStockZones":"SP","BulkPickMainStockZones":"C1","BulkPickDairyStockZones":"CD","DryPickStockZones":"AM","JitPickStockZones":"JT","ShortsPickStockZones":"-FZ","FreezerPickStockZones":"FZ","BrightonStockPickZones":"A1","MilkPickStockZones":"C1","PickingMaxCaseLabels":15,"DefaultShortsPickLocation":"SHORTS","PickListSelectionLoStatus":40,"PickListSelectionHiStatus":40,"PickListToPackLoStatus":50,"PickListToPackHiStatus":50,"SplitPickPackageTypes":"CARBOX","BulkPickMainPackageTypes":"","BulkPickDairyPackageTypes":"","DryPickPackageTypes":"CARBOX","JitPickPackageTypes":"CARBOX","ShortsPickPackageTypes":"CARBOX","FreezerPickPackageTypes":"","BrightonStockPickPackageTypes":"CARBOX","MilkPickPackageTypes":"","ToleranceCheckTriggerUoM":"KG","PoReceiptUpperWeightTolerance":20,"PoReceiptToleranceCheckTriggerUoM":"KG","PoReceiptStatusLo":20,"PoReceiptStatusHi":75,"DeliveryRoutes":"LONBIC,LONBRI,LONWLK,R01-A,R05-A,R11-A,R19-A,R41 2A,R44-B,TBT,ZBCLON","CustomerGroups":"19 - Customer Group 19|20 - Customer Group 20|24 - Customer Group 24|27 - Customer Group 27|28 - Customer Group 28|81 - Customer Group 81","StockZones":"AB,AM,C1,C2,CH,DO,FZ,GI,JT,NP,PA,QC,RJ,SH,SP","StandardLoadPackageTypes":"CARBOX,PALLET","FrozenLoadPackageTypes":"FZPACK","MilkLoadPackageTypes":"FZPACK","ReplenBulkLocationTypes":"BL","BulkPickPackingStockZones":"C1","BulkPickPackingPackageTypes":"CARBOX,PALLET","PickLineStatusFilter":"30,40","PackLineStatusFilter":"50","UndeliveredStockLocation":"INSPECT","UndeliveredStockOrderType":"CUS","UndeliveredStockReasonCode":"C17","PoReceiptStaticPrinterRequired":true,"PoReceiptBySupplierStaticPrinterRequired":false,"PickingRoundUpPercentage":0.05,"PickingRoundUpDecimalPlacesTrigger":4,"StandardLoadShowPackageContents":false,"FrozenLoadShowPackageContents":false,"MilkLoadShowPackageContents":false,"SoftLoadEnabled":true,"SoftLoadRemark":"loaded","BulkPickPackingShortLocations":"WASTE,ZERO","BulkPickPackingAutoShortLocation":"ZERO","ReplenishmentCaseModeEnabled":true,"StockMoveCaseModeEnabled":true,"MoveToWasteCaseModeEnabled":true,"SupplierReceiptForceLotEnabled":true,"SupplierReceiptForceLotSuffix":"L","WebServiceMode":true,"ApiHost":"https://mingle-ionapi.eu1.inforcloudsuite.com:443/U7LY7UGZWXXLQB9J_TST/M3/m3api-rest/v2/execute/","ApiPortNumber":443,"ErrorCode":0,"M3UserCredentials":"HIDDEN","DisabledProcesses":["Dry Pick (Bicester)","JIT and Shorts Pick (Brighton)","Freezer Pick (Bicester)","Brighton Stock Pick","Milk Pick (Brighton)","Frozen Load (Bicester)","Milk Load (Brighton)","Freezer Pick (Brighton)"],"AccessToken":"HIDDEN","AccessTokenValidForSeconds":7200,"PalletBuildPalletTypes":"PALLET","PalletBuildPackageTypes":"CARBOX,FZPACK"}
+2026-09-16 16:13:20,323 (BECWHLO) [11] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST (ReqID = 3091-2026-06-12_21:18:36.877-4982) - : http://192.168.0.124:60948/api/reasoncode/GetAllReasonCodes?Company=920&Warehouse=LON&User=BECWHLO&DeviceID=3091&ReqId=3091-2026-06-12_21%3a18%3a36.877-4982&DeviceLocale=en-GB&WarehouseID=3&WebServiceMode=true&DeviceLanguage=en&UserID=1&M3Credentials=HIDDEN&ApiPort=443&Division=TMP&MethodName=GetAllReasonCodes&Retry=False&Facility=TMP&EmployeeName=BEC&TransactionName=TO+DO&ApiHost=https%3a%2f%2fmingle-ionapi.eu1.inforcloudsuite.com%3a443%2fU7LY7UGZWXXLQB9J_TST%2fM3%2fm3api-rest%2fv2%2fexecute%2f&DeviceName=25171E0100&Password=HIDDEN&AccessToken=HIDDEN
+2026-09-16 16:13:20,339 (BECWHLO) [11] DEBUG SQLServerClassLib.ModelManagers.ReasonCodeManager GetAllReasons - Getting all reason codes
+2026-09-16 16:13:20,339 (BECWHLO) [11] DEBUG SQLServerClassLib.ModelManagers.ReasonCodeManager GetAllReasons - Stored Procedure Executed is >>
+usp_ReasonCodeSelectAll
+@Language NVARCHAR(MAX /* Specified as 2 */) = 'en';
+
+2026-09-16 16:13:20,374 (BECWHLO) [9] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__1 - RESPONSE (ReqID = 3091-2026-06-12_21:18:36.877-4982): [{"Code":"W01","Description":"Out of Date","Type":21},{"Code":"W02","Description":"Product Quality","Type":21},{"Code":"W03","Description":"Customer Foreca","Type":21},{"Code":"W04","Description":"Planner Error","Type":21},{"Code":"W05","Description":"Count Error","Type":21},{"Code":"W06","Description":"Missrotation","Type":21},{"Code":"W07","Description":"Damage","Type":21},{"Code":"W08","Description":"Returns","Type":21},{"Code":"W09","Description":"Pick Error","Type":21},{"Code":"W10","Description":"Unknown","Type":21},{"Code":"A01","Description":"Creating Stock","Type":22},{"Code":"A02","Description":"Booked in Incor","Type":22},{"Code":"A03","Description":"GRN Adjustment-","Type":22},{"Code":"A04","Description":"GRN Adjustment-","Type":22},{"Code":"A05","Description":"Charity Donatio","Type":22},{"Code":"A06","Description":"Code Setup Issu","Type":22},{"Code":"A07","Description":"Stock Count Err","Type":22},{"Code":"A08","Description":"Availability Ad","Type":22},{"Code":"A09","Description":"Customer Return","Type":22},{"Code":"A10","Description":"Samples Write O","Type":22},{"Code":"A11","Description":"Substitution Co","Type":22},{"Code":"A12","Description":"Transfer Issue","Type":22},{"Code":"A13","Description":"Unrecorded Wast","Type":22}]
+2026-09-16 16:21:57,235 (BECWHLO) [19] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST (ReqID = 3091-2026-06-12_21:27:13.788-4301) - : http://192.168.0.124:60948/api/reasoncode/GetAllReasonCodes?Company=920&Warehouse=LON&User=BECWHLO&DeviceID=3091&ReqId=3091-2026-06-12_21%3a27%3a13.788-4301&DeviceLocale=en-GB&WarehouseID=3&WebServiceMode=true&DeviceLanguage=en&UserID=1&M3Credentials=HIDDEN&ApiPort=443&Division=TMP&MethodName=GetAllReasonCodes&Retry=False&Facility=TMP&EmployeeName=BEC&TransactionName=TO+DO&ApiHost=https%3a%2f%2fmingle-ionapi.eu1.inforcloudsuite.com%3a443%2fU7LY7UGZWXXLQB9J_TST%2fM3%2fm3api-rest%2fv2%2fexecute%2f&DeviceName=25171E0100&Password=HIDDEN&AccessToken=HIDDEN
+2026-09-16 16:21:57,244 (BECWHLO) [19] DEBUG SQLServerClassLib.ModelManagers.ReasonCodeManager GetAllReasons - Getting all reason codes
+2026-09-16 16:21:57,244 (BECWHLO) [19] DEBUG SQLServerClassLib.ModelManagers.ReasonCodeManager GetAllReasons - Stored Procedure Executed is >>
+usp_ReasonCodeSelectAll
+@Language NVARCHAR(MAX /* Specified as 2 */) = 'en';
+
+2026-09-16 16:21:57,253 (BECWHLO) [25] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__1 - RESPONSE (ReqID = 3091-2026-06-12_21:27:13.788-4301): [{"Code":"W01","Description":"Out of Date","Type":21},{"Code":"W02","Description":"Product Quality","Type":21},{"Code":"W03","Description":"Customer Foreca","Type":21},{"Code":"W04","Description":"Planner Error","Type":21},{"Code":"W05","Description":"Count Error","Type":21},{"Code":"W06","Description":"Missrotation","Type":21},{"Code":"W07","Description":"Damage","Type":21},{"Code":"W08","Description":"Returns","Type":21},{"Code":"W09","Description":"Pick Error","Type":21},{"Code":"W10","Description":"Unknown","Type":21},{"Code":"A01","Description":"Creating Stock","Type":22},{"Code":"A02","Description":"Booked in Incor","Type":22},{"Code":"A03","Description":"GRN Adjustment-","Type":22},{"Code":"A04","Description":"GRN Adjustment-","Type":22},{"Code":"A05","Description":"Charity Donatio","Type":22},{"Code":"A06","Description":"Code Setup Issu","Type":22},{"Code":"A07","Description":"Stock Count Err","Type":22},{"Code":"A08","Description":"Availability Ad","Type":22},{"Code":"A09","Description":"Customer Return","Type":22},{"Code":"A10","Description":"Samples Write O","Type":22},{"Code":"A11","Description":"Substitution Co","Type":22},{"Code":"A12","Description":"Transfer Issue","Type":22},{"Code":"A13","Description":"Unrecorded Wast","Type":22}]
+2026-09-16 16:22:01,701 (BECWHLO) [19] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST (ReqID = 3091-2026-06-12_21:27:18.266-3215) - : http://192.168.0.124:60948/api/Activity/LogSignOff
+2026-09-16 16:22:01,701 (BECWHLO) [19] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST BODY: {"Company":"920","Warehouse":"LON","User":"BECWHLO","DeviceID":"3091","ReqId":"3091-2026-06-12_21:27:18.266-3215","DeviceLocale":"en-GB","WarehouseID":"3","WebServiceMode":"true","DeviceLanguage":"en","UserID":"1","M3Credentials":"HIDDEN","ApiPort":"443","Division":"TMP","MethodName":"LogSignOff","Retry":"False","Facility":"TMP","EmployeeName":"BEC","TransactionName":"TO DO","ApiHost":"https://mingle-ionapi.eu1.inforcloudsuite.com:443/U7LY7UGZWXXLQB9J_TST/M3/m3api-rest/v2/execute/","DeviceName":"25171E0100"}
+2026-09-16 16:22:01,713 (BECWHLO) [19] DEBUG SQLServerClassLib.ModelManagers.ActivityManager WriteActivityLog - Logging Activity of Transaction Type 000002 via unified object model
+2026-09-16 16:22:01,713 (BECWHLO) [19] DEBUG SQLServerClassLib.ModelManagers.ActivityManager WriteActivityLog - Stored Procedure Executed is >>
+usp_ActivityLog_InsertJson
+@JsonData NVARCHAR(MAX /* Specified as -1 */) = '{"TerminalNumber":3091,"DeviceName":"25171E0100","CardNumber":"BECWHLO","EmployeeName":"BEC","Company":"920","Division":"TMP","Facility":"TMP","Warehouse":"LON","TransactionType":"000002","TransactionName":"LogOff"}';
+
+2026-09-16 16:22:01,713 (BECWHLO) [19] INFO  SQLServerClassLib.ModelManagers.ActivityManager WriteActivityLog - Activity Logged OK
+2026-09-16 16:22:01,719 (BECWHLO) [11] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__1 - RESPONSE (ReqID = 3091-2026-06-12_21:27:18.266-3215): "OK"
+2026-09-18 10:57:00,787 (BECWHLO) [9] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST (ReqID = 3091-2026-09-18_10:56:54.918-5391) - : http://192.168.0.124:60948/api/server/GetAccessToken?Creds=%7b%22Domain%22%3a%22%22%2c%22Password%22%3a%2254352B336F66496A5469527346616F62664734334448565274415975613574763650522F56454D543352467839314175357278525A6E325A637935706A71624162783852626E6F4C4966305175666266724368716639664C7659704D587061562B76366E364E53616238545150626E6F7A69324F6848576276385379564A6C33%22%2c%22UserName%22%3a%224471363859443132516565437A425936495A565568786A496A57547847613564367567735152624D52742B426D4A4D364B705138447A65734F6F6470577638455663386C352F462F70714A6A7A4F4448566D356C2F7950524C61583335454B397748496A52766A6948434277736A336D3935646F6B526847336A64545768386B4C415A724957514775524E716263504B4267767162673D3D%22%7d&User=BECWHLO&DeviceID=3091&ReqId=3091-2026-09-18_10%3a56%3a54.918-5391&DeviceLocale=en-US&Retry=False&M3Credentials=HIDDEN&Password=HIDDEN&AccessToken=HIDDEN
+2026-09-18 10:57:01,370 (BECWHLO) [9] DEBUG M3WebServiceClassLib.CommonCode.OAuthHelpers GetTokenWeb - bearer = HIDDEN
+2026-09-18 10:57:01,435 (BECWHLO) [8] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__1 - RESPONSE (ReqID = 3091-2026-09-18_10:56:54.918-5391): {"AccessToken":"HIDDEN","ValidForInSeconds":7200,"ArrivalTimeInSeconds":0,"M3UserCredentials":"HIDDEN"}
+2026-09-18 10:57:01,613 () [9] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST (ReqID = 1234-Emulator-2026-09-18_10:56:54.824-5759) - : http://192.168.0.124:60948/api/server/CheckServer?User=&DeviceID=1234-Emulator&ReqId=1234-Emulator-2026-09-18_10%3a56%3a54.824-5759&MethodName=CheckServer&Retry=False&VersionNumber=0.1.57&M3Credentials=HIDDEN&Password=HIDDEN&AccessToken=HIDDEN
+2026-09-18 10:57:01,613 () [9] INFO  Server.Controllers.ServerController CheckServer - Server Check by device: 1234-Emulator. Device is Running App Version: 0.1.57
+2026-09-18 10:57:01,613 () [9] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceFacility - Getting Facility for DeviceName: 1234-Emulator
+2026-09-18 10:57:01,627 () [9] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceFacility - Stored Procedure Executed is >>
+usp_DeviceDetailGetDeviceFacility
+@Name NVARCHAR(MAX /* Specified as 13 */) = '1234-Emulator';
+
+2026-09-18 10:57:01,643 () [9] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceFacility - Device Returned Facility: TMP
+2026-09-18 10:57:01,643 () [9] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceHostDetails - Getting Facility for DeviceName: 1234-Emulator
+2026-09-18 10:57:01,643 () [9] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceHostDetails - Stored Procedure Executed is >>
+usp_DeviceDetailGetDeviceHostDetails
+@Name NVARCHAR(MAX /* Specified as 13 */) = '1234-Emulator';
+
+2026-09-18 10:57:01,643 () [9] DEBUG SQLServerClassLib.ModelManagers.DeviceManager GetDeviceHostDetails - Device Returned HostDetails: CMP:920 DIV:TMP FAC:TMP WHS:BIC 
+2026-09-18 10:57:01,643 () [8] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__1 - RESPONSE (ReqID = 1234-Emulator-2026-09-18_10:56:54.824-5759): {"Cipher":"78ab86ab0b6a34794e9c6ec077a064cf7533a3275e178b8f","Company":"920","Division":"TMP","Facility":"TMP","Warehouse":"BIC","M3UserCredentials":"HIDDEN","AccessToken":"HIDDEN"}
+2026-09-29 10:19:39,630 (BECWHLO) [14] DEBUG SQLServerClassLib.ModelManagers.ActivityManager WriteActivityLog - Stored Procedure Executed is >>
+usp_ActivityLog_InsertJson
+@JsonData NVARCHAR(MAX /* Specified as -1 */) = '{"TerminalNumber":3091,"DeviceName":"25171E0100","CardNumber":"BECWHLO","EmployeeName":"BEC","Company":"920","Division":"TMP","Facility":"TMP","Warehouse":"BIC","TransactionType":"000002","TransactionName":"LogOff"}';
+
+2026-09-29 10:19:39,630 (BECWHLO) [14] INFO  SQLServerClassLib.ModelManagers.ActivityManager WriteActivityLog - Activity Logged OK
+2026-09-29 10:19:39,655 (BECWHLO) [5] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__1 - RESPONSE (ReqID = 3091-2026-06-25_15:25:34.522-1061): "OK"
+2026-09-29 10:19:39,711 (BECWHLO) [63] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPIResult - (ReqID = 3091-2026-06-25_15:25:34.082-2622) - MI Program: PPS200MI  Transaction: UpdUserDefLine     Result: OK 
+ Record: 1
+
+2026-09-29 10:19:39,711 (BECWHLO) [63] INFO  M3WebServiceClassLib.Managers.M3ReceivingManager UnLockPurchaseOrderLine - PO Line 1000161/10/0 Unlocked OK
+2026-09-29 10:19:39,733 (BECWHLO) [42] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__1 - RESPONSE (ReqID = 3091-2026-06-25_15:25:34.082-2622): "OK"
+2026-09-29 11:03:16,783 ((null)) [54] ERROR Server.CommonCode.ApiLogHandler MoveNext - Couldn't find a request ID in the message
+2026-09-29 11:03:16,797 ((null)) [54] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST (ReqID = ) - : http://192.168.0.124:60948/api/receiving/ListPOLines?TransactionType=xxxxxx&OrderNumber=1000161&M3Credentials=HIDDEN&Password=HIDDEN&AccessToken=HIDDEN
+2026-09-29 11:03:19,780 ((null)) [54] ERROR Server.CommonCode.Log4NetExceptionLogger Log - Error requesting http://192.168.0.124:60948/api/receiving/ListPOLines?TransactionType=xxxxxx&OrderNumber=1000161. Error : System.NullReferenceException: Object reference not set to an instance of an object.
+   at Server.CommonCode.CustomAuthFilter.OnAuthorization(HttpActionContext actionContext) in C:\menu partner\NewClone\tmp-esmart-server\Server\CommonCode\CustomAuthFilter.cs:line 14
+   at System.Web.Http.Filters.AuthorizationFilterAttribute.OnAuthorizationAsync(HttpActionContext actionContext, CancellationToken cancellationToken)
+--- End of stack trace from previous location where exception was thrown ---
+   at System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw()
+   at System.Runtime.CompilerServices.TaskAwaiter.HandleNonSuccessAndDebuggerNotification(Task task)
+2026-06-17 12:36:54,544 (BECWHLO) [41] DEBUG Server.CommonCode.ApiLogHandler MoveNext - REQUEST: http://192.168.0.124:60948/api/count/ListOpenStockCounts?Company=920&Warehouse=BRI&TransactionType=xxxxxx&User=BECWHLO&ToStatus=69&DeviceID=3091&ReqId=3091-2025-12-19_20%3a00%3a54.641-2023&DeviceLocale=en-GB&WarehouseID=1&WebServiceMode=true&DeviceLanguage=en&UserID=1&FromStatus=40&RecountMode=false&M3Credentials=HIDDEN&ApiPort=443&Division=TMP&MethodName=ListOpenStockCounts&Retry=False&Facility=TMP&EmployeeName=BEC&TransactionName=Full+Stock+Count&ApiHost=https%3a%2f%2fmingle-ionapi.eu1.inforcloudsuite.com%3a443%2fU7LY7UGZWXXLQB9J_TST%2fM3%2fm3api-rest%2fv2%2fexecute%2f&DeviceName=25171E0100&Password=HIDDEN&AccessToken=HIDDEN
+2026-06-17 12:36:54,556 (BECWHLO) [41] INFO  M3WebServiceClassLib.Managers.M3CountManager ListOpenStockCounts - Calling MMS301MI - LstPhysInv
+2026-06-17 12:36:54,556 (BECWHLO) [41] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPICall - Calling WebService: >>
+MI Program: MMS301MI  Transaction: LstPhysInv  NumberOfRecs: 500
+URL: https://mingle-ionapi.eu1.inforcloudsuite.com:443/U7LY7UGZWXXLQB9J_TST/M3/m3api-rest/v2/execute/MMS301MI/LstPhysInv;maxrecs=500;returncols=STNB,TX30,STAR?WHLO=BRI&FSTA=40&TSTA=69&m3user=BECWHLO
+
+Inputs:
+   WHLO :  BRI
+   FSTA :  40
+   TSTA :  69
+
+Outputs:
+   STNB
+   TX30
+   STAR
+
+2026-06-17 12:36:55,129 (BECWHLO) [41] DEBUG M3WebServiceClassLib.CommonCode.WebService LogAPIResult - MI Program: MMS301MI  Transaction: LstPhysInv     Result: OK 
+ Record: 1
+    STNB = 22
+    TX30 = BRI - DAIRY
+    STAR = 158
+Record: 2
+    STNB = 25
+    TX30 = BRI - FREEZER
+    STAR = 91
+
+2026-06-17 12:36:55,129 (BECWHLO) [41] INFO  M3WebServiceClassLib.Managers.M3CountManager ListOpenStockCounts - Downloaded 2 Records
+2026-06-17 12:36:55,129 (BECWHLO) [41] DEBUG M3WebServiceClassLib.Managers.M3CountManager ListOpenStockCounts - Data:System.Collections.Generic.List`1[M3WebServiceClassLib.Models.OpenStockCountModel]
+2026-06-17 12:36:55,149 (BECWHLO) [48] DEBUG Server.CommonCode.ApiLogHandler <SendAsync>b__1 - RESPONSE: [{"InventoryNumber":"22","Description":"BRI - DAIRY","NumberOfLines":"158"},{"InventoryNumber":"25","Description":"BRI - FREEZER","NumberOfLines":"91"}]

@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+import re
+
 from urllib.parse import urlsplit
 
 from app.persistence.models.log_entry import LogEntry
@@ -104,7 +106,7 @@ def _response_line(t: LogTransaction, resp: LogEntry | None) -> str:
         "🛑" if t.status == LogTransactionStatus.error else "…")
     body = t.response_summary
     if not body and resp and resp.message:
-        body = resp.message.replace("RESPONSE:", "").strip()
+        body = re.sub(r"^RESPONSE(?: \(ReqID = [^)]*\))?\s*:\s*", "", resp.message, count=1).strip()
     if not body and t.status == LogTransactionStatus.incomplete:
         return "◀ (no RESPONSE ingested yet — incomplete)"
     body = (body or "").strip()

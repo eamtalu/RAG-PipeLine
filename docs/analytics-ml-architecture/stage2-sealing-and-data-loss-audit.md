@@ -1029,3 +1029,11 @@ Re-ingesting a file will not insert duplicate copies of these entries.
 - `docs/plan/2026-08-05_20-32_daily-partitioning.md` - the UTC-day partitioning that makes the NULL-partition trap in leaks 1 and 4 possible.
 - `docs/deletion-and-cleanup-semantics.md` - the delete paths referenced in leaks 6 and 10.
 - `docs/database-er-diagram.md` - the schema these three tables live in.
+
+## Addendum, 2026-09-29 (chunk 128): the request id
+
+The production servers switched log format at 13:00 on 2026-09-29: the request, response and M3 lines now carry a request id.
+The parser classified the new request and response lines as `info`, so Stage 2 built headless incomplete transactions (181 of 185 on the 2026-09-16 sample; 759 of 1,226 on tmp-test since 15 Sep).
+Chunk 128 recognises both spellings and routes stamped lines by (server, id) ahead of the rules audited above, which stay in force for id-less lines and old-format data (verified byte-identical on a real June log: 233 transactions, same ids, same rows).
+The cross-user fallback noted at "a response can close another user's transaction" can no longer apply to a stamped response.
+Rows stored between the switch and the deploy are repaired in place by `app/reclassify_log_entries.py`, which also drops the transactions built from them and their saved stream state before ticketing the window, because a windowed rebuild over the broken rows was measured to clash with sealed rows and orphan entries.

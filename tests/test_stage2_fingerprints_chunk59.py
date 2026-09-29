@@ -197,7 +197,13 @@ def _derivation_digest() -> str:
 #: Changed again by 18ad (chunk 97): a work line logged within 250 ms of its own thread's answered
 #: conversation rejoins it, and a GET without MethodName is named by its URL. `_DERIVE_VERSION` 3 -> 4:
 #: every GetAccessToken row gains a method and the paired headless/incomplete rows merge.
-_EXPECTED_DERIVATION = "2cd4db15166a2c93"
+#:
+#: Changed again by chunk 128 (2026-09-29): the new log format stamps a request id on the request,
+#: response and M3 lines, and `_group` routes a stamped line by (server, id) ahead of the old rules.
+#: `_DERIVE_VERSION` IS bumped (4 -> 5): every new-format transaction changes shape (it gains its
+#: request and response), while old-format rows derive identically (the end-to-end comparison in
+#: chunk 128 pins that on a real June log: same ids, same statuses).
+_EXPECTED_DERIVATION = "b6650ebd192acd94"
 
 
 def test_the_derivation_is_pinned_to_the_derive_version():

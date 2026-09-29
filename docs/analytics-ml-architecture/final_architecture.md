@@ -135,6 +135,10 @@ Component: `app/services/mnp_log_ingestion/pipeline/parse_insert.py`, driven by 
 
 The parser (`parsers/m3_dotnet_parser.py`) groups a timestamped header line plus its continuation lines into one logical entry, then classifies it into one of eight types:
 `request`, `request_body`, `response`, `mi_call`, `mi_result`, `sql`, `error`, `info`.
+Two spellings of the bracket lines are recognised (chunk 128, 2026-09-29): the old `REQUEST: <url>` / `RESPONSE: <json>`, and the new `REQUEST (ReqID = <id>) - : <url>` / `RESPONSE (ReqID = <id>): <json>`, which the production servers write since 2026-09-29 13:00.
+The new format also stamps the id on the M3 call and result lines (`LogAPICall - (ReqID = <id>):`, `LogAPIResult - (ReqID = <id>) - MI Program: …`).
+The id is kept in `fields["reqid"]`; `message` is normalised to the old spelling so every reader sees one shape; `raw_body` is never touched.
+An empty id (`ReqID = `) is no id.
 Timestamps are parsed as the tenant's local wall clock and converted to UTC at this single choke point.
 
 Each entry becomes one row in `log_entries` - the system's append-only ground truth.
@@ -210,6 +214,14 @@ Since chunk 67 a stream is keyed by **(server, thread, user)** - all three, beca
 The pairing rules, all scoped inside one server (recency rules since 18ac, chunk 95):
 
 ```
+ any line with a stamped request id (new format only; old-format lines
+                never have one) -> joins its conversation by (server, id):
+                the request opens it and takes the (server, thread, user)
+                slot so id-less work lines join by the rules below; the M3
+                lines join by id from any thread; the response closes it by
+                id from any thread or user; a response whose id is unknown
+                stands alone. The rules below are unchanged for every other
+                line (chunk 128).
  request        -> waits in a pending pool until its work appears
  request_body   -> opens a stream; claims its request by ReqID (GET), or the
                    id-less pending request (POST) written by its OWN THREAD and
@@ -224,8 +236,9 @@ The pairing rules, all scoped inside one server (recency rules since 18ac, chunk
                    moment a handler finishes); a stream whose last line is an
                    M3 call still awaiting its result is not a candidate; a
                    user-less response goes to user-less work first; ties fall
-                   back to the oldest; responses carry no request id
-                   (verified: 0 of 18,090 live responses do)
+                   back to the oldest; an OLD-format response carries no
+                   request id (verified: 0 of 18,090 live responses did
+                   before 2026-09-29; every new-format one does)
  quiet gap      -> a stream idle for more than 300s is closed as-is
                    (log_open_gap_seconds; the longest real conversation
                     measured is 363.7s TOTAL, with entries well inside 300s

@@ -72,6 +72,9 @@ class _TxnBuilder:
         self.entries: list[LogEntry] = []
         # S2: a DURABLE stream position, not a batch index. See `_stream_pos`.
         self.open_pos: tuple = _NO_POS
+        # chunk 128: the request id the new log format stamped on this conversation, or None for a
+        # conversation grouped by the old (server, thread, user) rules
+        self.reqid: str | None = None
 
     def add(self, entry: LogEntry) -> None:
         self.entries.append(entry)
@@ -162,7 +165,7 @@ class _TxnBuilder:
 
         response_summary = None
         if response_entry and response_entry.message:
-            response_summary = response_entry.message.replace("RESPONSE:", "").strip()[:500]
+            response_summary = _RESPONSE_PREFIX.sub("", response_entry.message, count=1).strip()[:500]
 
         # catch-all: keep all merged params except secrets
         clean_attrs = {k: v for k, v in attrs.items() if str(k).lower() not in _SENSITIVE}
@@ -190,7 +193,8 @@ class _TxnBuilder:
             "facility": g("Facility"),
             "device_id": g("DeviceID"),
             "device_name": g("DeviceName"),
-            "reqid": g("ReqID", "ReqId"),
+            # chunk 128: a POST's URL has no ReqId and its body may be absent; the header stamp has it
+            "reqid": g("ReqID", "ReqId") or _stamped_reqid_of(self.entries),
             "method": method,
             "http_method": "POST" if has_body else "GET",
             "endpoint_url": url,
@@ -214,6 +218,29 @@ class _TxnBuilder:
 
 _INTERNAL = {"mi_call", "mi_result", "sql", "info", "error"}
 
+# chunk 128: "RESPONSE: …" as the parser now always spells it, and the raw new-format spelling for
+# rows stored before the parser learned it.
+import re as _re
+
+_RESPONSE_PREFIX = _re.compile(r"^RESPONSE(?: \(ReqID = [^)]*\))?\s*:\s*")
+
+
+def _stamped_reqid(e: LogEntry) -> str | None:
+    """The request id the NEW log format stamps on a request, response, M3 call or M3 result line
+    (parser: fields["reqid"]). Old-format lines never have it: a GET's URL ReqId and a body's ReqId
+    are read by `_entry_reqid`, not here, so the old grouping rules see exactly what they always saw."""
+    f = e.fields or {}
+    v = f.get("reqid") if isinstance(f, dict) else None
+    return str(v) if v else None
+
+
+def _stamped_reqid_of(entries: list[LogEntry]) -> str | None:
+    for e in entries:
+        v = _stamped_reqid(e)
+        if v:
+            return v
+    return None
+
 
 def _method_from_url(url: str | None) -> str | None:
     """The last path segment of a request URL, or None. `.../api/server/GetAccessToken?Creds=...`
@@ -226,8 +253,11 @@ def _method_from_url(url: str | None) -> str | None:
 
 
 def _entry_reqid(e: LogEntry) -> str | None:
-    """ReqID for a request/body entry (GET carries it in the URL params, POST in the body)."""
+    """ReqID for a request/body entry (GET carries it in the URL params, POST in the body). The
+    new format's header stamp (chunk 128) counts too, so a body can find its stamped request."""
     f = e.fields or {}
+    if f.get("reqid"):
+        return str(f["reqid"])
     p = f.get("params") if isinstance(f.get("params"), dict) else {}
     for d in (p, f):
         for k in ("ReqID", "ReqId", "reqid"):
@@ -304,6 +334,13 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
     open_by_key: dict[tuple, _TxnBuilder] = {}
     # (server, thread) -> its currently-active key (null inherit)
     current_by_thread: dict[tuple, tuple] = {}
+    # chunk 128: the new log format stamps a request id on the request, the response and the M3
+    # lines. A stamped line joins its conversation by (server, id) and nothing else; the response
+    # closes it by id from whatever thread or user. Such a builder is ALSO registered under its
+    # (server, thread, user) key and as the thread's current stream, so id-less lines (stored
+    # procedures, narration, errors) join it by the old rules. Old-format lines never carry a stamp
+    # and never enter this map, so their grouping is byte-for-byte the old one.
+    open_by_reqid: dict[tuple[str, str], _TxnBuilder] = {}
 
     # S4. `seed` is state read back from `log_open_stream`, so a stream can CONTINUE across a process
     # boundary instead of being re-derived from a padded window. Absent (the default) reproduces the
@@ -329,6 +366,10 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
         open_by_key[key] = b
         if st["is_current"]:
             current_by_thread[(srv, st["thread"])] = key
+        rid = _stamped_reqid_of(st["entries"])  # chunk 128: a reloaded stamped stream is reachable by id
+        if rid:
+            b.reqid = rid
+            open_by_reqid[(srv, rid)] = b
     pending_reqs: list[LogEntry] = list((seed or {}).get("pending") or [])
     # S2: there is no `req_pos` map any more. It existed to remember where in the stream each pending
     # request arrived, which is a property of the ENTRY - so it is derived by `_stream_pos` rather than
@@ -441,7 +482,54 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
         # key[:2] is (server, thread) for named and anonymous keys alike (18r).
         if b is not None and current_by_thread.get(key[:2]) == key:
             del current_by_thread[key[:2]]
+        if b is not None:
+            forget_id(b)
         return b
+
+    # ---- chunk 128: the stamped-id path -------------------------------------------------------
+    def is_id_builder(b: _TxnBuilder) -> bool:
+        return b.reqid is not None
+
+    def forget_id(b: _TxnBuilder) -> None:
+        for k in [k for k, bb in open_by_reqid.items() if bb is b]:
+            del open_by_reqid[k]
+
+    def open_id_builder(srv: str, rid: str, e: LogEntry) -> _TxnBuilder:
+        """The open conversation for (server, id), created from this line if none is open. It takes
+        the (server, thread, user) slot and the thread's current stream, so the old rules route the
+        id-less work lines that follow on this thread into it; a builder it displaces from the slot
+        stays open, reachable by its own id."""
+        b = open_by_reqid.get((srv, rid))
+        key = (srv, e.thread, e.user_ctx)
+        if b is None:
+            b = _TxnBuilder()
+            b.open_pos = _stream_pos(e)
+            b.reqid = rid
+            open_by_reqid[(srv, rid)] = b
+        prior = open_by_key.get(key)
+        if prior is not None and prior is not b and not is_id_builder(prior) and not has_request(prior):
+            # headless old-style work on this slot with no request of its own: the stamped request
+            # arriving now is what it belongs to (the server logs a line or two before the URL line)
+            for x in prior.entries:
+                b.add(x)
+            b.open_pos = min(b.open_pos, prior.open_pos) if b.open_pos != _NO_POS else prior.open_pos
+            open_by_key.pop(key, None)
+        open_by_key[key] = b
+        current_by_thread[key[:2]] = key
+        return b
+
+    def close_id_builder(srv: str, rid: str) -> _TxnBuilder | None:
+        b = open_by_reqid.pop((srv, rid), None)
+        if b is None:
+            return None
+        # a stamped conversation may hold more than one slot: its M3 continuation ran on another
+        # thread and claimed that thread too. Every slot it holds is released with it.
+        for k in [k for k, bb in open_by_key.items() if bb is b]:
+            del open_by_key[k]
+            if current_by_thread.get(k[:2]) == k:
+                del current_by_thread[k[:2]]
+        return b
+    # ---------------------------------------------------------------------------------------------
 
     def last_ts(b: _TxnBuilder) -> datetime | None:
         return next((e.timestamp for e in reversed(b.entries) if e.timestamp is not None), None)
@@ -472,6 +560,10 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
         for k in [k for k, bd in open_by_key.items()
                   if (lt := last_ts(bd)) is not None and lt < horizon]:
             builders.append(close(k))
+        # chunk 128: a stamped conversation displaced from its slot but still waiting for its response
+        for k in [k for k, bd in open_by_reqid.items()
+                  if (lt := last_ts(bd)) is not None and lt < horizon]:
+            builders.append(open_by_reqid.pop(k))
         for r in [r for r in pending_reqs if r.timestamp is not None and r.timestamp < horizon]:
             pending_reqs.remove(r)
             nb = _TxnBuilder()
@@ -491,6 +583,30 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
         srv = _entry_server(e)
         if e.timestamp is not None:
             evict_stale(e.timestamp)
+
+        # chunk 128: a line the new format stamped with the request id is routed by that id and
+        # nothing else. Everything below this block is the old logic, untouched.
+        rid = _stamped_reqid(e)
+        if rid is None and et == "request_body":
+            # a body carries its id in its JSON; it belongs to the stamped request that opened the
+            # conversation a millisecond earlier (never to an old-format one: those never open by id)
+            body_id = _entry_reqid(e)
+            if body_id is not None and (srv, body_id) in open_by_reqid:
+                rid = body_id
+        if rid is not None:
+            if et == "response":
+                b = close_id_builder(srv, rid)
+                if b is None:
+                    b = _TxnBuilder()  # its request is outside this window (or was never logged)
+                    b.open_pos = _stream_pos(e)
+                b.add(e)
+                builders.append(b)
+                head = b.entries[0]  # the tail lines of a stamped conversation log on ITS thread
+                remember_closed((srv, head.thread, head.user_ctx), b, e)
+            else:
+                b = open_id_builder(srv, rid, e)
+                b.add(e)
+            continue
 
         if et == "request":
             pending_reqs.append(e)
@@ -560,7 +676,9 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
             # response, or its request isn't open), fall back to all of THIS SERVER's candidates so
             # it still lands.
             ru = e.user_ctx
-            keys = [k for k in open_by_key if k[0] == srv]
+            # chunk 128: a stamped conversation is closed by its own stamped response, never by an
+            # id-less one (the two formats only meet in the minutes around the server's upgrade)
+            keys = [k for k in open_by_key if k[0] == srv and not is_id_builder(open_by_key[k])]
             srv_reqs = [r for r in pending_reqs if _entry_server(r) == srv]
             # 18ac-B: a response with NO user is matched against user-less work first - a device's
             # CheckServer conversation logs without a context user from URL to answer - and only
@@ -606,7 +724,16 @@ def _group(entries: list[LogEntry], seed: dict | None = None) -> list[_TxnBuilde
                 b.open_pos = _stream_pos(e)     # S2: an orphan response opens at its own position
                 builders.append(b)
 
-    builders.extend(open_by_key.values())
+    # chunk 128: a stamped conversation may sit in several slots, or in none (displaced); emit each
+    # open builder exactly once
+    # open one exactly once, by its id. An old-style builder holds exactly one slot.
+    emitted_ids: set[str] = set()
+    for b in list(open_by_key.values()) + list(open_by_reqid.values()):
+        if b.reqid is not None:
+            if b.reqid in emitted_ids:
+                continue
+            emitted_ids.add(b.reqid)
+        builders.append(b)
     for r in pending_reqs:  # REQUESTs with no work and no RESPONSE -> their own (incomplete) txn
         b = _TxnBuilder()
         b.add(r)

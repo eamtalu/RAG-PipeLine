@@ -104,8 +104,10 @@ class LogEntry(Base):
     # so it's a reliable correlation key where the async REQUEST/RESPONSE bracket lines hop threads.
     thread: Mapped[str | None] = mapped_column(String(16), nullable=True)  # index dropped (unused); see migration e2a9c7b41d68
     # log4net context user from the header prefix "(CPRICE)". Present on EVERY line — including the
-    # async RESPONSE line, which has no user in its payload and no ReqID. Stage 2 uses it to attach
-    # a response to the oldest open request *for that same user*, so a response can never cross users.
+    # async RESPONSE line, which has no user in its payload. In the OLD log format the response line
+    # carried no ReqID either, and Stage 2 attached it to that user's open work; since 2026-09-29 the
+    # server stamps the request id on the request, response and M3 lines (kept in fields["reqid"],
+    # chunk 128) and Stage 2 joins those lines by id, keeping the user rule for id-less lines.
     user_ctx: Mapped[str | None] = mapped_column(String(64), nullable=True)  # index dropped (unused); see migration e2a9c7b41d68
     logger: Mapped[str | None] = mapped_column(String(256), nullable=True)
     method: Mapped[str | None] = mapped_column(String(128), nullable=True)

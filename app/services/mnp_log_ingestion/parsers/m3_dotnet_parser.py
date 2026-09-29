@@ -12,6 +12,17 @@
 #     └ timestamp ─────────┘ └user┘ └thr┘ └lvl┘ └logger┘ └method┘   └ message ┘
 #
 #   User is normalised: (BECWHLO) -> "BECWHLO";  ((null)) / () -> None.
+#
+#   Chunk 128 (2026-09-29): the server now stamps a request id on the bracket lines and on the M3
+#   call and result lines:
+#     MoveNext - REQUEST (ReqID = <id>) - : <url>        was  MoveNext - REQUEST: <url>
+#     <SendAsync>b__1 - RESPONSE (ReqID = <id>): <json>   was  <SendAsync>b__1 - RESPONSE: <json>
+#     LogAPICall - (ReqID = <id>):                        was  LogAPICall - <text>
+#     LogAPIResult - (ReqID = <id>) - MI Program: …      was  LogAPIResult - MI Program: …
+#   Both spellings are recognised. The id goes into fields["reqid"]; the prefix is stripped from
+#   `message` so it reads exactly as the old format did ("REQUEST: <url>", "RESPONSE: <json>") and
+#   every downstream reader keeps working. `raw_body` is never touched: it is the entry's identity.
+#   An EMPTY id ("ReqID = ") is no id: the server logs "Couldn't find a request ID" beside it.
 
 import json
 import re
@@ -46,6 +57,11 @@ _MI_CALL = re.compile(
 )
 
 _NULL_USERS = {"", "(null)", "null"}
+
+# Chunk 128: "REQUEST (ReqID = <id>) - : …" / "RESPONSE (ReqID = <id>): …" / the old "REQUEST: …".
+_BRACKET = re.compile(r"^(?P<kind>REQUEST BODY|REQUEST|RESPONSE)(?: \(ReqID = (?P<id>[^)]*)\))?(?: -)?\s*:\s?", re.DOTALL)
+# Chunk 128: the id the M3 call and result lines carry ahead of their text.
+_MI_REQID = re.compile(r"^\(ReqID = (?P<id>[^)]*)\)(?::| -)?\s*", re.DOTALL)
 
 
 class M3DotNetLogParser(BaseLogParser):
@@ -126,28 +142,46 @@ class M3DotNetLogParser(BaseLogParser):
             rec.result_status = msg
             return
 
-        # 2. request / response by message prefix
-        if msg.startswith("REQUEST BODY:"):
-            rec.entry_type = "request_body"
-            rec.fields = self._extract_json_blob(message.split("REQUEST BODY:", 1)[1].strip())
-            return
-        if msg.startswith("REQUEST:"):
-            rec.entry_type = "request"
-            rec.fields = self._extract_request(message.split("REQUEST:", 1)[1].strip())
-            return
-        if msg.startswith("RESPONSE:"):
-            rec.entry_type = "response"
-            rec.fields = self._extract_json_blob(message.split("RESPONSE:", 1)[1].strip(), key="response")
+        # 2. request / response by message prefix, in either spelling (chunk 128)
+        bracket = _BRACKET.match(msg)
+        if bracket:
+            kind, rest = bracket.group("kind"), msg[bracket.end():].strip()
+            reqid = (bracket.group("id") or "").strip() or None
+            if kind == "REQUEST BODY":
+                rec.entry_type = "request_body"
+                rec.fields = self._extract_json_blob(rest)
+                rec.message = f"REQUEST BODY: {rest}"
+            elif kind == "REQUEST":
+                rec.entry_type = "request"
+                rec.fields = self._extract_request(rest)
+                rec.message = f"REQUEST: {rest}"
+            else:
+                rec.entry_type = "response"
+                rec.fields = self._extract_json_blob(rest, key="response")
+                rec.message = f"RESPONSE: {rest}"
+            if reqid:
+                rec.fields["reqid"] = reqid
+                rec.reqid = reqid
             return
 
-        # 3. M3 MI call / result by method
-        if rec.method == "LogAPICall":
-            rec.entry_type = "mi_call"
-            self._extract_mi_call(rec, body_text)
-            return
-        if rec.method == "LogAPIResult":
-            rec.entry_type = "mi_result"
-            self._extract_mi_result(rec, message, body_text)
+        # 3. M3 MI call / result by method; the id ahead of the text is lifted out (chunk 128)
+        if rec.method in ("LogAPICall", "LogAPIResult"):
+            stamped = _MI_REQID.match(msg)
+            if stamped:
+                message = msg[stamped.end():]
+                rec.message = message
+                reqid = (stamped.group("id") or "").strip() or None
+            else:
+                reqid = None
+            if rec.method == "LogAPICall":
+                rec.entry_type = "mi_call"
+                self._extract_mi_call(rec, body_text)
+            else:
+                rec.entry_type = "mi_result"
+                self._extract_mi_result(rec, message, body_text)
+            if reqid:
+                rec.fields["reqid"] = reqid
+                rec.reqid = reqid
             return
 
         # 4. SQL stored procedure (has a body with the proc text)

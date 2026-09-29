@@ -27,6 +27,9 @@ class LogRecord(BaseModel):
 
     # --- classification ---
     entry_type: str = "info"         # request/request_body/mi_call/mi_result/sql/response/info/error
+    # chunk 128: the request id the new log format stamps on request, response and M3 lines; also
+    # kept in fields["reqid"], which is what reaches the log_entries row
+    reqid: str | None = None
 
     # --- M3 MI promoted fields ---
     mi_program: str | None = None    # e.g. MMS200MI
