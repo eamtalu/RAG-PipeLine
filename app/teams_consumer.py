@@ -20,6 +20,8 @@ from app.services.log_agent.agent import LogDebugAgent
 from app.services.teams.binding_mirror import build_mirror_from_settings
 from app.services.teams.binding_sweep import sweep_once
 from app.services.teams.consumer import HttpAnswerPoster, TeamsQuestionConsumer
+from app.services.teams.home_snapshot import build_writer_from_settings
+from app.services.teams.home_snapshot import sweep_once as snapshot_sweep_once
 from app.services.teams.memory import ConversationMemory
 from app.settings import settings
 
@@ -66,6 +68,24 @@ async def _sweep_loop(stop: asyncio.Event) -> None:
             pass
 
 
+async def _snapshot_loop(stop: asyncio.Event) -> None:
+    """The Teams tab's Home numbers, rewritten every minute per bound customer (chunk 127)."""
+    writer = build_writer_from_settings()
+    if writer is None:
+        logger.info("home snapshot loop off: TEAMS_EDGE_DYNAMODB_TABLE is not set")
+        return
+    while not stop.is_set():
+        try:
+            written = await snapshot_sweep_once(writer)
+            logger.debug("home snapshot written for %s", written)
+        except Exception:
+            logger.exception("home snapshot sweep failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.teams_home_snapshot_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+
 def _require(value: str, name: str) -> str:
     if not value:
         raise SystemExit(f"{name} must be set to run the Teams consumer")
@@ -93,7 +113,7 @@ async def _amain() -> None:
         except NotImplementedError:
             pass
     try:
-        await asyncio.gather(consumer.run_forever(stop), _sweep_loop(stop))
+        await asyncio.gather(consumer.run_forever(stop), _sweep_loop(stop), _snapshot_loop(stop))
     finally:
         await engine.dispose()
 

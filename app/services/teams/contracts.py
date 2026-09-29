@@ -39,6 +39,11 @@ class QuestionJob(BaseModel):
     sender_name: str | None = None
     question: str = Field(..., min_length=1)
     enqueued_at: datetime = Field(default_factory=_now)
+    source: Literal["bot", "tab"] = Field(
+        default="bot",
+        description="Where the question was typed: the Teams chat, or the Home tab's "
+        "chat pane (answered by storing the payload on the job rather than sending it).",
+    )
 
 
 class EvidenceColumn(BaseModel):

@@ -54,3 +54,11 @@ The contract and the card layout are in `docs/teams-evidence-card.md`; the edge 
 
 Only the text of earlier questions and answers is sent back to the model, never earlier tool calls or results.
 The model re-reads the data fresh for every question, so a follow-up can never quote a number from a stale tool result.
+
+## The Home snapshot for the Teams tab (chunk 127)
+
+The Teams app's Home tab is a page served by the edge on AWS, which cannot reach this server.
+So the consumer computes "today so far" per bound, enabled customer every `TEAMS_HOME_SNAPSHOT_SECONDS` (60) and writes it to the edge's DynamoDB table as `HOME#<customer_code>` / `SNAPSHOT`, one JSON string with a one-hour TTL (`app/services/teams/home_snapshot.py`).
+It is built from the same reads the analytics agent uses (`aggregate_releases`, `list_releases`) on the tenant's clock: releases today against yesterday at this time with an hourly sparkline, deliveries, fill rate, zero-picks and partials, the top zero-picked items today and chronic short items over seven days, customers today by lines, and the latest short lines.
+A customer without a `pick_release` settlement gets no snapshot; a customer without the item or customer lookups gets the plain fields instead.
+Questions typed in the tab arrive on the same queue with `source="tab"` and are answered the same way; the edge stores the answer on the job for the page to poll instead of sending it into a Teams conversation.

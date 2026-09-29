@@ -416,6 +416,7 @@ class Settings(BaseSettings):
     teams_sqs_wait_seconds: int = 20              # long-poll wait (SQS max)
     teams_history_turns: int = 6                  # prior turns replayed to the agent (3 exchanges)
     teams_binding_mirror_sweep_seconds: float = 60.0  # how often the consumer re-pushes stale bindings
+    teams_home_snapshot_seconds: float = 60.0     # how often the consumer rewrites the Teams tab's Home snapshot
 
     # --- Notifications (rules → in-process bus → channels: Teams/Slack/WhatsApp) ---
     # Background worker: evaluates rules over recently-finalized transactions, publishes events to
