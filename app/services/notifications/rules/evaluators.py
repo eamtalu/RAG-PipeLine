@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.persistence.models.log_transaction import LogTransaction
 from app.persistence.models.notification import NotificationRule
 from app.services.notifications.events import NotificationEvent
+from app.services.notifications.links import link_keys
+from app.services.notifications.redact import redact_secrets
 from app.services.notifications.rules.base import StreamingEvaluator, WindowEvaluator
 from app.services.mnp_log_ingestion.timefmt import iso_display
 
@@ -30,21 +32,22 @@ def _txn_status(txn: LogTransaction) -> str | None:
 
 
 def transaction_payload(txn: LogTransaction) -> dict:
-    """Curated, channel-agnostic context for a transaction event (ordered facts + ids for links)."""
+    """Curated, channel-agnostic context for a transaction event (ordered facts + ids for links).
+    The request id leads: it is what a reader searches the log explorer by."""
     facts = {
+        "Request ID": txn.reqid,
         "Customer": txn.customer_code,
         "Status": _txn_status(txn),
         "Method": txn.method,
         "Warehouse": txn.warehouse,
         "User": txn.user_name,
-        "Req ID": txn.reqid,
         # display-only: show the start in UK time to match the logs (storage/window math stay UTC)
         "Started": iso_display(txn.started_at),
         "Duration (ms)": txn.duration_ms,
-        "Error": txn.error_text,
+        "Error": redact_secrets(txn.error_text),
     }
     facts = {k: v for k, v in facts.items() if v not in (None, "")}
-    return {"transaction_id": str(txn.id), "facts": facts}
+    return {"transaction_id": str(txn.id), **link_keys(txn), "facts": facts}
 
 
 def _target_ids(rule: NotificationRule) -> list[str] | None:
@@ -60,7 +63,7 @@ def _txn_event(rule: NotificationRule, txn: LogTransaction, event_type: str) -> 
         customer_code=txn.customer_code,
         severity=rule.severity,
         title=f"[{txn.customer_code}] {status}: {txn.method or 'transaction'}",
-        summary=txn.error_text or None,
+        summary=redact_secrets(txn.error_text) or None,
         # stable per (rule, transaction, STATUS) → an unchanged transaction alerts exactly once no
         # matter how often the worker polls, while a status CHANGE - the correction the alert exists
         # for, e.g. incomplete that later errors - mints a new key and re-alerts. Version-blind

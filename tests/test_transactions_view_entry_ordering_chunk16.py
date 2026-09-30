@@ -136,7 +136,7 @@ async def test_rendered_entries_are_in_seq_order_despite_scrambled_insert(db):
 
     r = await view_transactions(customer=cc, db=db, pending={}, date=D, limit=50, offset=0,
                                 user=None, hour=None, status=None,
-                                order_number=None, item_number=None, verbose=True)
+                                order_number=None, item_number=None, verbose=True, reqid=None)
     body = r.body.decode()
 
     # steps must appear in seq order (1 then 2) regardless of the scrambled insertion order above.

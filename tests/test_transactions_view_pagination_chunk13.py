@@ -51,7 +51,7 @@ async def test_view_is_ascending_and_paginated(db):
     # so the optional params must be passed explicitly as None/False (otherwise they are Query sentinels).
     r1 = await view_transactions(customer=cc, db=db, pending={}, date=D, limit=2, offset=0,
                                  user=None, hour=None, status=None,
-                                 order_number=None, item_number=None, verbose=False)
+                                 order_number=None, item_number=None, verbose=False, reqid=None)
     b1 = r1.body.decode()
     assert r1.headers["X-Total-Count"] == "3"
     assert r1.headers["X-Limit"] == "2"
@@ -64,7 +64,7 @@ async def test_view_is_ascending_and_paginated(db):
     # page 2: the remaining one (03:00)
     r2 = await view_transactions(customer=cc, db=db, pending={}, date=D, limit=2, offset=2,
                                  user=None, hour=None, status=None,
-                                 order_number=None, item_number=None, verbose=False)
+                                 order_number=None, item_number=None, verbose=False, reqid=None)
     b2 = r2.body.decode()
     assert r2.headers["X-Page"] == "2"
     assert str(txns[2].id) in b2
@@ -77,7 +77,7 @@ async def test_view_empty_page_still_reports_total(db):
     # offset past the end -> empty page, but the total (and header) still reflect the day
     r = await view_transactions(customer=cc, db=db, pending={}, date=D, limit=50, offset=50,
                                 user=None, hour=None, status=None,
-                                order_number=None, item_number=None, verbose=False)
+                                order_number=None, item_number=None, verbose=False, reqid=None)
     assert r.headers["X-Total-Count"] == "2"
     assert "(no transactions on this page)" in r.body.decode()
 
@@ -105,7 +105,7 @@ async def test_view_filters_by_order_and_item_number(db):
     # order_number=CO222 -> only txns[1] and txns[2]
     r = await view_transactions(customer=cc, db=db, pending={}, date=D, limit=50, offset=0,
                                 user=None, hour=None, status=None,
-                                order_number="CO222", item_number=None, verbose=False)
+                                order_number="CO222", item_number=None, verbose=False, reqid=None)
     body = r.body.decode()
     assert r.headers["X-Total-Count"] == "2"
     assert str(txns[1].id) in body and str(txns[2].id) in body
@@ -115,7 +115,7 @@ async def test_view_filters_by_order_and_item_number(db):
     # order_number=CO222 AND item_number=IT-C -> only txns[2]
     r2 = await view_transactions(customer=cc, db=db, pending={}, date=D, limit=50, offset=0,
                                  user=None, hour=None, status=None,
-                                 order_number="CO222", item_number="IT-C", verbose=False)
+                                 order_number="CO222", item_number="IT-C", verbose=False, reqid=None)
     body2 = r2.body.decode()
     assert r2.headers["X-Total-Count"] == "1"
     assert str(txns[2].id) in body2
@@ -124,7 +124,7 @@ async def test_view_filters_by_order_and_item_number(db):
     # a non-matching order_number -> empty page, total 0
     r3 = await view_transactions(customer=cc, db=db, pending={}, date=D, limit=50, offset=0,
                                  user=None, hour=None, status=None,
-                                 order_number="NOPE", item_number=None, verbose=False)
+                                 order_number="NOPE", item_number=None, verbose=False, reqid=None)
     assert r3.headers["X-Total-Count"] == "0"
 
 

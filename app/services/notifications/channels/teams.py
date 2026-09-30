@@ -12,6 +12,8 @@ import httpx
 
 from app.services.notifications.channels.base import Channel, ChannelRateLimited
 from app.services.notifications.events import NotificationEvent
+from app.services.notifications.links import transaction_url
+from app.services.notifications.redact import redact_secrets
 from app.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -61,15 +63,16 @@ class TeamsChannel(Channel):
         color = _SEVERITY_COLOR.get(event.severity, "Default")
         bodies: list[dict] = [
             {"type": "TextBlock", "size": "Large", "weight": "Bolder", "wrap": True,
-             "color": color, "text": event.title},
+             "color": color, "text": redact_secrets(event.title)},
         ]
         if event.summary:
-            bodies.append({"type": "TextBlock", "wrap": True, "isSubtle": True, "text": event.summary})
+            bodies.append({"type": "TextBlock", "wrap": True, "isSubtle": True,
+                           "text": redact_secrets(event.summary)})
 
         facts = self._facts(event)
         if facts:
             bodies.append({"type": "FactSet",
-                           "facts": [{"title": str(k), "value": str(v)} for k, v in facts]})
+                           "facts": [{"title": str(k), "value": redact_secrets(str(v))} for k, v in facts]})
 
         card: dict = {
             "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
@@ -80,7 +83,7 @@ class TeamsChannel(Channel):
 
         url = self._link(event)
         if url:
-            card["actions"] = [{"type": "Action.OpenUrl", "title": "Open", "url": url}]
+            card["actions"] = [{"type": "Action.OpenUrl", "title": "Open in eSmart Eye", "url": url}]
 
         return {
             "type": "message",
@@ -106,9 +109,4 @@ class TeamsChannel(Channel):
         payload = event.payload or {}
         if payload.get("url"):
             return str(payload["url"])
-        base = settings.app_public_base_url.rstrip("/") if settings.app_public_base_url else ""
-        txn_id = payload.get("transaction_id")
-        if base and txn_id:
-            # matches the matrix-log-explorer App Router route: src/app/transactions/[id]/page.tsx
-            return f"{base}/transactions/{txn_id}"
-        return None
+        return transaction_url(settings.app_public_base_url, payload)

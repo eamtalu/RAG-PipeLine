@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.services.notifications import tenant_gate
+from app.services.notifications.links import link_keys
+from app.persistence.models.log_transaction import LogTransaction
 from app.persistence.models.notification import (
     CustomerNotificationChannel,
     NotificationRule,
@@ -175,6 +177,17 @@ class NotificationRepository:
         return True
 
     # ----- events (outbox) ----------------------------------------------------------------------
+    async def transaction_link_keys(self, customer_code: str, transaction_id: str) -> dict:
+        """The request id and day of this tenant's transaction, for an alert's link; {} when the id
+        is not a UUID or the transaction is not this tenant's."""
+        try:
+            txn_uuid = uuid.UUID(str(transaction_id))
+        except ValueError:
+            return {}
+        txn = await self.db.scalar(select(LogTransaction).where(
+            LogTransaction.id == txn_uuid, LogTransaction.customer_code == customer_code))
+        return link_keys(txn) if txn is not None else {}
+
     async def get_event_by_dedup_key(self, dedup_key: str) -> NotificationEvent | None:
         return await self.db.scalar(
             select(NotificationEvent).where(NotificationEvent.dedup_key == dedup_key)

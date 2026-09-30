@@ -325,6 +325,7 @@ async def publish_manual_endpoint(
     payload: dict = {"facts": facts}
     if body.transaction_id:
         payload["transaction_id"] = body.transaction_id
+        payload.update(await repo.transaction_link_keys(code, body.transaction_id))
         facts["Transaction"] = body.transaction_id
 
     event = Event(

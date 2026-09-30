@@ -947,6 +947,8 @@ async def view_transactions(
     order_number: str | None = Query(default=None, description="exact match on order_number; omit for all"),
     item_number: str | None = Query(default=None, description="exact match on item_number; omit for all"),
     verbose: bool = Query(default=False, description="also render plain INFO narration steps"),
+    reqid: str | None = Query(default=None, description="exact match on the request id (trimmed); "
+                              "stacks on the day like the other filters"),
 ):
     """Render one PAGE of a day's transactions as the §6 text view, oldest→newest (from 00:00).
 
@@ -970,6 +972,9 @@ async def view_transactions(
         conds.append(LogTransaction.order_number == order_number)
     if item_number is not None:
         conds.append(LogTransaction.item_number == item_number)
+    reqid = (reqid or "").strip() or None
+    if reqid is not None:
+        conds.append(LogTransaction.reqid == reqid)
 
     # total for the pager (cheap: index-only count over this day, see docs/debugging-worker-timeout-outage.md)
     total = (await db.scalar(select(func.count()).select_from(LogTransaction).where(*conds))) or 0
@@ -996,6 +1001,8 @@ async def view_transactions(
         header += f" · order {order_number}"
     if item_number is not None:
         header += f" · item {item_number}"
+    if reqid is not None:
+        header += f" · request {reqid}"
     if hour is not None:
         header += f" hour {hour:02d}:00"
     header += f" — page {page}/{page_count} — oldest → newest"

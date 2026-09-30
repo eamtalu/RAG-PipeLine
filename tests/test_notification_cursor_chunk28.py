@@ -175,7 +175,7 @@ def test_a_rule_does_not_re_evaluate_rows_behind_its_own_cursor():
             self.status = LogTransactionStatus.error
             self.method = self.error_text = self.user_name = None
             self.id = uuid.uuid4()
-            self.warehouse = self.reqid = self.duration_ms = None
+            self.warehouse = self.reqid = self.duration_ms = self.date = None
             self.started_at = created_at
 
     old, new = _utc(2026, 8, 8, 10, 0), _utc(2026, 8, 8, 11, 0)
