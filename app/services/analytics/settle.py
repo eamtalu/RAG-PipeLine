@@ -29,7 +29,7 @@ import enum
 from dataclasses import dataclass, field as dc_field
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from app.services.analytics import contract
 
@@ -44,6 +44,8 @@ class Rule(str, enum.Enum):
 
     first = "first"
     last = "last"
+    # Chunk 129: the first value AS TEXT, for codes (a location) that are neither numbers nor times.
+    first_text = "first_text"
     sum = "sum"
     count = "count"
     min = "min"
@@ -51,12 +53,29 @@ class Rule(str, enum.Enum):
     distinct_count = "distinct_count"
     difference = "difference"
     flag = "flag"
+    # Chunk 129: a value looked up by a key the row already has (a carried field or an earlier value).
+    lookup = "lookup"
+    # Chunk 129: other calls of the SAME user on the SAME item (the `match` fields) in `methods`,
+    # from `window_s` seconds before the release's first call up to its last call. On tmp-live a
+    # picker checks a location on the handheld seconds before confirming a pick; these rules attach
+    # those checks to the release without either side carrying a key the other has.
+    nearby_count = "nearby_count"
+    nearby_distinct = "nearby_distinct"
+    nearby_last = "nearby_last"
+    nearby_has = "nearby_has"
 
 
 #: Rules that read a field from every qualifying call.
-READS_A_FIELD = frozenset({Rule.first, Rule.last, Rule.sum, Rule.min, Rule.max, Rule.distinct_count})
+READS_A_FIELD = frozenset({Rule.first, Rule.last, Rule.first_text, Rule.sum, Rule.min, Rule.max,
+                           Rule.distinct_count})
 #: Rules that read two earlier settled values instead.
 READS_SETTLED = frozenset({Rule.difference, Rule.flag})
+#: Rules that read the context calls of other methods.
+NEARBY = frozenset({Rule.nearby_count, Rule.nearby_distinct, Rule.nearby_last, Rule.nearby_has})
+#: Nearby rules that read a field of the context calls.
+NEARBY_WITH_FIELD = frozenset({Rule.nearby_distinct, Rule.nearby_last, Rule.nearby_has})
+#: How a `lookup` rule names what it looks up: `lookup:<lookup>.<attribute>`, as a grouping does.
+LOOKUP_PREFIX = "lookup:"
 #: Comparisons a `flag` may make.
 FLAG_OPS = ("<", "<=", "==", "!=", ">=", ">")
 
@@ -78,6 +97,11 @@ class Settled:
     #: For `flag`: the comparison and, when comparing to a constant, the constant.
     op: str | None = None
     right_value: Decimal | None = None
+    #: For the `nearby_*` rules: which methods' calls, which fields must be equal between them and
+    #: the release's first call, and how many seconds before that first call to look.
+    methods: tuple[str, ...] = ()
+    match: tuple[str, ...] = ()
+    window_s: int | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +168,15 @@ def _numeric_or_time(value: Any, tz: tzinfo | None) -> Any:
     return _time_or_none(value, tz)
 
 
+def _text_or_none(value: Any) -> str | None:
+    """`first_text` (chunk 129): the value as written, for codes such as a location `A03A` that are
+    neither a number nor a time and that `first` therefore reads as nothing."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _time_or_none(value: Any, tz: tzinfo | None) -> datetime | None:
     if not isinstance(value, str) or len(value) < 10 or value[4] != "-":
         return None
@@ -170,7 +203,9 @@ def _subtract(a: Any, b: Any) -> Decimal | None:
 
 # ============================================================== settling one key
 
-def _settle_key(rows: list[Mapping[str, Any]], settlement: Settlement, tz: tzinfo | None) -> SettledRow:
+def _settle_key(rows: list[Mapping[str, Any]], settlement: Settlement, tz: tzinfo | None,
+                context: Iterable[Mapping[str, Any]] | None = None,
+                resolve: "Resolve | None" = None) -> SettledRow:
     ordered = sorted(rows, key=lambda r: (r.get("event_time") is None, r.get("event_time")))
     first_at = next((r["event_time"] for r in ordered if r.get("event_time") is not None), None)
 
@@ -193,6 +228,8 @@ def _settle_key(rows: list[Mapping[str, Any]], settlement: Settlement, tz: tzinf
                 values[s.name] = _numeric_or_time(present[0][1], tz) if present else None
             elif s.rule is Rule.last:
                 values[s.name] = _numeric_or_time(present[-1][1], tz) if present else None
+            elif s.rule is Rule.first_text:
+                values[s.name] = _text_or_none(present[0][1]) if present else None
             elif s.rule is Rule.distinct_count:
                 values[s.name] = len({str(v) for _, v in present})
             else:
@@ -213,7 +250,77 @@ def _settle_key(rows: list[Mapping[str, Any]], settlement: Settlement, tz: tzinf
             a = values.get(s.left)
             b = values.get(s.right) if s.right else s.right_value
             values[s.name] = _compare(a, s.op, b)
+        elif s.rule is Rule.lookup:
+            values[s.name] = _looked_up(s, _key_for(s.left, ordered, carried, values), resolve)
+        elif s.rule in NEARBY:
+            values[s.name] = _nearby(s, ordered, context, values, tz)
     return SettledRow(key=tuple(), event_time=first_at, carried=carried, values=values, calls=len(rows))
+
+
+#: `(lookup, attribute, key) -> value or None`. Handed in by the store, so this module stays pure.
+Resolve = Callable[[str, str, str], Any]
+
+
+def _key_for(name: str | None, ordered: list[Mapping[str, Any]], carried: dict[str, Any],
+             values: dict[str, Any]) -> str | None:
+    """The key a `lookup` rule reads: an earlier settled value, a carried field, or a call field."""
+    if not name:
+        return None
+    for source in (values, carried):
+        if name in source:
+            v = source[name]
+            return None if v is None or v == "" else str(v)
+    plain = _carry_name(name)
+    if plain in carried:
+        v = carried[plain]
+        return None if v is None or v == "" else str(v)
+    for r in ordered:
+        v = _read(r, name)
+        if v is not None:
+            return str(v)
+    return None
+
+
+def _looked_up(s: Settled, key: str | None, resolve: Resolve | None) -> Any:
+    if key is None or resolve is None or not s.field or not s.field.startswith(LOOKUP_PREFIX):
+        return None
+    lookup, _dot, attribute = s.field[len(LOOKUP_PREFIX):].partition(".")
+    value = resolve(lookup, attribute, key)
+    return None if value is None or value == "" else value
+
+
+def _nearby(s: Settled, ordered: list[Mapping[str, Any]], context: Iterable[Mapping[str, Any]] | None,
+            values: dict[str, Any], tz: tzinfo | None) -> Any:
+    """The `nearby_*` rules over the context calls that belong to this release."""
+    timed = [r for r in ordered if r.get("event_time") is not None]
+    rows: list[Mapping[str, Any]] = []
+    if timed and context and s.window_s:
+        first, last = timed[0], timed[-1]
+        lo = _aware(first["event_time"], tz) - timedelta(seconds=s.window_s)
+        hi = _aware(last["event_time"], tz)
+        wanted = tuple(_read(first, m) for m in s.match)
+        if all(w is not None for w in wanted):
+            for r in context:
+                at = r.get("event_time")
+                if r.get("method") not in s.methods or at is None or not _qualifies(r, s):
+                    continue
+                if not lo <= _aware(at, tz) <= hi:
+                    continue
+                if tuple(_read(r, m) for m in s.match) != wanted:
+                    continue
+                rows.append(r)
+    rows.sort(key=lambda r: r["event_time"])
+    if s.rule is Rule.nearby_count:
+        return len(rows)
+    seen = [str(v) for v in (_read(r, s.field) for r in rows) if v is not None]
+    if s.rule is Rule.nearby_distinct:
+        return len(set(seen))
+    if s.rule is Rule.nearby_last:
+        return seen[-1] if seen else None
+    target = values.get(s.left) if s.left else None   # nearby_has
+    if target is None:
+        return None
+    return 1 if str(target) in seen else 0
 
 
 def _compare(a: Any, op: str | None, b: Any) -> int | None:
@@ -228,10 +335,15 @@ def _compare(a: Any, op: str | None, b: Any) -> int | None:
 
 
 def settle(rows: Iterable[Mapping[str, Any]], settlement: Settlement, *,
-           tz: tzinfo | None = None) -> dict[tuple[str, ...], SettledRow]:
+           tz: tzinfo | None = None, context: Iterable[Mapping[str, Any]] | None = None,
+           resolve: "Resolve | None" = None) -> dict[tuple[str, ...], SettledRow]:
     """One settled row per distinct key among `rows`, ignoring rows from other methods and rows with
     no key. Pure: give it the same rows in any order and it returns the same answer. `tz` is the
-    tenant's zone, used only to read a time an attribute carries as a zoneless string."""
+    tenant's zone, used only to read a time an attribute carries as a zoneless string.
+
+    Chunk 129: `context` is the calls of OTHER methods the `nearby_*` rules may read, and `resolve`
+    answers the `lookup` rules. Both absent reproduce the pre-129 behaviour exactly: the new rules
+    then settle to nothing (a count to 0), and no existing rule reads either."""
     by_key: dict[tuple[str, ...], list[Mapping[str, Any]]] = {}
     for row in rows:
         if row.get("method") not in settlement.reads:
@@ -242,7 +354,7 @@ def settle(rows: Iterable[Mapping[str, Any]], settlement: Settlement, *,
         by_key.setdefault(tuple(str(p) for p in parts), []).append(row)
     out: dict[tuple[str, ...], SettledRow] = {}
     for key, group in by_key.items():
-        settled = _settle_key(group, settlement, tz)
+        settled = _settle_key(group, settlement, tz, context, resolve)
         settled.key = key
         out[key] = settled
     return out
@@ -288,4 +400,26 @@ def validate(settlement: Settlement) -> list[str]:
             if s.rule is Rule.flag and s.op not in FLAG_OPS:
                 problems.append(f"settled value {s.name!r} uses comparison {s.op!r}; it must be one of "
                                 f"{', '.join(FLAG_OPS)}")
+        if s.rule is Rule.lookup:
+            if not s.field or not s.field.startswith(LOOKUP_PREFIX) or "." not in s.field[len(LOOKUP_PREFIX):]:
+                problems.append(f"settled value {s.name!r} is a lookup and must name a lookup path, "
+                                f"{LOOKUP_PREFIX}<lookup>.<attribute>")
+            if not s.left:
+                problems.append(f"settled value {s.name!r} needs a left-hand field: the key to look up")
+        if s.rule in NEARBY:
+            if not s.methods:
+                problems.append(f"settled value {s.name!r} must say which methods' calls it reads")
+            if not s.match:
+                problems.append(f"settled value {s.name!r} must name the fields a nearby call must match, "
+                                f"for example user_name and item_number")
+            if not s.window_s or s.window_s <= 0:
+                problems.append(f"settled value {s.name!r} needs a window in seconds greater than 0")
+            if s.rule in NEARBY_WITH_FIELD and not s.field:
+                problems.append(f"settled value {s.name!r} is a {s.rule.value} and must name a field")
+            if s.rule is Rule.nearby_has:
+                if not s.left:
+                    problems.append(f"settled value {s.name!r} needs a left-hand settled value to look for")
+                elif s.left not in seen or s.left == s.name:
+                    problems.append(f"settled value {s.name!r} reads {s.left!r}, which is not a settled "
+                                    f"value defined before it")
     return problems

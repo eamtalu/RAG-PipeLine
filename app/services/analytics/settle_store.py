@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -58,6 +58,8 @@ def to_json(settlement: st.Settlement) -> dict:
             "statuses": sorted(v.statuses), "only": sorted(v.only),
             "left": v.left, "right": v.right, "op": v.op,
             "right_value": None if v.right_value is None else str(v.right_value),
+            **({"methods": list(v.methods), "match": list(v.match), "window_s": v.window_s}
+               if v.rule in st.NEARBY else {}),
         } for v in settlement.values],
     }
 
@@ -77,7 +79,10 @@ def from_json(name: str, doc: Mapping[str, Any]) -> st.Settlement:
             name=str(raw.get("name") or "").strip(), rule=rule, field=raw.get("field") or None,
             statuses=frozenset(raw.get("statuses") or ()), only=frozenset(raw.get("only") or ()),
             left=raw.get("left") or None, right=raw.get("right") or None, op=raw.get("op") or None,
-            right_value=None if rv is None or rv == "" else Decimal(str(rv))))
+            right_value=None if rv is None or rv == "" else Decimal(str(rv)),
+            methods=tuple(str(m) for m in (raw.get("methods") or ())),
+            match=tuple(str(m) for m in (raw.get("match") or ())),
+            window_s=int(raw["window_s"]) if raw.get("window_s") not in (None, "") else None))
     return st.Settlement(
         name=name,
         reads=tuple(str(m) for m in (doc.get("reads") or ())),
@@ -175,6 +180,75 @@ def _to_row(customer_code: str, settlement: st.Settlement, settled: st.SettledRo
     return row
 
 
+async def _context_for(db: AsyncSession, customer_code: str, settlement: st.Settlement,
+                       calls: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """Chunk 129: the calls of other methods the settlement's `nearby_*` rules may read, for these
+    releases. Bounded three ways: only the methods the rules name, only the match values the calls
+    carry, and only from the widest window before the earliest call to the latest call."""
+    rules = [v for v in settlement.values if v.rule in st.NEARBY]
+    timed = [c for c in calls if c.get("event_time") is not None]
+    if not rules or not timed:
+        return []
+    methods = sorted({m for v in rules for m in v.methods})
+    window = max(v.window_s or 0 for v in rules)
+    lo = min(c["event_time"] for c in timed) - timedelta(seconds=window)
+    hi = max(c["event_time"] for c in timed)
+    conditions = [AnalyticsFact.customer_code == customer_code, AnalyticsFact.method.in_(methods),
+                  AnalyticsFact.event_time >= lo, AnalyticsFact.event_time <= hi]
+    for field in sorted({m for v in rules for m in v.match}):
+        wanted = sorted({str(x) for x in (st._read(c, field) for c in calls) if x is not None})
+        if not wanted:
+            return []
+        column = (AnalyticsFact.attributes[contract.attr_key(field)].astext if contract.is_attr_path(field)
+                  else getattr(AnalyticsFact, field))
+        conditions.append(column.in_(wanted))
+    rows = (await db.execute(select(AnalyticsFact).where(*conditions))).scalars().all()
+    return [{c.name: getattr(r, c.name) for c in AnalyticsFact.__table__.columns} for r in rows]
+
+
+#: How many rounds of lookup loading a settlement may take: one per `lookup` rule that keys on
+#: another lookup's answer (a designated location's zone), plus the first.
+_MAX_LOOKUP_ROUNDS = 6
+
+
+async def _settle_with_lookups(db: AsyncSession, customer_code: str, settlement: st.Settlement,
+                               calls: list[dict], context: list[dict], tz) -> dict:
+    """Settle, loading exactly the lookup values the `lookup` rules ask for.
+
+    A rule may key on an earlier rule's answer, so the keys are not all known up front. Each round
+    settles with what is loaded, records what was asked for and missing, loads that, and settles
+    again; it ends when a round asks for nothing new. The pure half never touches the database."""
+    from app.services.analytics import lookup_store
+
+    if not any(v.rule is st.Rule.lookup for v in settlement.values):
+        return st.settle(calls, settlement, tz=tz, context=context)
+    loaded: dict[tuple[str, str, str], Any] = {}
+    fetched: set[tuple[str, str, str]] = set()
+    settled: dict = {}
+    for _ in range(_MAX_LOOKUP_ROUNDS):
+        missing: set[tuple[str, str, str]] = set()
+
+        def resolve(lookup: str, attribute: str, key: str) -> Any:
+            triple = (lookup, attribute, key)
+            if triple not in fetched:
+                missing.add(triple)
+            return loaded.get(triple)
+
+        settled = st.settle(calls, settlement, tz=tz, context=context, resolve=resolve)
+        if not missing:
+            break
+        by_lookup: dict[str, set[str]] = {}
+        for lookup, _attribute, key in missing:
+            by_lookup.setdefault(lookup, set()).add(key)
+        attributes = {(lookup, attribute) for lookup, attribute, _key in missing}
+        resolver = await lookup_store.resolver(db, customer_code, by_lookup, attributes)
+        now = datetime.now(timezone.utc)
+        for lookup, attribute, key in missing:
+            fetched.add((lookup, attribute, key))
+            loaded[(lookup, attribute, key)] = resolver.value(lookup, key, attribute, now)
+    return settled
+
+
 async def settle_keys(db: AsyncSession, customer_code: str, settlement: st.Settlement,
                       keys: Iterable[tuple[str, ...]], *, now: datetime | None = None) -> int:
     """Recompute these keys from all their calls and upsert their rows. Does NOT commit. Returns how
@@ -184,7 +258,9 @@ async def settle_keys(db: AsyncSession, customer_code: str, settlement: st.Settl
         return 0
     now = now or datetime.now(timezone.utc)
     calls = await _calls_for(db, customer_code, settlement, keys)
-    settled = st.settle(calls, settlement, tz=await _tenant_zone(db, customer_code))
+    context = await _context_for(db, customer_code, settlement, calls)
+    settled = await _settle_with_lookups(db, customer_code, settlement, calls, context,
+                                         await _tenant_zone(db, customer_code))
     rows = [_to_row(customer_code, settlement, s, now) for s in settled.values()]
     if not rows:
         return 0
@@ -373,7 +449,9 @@ async def read_key(db: AsyncSession, customer_code: str, settlement: st.Settleme
     """The preview: every call for one key, and the row they settle to. Computed live from the
     calls, so it is right even before the fold has run."""
     calls = await _calls_for(db, customer_code, settlement, [key])
-    settled = st.settle(calls, settlement, tz=await _tenant_zone(db, customer_code)).get(key)
+    context = await _context_for(db, customer_code, settlement, calls)
+    settled = (await _settle_with_lookups(db, customer_code, settlement, calls, context,
+                                          await _tenant_zone(db, customer_code))).get(key)
     calls.sort(key=lambda r: (r.get("event_time") is None, r.get("event_time")))
     return calls, settled
 

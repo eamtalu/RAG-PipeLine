@@ -59,8 +59,25 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 #: What a conflicting later value does. `first_wins` suits an attribute that belongs to its key for
-#: life, which is every relationship measured so far.
-CONFLICT_RULES = ("first_wins", "latest_wins")
+#: life, which is every relationship measured so far. `all_values` (chunk 129) keeps every value the
+#: key was given, as one combined value `A1 | C1`, so a location seen in two zones shows as exactly
+#: that and can be picked out and fixed rather than silently resolved either way.
+CONFLICT_RULES = ("first_wins", "latest_wins", "all_values")
+
+#: How `all_values` joins the values it keeps.
+COMBINED_SEP = " | "
+
+
+def combine_values(current: str, new: str) -> str:
+    """`current` plus `new` as one sorted, de-duplicated combined value."""
+    parts = {p.strip() for p in current.split(COMBINED_SEP) if p.strip()}
+    parts.add(new.strip())
+    return COMBINED_SEP.join(sorted(parts))
+
+
+def is_combined(value: str | None) -> bool:
+    """Whether a looked-up value is several values kept together by `all_values`."""
+    return bool(value) and COMBINED_SEP in value
 
 #: Where a value came from. `imported` beats `observed`, so a customer list loaded from M3 can later
 #: override what was inferred from traffic without a migration. Only `observed` is written today.
@@ -105,6 +122,9 @@ class Source:
     method: str
     key_field: str
     value_field: str
+    #: Chunk 129: the fields live on each ELEMENT of a list response (a pick-list listing returns one
+    #: element per line), not on the fact. Harvested from the response entries by `harvest_lists`.
+    list: bool = False
 
 
 @dataclass(frozen=True)
@@ -234,12 +254,56 @@ def harvest(rows: Iterable[Mapping[str, Any]], lookups: Iterable[Lookup]) -> lis
             continue
         for lookup, by_method in indexed:
             for attribute_name, source in by_method.get(method, ()):
+                if source.list:
+                    continue  # read from the response list by `harvest_lists`, never from the fact
                 key = _text(_read(row, source.key_field))
                 value = _text(_read(row, source.value_field))
                 if key is None or value is None:
                     continue
                 out.append(Observation(lookup=lookup.name, key=key, attribute=attribute_name,
                                        value=value, at=at, source_method=method))
+    return out
+
+
+def harvest_lists(rows: Iterable[Mapping[str, Any]], entries_by_txn: Mapping[Any, Sequence[tuple[str, Any]]],
+                  lookups: Iterable[Lookup]) -> list[Observation]:
+    """Every (key, attribute, value) the LIST responses of these transactions supply.
+
+    `rows` are source transaction rows (`id`, `method`, `event_time`); `entries_by_txn` maps a
+    transaction id to its `(entry_type, fields)` entries, the same pairs the fold reads to build
+    facts. A response's list lives under `fields["response"]`; each element that is a dict with both
+    the key and the value supplies one observation, timed at the transaction.
+    """
+    by_method: dict[str, list[tuple[Lookup, str, Source]]] = {}
+    for lookup in lookups:
+        for method, pairs in lookup.sources_by_method().items():
+            for attribute_name, source in pairs:
+                if source.list:
+                    by_method.setdefault(method, []).append((lookup, attribute_name, source))
+    out: list[Observation] = []
+    if not by_method:
+        return out
+    for row in rows:
+        method = row.get("method")
+        at = row.get("event_time")
+        if at is None or method not in by_method:
+            continue
+        for entry_type, fields in entries_by_txn.get(row.get("id"), ()):
+            if entry_type != "response" or not isinstance(fields, dict):
+                continue
+            elements = fields.get("response")
+            if not isinstance(elements, list):
+                continue
+            for element in elements:
+                if not isinstance(element, dict):
+                    continue
+                for lookup, attribute_name, source in by_method[method]:
+                    key = _text(element.get(source.key_field))
+                    value = _text(element.get(source.value_field))
+                    if key is None or value is None:
+                        continue
+                    out.append(Observation(lookup=lookup.name, key=key, attribute=attribute_name,
+                                           value=value, at=at, source_method=method))
     return out
 
 

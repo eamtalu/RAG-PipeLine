@@ -1,0 +1,312 @@
+{
+ "values": [
+  {
+   "op": null,
+   "left": null,
+   "name": "expected",
+   "only": [],
+   "rule": "first",
+   "field": "attr:ExpectedQuantity",
+   "right": null,
+   "statuses": [],
+   "right_value": null
+  },
+  {
+   "op": null,
+   "left": null,
+   "name": "picked",
+   "only": [],
+   "rule": "sum",
+   "field": "attr:QuantityPicked",
+   "right": null,
+   "statuses": [
+    "success"
+   ],
+   "right_value": null
+  },
+  {
+   "op": null,
+   "left": null,
+   "name": "calls",
+   "only": [],
+   "rule": "count",
+   "field": null,
+   "right": null,
+   "statuses": [],
+   "right_value": null
+  },
+  {
+   "op": null,
+   "left": null,
+   "name": "empty_visits",
+   "only": [
+    "attempt"
+   ],
+   "rule": "count",
+   "field": null,
+   "right": null,
+   "statuses": [],
+   "right_value": null
+  },
+  {
+   "op": null,
+   "left": null,
+   "name": "refused",
+   "only": [],
+   "rule": "count",
+   "field": null,
+   "right": null,
+   "statuses": [
+    "error"
+   ],
+   "right_value": null
+  },
+  {
+   "op": null,
+   "left": null,
+   "name": "lots",
+   "only": [],
+   "rule": "distinct_count",
+   "field": "lot_number",
+   "right": null,
+   "statuses": [
+    "success"
+   ],
+   "right_value": null
+  },
+  {
+   "op": null,
+   "left": "picked",
+   "name": "shortfall",
+   "only": [],
+   "rule": "difference",
+   "field": null,
+   "right": "expected",
+   "statuses": [],
+   "right_value": null
+  },
+  {
+   "op": "<",
+   "left": "shortfall",
+   "name": "is_short",
+   "only": [],
+   "rule": "flag",
+   "field": null,
+   "right": null,
+   "statuses": [],
+   "right_value": "0"
+  },
+  {
+   "op": null,
+   "left": null,
+   "name": "started_at",
+   "only": [],
+   "rule": "first",
+   "field": "attr:StartDateTime",
+   "right": null,
+   "statuses": [],
+   "right_value": null
+  },
+  {
+   "op": null,
+   "left": null,
+   "name": "finished_at",
+   "only": [],
+   "rule": "max",
+   "field": "event_time",
+   "right": null,
+   "statuses": [],
+   "right_value": null
+  },
+  {
+   "op": null,
+   "left": "finished_at",
+   "name": "duration_s",
+   "only": [],
+   "rule": "difference",
+   "field": null,
+   "right": "started_at",
+   "statuses": [],
+   "right_value": null
+  },
+  {
+   "only": [],
+   "statuses": [],
+   "field": "attr:FromLocation",
+   "left": null,
+   "right": null,
+   "op": null,
+   "right_value": null,
+   "name": "from_location",
+   "rule": "first_text"
+  },
+  {
+   "only": [],
+   "statuses": [],
+   "field": "lookup:pick line.Location",
+   "left": "attr:ReportingNumber",
+   "right": null,
+   "op": null,
+   "right_value": null,
+   "name": "designated_location",
+   "rule": "lookup"
+  },
+  {
+   "only": [],
+   "statuses": [],
+   "field": "lookup:location.StockZone",
+   "left": "from_location",
+   "right": null,
+   "op": null,
+   "right_value": null,
+   "name": "from_zone",
+   "rule": "lookup"
+  },
+  {
+   "only": [],
+   "statuses": [],
+   "field": "lookup:location.StockZone",
+   "left": "designated_location",
+   "right": null,
+   "op": null,
+   "right_value": null,
+   "name": "designated_zone",
+   "rule": "lookup"
+  },
+  {
+   "only": [],
+   "statuses": [],
+   "field": null,
+   "left": "from_location",
+   "right": "designated_location",
+   "op": "==",
+   "right_value": null,
+   "name": "from_designated",
+   "rule": "flag"
+  },
+  {
+   "only": [],
+   "statuses": [],
+   "field": null,
+   "left": "from_zone",
+   "right": "designated_zone",
+   "op": "==",
+   "right_value": null,
+   "name": "same_zone",
+   "rule": "flag"
+  },
+  {
+   "only": [],
+   "statuses": [],
+   "field": null,
+   "left": null,
+   "right": null,
+   "op": null,
+   "right_value": null,
+   "name": "lookups",
+   "rule": "nearby_count",
+   "methods": [
+    "GetSummarisedBalanceDetails",
+    "IsStockInLocation",
+    "GetOldestItemBalanceAPI"
+   ],
+   "match": [
+    "user_name",
+    "item_number"
+   ],
+   "window_s": 180
+  },
+  {
+   "only": [],
+   "statuses": [
+    "error",
+    "soft"
+   ],
+   "field": null,
+   "left": null,
+   "right": null,
+   "op": null,
+   "right_value": null,
+   "name": "empty_checks",
+   "rule": "nearby_count",
+   "methods": [
+    "GetSummarisedBalanceDetails"
+   ],
+   "match": [
+    "user_name",
+    "item_number"
+   ],
+   "window_s": 180
+  },
+  {
+   "only": [],
+   "statuses": [],
+   "field": "attr:Location",
+   "left": null,
+   "right": null,
+   "op": null,
+   "right_value": null,
+   "name": "locations_checked",
+   "rule": "nearby_distinct",
+   "methods": [
+    "GetSummarisedBalanceDetails",
+    "IsStockInLocation"
+   ],
+   "match": [
+    "user_name",
+    "item_number"
+   ],
+   "window_s": 180
+  },
+  {
+   "only": [],
+   "statuses": [],
+   "field": "attr:resp.Location",
+   "left": null,
+   "right": null,
+   "op": null,
+   "right_value": null,
+   "name": "suggested_location",
+   "rule": "nearby_last",
+   "methods": [
+    "GetOldestItemBalanceAPI"
+   ],
+   "match": [
+    "user_name",
+    "item_number"
+   ],
+   "window_s": 180
+  },
+  {
+   "only": [],
+   "statuses": [],
+   "field": "attr:Location",
+   "left": "from_location",
+   "right": null,
+   "op": null,
+   "right_value": null,
+   "name": "picked_from_checked",
+   "rule": "nearby_has",
+   "methods": [
+    "GetSummarisedBalanceDetails",
+    "IsStockInLocation"
+   ],
+   "match": [
+    "user_name",
+    "item_number"
+   ],
+   "window_s": 180
+  },
+  {
+   "only": [],
+   "statuses": [],
+   "field": null,
+   "left": "from_location",
+   "right": "suggested_location",
+   "op": "==",
+   "right_value": null,
+   "name": "followed_suggestion",
+   "rule": "flag"
+  }
+ ]
+}

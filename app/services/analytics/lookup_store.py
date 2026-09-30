@@ -42,7 +42,8 @@ logger = logging.getLogger(__name__)
 def to_row(lookup: lk.Lookup) -> list[dict]:
     """A declaration's attributes as the JSON the column holds. Sorted, so the stored form is stable."""
     return [{"name": a.name, "stable": a.stable, "on_conflict": a.on_conflict,
-             "sources": [{"method": s.method, "key_field": s.key_field, "value_field": s.value_field}
+             "sources": [{"method": s.method, "key_field": s.key_field, "value_field": s.value_field,
+                          **({"list": True} if s.list else {})}
                          for s in a.sources]}
             for a in sorted(lookup.attributes, key=lambda a: a.name)]
 
@@ -52,7 +53,7 @@ def from_row(row) -> lk.Lookup:
     attributes = []
     for raw in (row.attributes or []):
         sources = tuple(lk.Source(method=s["method"], key_field=s["key_field"],
-                                  value_field=s["value_field"])
+                                  value_field=s["value_field"], list=bool(s.get("list", False)))
                         for s in (raw.get("sources") or []))
         attributes.append(lk.Attribute(name=raw["name"], sources=sources,
                                        stable=bool(raw.get("stable", True)),
@@ -118,6 +119,7 @@ async def record(db: AsyncSession, customer_code: str, observations: Sequence[lk
         attribute = declared.attribute(attribute_name) if declared else None
         stable = True if attribute is None else attribute.stable
         latest_wins = bool(attribute and attribute.on_conflict == "latest_wins")
+        all_values = bool(attribute and attribute.on_conflict == "all_values")
         periods = sorted(existing.get((lookup_name, key, attribute_name), ()),
                          key=lambda r: lk._aware(r.valid_from))
 
@@ -125,9 +127,13 @@ async def record(db: AsyncSession, customer_code: str, observations: Sequence[lk
             # The rule that makes a late name work: valid from the beginning of the key's life, not
             # from the instant somebody happened to say it.
             chosen = group[-1] if latest_wins else group[0]
+            first_value = chosen.value
+            if all_values:
+                for o in group:
+                    first_value = lk.combine_values(first_value, o.value)
             fresh.append({
                 "id": uuid.uuid4(), "customer_code": customer_code, "lookup": lookup_name,
-                "key": key, "attribute": attribute_name, "value": chosen.value,
+                "key": key, "attribute": attribute_name, "value": first_value,
                 "valid_from": lk.BEGINNING, "valid_to": None, "origin": "observed",
                 "source_method": chosen.source_method, "observations": len(group),
                 "first_seen_at": group[0].at, "last_seen_at": group[-1].at,
@@ -144,6 +150,18 @@ async def record(db: AsyncSession, customer_code: str, observations: Sequence[lk
 
         open_period = periods[-1]
         for o in group:
+            if all_values:
+                # Chunk 129: every value the key was given is kept, combined, and counted as a conflict
+                # the first time it widens, so the screen can list the keys that need a decision.
+                combined = lk.combine_values(open_period.value, o.value)
+                if combined != open_period.value:
+                    open_period.value = combined
+                    stats["conflicts"] += 1
+                else:
+                    stats["extended"] += 1
+                open_period.observations += 1
+                open_period.last_seen_at = max(lk._aware(open_period.last_seen_at), lk._aware(o.at))
+                continue
             if o.value == open_period.value:
                 open_period.observations += 1
                 open_period.last_seen_at = max(lk._aware(open_period.last_seen_at), lk._aware(o.at))
@@ -251,8 +269,38 @@ async def backfill(db: AsyncSession, customer_code: str, declared: lk.Lookup, *,
                AnalyticsFact.event_time >= since)
         .order_by(AnalyticsFact.event_time))).scalars().all()
     facts = [{c.name: getattr(r, c.name) for c in AnalyticsFact.__table__.columns} for r in rows]
-    stats = await record(db, customer_code, lk.harvest(facts, [declared]), {declared.name: declared})
+    observations = lk.harvest(facts, [declared])
+    if any(src.list for a in declared.attributes for src in a.sources):
+        observations += await _harvest_lists_from_entries(db, customer_code, declared, facts)
+    stats = await record(db, customer_code, observations, {declared.name: declared})
     return {**stats, "facts_read": len(facts), "methods": methods}
+
+
+async def _harvest_lists_from_entries(db: AsyncSession, customer_code: str, declared: lk.Lookup,
+                                      facts: Sequence[Mapping]) -> list[lk.Observation]:
+    """Chunk 129: a list source's values live in the response entries, which the facts do not keep.
+    Read the response entries of the facts' transactions (raw entries are kept 60 days, so a backfill
+    reaches that far) and harvest them exactly as the fold does."""
+    from app.persistence.models.log_entry import LogEntry
+    from app.persistence.models.log_entry_assignment import LogEntryAssignment
+
+    list_methods = {src.method for a in declared.attributes for src in a.sources if src.list}
+    rows = [{"id": f["source_transaction_id"], "method": f["method"], "event_time": f["event_time"]}
+            for f in facts if f.get("method") in list_methods and f.get("source_transaction_id")]
+    out: list[lk.Observation] = []
+    for i in range(0, len(rows), 2000):
+        chunk = rows[i:i + 2000]
+        ids = [r["id"] for r in chunk]
+        entries: dict = {}
+        for txn_id, fields in (await db.execute(
+                select(LogEntryAssignment.transaction_id, LogEntry.fields)
+                .join(LogEntry, LogEntry.id == LogEntryAssignment.entry_id)
+                .where(LogEntryAssignment.customer_code == customer_code,
+                       LogEntryAssignment.transaction_id.in_(ids),
+                       LogEntry.entry_type == "response"))).all():
+            entries.setdefault(txn_id, []).append(("response", fields))
+        out += lk.harvest_lists(chunk, entries, [declared])
+    return out
 
 
 #: How much of a field's values must be known keys before it is called a spelling of the key rather

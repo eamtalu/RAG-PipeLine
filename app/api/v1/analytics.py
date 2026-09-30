@@ -853,7 +853,8 @@ def _lookup_from_payload(body: dict) -> lookup_model.Lookup:
                                  f"field names are explicit because the spelling differs per method")
             sources.append(lookup_model.Source(method=str(src["method"]),
                                                key_field=str(src["key_field"]),
-                                               value_field=str(src["value_field"])))
+                                               value_field=str(src["value_field"]),
+                                               list=bool(src.get("list", False))))
         attributes.append(lookup_model.Attribute(
             name=str(raw["name"]).strip(), sources=tuple(sources),
             stable=bool(raw.get("stable", True)),
@@ -1618,7 +1619,21 @@ async def _validate_settlement(db, customer: str, declared: settle_model.Settlem
     """The pure rules, plus the one thing they cannot know: which attributes this tenant approved."""
     problems = settle_model.validate(declared)
     known = await capture.approved_attributes(db, customer)
-    named = list(declared.key) + list(declared.carry) + [v.field for v in declared.values if v.field]
+    named = list(declared.key) + list(declared.carry) + [
+        v.field for v in declared.values if v.field and v.rule is not settle_model.Rule.lookup]
+    named += [m for v in declared.values for m in v.match]
+    value_names = {v.name for v in declared.values}
+    named += [v.left for v in declared.values
+              if v.rule is settle_model.Rule.lookup and v.left and v.left not in value_names]
+    lookups = await lookup_store.load(db, customer, enabled_only=False)
+    for v in declared.values:
+        if v.rule is settle_model.Rule.lookup and v.field and v.field.startswith(settle_model.LOOKUP_PREFIX):
+            lookup_name, _dot, attribute = v.field[len(settle_model.LOOKUP_PREFIX):].partition(".")
+            declared_lookup = lookups.get(lookup_name)
+            if declared_lookup is None:
+                problems.append(f"{v.field!r} names lookup {lookup_name!r}, which is not declared")
+            elif declared_lookup.attribute(attribute) is None:
+                problems.append(f"lookup {lookup_name!r} declares no attribute {attribute!r}")
     for field in named:
         if contract.is_attr_path(field) and contract.attr_key(field) not in known:
             problems.append(f"{field!r} is not an approved attribute: tick it in fact composition first")

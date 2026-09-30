@@ -211,6 +211,24 @@ RECIPES: list[dict] = [
               "limit": 15, "start": "<7 days ago>", "end": "<now>"}},
     {"question": "refusals by picker this week",
      "call": {"group_by": ["user_name"], "sort": "refused", "start": "<7 days ago>", "end": "<now>"}},
+    # Chunk 129: locations and zones. Present only when the settlement declares these values.
+    {"question": "what share of picks came from the designated location today, by zone",
+     "call": {"group_by": ["designated_zone"], "day": "today"},
+     "read": "from_designated summed is the picks from the designated location; divide by rows. Releases "
+             "whose designated location is unknown have no from_designated; use rows of a second call "
+             "with where ['from_designated>=0'] as the denominator"},
+    {"question": "which zones are picks taken from, and how often off the designated location",
+     "call": {"group_by": ["from_zone"], "day": "today", "sort": "rows"},
+     "read": "rows per zone picked from; from_designated summed is how many of those were on location"},
+    {"question": "designated locations most often bypassed this week, and where picks went instead",
+     "call": {"group_by": ["designated_location", "from_location"], "where": ["from_designated==0"], "sort": "rows",
+              "limit": 15, "start": "<7 days ago>", "end": "<now>"}},
+    {"question": "how many lookups pickers make before a pick, by picker today",
+     "call": {"group_by": ["user_name"], "day": "today"},
+     "read": "lookups summed / rows = lookups per release; empty_checks summed = checks that found no stock"},
+    {"question": "how often the picker picked from a location they had checked today",
+     "call": {"where": ["from_designated==0"], "day": "today"},
+     "read": "picked_from_checked summed / rows = off-location picks taken from a location the picker checked"},
 ]
 
 #: Counted on every aggregate: how many distinct deliveries the rows in each group touch.
@@ -259,7 +277,15 @@ async def describe_releases(db: AsyncSession, args: dict, customer_code: str) ->
                             "accepted, shortfall = picked - expected (negative = short). is_short is 1 on "
                             "a short release. A zero-pick is picked==0 (stock-out); a partial is short "
                             "with picked>0. duration_s is seconds from the picker starting the line to "
-                            "the last confirm. Say the grain ('across N releases') in every answer.")}
+                            "the last confirm. Say the grain ('across N releases') in every answer. "
+                            "Locations, when declared: from_location is where the pick was confirmed from, "
+                            "designated_location the pick-list line's location, from_zone and "
+                            "designated_zone their zones, from_designated 1 when they are the same, "
+                            "same_zone 1 when the zones are the same; lookups counts the stock checks "
+                            "the picker made on that item in the 3 minutes before, empty_checks those "
+                            "that found nothing, picked_from_checked 1 when the pick came from a checked "
+                            "location, followed_suggestion 1 when it came from the oldest-stock "
+                            "suggestion. A zone written 'A1 | C1' is a location seen in two zones.")}
 
 
 ALWAYS_RETURNED = ("sum", "count", "total", "rows")

@@ -1012,8 +1012,12 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         # survive.
         lookups = await lookup_store.load(db, customer_code)
         if lookups:
+            # Chunk 129: a list source (one element per pick-list line) is read from the response
+            # entries this run already holds, keyed by the source transaction.
             await lookup_store.record(db, customer_code,
-                                      lk.harvest(facts, lookups.values()), lookups)
+                                      lk.harvest(facts, lookups.values())
+                                      + lk.harvest_lists(source_rows, by_txn, lookups.values()),
+                                      lookups)
 
         # Chunk 117: the settlements, recomputed for every key these facts touched.
         #
