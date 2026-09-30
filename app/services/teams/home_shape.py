@@ -113,7 +113,7 @@ def build(hours: list[datetime], line_rows: list[dict], picker_rows: list[dict])
         "axis": axis(max(totals, default=0)),
         "hours": [
             {"label": _hhmm(h), "range": f"{_hhmm(h)} – {_hhmm(h + timedelta(hours=1))}",
-             "total": totals[i], "total_text": f"{totals[i]:,}",
+             "total": totals[i], "total_text": f"{totals[i]:,}", "total_lines_text": _counted(totals[i], "line"),
              "segments": [{"tx": t, "label": t, "lines": by_tx[i][t], "text": f"{by_tx[i][t]:,}"}
                           for t in TX_ORDER if by_tx[i][t]],
              "pickers": pickers[i], "pickers_text": f"{pickers[i]:,}"}
@@ -121,14 +121,14 @@ def build(hours: list[datetime], line_rows: list[dict], picker_rows: list[dict])
         ],
         "peak": _first_peak(totals),
         "peak_pickers": peak_pickers,
-        "peak_pickers_text": "" if peak_pickers is None else _pickers_word(pickers[peak_pickers]),
+        "peak_pickers_text": "" if peak_pickers is None else _counted(pickers[peak_pickers], "picker"),
         "pickers_top": pickers_top,
         "pickers_top_text": f"{pickers_top:,}",
     }
 
 
-def _pickers_word(n: int) -> str:
-    return f"{n:,} picker" + ("" if n == 1 else "s")
+def _counted(n: int, word: str) -> str:
+    return f"{n:,} {word}" + ("" if n == 1 else "s")
 
 
 # ============================================================== the reads

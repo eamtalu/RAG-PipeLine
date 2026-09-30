@@ -87,7 +87,7 @@ def test_hours_are_stacked_by_kind_with_pickers_and_peaks():
     assert [x["tx"] for x in shape["legend"]] == ["stock", "jit", "milk", "frz"]
     six = shape["hours"][10]
     assert six["label"] == "06:00" and six["range"] == "06:00 – 07:00"
-    assert six["total"] == 94 and six["total_text"] == "94"
+    assert six["total"] == 94 and six["total_text"] == "94" and six["total_lines_text"] == "94 lines"
     # bottom to top in the page's order: stock, jit, milk, frz
     assert [(s["tx"], s["lines"]) for s in six["segments"]] == [("stock", 2), ("jit", 88), ("frz", 4)]
     assert six["pickers"] == 7 and six["pickers_text"] == "7"
@@ -106,6 +106,7 @@ def test_a_quiet_day_has_no_peaks_and_one_picker_reads_singular():
     one = home_shape.build(hours, [{"dimensions": ["2026-09-30T09:00:00", "Stock Pick"], "rows": 1}],
                            [{"dimensions": ["2026-09-30T09:00:00"], "distinct_user_name": 1}])
     assert one["peak_pickers_text"] == "1 picker"
+    assert one["hours"][-1]["total_lines_text"] == "1 line"  # the tooltip read "1 lines"
 
 
 # ==================================================== 4. in the snapshot, from settled rows
