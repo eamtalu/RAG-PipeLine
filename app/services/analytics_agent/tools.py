@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
 
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,7 @@ from app.persistence.repositories.customer_repository import get_customer_timezo
 from app.services.analytics import lookup_store
 from app.services.analytics import settle_query
 from app.services.analytics import settle_reads
+from app.services.agent_core.guards import wrap_tool
 from app.services.log_agent import tools as log_tools
 
 MAX_WINDOW_DAYS = 92
@@ -422,14 +423,8 @@ async def run_release_tool(name: str, args: dict, db: AsyncSession, customer_cod
         return _json({"error": f"{type(exc).__name__}: {exc}"})
 
 
-def _wrap(spec: dict, runner) -> BaseTool:
-    async def call(**kwargs) -> str:
-        return await runner(spec["name"], kwargs)
-
-    schema = dict(spec["input_schema"])
-    schema.pop("additionalProperties", None)  # some providers reject it; the parser ignores extras anyway
-    return StructuredTool.from_function(coroutine=call, name=spec["name"], description=spec["description"],
-                                        args_schema=schema)
+# Every tool result is redacted before the model reads it (chunk 132): the shared wrapper.
+_wrap = wrap_tool
 
 
 def build_tools(db: AsyncSession, customer_code: str) -> list[BaseTool]:

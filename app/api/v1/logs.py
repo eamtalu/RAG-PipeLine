@@ -38,11 +38,12 @@ from app.services.mnp_log_ingestion.pipeline.derive_transactions import (
 )
 from app.services.mnp_log_ingestion.render import render_transaction
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc, active_timezone_name
+from app.services.log_feed.scope import FeedScope, day_conditions, local_today, scope_conditions, scope_from
 from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
 
 import logging
 logger = logging.getLogger(__name__)
-from app.services.log_agent.agent import LogDebugAgent, get_log_debug_agent
+from app.services.logspace_agent.agent import LogspaceAgent
 
 router = APIRouter(prefix="/logs", tags=["logs"])
 
@@ -56,27 +57,8 @@ MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB — rotating log files can be large
 MAX_RENDER_ENTRIES = 50_000
 
 
-def _day_conds(customer: str, day: date_type, tz_name: str) -> list:
-    """The WHERE conditions selecting one customer-LOCAL day of transactions.
-
-    `LogTransaction.date` is that local day and is what the feed is specified in terms of, but
-    `log_transactions` is partitioned on `started_at` (a UTC instant), and PostgreSQL cannot derive
-    one from the other — `date` alone prunes nothing and opens all 60 partitions. So the equivalent
-    UTC window goes in beside it.
-
-    The window is padded well beyond any real timezone offset, which makes it a strict SUPERSET of
-    the instants that can carry this local date. That is deliberate: `date` was computed with
-    whatever display zone the customer had when the row was WRITTEN, so a later timezone change would
-    otherwise slide the two apart and blank out the day view. `date` stays the exact filter; the
-    window only prunes.
-    """
-    conds = [LogTransaction.customer_code == customer, LogTransaction.date == day]
-    window = time_bounds.from_local_dates(day, day, tz_name)
-    if window is not None:
-        # include_null=False is safe rather than lossy: `date` is derived FROM `started_at`, so a row
-        # with a NULL `started_at` also has a NULL `date` and never matches the equality above.
-        conds.append(window.covers(LogTransaction.started_at, include_null=False))
-    return conds
+# The day's WHERE clauses live with the feed's other filter rules, shared with the logspace agent.
+_day_conds = day_conditions
 
 
 def _assigned_sort_key(pair: "tuple[int | None, LogEntry]"):
@@ -957,24 +939,11 @@ async def view_transactions(
     stack on top of the date. Pagination metadata is returned in response headers: `X-Total-Count`,
     `X-Offset`, `X-Limit`, `X-Page`, `X-Page-Count`.
     """
-    conds = _day_conds(customer, date, active_timezone_name())
-    if user is not None:
-        conds.append(LogTransaction.user_name == user)
-    if hour is not None:
-        # `hour` is a LOCAL hour-of-day (matching the displayed times); started_at is a UTC instant, so
-        # convert to the customer's display zone before extracting, else this is off by the tz offset.
-        conds.append(
-            func.extract("hour", func.timezone(active_timezone_name(), LogTransaction.started_at)) == hour
-        )
-    if status is not None:
-        conds.append(LogTransaction.status == status)
-    if order_number is not None:
-        conds.append(LogTransaction.order_number == order_number)
-    if item_number is not None:
-        conds.append(LogTransaction.item_number == item_number)
     reqid = (reqid or "").strip() or None
-    if reqid is not None:
-        conds.append(LogTransaction.reqid == reqid)
+    # the same rule the logspace agent reads through (app/services/log_feed/scope.py)
+    conds = scope_conditions(customer, FeedScope(day=date, user=user, hour=hour, status=status,
+                                                 order_number=order_number, item_number=item_number,
+                                                 reqid=reqid, explicit=True), active_timezone_name())
 
     # total for the pager (cheap: index-only count over this day, see docs/debugging-worker-timeout-outage.md)
     total = (await db.scalar(select(func.count()).select_from(LogTransaction).where(*conds))) or 0
@@ -1155,32 +1124,47 @@ async def get_transaction(transaction_id: uuid.UUID,
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — Claude tool-use debugging agent
+# The ask box: the logspace agent over the feed's records (chunk 132)
 # ---------------------------------------------------------------------------
 
+class AskTurn(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str = Field(..., max_length=20000)
+
+
 class DebugAskRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="Natural-language debugging question.")
+    question: str = Field(..., min_length=1, max_length=4000, description="The person's question.")
+    scope: dict | None = Field(default=None, description="The feed's current filters (date, user, hour, status, "
+                               "order_number / orderNumber, item_number / itemNumber, reqid); none = today.")
+    history: list[AskTurn] = Field(default_factory=list, max_length=40,
+                                   description="Earlier turns of the same conversation, oldest first.")
 
 
 @router.post("/debug/ask")
 async def debug_ask(
     body: DebugAskRequest,
-    agent: LogDebugAgent = Depends(get_log_debug_agent),
+    customer: str = Depends(get_current_customer),
+    db: AsyncSession = Depends(get_session),
     pending: dict = Depends(read_pending_state),
 ):
-    """Ask the debugging agent a natural-language question about the logs.
+    """Ask eSmart Eye about the logspace's log records.
 
-    Claude picks read-only SQL-backed tools (search/count/find_errors/get_transaction/
-    search_entries), runs them against the relational store, and answers with cited
-    transaction ids. Returns the answer plus a trace of the tool calls it made.
+    The logspace agent answers from the records the feed's filter fetched (`scope`; today when none),
+    reading raw log transactions only (never the analytics settlement), on the analytics agent's
+    model with the shared guards. Returns the answer plus a trace of the tool calls it made.
 
     The answer reflects the last fully-stitched data; if `pending_regroup.pending` is true, the
     freshest ingested tail isn't included yet (finalize to include it).
     """
+    tz_name = active_timezone_name()
+    today = local_today(tz_name)
     try:
-        result = await agent.ask(body.question)
-    except RuntimeError as exc:  # missing API key, etc.
-        raise HTTPException(503, detail=str(exc))
+        agent = LogspaceAgent(db, customer, scope=scope_from(body.scope, today), tz_name=tz_name, today=today)
+        result = await agent.ask(body.question, history=[t.model_dump() for t in body.history])
+    except Exception as exc:  # noqa: BLE001 - the model or its provider is down, throttled or misconfigured
+        logger.exception("ask eSmart Eye failed for %s", customer)
+        raise HTTPException(503, detail=f"eSmart Eye could not answer right now: the language model is not "
+                                        f"available ({type(exc).__name__}: {str(exc)[:200]}). Try again shortly.")
     if isinstance(result, dict):
         result["pending_regroup"] = pending
         # `refs` — LineIds ("<transactionId>#<bodyLineIndex>") the answer cites, so the frontend can

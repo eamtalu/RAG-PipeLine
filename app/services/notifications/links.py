@@ -24,17 +24,22 @@ def link_keys(txn: LogTransaction) -> dict:
     return keys
 
 
-def transaction_url(base: str | None, payload: dict) -> str | None:
-    """The page to open for this payload, or None when there is no address or nothing to open."""
-    root = (base or "").rstrip("/")
-    if not root:
-        return None
+def transaction_path(payload: dict) -> str | None:
+    """The explorer path for this payload: filtered by request id on its day, else the
+    transaction's own page; None when there is nothing to open."""
     reqid, day = payload.get("reqid"), payload.get("date")
     if reqid and day:
         # matches the explorer's URL filters: src/lib/logsApi.ts filtersFromParams
-        return f"{root}/?{urlencode({'date': day, 'reqid': reqid}, quote_via=quote)}"
+        return f"/?{urlencode({'date': day, 'reqid': reqid}, quote_via=quote)}"
     txn_id = payload.get("transaction_id")
     if txn_id:
         # matches the matrix-log-explorer App Router route: src/app/transactions/[id]/page.tsx
-        return f"{root}/transactions/{quote(str(txn_id), safe='')}"
+        return f"/transactions/{quote(str(txn_id), safe='')}"
     return None
+
+
+def transaction_url(base: str | None, payload: dict) -> str | None:
+    """The page to open for this payload, or None when there is no address or nothing to open."""
+    root = (base or "").rstrip("/")
+    path = transaction_path(payload)
+    return f"{root}{path}" if root and path else None
