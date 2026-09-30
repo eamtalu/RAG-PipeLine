@@ -138,3 +138,14 @@ async def test_the_answer_is_redacted_too():
         result = await AnalyticsAgent(db, CC, model=model).ask("why did it fail?")
     assert "A1B2C3secret" not in result["answer"] and "hunter" not in result["answer"]
     assert result["answer"].count("<redacted>") == 2 and "User=X" in result["answer"]
+
+
+def test_the_gate_leans_towards_the_warehouse():
+    """A live run declined "what's short right now?", "how is BCHAM doing?" and "is the server ok?".
+    The gate now declines only what is clearly about something else; scripts/eval_topic_gate.py
+    checks this against the real model (32/32)."""
+    from app.services.agent_core.guards import _GATE_PROMPT
+    assert "When in doubt, reply in_scope." in _GATE_PROMPT
+    assert "only a message that is clearly about something else" in _GATE_PROMPT
+    for word in ("shorts", "zero-picks", "picker named", "server and logs", "summary for a meeting"):
+        assert word in _GATE_PROMPT

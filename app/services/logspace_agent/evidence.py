@@ -14,7 +14,7 @@ _TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$", re.M)
 
 _ROW_COLUMNS = [("time", "time"), ("method", "method"), ("status", "status"), ("user", "user"),
                 ("delivery_number", "delivery"), ("item_number", "item"), ("QuantityPicked", "picked"),
-                ("ExpectedQuantity", "expected"), ("FromLocation", "from")]
+                ("ExpectedQuantity", "expected"), ("pick_outcome", "outcome"), ("FromLocation", "from")]
 
 
 def _esc(value) -> str:

@@ -64,6 +64,10 @@ _FIELD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _CAMEL = re.compile(r"^[A-Z][a-z]+[A-Za-z0-9]*[a-z][A-Za-z0-9]*$")   # QuantityToBePicked: an attribute name
 _CONDITION = re.compile(r"^\s*([A-Za-z_][\w:]*)\s*(==|!=|<=|>=|<|>)\s*(.+?)\s*$")
 _NUMBER = re.compile(r"^-?\d+(\.\d+)?$")
+# a second comparison or a boolean word inside one condition: the model meant OR / AND in one string
+_COMPOUND = re.compile(r"(==|!=|<=|>=|<|>|\|\||&&)|\b(or|and)\b", re.I)
+PICK_OUTCOMES = ("zero-pick", "partial", "exact", "over")
+_QUOTED = re.compile(r"""^(?:'[^']*'|"[^"]*")$""")   # one whole quoted string
 
 
 class Problem(ValueError):
@@ -86,8 +90,9 @@ _FILTERS = {
     "time_from": {"type": "string", "description": "Local time HH:MM, inclusive."},
     "time_to": {"type": "string", "description": "Local time HH:MM, inclusive."},
     "where": {"type": "array", "items": {"type": "string"},
-              "description": "Extra conditions on a column or a request field, e.g. \"QuantityPicked==0\", "
-                             "\"QuantityPicked<ExpectedQuantity\", \"FromLocation=='JIT'\", \"status==error\"."},
+              "description": "Extra conditions that must ALL hold, on a column or a request field, e.g. "
+                             "\"QuantityPicked==0\", "
+                             "\"pick_outcome==partial\", \"FromLocation=='JIT'\", \"status==error\"."},
 }
 
 LOGSPACE_TOOLS: list[dict] = [
@@ -116,9 +121,11 @@ LOGSPACE_TOOLS: list[dict] = [
          "required": ["key", "value"]}},
     {"name": "aggregate",
      "description": "Counts over the fetched records, grouped by up to 3 of: method, status, user, warehouse, hour, "
-                    "transaction_name, item_number, delivery_number, order_number, reporting_number, route or "
+                    "transaction_name, item_number, delivery_number, order_number, reporting_number, route, "
+                    "pick_outcome (zero-pick / partial / exact / over on ConfirmPickLine) or "
                     "attr:<RequestField>; optional sums of numeric request fields (e.g. QuantityPicked). Each row: "
-                    "count, errors, sums. `total_rows` is the number of matching transactions; `base_rows` the same "
+                    "count, errors, sums. `groups_total` / `truncated` say whether more groups exist than returned. "
+                    "`total_rows` is the number of matching transactions; `base_rows` the same "
                     "without the `where` conditions, for \"N of M\" (zero-picks of all ConfirmPickLine calls).",
      "input_schema": {"type": "object", "properties": {
          **_FILTERS,
@@ -157,6 +164,31 @@ def _numeric(expr):
     return case((expr.op("~")(r"^-?[0-9]+(\.[0-9]+)?$"), cast(expr, Numeric)), else_=None)
 
 
+def _pick_outcome():
+    """zero-pick / partial / exact / over for a ConfirmPickLine, judged as numbers in SQL; NULL
+    for a call that does not carry both quantities."""
+    picked, expected = _numeric(_attr("QuantityPicked")), _numeric(_attr("ExpectedQuantity"))
+    ok = LogTransaction.status == LogTransactionStatus.success   # a failed confirm picked nothing
+    return case((ok & (picked == 0), "zero-pick"), (ok & (picked < expected), "partial"),
+                (ok & (picked > expected), "over"), (ok & (picked == expected), "exact"), else_=None)
+
+
+def outcome_of(attrs: dict, status: LogTransactionStatus | None = LogTransactionStatus.success) -> str | None:
+    """The same outcome for one row, in Python."""
+    if status != LogTransactionStatus.success:
+        return None
+    try:
+        picked, expected = Decimal(str(attrs["QuantityPicked"])), Decimal(str(attrs["ExpectedQuantity"]))
+    except (KeyError, ArithmeticError, ValueError):
+        return None
+    if picked == 0:
+        return "zero-pick"
+    return "partial" if picked < expected else "over" if picked > expected else "exact"
+
+
+COLUMNS["pick_outcome"] = _pick_outcome()
+
+
 def _operand(token: str):
     """(expression, is_numeric_capable) for the left side: a known column, else a request field."""
     name = token[5:] if token.startswith("attr:") else token
@@ -172,8 +204,12 @@ def _condition(text: str):
     if not m:
         raise ValueError(f"cannot read the condition {text!r}: write field, operator (== != < <= > >=) and value")
     left, op, right = m.groups()
+    quoted_value = bool(_QUOTED.match(right))
+    if not quoted_value and _COMPOUND.search(right):
+        raise ValueError(f"{text!r}: one condition per item, and all of them must hold; there is no OR. "
+                         f"To compare values, group_by the field instead.")
     col, is_attr = _operand(left)
-    quoted = len(right) >= 2 and right[0] == right[-1] and right[0] in "'\""
+    quoted = quoted_value
     if quoted:
         value = right[1:-1]
     elif _NUMBER.match(right):
@@ -190,6 +226,8 @@ def _condition(text: str):
         value = right
     if op not in ("==", "!="):
         raise ValueError(f"{text!r}: text can only be compared with == or !=")
+    if left == "pick_outcome" and value not in PICK_OUTCOMES:
+        raise ValueError(f"pick_outcome is one of {', '.join(PICK_OUTCOMES)}, not {value!r}")
     if left == "status":
         try:
             value = LogTransactionStatus(value)
@@ -221,7 +259,16 @@ def _filter_conditions(args: dict, day: date_type, tz_name: str) -> list:
                              LogTransaction.started_at <= t + timedelta(seconds=59))
             except (ValueError, TypeError):
                 problems.append(f"{key} must be HH:MM, not {args[key]!r}")
+    required: dict[str, str] = {}
     for text in args.get("where") or []:
+        m = _CONDITION.match(str(text))
+        if m and m.group(2) == "==":
+            field, value = m.group(1), m.group(3).strip().strip("'\"")
+            if field in required and required[field] != value:
+                problems.append(f"{field}=={required[field]} and {field}=={value} cannot both hold: conditions in "
+                                f"`where` must all hold at once. To compare them, group_by [\"{field}\"] instead.")
+                continue
+            required[field] = value
         try:
             conds.append(_condition(str(text)))
         except ValueError as exc:
@@ -229,6 +276,17 @@ def _filter_conditions(args: dict, day: date_type, tz_name: str) -> list:
     if problems:
         raise Problem(problems)
     return conds
+
+
+_QTY_NOTE = ("QuantityPicked conditions also count failed and soft calls. Zero-picks and partials are "
+             "pick_outcome==zero-pick / pick_outcome==partial (successful confirms only): use those.")
+
+
+def _with_note(result: dict, args: dict) -> dict:
+    """A hint in the result when the model filtered on QuantityPicked instead of pick_outcome."""
+    if any("QuantityPicked" in str(w) for w in (args.get("where") or [])):
+        result["note"] = _QTY_NOTE
+    return result
 
 
 def _clamp(value, default: int, hi: int) -> int:
@@ -269,6 +327,7 @@ def _row(t: LogTransaction, tz_name: str) -> dict:
         "reporting_number": t.reporting_number, "reqid": t.reqid, "duration_ms": t.duration_ms,
         "error": _error_excerpt(t.error_text),
         **{k: attrs.get(k) for k in ROW_FIELDS if attrs.get(k) not in (None, "")},
+        "pick_outcome": outcome_of(attrs, t.status),
         "link": _link(t),
     }
     return {k: v for k, v in row.items() if v is not None}
@@ -331,8 +390,8 @@ async def find_transactions(ctx: Context, args: dict) -> dict:
     total = await ctx.db.scalar(select(func.count()).select_from(LogTransaction).where(*conds)) or 0
     rows = (await ctx.db.execute(select(LogTransaction).where(*conds).order_by(order.nullslast(), LogTransaction.id)
                                  .limit(limit))).scalars().all()
-    return {"records": ctx.records, "total": total, "returned": len(rows),
-            "transactions": [_row(t, ctx.tz_name) for t in rows]}
+    return _with_note({"records": ctx.records, "total": total, "returned": len(rows),
+                       "transactions": [_row(t, ctx.tz_name) for t in rows]}, args)
 
 
 async def trace(ctx: Context, args: dict) -> dict:
@@ -439,8 +498,13 @@ async def aggregate(ctx: Context, args: dict) -> dict:
     limit = _clamp(args.get("limit"), 20, 50)
     rows = (await ctx.db.execute(stmt.order_by(order.desc().nullslast(), *[g for g in groups]).limit(limit))).all()
     out = [{k: _out(v) for k, v in r._mapping.items()} for r in rows]
-    return {"records": ctx.records, "total_rows": total, "base_rows": base, "groups": len(out), "group_by": group_by,
-            "sort": {"by": order.name, "dir": "desc"}, "rows": out}
+    groups_total = len(out)
+    if groups and len(out) == limit:
+        groups_total = await ctx.db.scalar(select(func.count()).select_from(
+            select(*groups).where(*conds).group_by(*groups).subquery())) or len(out)
+    return _with_note({"records": ctx.records, "total_rows": total, "base_rows": base, "groups": len(out),
+                       "groups_total": groups_total, "truncated": groups_total > len(out), "group_by": group_by,
+                       "sort": {"by": order.name, "dir": "desc"}, "rows": out}, args)
 
 
 async def _by_request_id(ctx: Context, reqid: str) -> str | None:

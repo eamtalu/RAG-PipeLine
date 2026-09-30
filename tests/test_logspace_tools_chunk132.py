@@ -226,3 +226,90 @@ def test_a_long_error_keeps_its_start_and_its_end():
     assert out.startswith("Error requesting http://h/x?") and out.endswith("Object reference not set.")
     assert " … " in out and len(out) <= 420
     assert _error_excerpt("short") == "short" and _error_excerpt(None) is None
+
+
+async def test_pick_outcome_splits_zero_picks_from_partials_in_one_call(db, cc):
+    """A live run called 62 short lines "partial" when 57 were zero-picks: the split is now the
+    database's, not the model's."""
+    out = await _run(db, cc, "aggregate", {"method": "ConfirmPickLine", "group_by": ["pick_outcome"]})
+    assert {r["pick_outcome"]: r["count"] for r in out["rows"]} == {"exact": 2, "zero-pick": 1, "partial": 1}
+    partial = await _run(db, cc, "find_transactions", {"where": ["pick_outcome==partial"]})
+    assert [r["reqid"] for r in partial["transactions"]] == ["R3"]
+
+
+async def test_rows_carry_their_pick_outcome(db, cc):
+    out = await _run(db, cc, "trace", {"key": "delivery_number", "value": "D1"})
+    assert [r.get("pick_outcome") for r in out["transactions"]] == ["exact", "zero-pick", "partial", None]
+
+
+def test_over_and_decimal_quantities_are_judged_as_numbers():
+    from app.services.logspace_agent.tools import outcome_of
+    assert outcome_of({"QuantityPicked": "0.61", "ExpectedQuantity": "0.600000"}) == "over"
+    assert outcome_of({"QuantityPicked": "0.9", "ExpectedQuantity": "0.900000"}) == "exact"
+    assert outcome_of({"QuantityPicked": "0.0", "ExpectedQuantity": "25.000000"}) == "zero-pick"
+    assert outcome_of({"QuantityPicked": "x", "ExpectedQuantity": "1"}) is None
+    assert outcome_of({}) is None
+
+
+async def test_two_different_required_values_for_one_field_is_a_problem_not_an_empty_answer(db, cc):
+    """A live run sent where ["pick_outcome==zero-pick", "pick_outcome==partial"] (all conditions must
+    hold, so nothing matched) and answered "no zero-picks or partials". It is refused instead."""
+    out = await _run(db, cc, "aggregate", {"method": "ConfirmPickLine",
+                                           "where": ["pick_outcome==zero-pick", "pick_outcome==partial"]})
+    assert out["error"] and "all hold" in out["problems"][0] and "group_by" in out["problems"][0]
+    same = await _run(db, cc, "aggregate", {"where": ["status==success", "status==success"]})
+    assert "error" not in same
+
+
+async def test_a_failed_call_has_no_pick_outcome(db, cc):
+    from datetime import datetime, timezone
+    from app.persistence.models.job import Job
+    job = (await db.execute(__import__("sqlalchemy").select(Job).where(Job.customer_code == cc))).scalars().first()
+    db.add(LogTransaction(customer_code=cc, job_id=job.id, date=TODAY, method="ConfirmPickLine", status=S.error,
+                          started_at=datetime(2026, 9, 30, 8, 0, tzinfo=timezone.utc), reqid="R9",
+                          attributes={"QuantityPicked": "12.0", "ExpectedQuantity": "12"}))
+    await db.flush()
+    rows = await _run(db, cc, "find_transactions", {"reqid": "R9"})
+    assert "pick_outcome" not in rows["transactions"][0]
+    agg = await _run(db, cc, "aggregate", {"method": "ConfirmPickLine", "group_by": ["pick_outcome"]})
+    assert {r["pick_outcome"]: r["count"] for r in agg["rows"]} == {"exact": 2, "zero-pick": 1, "partial": 1, None: 1}
+
+
+@pytest.mark.parametrize("cond", [
+    "pick_outcome==zero-pick or pick_outcome==partial",
+    "status==error and method==ConfirmPickLine",
+    "QuantityPicked==0 OR QuantityPicked<1",
+    "FromLocation=='JIT' || FromLocation=='A1'",
+])
+async def test_one_condition_per_item_there_is_no_or(db, cc, cond):
+    """A live run sent "pick_outcome==zero-pick or pick_outcome==partial" as one condition; read as one
+    odd value it matched nothing and was reported as "no shorts". It is refused instead."""
+    out = await _run(db, cc, "aggregate", {"where": [cond]})
+    assert out["error"] and "one condition per item" in out["problems"][0]
+
+
+async def test_pick_outcome_only_takes_its_four_values(db, cc):
+    out = await _run(db, cc, "aggregate", {"where": ["pick_outcome==short"]})
+    assert out["error"] and "zero-pick, partial, exact, over" in out["problems"][0]
+
+
+async def test_a_quoted_value_may_contain_and(db, cc):
+    out = await _run(db, cc, "aggregate", {"where": ["transaction_name=='JIT and Shorts Pick (Brighton)'"]})
+    assert "error" not in out and out["total_rows"] == 0
+
+
+async def test_aggregate_says_how_many_groups_exist_when_it_cuts_the_list(db, cc):
+    """A live run listed 20 of 21 zero-pick deliveries as if complete: the cut is now visible."""
+    out = await _run(db, cc, "aggregate", {"group_by": ["reqid"], "limit": 2})
+    assert out["groups"] == 2 and out["groups_total"] == 6 and out["truncated"] is True
+    full = await _run(db, cc, "aggregate", {"group_by": ["user"]})
+    assert full["groups_total"] == 2 and full["truncated"] is False
+
+
+async def test_a_quantity_picked_condition_carries_a_note_about_pick_outcome(db, cc):
+    out = await _run(db, cc, "aggregate", {"where": ["QuantityPicked==0"]})
+    assert "pick_outcome" in out["note"] and "failed" in out["note"]
+    found = await _run(db, cc, "find_transactions", {"where": ["QuantityPicked<ExpectedQuantity"]})
+    assert "pick_outcome" in found["note"]
+    plain = await _run(db, cc, "aggregate", {"where": ["pick_outcome==zero-pick"]})
+    assert "note" not in plain
