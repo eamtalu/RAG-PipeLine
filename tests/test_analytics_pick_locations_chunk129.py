@@ -296,3 +296,22 @@ async def test_a_backfill_with_more_keys_than_postgres_takes_parameters_is_writt
         again = await lookup_store.record(db, CC, obs[:35_000], {"pick line": PICK_LINE})
         await db.commit()
     assert stats["inserted"] == 40_000 and again["extended"] == 35_000 and again["inserted"] == 0
+
+
+async def test_a_release_after_local_midnight_is_filed_under_the_local_day(clean):
+    """Found while verifying chunk 129 on live data: 93 of 394 releases picked between 00:00 and 01:00
+    BST on 30 Sep carried business_date 29 Sep, because the settled row took the UTC date. The facts
+    already use the tenant's day; the agent's `day` argument filters on business_date."""
+    at = datetime(2026, 9, 29, 23, 30, tzinfo=timezone.utc)   # 00:30 on 30 Sep in London
+    async with async_session() as db:
+        f = _fact("ConfirmPickLine", 0, ReportingNumber="1", FromLocation="A03A")
+        f.event_time = at
+        db.add(f)
+        await db.commit()
+    s = st.Settlement(name="p", reads=("ConfirmPickLine",), key=("attr:ReportingNumber",), carry=(),
+                      values=(st.Settled("calls", st.Rule.count),))
+    async with async_session() as db:
+        await settle_store.settle_keys(db, CC, s, [("1",)])
+        await db.commit()
+        row = (await db.execute(select(AnalyticsSettledRow).where(AnalyticsSettledRow.customer_code == CC))).scalar_one()
+    assert str(row.business_date) == "2026-09-30"

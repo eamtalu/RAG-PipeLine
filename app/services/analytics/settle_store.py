@@ -157,14 +157,17 @@ def _stringify(value: Any) -> Any:
 
 
 def _to_row(customer_code: str, settlement: st.Settlement, settled: st.SettledRow,
-            now: datetime) -> dict:
+            now: datetime, tz: tzinfo | None = None) -> dict:
     attributes = {k: _stringify(v) for k, v in settled.carried.items()}
     attributes.update({k: _stringify(v) for k, v in settled.values.items()})
     row = {
         "id": uuid.uuid4(), "customer_code": customer_code, "settlement": settlement.name,
         "key": KEY_SEP.join(settled.key), "key_parts": list(settled.key),
         "event_time": settled.event_time,
-        "business_date": settled.event_time.date() if settled.event_time else None,
+        # The tenant's day, as the facts use: a release confirmed at 00:30 BST is today's, not the
+        # day before (chunk 129 found 93 of one morning's 394 releases filed under the UTC day).
+        "business_date": (settled.event_time.astimezone(tz) if tz else settled.event_time).date()
+                         if settled.event_time else None,
         "method": settlement.reads[0] if len(settlement.reads) == 1 else None,
         "attributes": attributes, "calls": settled.calls, "settled_at": now,
     }
@@ -259,9 +262,9 @@ async def settle_keys(db: AsyncSession, customer_code: str, settlement: st.Settl
     now = now or datetime.now(timezone.utc)
     calls = await _calls_for(db, customer_code, settlement, keys)
     context = await _context_for(db, customer_code, settlement, calls)
-    settled = await _settle_with_lookups(db, customer_code, settlement, calls, context,
-                                         await _tenant_zone(db, customer_code))
-    rows = [_to_row(customer_code, settlement, s, now) for s in settled.values()]
+    tz = await _tenant_zone(db, customer_code)
+    settled = await _settle_with_lookups(db, customer_code, settlement, calls, context, tz)
+    rows = [_to_row(customer_code, settlement, s, now, tz) for s in settled.values()]
     if not rows:
         return 0
     stmt = pg_insert(AnalyticsSettledRow).values(rows)
