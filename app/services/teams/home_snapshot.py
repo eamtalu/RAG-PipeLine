@@ -8,7 +8,7 @@ The edge only reads. A snapshot older than its TTL disappears, so a stopped cons
 "offline" rather than stale numbers for ever.
 
 Shape (the edge's `HomeSnapshot` mirrors it): customer_code, site, as_of, kpis[4], attention[],
-customers[], activity[], rail{}. Every value is pre-formatted text; the page never formats numbers.
+customers[], activity[], rail{}, shape{} (chunk 133, `home_shape`: lines per hour, last 24 h). Every value is pre-formatted text; the page never formats numbers.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from app.persistence.repositories.customer_repository import get_customer_timezo
 from app.persistence.repositories.teams_repository import TeamsBindingRepository
 from app.services.analytics.settle_reads import ReadProblem, UnknownSettlement
 from app.services.analytics_agent.tools import aggregate_releases, list_releases
+from app.services.teams import home_shape
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ async def compute(db: AsyncSession, customer_code: str) -> dict | None:
     ]
     attention = _attention(zero_items, chronic)
     customer_rows = _customers(customers)
+    shape = await _shape(db, customer_code, now, tz)
     return {
         "customer_code": customer_code,
         "site": await _site(db, customer_code),
@@ -105,7 +107,17 @@ async def compute(db: AsyncSession, customer_code: str) -> dict | None:
         "activity": _activity(problems["rows"], tz),
         "rail": {"releases": _int(releases), "deliveries": _int(deliveries), "fill_rate": _pct(fill),
                  "alerts": _int(zero_picks), "customers": _int(len(customer_rows))},
+        "shape": shape,
     }
+
+
+async def _shape(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo) -> dict | None:
+    """The chart under the tiles. A read it cannot make leaves the chart out, not the snapshot."""
+    try:
+        return await home_shape.compute(db, customer_code, now, tz)
+    except ReadProblem as exc:
+        logger.warning("home snapshot for %s: no shape of the day: %s", customer_code, exc.problems)
+        return None
 
 
 async def _optional(read, db, args, customer_code) -> dict:
