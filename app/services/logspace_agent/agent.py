@@ -79,7 +79,8 @@ How to answer:
   over the records: aggregate or find_transactions. For why one call failed: get_transaction.
   Call overview when you are unsure what the records hold.
 - Be constructive: what happened, what it means, and what to check next, in short plain sentences.
-  Name the request id of each call you rely on. The table of rows is attached for you from the tool
+  Name the request id of each call you rely on, written as a markdown link to that row's `link`:
+  [13-2026-09-30_18:37:56.933-7133](<the row's link>). A click opens that call in the feed. The table of rows is attached for you from the tool
   results: do not write your own table.
 - NEVER invent a record, a number, a name or a reason. Every figure must come from a tool result in this
   turn. If a tool returned a problem, fix exactly what it names and call once more; if it fails again,

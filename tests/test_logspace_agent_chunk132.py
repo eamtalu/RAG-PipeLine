@@ -119,3 +119,9 @@ async def test_off_topic_is_declined_in_the_logspace_words():
     async with async_session() as db:
         result = await _agent(db, "X", model, gate=TopicGate(model, "x")).ask("tell me a joke")
     assert result["declined"] == "off_topic" and "delivery, order, item or request id" in result["answer"]
+
+
+def test_request_ids_are_written_as_links_to_their_rows():
+    """The ask box opens a request in the feed when its id is a link; the instructions ask for that."""
+    from app.services.logspace_agent.agent import SYSTEM_PROMPT
+    assert "written as a markdown link to that row's `link`" in SYSTEM_PROMPT
