@@ -285,3 +285,14 @@ async def test_all_values_keeps_both_zones_of_a_location_and_counts_the_conflict
     async with async_session() as db:
         values = (await db.execute(select(AnalyticsLookupValue).where(AnalyticsLookupValue.customer_code == CC))).scalars().all()
     assert [v.value for v in values] == ["A1 | C1"] and lk.is_combined(values[0].value)
+
+
+async def test_a_backfill_with_more_keys_than_postgres_takes_parameters_is_written_in_batches(clean):
+    """The first live `pick line` backfill named 150k+ release keys in one statement and failed."""
+    obs = [lk.Observation("pick line", str(700000 + i), "Location", "A03A", T0, "ListPickLinesByUser") for i in range(40_000)]
+    async with async_session() as db:
+        stats = await lookup_store.record(db, CC, obs, {"pick line": PICK_LINE})
+        await db.commit()
+        again = await lookup_store.record(db, CC, obs[:35_000], {"pick line": PICK_LINE})
+        await db.commit()
+    assert stats["inserted"] == 40_000 and again["extended"] == 35_000 and again["inserted"] == 0

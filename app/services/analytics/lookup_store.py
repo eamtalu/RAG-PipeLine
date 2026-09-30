@@ -104,13 +104,19 @@ async def record(db: AsyncSession, customer_code: str, observations: Sequence[lk
     wanted = {(lookup, key) for lookup, key, _attribute in grouped}
     existing: dict[tuple[str, str, str], list[AnalyticsLookupValue]] = defaultdict(list)
     if wanted:
-        rows = (await db.execute(
-            select(AnalyticsLookupValue).where(
-                AnalyticsLookupValue.customer_code == customer_code,
-                AnalyticsLookupValue.lookup.in_(sorted({l for l, _ in wanted})),
-                AnalyticsLookupValue.key.in_(sorted({k for _, k in wanted}))))).scalars().all()
-        for row in rows:
-            existing[(row.lookup, row.key, row.attribute)].append(row)
+        # Chunk 129: in batches. A lookup keyed by the release has one key per release, and the
+        # first 60-day backfill of `pick line` named 150k+ keys in one IN list, past PostgreSQL's
+        # 32,767 bind parameters.
+        lookups_named = sorted({l for l, _ in wanted})
+        keys_named = sorted({k for _, k in wanted})
+        for i in range(0, len(keys_named), _KEY_BATCH):
+            rows = (await db.execute(
+                select(AnalyticsLookupValue).where(
+                    AnalyticsLookupValue.customer_code == customer_code,
+                    AnalyticsLookupValue.lookup.in_(lookups_named),
+                    AnalyticsLookupValue.key.in_(keys_named[i:i + _KEY_BATCH])))).scalars().all()
+            for row in rows:
+                existing[(row.lookup, row.key, row.attribute)].append(row)
 
     now = datetime.now(timezone.utc)
     fresh: list[dict] = []
@@ -192,12 +198,18 @@ async def record(db: AsyncSession, customer_code: str, observations: Sequence[lk
                 stats["changed"] += 1
                 open_period = _Pending(o.value, o.at)
 
-    if fresh:
-        # ON CONFLICT DO NOTHING rather than an update: two fold runs racing on the same key must not
-        # both write a period, and the loser has nothing to add - the winner wrote the same value.
-        await db.execute(pg_insert(AnalyticsLookupValue).values(fresh).on_conflict_do_nothing(
+    # ON CONFLICT DO NOTHING rather than an update: two fold runs racing on the same key must not
+    # both write a period, and the loser has nothing to add - the winner wrote the same value.
+    # In batches, for the same bind-parameter limit (14 columns a row).
+    for i in range(0, len(fresh), _ROW_BATCH):
+        await db.execute(pg_insert(AnalyticsLookupValue).values(fresh[i:i + _ROW_BATCH]).on_conflict_do_nothing(
             constraint="uq_analytics_lookup_values_key"))
     return stats
+
+
+#: Batch sizes that keep every statement well under PostgreSQL's 32,767 bind parameters.
+_KEY_BATCH = 10_000
+_ROW_BATCH = 1_000
 
 
 class _Pending:
