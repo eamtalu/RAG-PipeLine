@@ -221,8 +221,10 @@ def extract(entries, *, mi: bool = False) -> dict:
                     and not (isinstance(payload, str) and not payload.strip()):
                 out[BARE_RESPONSE_FIELD] = payload
             # Anything else at the top level of a response entry is metadata, not warehouse data.
+            # `reqid` is the request id the new log format stamps on the line (chunk 128): it is
+            # the conversation's identity, already on the transaction row, never a response field.
             for k, v in fields.items():
-                if k != "response" and _is_scalar(v):
+                if k not in ("response", "reqid") and _is_scalar(v):
                     out[f"{RESPONSE_PREFIX}{k}"] = v
 
         elif entry_type == "mi_result" and mi:

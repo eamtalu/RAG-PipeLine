@@ -339,3 +339,19 @@ async def test_rows_stored_as_info_before_the_fix_are_reclassified_in_place_and_
         assert len(tickets) == 1 and tickets[0].range_start <= at and tickets[0].range_end >= at + timedelta(seconds=2)
         again = await reclassify_stamped(db, CC, since=at - timedelta(minutes=1))
         assert again["changed"] == 0
+
+
+# ==================================================== 5. the stamp is not a response field
+
+def test_the_stamped_id_on_a_response_entry_is_not_projected_as_a_response_field():
+    from app.services.analytics import payload as pl
+
+    entries = [("response", {"response": {"Location": "A03A"}, "reqid": "3091-2026-09-30_07:30:55.006-6143"}),
+               ("response", {"response": [{"PickListNumber": "1"}], "reqid": "3091-x"})]
+    out = pl.extract(entries) if hasattr(pl, "extract") else None
+    if out is None:
+        import inspect
+        fn = next(f for n, f in inspect.getmembers(pl, inspect.isfunction) if "entries" in inspect.signature(f).parameters)
+        out = fn(entries)
+    assert out.get("resp.Location") == "A03A"
+    assert not any(k.endswith("reqid") for k in out), out
