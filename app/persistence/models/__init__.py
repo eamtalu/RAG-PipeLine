@@ -10,6 +10,8 @@ from app.persistence.models.analytics_lookup import (AnalyticsLookup,  # noqa: F
 from app.persistence.models.analytics_record_fact import AnalyticsRecordFact  # noqa: F401
 from app.persistence.models.analytics_ml import (AnalyticsFeatureSet,  # noqa: F401
                                                 AnalyticsPrediction)
+from app.persistence.models.analytics_forecast import (AnalyticsForecastAccuracy,  # noqa: F401
+                                                       AnalyticsForecastRun, AnalyticsForecastSeries)
 from app.persistence.models.log_open_stream import (LogOpenStream,  # noqa: F401
                                                     LogPendingRequest)
 from app.config.database import Base
@@ -96,6 +98,9 @@ __all__ = [
     # --- ML (M1) ---
     "AnalyticsFeatureSet",
     "AnalyticsPrediction",
+    "AnalyticsForecastRun",
+    "AnalyticsForecastSeries",
+    "AnalyticsForecastAccuracy",
     # --- stage 2 stream state (S4) ---
     "LogOpenStream",
     "LogPendingRequest",

@@ -268,6 +268,42 @@ class Settings(BaseSettings):
     analytics_reconcile_window_hours: int = 48
     analytics_reconcile_lag_hours: int = 6
 
+    # --- Demand forecast (chunk 138-141): nightly, per tenant, over the settled pick rows ---
+    # OFF by default like every analytics loop: it is only meaningful once a `pick_release` settlement
+    # has rows. The loop wakes every poll, and runs each tenant once per tenant-local day once that
+    # day's clock has passed `run_hour_local`, forecasting as of the day before.
+    analytics_forecast_worker_enabled: bool = False
+    analytics_forecast_poll_seconds: float = 900.0
+    analytics_forecast_run_hour_local: int = 3
+    # Which settlement's rows are the history, and which settled value counts units.
+    analytics_forecast_settlement: str = "pick_release"
+    analytics_forecast_units_value: str = "picked"
+    # How far back one run reads, the fewest steady days it will forecast from, and the fewest it will
+    # let Holt-Winters (three weekly seasons) into the race with.
+    analytics_forecast_history_days: int = 120
+    analytics_forecast_min_history_days: int = 14
+    analytics_forecast_min_days_ets: int = 21
+    # Items active on fewer days than this in the last 28 get week and month targets only.
+    analytics_forecast_item_daily_min_active_days: int = 10
+    analytics_forecast_max_items: int = 2000
+    analytics_forecast_backtest_folds: int = 6
+    # A bucket is scored this long after it closes, so late-settled lines are in. Two hours, not the
+    # reconciler's six: the run happens at 03:00 local and must be able to score the day that ended at
+    # midnight, or every score would arrive a day late. The rolling accuracy window; and the headroom
+    # added when turning lines per hour into pickers.
+    analytics_forecast_score_lag_hours: int = 2
+    analytics_forecast_accuracy_window_days: int = 28
+    analytics_forecast_staffing_buffer_pct: float = 0.10
+    # How far ahead a run writes: daily targets 1..N, weekly 0..N-1 (0 = the week in progress), monthly
+    # likewise; and how many calendar days the hourly heatmap covers (eight so seven whole 14:00 -> 08:00
+    # shifts can be composed from them).
+    analytics_forecast_horizon_days: int = 14
+    analytics_forecast_horizon_weeks: int = 5
+    analytics_forecast_horizon_months: int = 4
+    analytics_forecast_heatmap_days: int = 8
+    # Operator override of the automatic ramp trim, per tenant: {"tmp-live": "2026-09-14"}.
+    analytics_forecast_history_start: dict[str, str] = {}
+
     # Gate source retention on healthy analytics state (Phase 4).
     #
     # log_transactions partitions drop at 60 days. If analytics is broken when that happens, the source

@@ -32,7 +32,7 @@ def _stub_loops(monkeypatch):
     """Replace every real loop + the startup sweep with harmless stubs, and count register() calls."""
     for name in ("run_worker", "run_log_watcher", "run_log_stitch_worker", "run_log_parse_worker",
                  "run_ssh_log_fetcher", "run_notification_worker", "run_logspace_cleanup_worker",
-                 "run_log_partition_worker"):
+                 "run_log_partition_worker", "run_analytics_forecast_worker"):
         monkeypatch.setattr(bg, name, _noop_loop)
 
     async def _sweep0():

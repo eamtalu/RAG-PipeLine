@@ -27,6 +27,7 @@ from app.services.workers.log_watcher import run_log_watcher
 from app.services.workers.log_stitch_worker import run_log_stitch_worker, pending_backlog
 from app.services.workers.analytics_worker import run_analytics_worker
 from app.services.workers.analytics_reconcile_worker import run_analytics_reconcile_worker
+from app.services.workers.analytics_forecast_worker import run_analytics_forecast_worker
 from app.services.workers.ssh_log_fetcher import run_ssh_log_fetcher
 from app.services.workers.log_parse_worker import run_log_parse_worker, unfinished_ingest_objects
 from app.services.workers.log_partition_worker import run_log_partition_worker
@@ -131,6 +132,13 @@ async def start_background_tasks() -> list[asyncio.Task]:
     else:
         logger.info("Analytics reconciliation worker disabled "
                     "(analytics_reconcile_worker_enabled=False); nothing audits the folded data")
+    # The demand forecast (chunk 141): once per tenant per local day, after the run hour. Its own
+    # gate with its own branches, for the reason the comment above gives.
+    if settings.analytics_forecast_worker_enabled:
+        tasks.append(asyncio.create_task(run_analytics_forecast_worker()))
+    else:
+        logger.info("Analytics forecast worker disabled (analytics_forecast_worker_enabled=False); "
+                    "forecasts run only when triggered from the API")
     # Remote SSH log fetcher: the per-customer poll supervisor. ON by default and idle until a source
     # is enabled from the frontend (ssh_log_fetcher_enabled is only a global kill-switch).
     if settings.ssh_log_fetcher_enabled:

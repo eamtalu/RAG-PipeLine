@@ -350,6 +350,8 @@ def _group_expr(name: str, tz: tzinfo | None = None):
         return _local(tz).cast(Date)
     if name == "week":
         return func.date_trunc("week", _local(tz)).cast(Date)
+    if name == "month":
+        return func.date_trunc("month", _local(tz)).cast(Date)
     return _field_expr(name)
 
 

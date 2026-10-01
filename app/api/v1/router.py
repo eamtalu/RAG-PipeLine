@@ -10,6 +10,7 @@ from app.api.v1.notifications import router as notifications_router
 from app.api.v1.analytics import router as analytics_router
 from app.api.v1.teams import router as teams_router
 from app.api.v1.analytics_agent import router as analytics_agent_router
+from app.api.v1.analytics_forecast import router as analytics_forecast_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(upload_router)
@@ -21,4 +22,5 @@ api_router.include_router(customers_router)
 api_router.include_router(notifications_router)
 api_router.include_router(analytics_router)
 api_router.include_router(analytics_agent_router)
+api_router.include_router(analytics_forecast_router)
 api_router.include_router(teams_router)

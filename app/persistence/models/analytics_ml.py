@@ -28,7 +28,7 @@ Without the third, "reproducible" is a claim. With it, it is a test.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -83,14 +83,27 @@ class AnalyticsPrediction(Base):
 
     __tablename__ = "analytics_predictions"
     __table_args__ = (
-        # All four are needed. The same subject at the same horizon from two model versions is two
-        # predictions to compare, not a conflict - which is the whole point of keeping a model version.
-        UniqueConstraint("customer_code", "subject", "horizon", "model_version", "target_at",
-                         name="uq_analytics_predictions_key"),
+        # The same subject at the same horizon from two model versions is two predictions to compare,
+        # not a conflict - which is the whole point of keeping a model version. The demand forecast
+        # (chunk 138) widened the key with what it measures and at what grain: lines and units for the
+        # same item on the same day are two predictions, and so are a day and the week holding it.
+        UniqueConstraint("customer_code", "metric", "grain", "subject_kind", "subject", "horizon",
+                         "model_version", "target_at", name="uq_analytics_predictions_key"),
+        # The read: newest prediction per target for one series over a window (DISTINCT ON target_at
+        # ... ORDER BY target_at, predicted_at DESC) walks this index with no sort.
+        Index("ix_analytics_predictions_read", "customer_code", "metric", "grain", "subject_kind", "subject",
+              "target_at", "predicted_at"),
+        # The nightly re-score of the trailing window.
+        Index("ix_analytics_predictions_score", "customer_code", "target_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     customer_code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+    #: What is measured (`lines`, `units`, `pickers`) and at what time grain (`hour`, `day`, `week`,
+    #: `month`). Defaults keep the M1 rows and tests meaningful: a bare prediction is lines per day.
+    metric: Mapped[str] = mapped_column(String(32), nullable=False, default="lines", server_default="lines")
+    grain: Mapped[str] = mapped_column(String(8), nullable=False, default="day", server_default="day")
 
     #: What the prediction is about - an item number, a warehouse, an operator. A free string rather
     #: than a typed reference, because the subject of a forecast is chosen per model and a column per
@@ -115,9 +128,23 @@ class AnalyticsPrediction(Base):
     #: confidence interval cannot be re-aggregated, whereas the pieces it is built from can.
     detail: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
 
+    #: The 10th and 90th percentile around `value` (the median). Stored as the two bounds the backtest
+    #: produced; `detail` keeps the residual spread they came from, which is what re-aggregates.
+    p10: Mapped[object | None] = mapped_column(Numeric(20, 6), nullable=True)
+    p90: Mapped[object | None] = mapped_column(Numeric(20, 6), nullable=True)
+
+    #: Filled in once the target bucket has closed and been read back: the actual as it stood when
+    #: scored, the absolute error, and when. A prediction is judged only against what happened AFTER
+    #: it was made, which is why these three are written by a later pass and never at insert.
+    actual: Mapped[object | None] = mapped_column(Numeric(20, 6), nullable=True)
+    abs_error: Mapped[object | None] = mapped_column(Numeric(20, 6), nullable=True)
+    scored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     #: Which training set the model behind this was built from. Lineage is the point: a prediction whose
     #: training data cannot be identified cannot be explained when it is wrong.
     feature_set_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    #: The forecast run that wrote it (`analytics_forecast_runs.id`, soft reference).
+    run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
                                                  default=lambda: datetime.now(timezone.utc))

@@ -8,7 +8,8 @@ the browser: about 7 MB a week. These five additions make those one call each:
   A numeric value compares as a number, a text value as text, a time as a time.
 - STATS: `stat=median:duration_s`, `stat=p95:duration_s`, `stat=mean:duration_s`,
   `stat=min:...`, `stat=max:...`, and `stat=distinct:user_name` for "how many different".
-- TIME BUCKETS in the grouping, in the tenant's zone: `hour` (0-23), `hour_start`, `day`, `week`.
+- TIME BUCKETS in the grouping, in the tenant's zone: `hour` (0-23), `hour_start`, `day`, `week`,
+  and `month` (chunk 138, for the forecast's monthly actuals).
 - SORT on the list, numeric when the field is a number, with a direction.
 - validation that names a bad field or operator before any SQL runs, so the message is usable.
 
@@ -25,7 +26,7 @@ from app.services.analytics import settle as st
 
 OPS = ("==", "!=", "<=", ">=", "<", ">")
 STAT_KINDS = ("median", "p90", "p95", "p99", "mean", "min", "max", "distinct")
-BUCKETS = ("hour", "hour_start", "day", "week")
+BUCKETS = ("hour", "hour_start", "day", "week", "month")
 TYPED = ("method", "transaction_name", "warehouse", "item_number", "delivery_number", "lot_number",
          "user_name")
 

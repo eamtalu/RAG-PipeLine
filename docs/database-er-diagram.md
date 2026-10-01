@@ -107,6 +107,11 @@ erDiagram
     customers ||..o{ analytics_monthly_rollups : "tenant key (soft)"
     customers ||..o{ analytics_tenant_state : "tenant key (soft)"
     customers ||..o{ analytics_quality_issues : "tenant key (soft)"
+    customers ||..o{ analytics_feature_sets : "tenant key (soft)"
+    customers ||..o{ analytics_predictions : "tenant key (soft)"
+    customers ||..o{ analytics_forecast_runs : "tenant key (soft)"
+    customers ||..o{ analytics_forecast_series : "tenant key (soft)"
+    customers ||..o{ analytics_forecast_accuracy : "tenant key (soft)"
 ```
 
 ## Subsystem 1: RAG documents and embeddings
@@ -775,7 +780,7 @@ erDiagram
 ## Subsystem 8: Warehouse analytics platform
 
 Aggregates the derived `log_transactions` into metrics a user defines from the interface.
-Nine tables, added by migration `a7c31f9e2b48` (Phase 1 of `docs/analytics-ml-architecture/final_architecture.md`).
+Nine tables, added by migration `a7c31f9e2b48` (Phase 1 of `docs/analytics-ml-architecture/final_architecture.md`), plus the registries, settlements and lookups that later chunks added, and the five ML and forecasting tables described in their own section below.
 
 **It has no foreign keys at all.**
 Not one, anywhere - which is why it contributes nothing to the master overview above.
@@ -1044,6 +1049,117 @@ erDiagram
     analytics_facts ||..o{ analytics_fact_ledger : "every version of a fact (soft)"
 ```
 
+### ML and the demand forecast
+
+Five more tables, still without a single foreign key.
+Two came with M1 (`b7e34c9a2f58`): `analytics_feature_sets` pins a reproducible training set to an instant on the ledger, and `analytics_predictions` holds one model output per subject, horizon, model version and target instant.
+Three came with the demand forecast (`d8f3a1c2e7b4`), which also widened `analytics_predictions` with what it measures (`metric`), at what grain (`grain`), the interval (`p10`, `p90`) and the scoring fields (`actual`, `abs_error`, `scored_at`).
+
+The forecast reads history from `analytics_settled_rows` (the `pick_release` settlement), writes predictions, and once a target bucket has closed writes the actual back onto the same row.
+`analytics_forecast_accuracy` is recomputed from those scored rows every night; `analytics_forecast_series` is the latest word on each forecasted thing so the items page is one index walk; `analytics_forecast_runs` is the ledger of passes.
+A tenant purge deletes from all five explicitly (`logspace_cleanup.py`).
+
+```mermaid
+erDiagram
+    analytics_feature_sets {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string name
+        datetime pinned_at "which ledger versions: newest recorded_at at or before this"
+        string code_version
+        string content_hash "so a rebuild can be CHECKED"
+        int row_count
+        jsonb feature_names
+        text notes
+        datetime built_at
+    }
+
+    analytics_predictions {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string metric "lines | units | pickers"
+        string grain "hour | day | week | month"
+        string subject_kind "total | warehouse | transaction_name | item_number"
+        string subject
+        string horizon "label: 1d, 0w, 2m"
+        string model_version
+        datetime target_at "the instant the bucket starts, UTC"
+        datetime predicted_at
+        numeric value "p50"
+        numeric p10
+        numeric p90
+        numeric actual "written when the bucket has closed"
+        numeric abs_error
+        datetime scored_at
+        jsonb detail "model, backtest, classification, partial"
+        uuid feature_set_id "soft"
+        uuid run_id "soft"
+        datetime created_at
+    }
+
+    analytics_forecast_runs {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string status "queued | running | completed | skipped | failed"
+        string trigger "nightly | manual"
+        date as_of_date "last day learned from"
+        string model_version
+        datetime started_at
+        datetime finished_at
+        int points_written
+        int scored
+        text error
+        jsonb detail "history bounds, ramp trimmed, series counts, warnings"
+        datetime created_at
+    }
+
+    analytics_forecast_series {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string metric
+        string grain
+        string subject_kind
+        string subject
+        string classification "smooth | intermittent | lumpy | erratic | insufficient"
+        string model "winning candidate, null when unforecast"
+        numeric backtest_wape
+        int history_days
+        int active_days_28d
+        numeric volume_28d "keyset order for the items page"
+        uuid last_run_id "soft"
+        datetime updated_at
+    }
+
+    analytics_forecast_accuracy {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string metric
+        string grain
+        string subject_kind
+        string subject
+        string horizon
+        string model_version
+        date window_start
+        date window_end
+        int n
+        numeric mae
+        numeric wape
+        numeric mape "over non-zero actuals only"
+        int mape_n
+        numeric bias "predicted minus actual"
+        datetime computed_at
+    }
+
+    analytics_feature_sets ||..o{ analytics_predictions : "feature_set_id (soft)"
+    analytics_forecast_runs ||..o{ analytics_predictions : "run_id (soft)"
+    analytics_forecast_runs ||..o{ analytics_forecast_series : "last_run_id (soft)"
+    analytics_settled_rows ||..o{ analytics_predictions : "history read, actual written back (soft)"
+    analytics_predictions ||..o{ analytics_forecast_accuracy : "recomputed from scored rows (soft)"
+```
+
+Unique keys: `analytics_predictions (customer_code, metric, grain, subject_kind, subject, horizon, model_version, target_at)`, `analytics_forecast_series (customer_code, metric, grain, subject_kind, subject)`, `analytics_forecast_accuracy (… , horizon, model_version)`.
+Read indexes: `ix_analytics_predictions_read (customer_code, metric, grain, subject_kind, subject, target_at, predicted_at DESC)` serves the newest-per-target read; `ix_analytics_predictions_score (customer_code, target_at)` the nightly re-score; `ix_analytics_forecast_series_volume` the items page.
+
 ### One writer per table
 
 For every analytics table the rule is absolute: **exactly one component may write it.**
@@ -1165,8 +1281,11 @@ The nine `analytics_*` tables add **no rows to this table**. They have no enforc
 
 | Logical parent | Referencing column | Meaning |
 | --- | --- | --- |
-| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, the notification tables, and all nine `analytics_*` tables | tenant partition key |
+| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, the notification tables, and every `analytics_*` table including the ML and forecast ones | tenant partition key |
 | `analytics_metrics.id` | `definition_id` on the three rollup tables | which definition a rollup row belongs to; no FK because a FK from a partitioned child made the log partitions undroppable once already |
+| `analytics_feature_sets.id` | `analytics_predictions.feature_set_id` | which training set the model behind a prediction was built from; nullable |
+| `analytics_forecast_runs.id` | `analytics_predictions.run_id`, `analytics_forecast_series.last_run_id` | which forecast pass wrote the row; nullable, no FK |
+| `analytics_settled_rows` (`pick_release`) | `analytics_predictions.actual` | the actual is read from the settled rows after the bucket closes and written onto the prediction; a relationship in data flow, not a column reference |
 | `log_transactions.id` | `analytics_facts.source_transaction_id` | which transaction this fact was derived from; no FK, and deliberately survives the transaction being dropped at 60 days |
 | `log_transactions.id` | `analytics_fact_ledger.source_transaction_id` | same, per version |
 | `log_transactions.id` | `analytics_quality_issues.source_transaction_id` | nullable: a row can be unusable precisely because its identity could not be read |
