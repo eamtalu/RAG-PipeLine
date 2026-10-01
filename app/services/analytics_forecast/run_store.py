@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.analytics_forecast import AnalyticsForecastRun
 
-#: A `running` row older than this is a crashed process, not a run in progress.
-STALE_AFTER = timedelta(hours=2)
+#: A `queued` or `running` row older than this is a dead process, not a run in progress. A run takes
+#: seconds; fifteen minutes is generous. The live incident: two restarts a minute apart killed a
+#: worker mid-run and the row blocked the tenant until this window passed.
+STALE_AFTER = timedelta(minutes=15)
 
 
 def _now() -> datetime:
@@ -41,6 +43,17 @@ async def finish(db: AsyncSession, run_id: uuid.UUID, *, status: str, points_wri
     if detail is not None:
         values["detail"] = detail
     await db.execute(update(AnalyticsForecastRun).where(AnalyticsForecastRun.id == run_id).values(**values))
+
+
+async def sweep_stale(db: AsyncSession, *, now: datetime | None = None, older_than: timedelta = STALE_AFTER) -> int:
+    """Mark every `queued` or `running` run older than the stale window as failed. Called at the
+    start of each worker pass, because a process that dies mid-run cannot write its own epitaph."""
+    cutoff = (now or _now()) - older_than
+    result = await db.execute(update(AnalyticsForecastRun).where(
+        AnalyticsForecastRun.status.in_(("queued", "running")), AnalyticsForecastRun.created_at < cutoff,
+    ).values(status="failed", finished_at=_now(),
+             error=f"orphaned: no process finished this run within {int(older_than.total_seconds() // 60)} minutes"))
+    return result.rowcount or 0
 
 
 async def get(db: AsyncSession, cc: str, run_id: uuid.UUID) -> AnalyticsForecastRun | None:

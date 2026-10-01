@@ -151,3 +151,42 @@ async def test_the_loop_starts_only_when_its_flag_is_on(monkeypatch):
     await asyncio.sleep(0)
     await bg.stop_background_tasks(tasks)
     assert started["n"] == 1
+
+
+# ==================================================== 4. orphans
+
+async def test_a_run_left_running_by_a_dead_process_is_swept_and_the_tenant_is_due_again():
+    """The live symptom: two restarts a minute apart killed a worker mid-run, the row stayed
+    `running`, and for two hours nothing could forecast the tenant. A pass now sweeps any run that
+    has been in flight longer than the stale window to `failed` before deciding who is due."""
+    now = datetime(2026, 10, 5, 2, 0, tzinfo=UTC)
+    async with async_session() as db:
+        run = await run_store.create(db, CC, as_of_date=date(2026, 10, 4), trigger="nightly", model_version=MODEL_VERSION)
+        await db.commit()
+        await run_store.claim(db, run.id)
+        await db.commit()
+        assert (await run_store.running(db, CC)) is not None
+        swept = await run_store.sweep_stale(db, now=now + run_store.STALE_AFTER + timedelta(minutes=1))
+        await db.commit()
+        got = await run_store.get(db, CC, run.id)
+    assert swept >= 1
+    assert got.status == "failed" and "orphan" in (got.error or "").lower() and got.finished_at is not None
+    assert (CC, date(2026, 10, 4)) in await _due(now)
+    assert run_store.STALE_AFTER <= timedelta(minutes=15)
+
+
+async def test_forecast_once_sweeps_before_it_runs(monkeypatch):
+    seen = {"swept": 0}
+
+    async def fake_sweep(db, *, now=None):
+        seen["swept"] += 1
+        return 0
+
+    async def fake_run(cc, *, as_of_date, trigger):
+        return {"status": "completed"}
+
+    monkeypatch.setattr(w.run_store, "sweep_stale", fake_sweep)
+    monkeypatch.setattr(w.runner, "run_tenant", fake_run)
+    monkeypatch.setattr(w, "_candidates", _candidates_mine)
+    await w.forecast_once(datetime(2026, 10, 5, 2, 0, tzinfo=UTC))
+    assert seen["swept"] == 1

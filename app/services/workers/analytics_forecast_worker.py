@@ -61,6 +61,11 @@ async def due_tenants(now: datetime, *, run_hour: int) -> list[tuple[str, date]]
 async def forecast_once(now: datetime | None = None) -> dict:
     """One pass: run every due tenant. A failing tenant is logged and does not stop the others."""
     now = now or datetime.now(timezone.utc)
+    async with async_session() as db:
+        swept = await run_store.sweep_stale(db, now=now)
+        await db.commit()
+    if swept:
+        logger.warning("Forecast: swept %d orphaned run(s) left running by a dead process", swept)
     due = await due_tenants(now, run_hour=settings.analytics_forecast_run_hour_local)
     stats = {"due": len(due), "completed": 0, "skipped": 0, "failed": 0}
     for cc, as_of in due:
