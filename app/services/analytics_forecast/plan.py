@@ -196,13 +196,14 @@ def _targets(as_of: date, tz: tzinfo, cfg: ForecastConfig) -> dict[str, list[ser
             "month": series.targets(as_of=as_of, grain="month", n=cfg.horizon_months, tz=tz)}
 
 
-def _hourly_rows(total: list[PredictionRow], bundle: hs.HistoryBundle, *, as_of: date, tz: tzinfo,
+def _hourly_rows(total: list[PredictionRow], bundle: hs.HistoryBundle, *, as_of: date, tz: tzinfo, steady: date,
                  cfg: ForecastConfig, model_version: str, run_id, predicted_at: datetime,
                  base: dict) -> tuple[list[PredictionRow], dict]:
     """The heatmap: the headline daily lines cut into hours by the measured profile, and the pickers
     each hour needs at the measured throughput."""
-    share = hourly.profile(bundle.hourly)
-    tp = hourly.throughput(bundle.hourly)
+    rows_in = hourly.since(bundle.hourly, steady)
+    share = hourly.profile(rows_in)
+    tp = hourly.throughput(rows_in)
     days = [hourly.DayPoint(day=r.target_at.astimezone(tz).date(), p10=float(r.p10), p50=float(r.value),
                             p90=float(r.p90)) for r in total if r.grain == "day"][:cfg.heatmap_days]
     out = []
@@ -270,7 +271,7 @@ def run_all(bundle: hs.HistoryBundle, *, as_of: date, tz: tzinfo, cfg: ForecastC
                     headline_total.append(row)
     if headline_total:
         base = {k: v for k, v in headline_total[0].detail.items() if k in ("model", "classification", "history")}
-        rows, staffing_detail = _hourly_rows(headline_total, bundle, as_of=as_of, tz=tz, cfg=cfg,
+        rows, staffing_detail = _hourly_rows(headline_total, bundle, as_of=as_of, tz=tz, steady=steady, cfg=cfg,
                                              model_version=model_version, run_id=run_id, predicted_at=predicted_at,
                                              base=base)
         out.predictions.extend(rows)

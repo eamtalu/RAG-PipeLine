@@ -37,7 +37,8 @@ router = APIRouter(prefix="/analytics/forecast", tags=["analytics-forecast"])
 METRICS = ("lines", "units", "pickers")
 SUBJECT_KINDS = ("total", "warehouse", "transaction_name", "item_number")
 GRAINS = series.GRAINS
-MAX_BACK = {"day": 365, "week": 52, "month": 24}
+MAX_BACK = {"day": 365, "week": 52, "month": 24, "hour": 336}
+HOUR_METRICS = ("lines", "pickers")
 ITEMS_MAX = 500
 RUNS_MAX = 100
 
@@ -119,42 +120,97 @@ def _bucket_points(grain: str, first: date, last: date, daily: dict[date, float]
     return out
 
 
+def _hour_points(first_local: datetime, count: int, actual: dict[datetime, float], now_local: datetime,
+                 preds: dict[datetime, object], tz: ZoneInfo) -> list[dict]:
+    """One point per local hour from `first_local`. Hours before the one in progress carry the actual
+    (0 when the read had nothing for them), the hour in progress is partial, later hours are ahead."""
+    out = []
+    now_hour = now_local.replace(minute=0, second=0, microsecond=0, tzinfo=None)
+    for i in range(count):
+        start = first_local + timedelta(hours=i)
+        at = start.replace(tzinfo=tz).astimezone(timezone.utc)
+        p = preds.get(at)
+        closed = start < now_hour
+        in_progress = start == now_hour
+        value = actual.get(start, 0.0) if start <= now_hour else None
+        out.append({
+            "target": start.strftime("%Y-%m-%dT%H:%M"), "start": start.strftime("%Y-%m-%dT%H:%M"),
+            "end": (start + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M"),
+            "actual": _s(value) if closed else None,
+            "actual_to_date": _s(value) if in_progress else None,
+            "partial": in_progress,
+            "p10": _s(p.p10) if p else None, "p50": _s(p.value) if p else None, "p90": _s(p.p90) if p else None,
+            "horizon": p.horizon if p else None, "model": (p.detail or {}).get("model") if p else None,
+            "predicted_at": p.predicted_at.isoformat() if p else None,
+            "scored": bool(p and p.scored_at)})
+    return out
+
+
+async def _hour_grain(db: AsyncSession, customer: str, *, metric: str, hours_back: int, as_of: date, today: date,
+                      now_local: datetime, tz: ZoneInfo, settlement: str, horizon: str) -> dict:
+    """The hour grain: `hours_back` hours before today, then every hour the heatmap forecasts ahead."""
+    first_local = datetime.combine(today, datetime.min.time()) - timedelta(hours=hours_back)
+    last_day = as_of + timedelta(days=settings.analytics_forecast_heatmap_days)
+    end_local = datetime.combine(last_day + timedelta(days=1), datetime.min.time())
+    count = int((end_local - first_local).total_seconds() // 3600)
+    since = first_local.replace(tzinfo=tz).astimezone(timezone.utc)
+    until = end_local.replace(tzinfo=tz).astimezone(timezone.utc)
+    rows = await history_store.read_hourly(db, customer, settlement, since=since,
+                                           until=min(until, now_local.astimezone(timezone.utc) + timedelta(hours=1)), tz=tz)
+    actual = {r.start: (r.lines if metric == "lines" else float(r.pickers)) for r in rows}
+    preds = {p.target_at: p for p in await prediction_store.latest_per_target(
+        db, customer, metric=metric, grain="hour", subject_kind="total", subject="total", start=since, end=until,
+        horizon=None if horizon == "latest" else horizon)}
+    return {"points": _hour_points(first_local, count, actual, now_local, preds, tz)}
+
+
 @router.get("/series")
 async def read_series(metric: str = "lines", subject_kind: str = "total", subject: str = "total",
                       grains: str = "day,week,month", days_back: int = 28, weeks_back: int = 8, months_back: int = 6,
-                      horizon: str = "latest", customer: str = Depends(get_current_customer),
+                      hours_back: int = 72, horizon: str = "latest", customer: str = Depends(get_current_customer),
                       db: AsyncSession = Depends(get_session)):
-    """Actuals and forecast for one series at up to three grains, in one call.
+    """Actuals and forecast for one series at up to four grains, in one call.
 
     Actuals come from the settled rows through the forecast's own history read. A bucket that is
-    still running (today, this week, this month) carries `actual_to_date` and `partial: true`; a
-    closed one carries `actual`. Forecast points are the newest prediction per target, or the one
-    made at `horizon` when pinned ("what did we say a week out")."""
+    still running (this hour, today, this week, this month) carries `actual_to_date` and
+    `partial: true`; a closed one carries `actual`. Forecast points are the newest prediction per
+    target, or the one made at `horizon` when pinned ("what did we say a week out"). The `hour`
+    grain exists for the total only, for lines and pickers: it is what the heatmap is made of."""
     _check("metric", metric, METRICS)
     _check("subject_kind", subject_kind, SUBJECT_KINDS)
     wanted = tuple(g.strip() for g in grains.split(",") if g.strip())
     for g in wanted:
-        _check("grains", g, GRAINS)
+        _check("grains", g, GRAINS + ("hour",))
+    if "hour" in wanted and (subject_kind != "total" or metric not in HOUR_METRICS):
+        raise HTTPException(422, detail="the hour grain exists for the total only, for lines and pickers")
     back = {"day": min(max(days_back, 1), MAX_BACK["day"]), "week": min(max(weeks_back, 1), MAX_BACK["week"]),
             "month": min(max(months_back, 1), MAX_BACK["month"])}
     horizon_n = {"day": settings.analytics_forecast_horizon_days, "week": settings.analytics_forecast_horizon_weeks,
                  "month": settings.analytics_forecast_horizon_months}
     tz = await _tz(db, customer)
     as_of, run = await _as_of(db, customer, tz)
-    today = _now().astimezone(tz).date()
+    now_local = _now().astimezone(tz)
+    today = now_local.date()
     cfg = runner.config_from_settings(customer)
-    windows = {g: _window(g, back[g], as_of, horizon_n[g]) for g in wanted}
-    first_day = min(w[0] for w in windows.values())
+    calendar_grains = tuple(g for g in wanted if g != "hour")
+    windows = {g: _window(g, back[g], as_of, horizon_n[g]) for g in calendar_grains}
+    daily: dict[date, float] = {}
+    out_grains = {}
     try:
-        rows = await history_store.read_daily_for(
-            db, customer, cfg.settlement, since=series.local_midnight(first_day, tz),
-            until=series.local_midnight(today + timedelta(days=1), tz), tz=tz, units_value=cfg.units_value,
-            subject_kind=subject_kind, subject=subject)
+        if windows:
+            first_day = min(w[0] for w in windows.values())
+            rows = await history_store.read_daily_for(
+                db, customer, cfg.settlement, since=series.local_midnight(first_day, tz),
+                until=series.local_midnight(today + timedelta(days=1), tz), tz=tz, units_value=cfg.units_value,
+                subject_kind=subject_kind, subject=subject)
+            daily = {d: float(lines if metric == "lines" else units) for d, lines, units in rows}
+        if "hour" in wanted:
+            out_grains["hour"] = await _hour_grain(
+                db, customer, metric=metric, hours_back=min(max(hours_back, 1), MAX_BACK["hour"]), as_of=as_of,
+                today=today, now_local=now_local, tz=tz, settlement=cfg.settlement, horizon=horizon)
     except UnknownSettlement as exc:
         raise HTTPException(404, detail=str(exc))
-    daily = {d: float(lines if metric == "lines" else units) for d, lines, units in rows}
-    out_grains = {}
-    for g in wanted:
+    for g in calendar_grains:
         first, last = windows[g]
         preds = {p.target_at: p for p in await prediction_store.latest_per_target(
             db, customer, metric=metric, grain=g, subject_kind=subject_kind, subject=subject,

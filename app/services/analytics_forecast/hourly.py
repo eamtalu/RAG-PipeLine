@@ -62,31 +62,35 @@ def _by_day(rows: list[HourRow]) -> dict[date, list[float]]:
     return days
 
 
-def _median_shape(shapes: list[list[float]]) -> list[float] | None:
-    if not shapes:
+def _pooled_shape(days: list[list[float]]) -> list[float] | None:
+    if not days:
         return None
-    med = [statistics.median(s[h] for s in shapes) for h in range(HOURS)]
-    total = sum(med)
-    return [v / total for v in med] if total > 0 else None
+    total_by_hour = [sum(d[h] for d in days) for h in range(HOURS)]
+    total = sum(total_by_hour)
+    return [v / total for v in total_by_hour] if total > 0 else None
+
+
+def since(rows: list[HourRow], day: date) -> list[HourRow]:
+    """Only the hours on or after `day`: the rollout ramp is no more a shape to learn than a level."""
+    return [r for r in rows if r.start.date() >= day]
 
 
 def profile(rows: list[HourRow]) -> Share:
-    """Per weekday, the share of a day's lines in each hour, summing to one.
+    """Per weekday, the share of that weekday's lines falling in each hour, summing to one.
 
-    Each observed day is normalised first, then the median is taken hour by hour, so one huge day
-    does not set the shape for all of them. A weekday never observed, or observed only empty,
-    borrows the shape of all days together; with no data at all every hour gets an equal share."""
+    Shares are pooled over lines, not averaged over days, so a 13-line day cannot shape a 520-line
+    one (the live Saturday profile came out spiky for exactly that reason). A weekday never observed,
+    or observed only empty, borrows the pooled shape of every day; with no data at all every hour
+    gets an equal share."""
     per_dow: dict[int, list[list[float]]] = {d: [] for d in range(7)}
     everything: list[list[float]] = []
     for day, hours in _by_day(rows).items():
-        total = sum(hours)
-        if total <= 0:
+        if sum(hours) <= 0:
             continue
-        shape = [v / total for v in hours]
-        per_dow[day.weekday()].append(shape)
-        everything.append(shape)
-    fallback = _median_shape(everything) or [1.0 / HOURS] * HOURS
-    return {d: _median_shape(per_dow[d]) or fallback for d in range(7)}
+        per_dow[day.weekday()].append(hours)
+        everything.append(hours)
+    fallback = _pooled_shape(everything) or [1.0 / HOURS] * HOURS
+    return {d: _pooled_shape(per_dow[d]) or fallback for d in range(7)}
 
 
 def throughput(rows: list[HourRow]) -> Throughput:

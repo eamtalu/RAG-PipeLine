@@ -74,3 +74,21 @@ def test_pickers_needed_rounds_up_with_the_buffer():
     assert st.pickers_needed(0.0, 40.0, buffer_pct=0.10) == 0
     assert st.pickers_needed(100.0, None, buffer_pct=0.10) is None
     assert st.pickers_needed(100.0, 0.0, buffer_pct=0.10) is None
+
+
+def test_profile_weights_hours_by_volume_so_a_tiny_day_does_not_shape_a_busy_one():
+    """Live finding: the Saturday shape came out spiky because a 13-line rollout day counted as
+    much as a 520-line one. Shares are pooled over lines, so the busy days decide the shape."""
+    busy = _shift_day(MON + timedelta(days=5), scale=10.0)                      # 400 lines an hour, 18 hours
+    spiky = [h.HourRow(start=datetime(2026, 9, 12, 6), lines=13.0, pickers=1)]  # one hour, 13 lines
+    share = h.profile(busy + spiky)
+    sat = share[5]
+    assert sat[6] == pytest.approx((400 + 13) / (18 * 400 + 13))
+    assert sat[15] == pytest.approx(400 / (18 * 400 + 13))
+
+
+def test_rows_since_a_day_drop_the_ramp():
+    rows = _weeks(2)
+    kept = h.since(rows, MON + timedelta(days=7))
+    assert all(r.start.date() >= MON + timedelta(days=7) for r in kept)
+    assert len(kept) == 7 * 24

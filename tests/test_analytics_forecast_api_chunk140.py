@@ -201,3 +201,40 @@ async def test_subjects_lists_what_has_been_forecast_for_a_kind():
     assert [s["subject"] for s in out["subjects"]] == ["Brighton Stock Pick", "JIT and Shorts Pick (Brighton)"]
     assert out["subjects"][0]["model"] and out["subjects"][0]["classification"] == "smooth"
     assert bad == 422
+
+
+# ==================================================== 7. the hour grain
+
+async def test_series_at_the_hour_grain_puts_actual_pickers_next_to_the_forecast_per_hour():
+    await _plant_and_run()
+    async with async_session() as db:
+        out = await api.read_series(metric="pickers", subject_kind="total", subject="total", grains="hour", days_back=1,
+                                    weeks_back=1, months_back=1, horizon="latest", hours_back=48, customer=CC, db=db)
+    pts = out["grains"]["hour"]["points"]
+    assert len(pts) == 48 + 8 * 24                       # 48 hours back, the heatmap's eight days ahead
+    assert pts[0]["target"] == "2026-10-03T00:00" and pts[0]["start"] == pts[0]["target"]   # 48 h before today
+    assert pts[0]["end"] == "2026-10-03T01:00"
+    # Saturday 3 Oct 15:00 London: lines were planted 14:00 onwards by 3 pickers
+    sat_15 = next(p for p in pts if p["target"] == "2026-10-03T15:00")
+    assert sat_15["actual"] is not None and int(sat_15["actual"]) >= 1 and sat_15["p50"] is None
+    # the hour in progress at NOW (03:00Z = 04:00 London on 5 Oct) is partial, with a forecast
+    now_hour = next(p for p in pts if p["target"] == "2026-10-05T04:00")
+    assert now_hour["partial"] is True and now_hour["actual"] is None and now_hour["p50"] is not None
+    ahead = next(p for p in pts if p["target"] == "2026-10-05T15:00")
+    assert ahead["actual"] is None and ahead["p50"] is not None and ahead["horizon"] == "1d"
+    async with async_session() as db:
+        out2 = await api.read_series(metric="lines", subject_kind="total", subject="total", grains="hour", days_back=1,
+                                     weeks_back=1, months_back=1, horizon="latest", hours_back=24, customer=CC, db=db)
+    assert len(out2["grains"]["hour"]["points"]) == 24 + 8 * 24
+
+
+async def test_the_hour_grain_is_bounded_and_only_for_the_total():
+    await _plant_and_run()
+    async with async_session() as db:
+        out = await api.read_series(metric="pickers", subject_kind="total", subject="total", grains="hour", days_back=1,
+                                    weeks_back=1, months_back=1, horizon="latest", hours_back=10_000, customer=CC, db=db)
+        assert len(out["grains"]["hour"]["points"]) == api.MAX_BACK["hour"] + 8 * 24
+        with pytest.raises(HTTPException) as exc:
+            await api.read_series(metric="pickers", subject_kind="item_number", subject="104568", grains="hour", days_back=1,
+                                  weeks_back=1, months_back=1, horizon="latest", hours_back=24, customer=CC, db=db)
+    assert exc.value.status_code == 422
