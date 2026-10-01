@@ -7,6 +7,7 @@ fold: these tests are about what the forecast does WITH settled rows, not how ro
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete
@@ -31,6 +32,9 @@ PICK_RELEASE = st.Settlement(
         st.Settled(name="picked", rule=st.Rule.sum, field="attr:QuantityPicked", statuses=frozenset({"success"})),
         st.Settled(name="calls", rule=st.Rule.count),
         st.Settled(name="duration_s", rule=st.Rule.difference, left="finished_at", right="started_at"),
+        # the Teams snapshot filters on these, so the fixture settlement declares them too
+        st.Settled(name="shortfall", rule=st.Rule.difference, left="picked", right="expected"),
+        st.Settled(name="is_short", rule=st.Rule.flag, left="shortfall", op="<", right_value=Decimal("0")),
     ))
 
 MODELS = (AnalyticsForecastAccuracy, AnalyticsForecastSeries, AnalyticsForecastRun, AnalyticsPrediction,
@@ -62,7 +66,7 @@ def settled(cc: str, when: datetime, *, item="104568", tx="Brighton Stock Pick",
         id=uuid.uuid4(), customer_code=cc, settlement=SETTLEMENT, key=key, key_parts=[key],
         event_time=when, business_date=local.date(), method="ConfirmPickLine", transaction_name=tx,
         warehouse=warehouse, item_number=item, delivery_number="27907", lot_number=None, user_name=user,
-        attributes={"expected": picked, "picked": picked, "calls": "1", "duration_s": duration_s,
+        attributes={"expected": picked, "picked": picked, "calls": "1", "duration_s": duration_s, "shortfall": "0", "is_short": "0",
                     "item_number": item, "user_name": user, "warehouse": warehouse, "transaction_name": tx},
         calls=1, settled_at=when)
 

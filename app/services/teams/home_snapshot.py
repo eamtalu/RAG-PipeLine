@@ -8,7 +8,9 @@ The edge only reads. A snapshot older than its TTL disappears, so a stopped cons
 "offline" rather than stale numbers for ever.
 
 Shape (the edge's `HomeSnapshot` mirrors it): customer_code, site, as_of, kpis[4], attention[],
-customers[], activity[], rail{}, shape{} (chunk 133, `home_shape`: lines per hour, last 24 h). Every value is pre-formatted text; the page never formats numbers.
+customers[], activity[], rail{}, shape{} (chunk 133, `home_shape`: lines per hour, last 24 h), forecast{}
+(chunk 142, `home_forecast`: tomorrow, the week, accuracy, tonight's peak, 15 days of actual against
+forecast, 7 shifts). Every value is pre-formatted text; the page never formats numbers.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from app.persistence.repositories.customer_repository import get_customer_timezo
 from app.persistence.repositories.teams_repository import TeamsBindingRepository
 from app.services.analytics.settle_reads import ReadProblem, UnknownSettlement
 from app.services.analytics_agent.tools import aggregate_releases, list_releases
-from app.services.teams import home_shape
+from app.services.teams import home_forecast, home_shape
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +99,7 @@ async def compute(db: AsyncSession, customer_code: str) -> dict | None:
     attention = _attention(zero_items, chronic)
     customer_rows = _customers(customers)
     shape = await _shape(db, customer_code, now, tz)
+    forecast = await _forecast(db, customer_code, now, tz)
     return {
         "customer_code": customer_code,
         "site": await _site(db, customer_code),
@@ -108,7 +111,17 @@ async def compute(db: AsyncSession, customer_code: str) -> dict | None:
         "rail": {"releases": _int(releases), "deliveries": _int(deliveries), "fill_rate": _pct(fill),
                  "alerts": _int(zero_picks), "customers": _int(len(customer_rows))},
         "shape": shape,
+        "forecast": forecast,
     }
+
+
+async def _forecast(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo) -> dict:
+    """The forecast card. A failure here leaves the card saying so, never the snapshot missing."""
+    try:
+        return await home_forecast.compute(db, customer_code, now, tz)
+    except Exception:
+        logger.exception("home snapshot for %s: forecast block failed", customer_code)
+        return {"available": False, "note": "forecast unavailable right now"}
 
 
 async def _shape(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo) -> dict | None:
