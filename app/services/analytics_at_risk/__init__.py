@@ -9,4 +9,6 @@ once a day.
 
 #: Bumped whenever the tier rule, the outcome rule or the learning changes. A profile or an outcome
 #: row carries the version it was decided under, so a rule change never rewrites history quietly.
-RULE_VERSION = "at-risk-v1"
+#: v2 (2026-10-03): a pick line counts as done once confirmed, a short pick included; v1 judged on
+#: lines that moved stock and flagged one closed delivery in four as late on the live data.
+RULE_VERSION = "at-risk-v2"

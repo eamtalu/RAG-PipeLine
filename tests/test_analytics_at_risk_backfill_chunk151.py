@@ -115,7 +115,7 @@ async def test_the_universe_is_the_latest_routing_call_per_delivery_kept_to_the_
     ])
     async with async_session() as db:
         routes, unreadable = await backfill.routing_universe(db, CC, day=DAY, tz=LONDON)
-    assert sorted(routes) == ["29616", "29617"]
+    assert sorted(routes) == ["29616", "29617"]  # the moved one on its new day, the soft-status one too
     assert routes["29616"].departure_at == DEP and routes["29616"].route == "BRI03"
     assert routes["29616"].customer_name == "BOK SHOP HORSHAM" and routes["29616"].customer_number == "10567"
     assert routes["29617"].departure_at == datetime(2026, 10, 1, 11, 0, tzinfo=UTC) and routes["29617"].customer_name == "SHAKE SHACK"
@@ -130,14 +130,19 @@ async def _plant_day() -> None:
         fx.routing_call("29616", route="BRI03", dep_date="20261001", dep_time="1130", when=t),
         fx.routing_call("29700", route="BRI03", dep_date="20261001", dep_time="1130", when=t, customer_name="HILTON"),
         fx.routing_call("29800", route="BRI03", dep_date="20261001", dep_time="1130", when=t, customer_name="LIVE ROW"),
+        fx.routing_call("29750", route="BRI03", dep_date="20261001", dep_time="1130", when=t, customer_name="SHORT PICK"),
     ])
-    await fx.plant(fx.pick_line_values(CC, "29616", ["600001", "600002"]) + fx.pick_line_values(CC, "29700", ["600003"]))
+    await fx.plant(fx.pick_line_values(CC, "29616", ["600001", "600002"]) + fx.pick_line_values(CC, "29700", ["600003"])
+                   + fx.pick_line_values(CC, "29750", ["600004", "600005"]))
     p = DEP - timedelta(hours=5)
     await fx.plant([
         fx.pick_fact(CC, "29616", "600001", p, expected="2", picked="2", package="29616/1-1"),
         fx.pick_fact(CC, "29616", "600002", p + timedelta(minutes=2), expected="1", picked="1", package="29616/1-1"),
         fx.load_fact(CC, "29616", "29616/1-1", DEP - timedelta(minutes=30), dock="BRI03"),  # inside the 120 lead
         fx.pick_fact(CC, "29700", "600003", p, expected="1", picked="1", package="29700/1-1"),  # picked, never loaded
+        fx.pick_fact(CC, "29750", "600004", p, expected="2", picked="2", package="29750/1-1"),
+        fx.pick_fact(CC, "29750", "600005", p + timedelta(minutes=1), expected="3", picked="0", package=""),  # declared short
+        fx.load_fact(CC, "29750", "29750/1-1", DEP - timedelta(hours=4), dock="BRI03"),
         fx.load_fact(CC, "29900", "29900/1-1", DEP - timedelta(hours=4), dock="BRI03"),  # the dock's last scan is 29616's
         fx.load_fact(CC, "29616", "29616/1-1", DEP + timedelta(hours=4), dock="BRI03"),  # after the close: must not count
     ])
@@ -156,8 +161,11 @@ async def test_backfill_writes_closed_reconstructed_rows_and_leaves_the_live_row
     await _plant_day()
     out = await backfill.backfill_tenant(CC, start=DAY, end=DAY, now=DEP + timedelta(days=1))
     assert out["status"] == "completed"
-    assert out["days"] == [{"date": "2026-10-01", "deliveries": 3, "written": 2, "existing": 1, "unreadable": 0,
-                            "missed": 1, "delayed": 1, "fine": 0}]
+    assert out["days"] == [{"date": "2026-10-01", "deliveries": 4, "written": 3, "existing": 1, "unreadable": 0,
+                            "missed": 1, "delayed": 1, "fine": 1}]
+    short = (await _rows())["29750"]  # one line short, every package loaded four hours ahead: fine, not delayed
+    assert (short.lines_expected, short.lines_confirmed, short.lines_picked, short.lines_short) == (2, 2, 1, 1)
+    assert (short.outcome, short.max_tier) == ("loaded_in_time", "none")
     rows = await _rows()
     a = rows["29616"]
     assert (a.status, a.outcome, a.reconstructed, a.closed_at) == ("closed", "loaded_in_time", True, DEP + GRACE)
@@ -174,10 +182,15 @@ async def test_backfill_writes_closed_reconstructed_rows_and_leaves_the_live_row
     async with async_session() as db:
         profile = await db.scalar(select(AnalyticsAtRiskRouteProfile).where(
             AnalyticsAtRiskRouteProfile.customer_code == CC, AnalyticsAtRiskRouteProfile.as_of_date == DAY))
-    assert profile is not None and profile.route == "BRI03" and profile.sample == 3  # the live row and both reconstructed rows teach
+    assert profile is not None and profile.route == "BRI03" and profile.sample == 4  # the live row and the reconstructed rows teach
     # a second run changes nothing
     again = await backfill.backfill_tenant(CC, start=DAY, end=DAY, now=DEP + timedelta(days=1))
-    assert again["days"][0]["written"] == 0 and again["days"][0]["existing"] == 3
+    assert again["days"][0]["written"] == 0 and again["days"][0]["existing"] == 4
+    # with replace, the reconstructed rows are written again under the current rule; the live row is kept
+    redo = await backfill.backfill_tenant(CC, start=DAY, end=DAY, now=DEP + timedelta(days=1), replace=True)
+    assert (redo["days"][0]["replaced"], redo["days"][0]["written"], redo["days"][0]["existing"]) == (3, 3, 1)
+    rows = await _rows()
+    assert rows["29800"].id == live.id and rows["29616"].id != a.id
 
 
 async def test_a_day_whose_deliveries_have_not_closed_is_refused():
@@ -194,7 +207,7 @@ async def test_the_accuracy_score_ignores_reconstructed_rows_but_the_history_sho
         agg = await delivery_store.accuracy(db, CC, start=DAY, end=DAY)
         rows, _ = await delivery_store.history_rows(db, CC, start=DAY, end=DAY)
     assert agg["routes"]["BRI03"]["departures"] == 1 and agg["by_tier"] == {}
-    assert sorted(r.delivery_number for r in rows) == ["29616", "29700", "29800"]
+    assert sorted(r.delivery_number for r in rows) == ["29616", "29700", "29750", "29800"]
 
 
 async def test_the_api_row_says_when_it_was_reconstructed():

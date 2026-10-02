@@ -104,7 +104,7 @@ def _row_json(row: AnalyticsAtRiskDelivery, now: datetime) -> dict:
         "loading_expected": True if row.loading_expected is None else bool(row.loading_expected),
         "transaction_names": list(row.transaction_names or []),
         "category": model.category_for(outcome=row.outcome, max_tier=row.max_tier, lines_expected=row.lines_expected,
-                                       lines_picked=int(row.lines_picked or 0)),
+                                       lines_confirmed=int(row.lines_confirmed or 0)),
         "status": row.status, "closed_at": _iso(row.closed_at), "outcome": row.outcome,
         "outcome_lead_min": _s(row.outcome_lead_min), "check": check, "reopened": reopened,
         "tier_history": list(row.tier_history or []), "rule_version": row.rule_version,

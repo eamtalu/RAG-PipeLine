@@ -35,7 +35,9 @@ A delivery is judged against its departure instant and its route's thresholds (`
 A lead is learned per route as a coverage quantile over the closed deliveries of the last 28 days: the lead that nine in ten loaded deliveries met or beat, which is the tenth percentile of lead minutes.
 Below 20 closed deliveries the learned lead is unknown.
 The effective threshold is the larger of the learned lead and the tenant's floor (120 minutes to load, 180 to pick by default), so a slow week can never teach the system to hide risk.
-With the expected line count unknown, only a delivery with no picks at all counts as picking open, so a lookup gap never flags every delivery.
+A pick line is done once it is confirmed, whether it moved stock or was declared short: a short pick is the warehouse's answer for that line, not a line still waiting.
+Rule version `at-risk-v2` made that explicit; v1 judged on lines that moved stock and flagged one closed delivery in four as late on the live data, because most deliveries carry a short line.
+With the expected line count unknown, only a delivery with no confirmation at all counts as picking open, so a lookup gap never flags every delivery.
 
 ## What it writes
 
@@ -51,7 +53,7 @@ With the expected line count unknown, only a delivery with no picks at all count
 
 Every closed delivery is also given one of three words (`model.category_for`, mirrored in SQL by `delivery_store.category_expr` so a filter and a count agree with the row):
 
-- `missed`: the van left without it. A package was never loaded, or lines were never picked.
+- `missed`: the van left without it. A package was never loaded, or lines were never confirmed (picked or declared short).
 - `delayed`: it got away, but behind the route's rhythm (flagged Watch or At risk before the departure) or after the departure time.
 - `fine`: in time and never flagged.
 
@@ -91,6 +93,7 @@ Each day is judged with the profiles learned up to the day before, and its own p
 Rows written this way carry `reconstructed = true` (migration `c4d5e6f7a8b9`).
 They fill the history and teach the route profiles, but the accuracy score leaves them out, because their flags were computed from the clocks rather than observed minute by minute.
 A live row is never overwritten, a day whose deliveries have not all closed is skipped, and each day commits on its own, so an interrupted run resumes by running it again.
+`--replace` deletes the range's reconstructed rows first and writes them again, which is how a rule change is applied to the backfilled history.
 The raw log retention bounds how far back it can go: 60 days of `log_transactions`, and on tmp-live the ingest only became complete on 14 Sep 2026.
 
 ## When it runs

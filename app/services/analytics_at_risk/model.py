@@ -150,11 +150,14 @@ def parse_packages_to_load(raw: Any) -> list[tuple[str, str]]:
 # ============================================================== tiers
 
 def picking_open(state: DeliveryState) -> bool:
-    """Lines still to pick. With the expected count unknown, only a delivery with NO picks yet counts
-    as open: a lookup gap must not flag every delivery that has been picked."""
+    """Lines still to pick. A line is done once it is CONFIRMED, whether it moved stock or was declared
+    short: a short pick is the warehouse's answer for that line, not a line still waiting, and judging
+    on `lines_picked` instead flagged one closed delivery in four as late on the live data. With the
+    expected count unknown, only a delivery with NO confirmation yet counts as open: a lookup gap must
+    not flag every delivery that has been picked."""
     if state.lines_expected is None:
-        return state.lines_picked == 0
-    return state.lines_picked < state.lines_expected
+        return state.lines_confirmed == 0
+    return state.lines_confirmed < state.lines_expected
 
 
 def loading_open(state: DeliveryState) -> bool:
@@ -269,10 +272,11 @@ LATE_OUTCOMES = ("loaded_late", "never_loaded", "picked_late")
 CATEGORIES = ("missed", "delayed", "fine", "unknown", "open")
 
 
-def category_for(*, outcome: str | None, max_tier: str | None, lines_expected: int | None, lines_picked: int) -> str:
+def category_for(*, outcome: str | None, max_tier: str | None, lines_expected: int | None, lines_confirmed: int) -> str:
     """One plain word for a closed delivery.
 
-    - `missed`: the van left without it. A package was never loaded, or lines were never picked.
+    - `missed`: the van left without it. A package was never loaded, or lines were never confirmed
+      (picked or declared short).
     - `delayed`: it got away, but behind the route's rhythm (flagged Watch or At risk before the
       departure) or after the departure time.
     - `fine`: in time and never flagged.
@@ -285,7 +289,7 @@ def category_for(*, outcome: str | None, max_tier: str | None, lines_expected: i
     if outcome == "never_loaded":
         return "missed"
     if outcome == "picked_late":
-        incomplete = lines_picked < lines_expected if lines_expected is not None else lines_picked == 0
+        incomplete = lines_confirmed < lines_expected if lines_expected is not None else lines_confirmed == 0
         return "missed" if incomplete else "delayed"
     if outcome == "loaded_late":
         return "delayed"

@@ -27,28 +27,44 @@ def _state(**over) -> m.DeliveryState:
                 lines_picked=0, lines_short=0, packages_created=0, packages_loaded=0, last_pick_at=None,
                 last_load_at=None, loading_expected=True)
     base.update(over)
+    if "lines_confirmed" not in over:  # the helper confirms what it picks unless a test says otherwise
+        base["lines_confirmed"] = base["lines_picked"]
     return m.DeliveryState(**base)
+
+
+def test_a_short_line_counts_as_confirmed_so_picking_closes():
+    """The live flaw v1 had: a line declared short moved no stock, so `lines_picked` never reached the
+    expected count and the delivery was flagged watch, then late, although every package was on the
+    van. One closed delivery in four on the real data."""
+    short = _state(lines_expected=20, lines_confirmed=20, lines_picked=19, lines_short=1, packages_created=2, packages_loaded=2)
+    assert m.picking_open(short) is False
+    assert m.tier_for(short, datetime(2026, 10, 2, 11, 0, tzinfo=UTC), THRESHOLDS) is m.Tier.none
+    assert m.picking_open(_state(lines_expected=20, lines_confirmed=19, lines_picked=19)) is True
+    # unknown expected count: any confirmation closes it, a short one included
+    assert m.picking_open(_state(lines_expected=None, lines_confirmed=1, lines_picked=0, lines_short=1)) is False
+    assert m.category_for(outcome="picked_late", max_tier="late", lines_expected=20, lines_confirmed=20) == "delayed"
+    assert m.category_for(outcome="picked_late", max_tier="late", lines_expected=20, lines_confirmed=19) == "missed"
 
 
 # ----------------------------------------------------------------- the three plain categories
 
 def test_category_is_missed_delayed_or_fine():
     # missed: the van left without it
-    assert m.category_for(outcome="never_loaded", max_tier="late", lines_expected=5, lines_picked=5) == "missed"
-    assert m.category_for(outcome="picked_late", max_tier="late", lines_expected=5, lines_picked=3) == "missed"
-    assert m.category_for(outcome="picked_late", max_tier="late", lines_expected=None, lines_picked=0) == "missed"
+    assert m.category_for(outcome="never_loaded", max_tier="late", lines_expected=5, lines_confirmed=5) == "missed"
+    assert m.category_for(outcome="picked_late", max_tier="late", lines_expected=5, lines_confirmed=3) == "missed"
+    assert m.category_for(outcome="picked_late", max_tier="late", lines_expected=None, lines_confirmed=0) == "missed"
     # delayed: it got away, but behind the rhythm or after the departure
-    assert m.category_for(outcome="loaded_late", max_tier="none", lines_expected=5, lines_picked=5) == "delayed"
-    assert m.category_for(outcome="loaded_in_time", max_tier="at_risk", lines_expected=5, lines_picked=5) == "delayed"
-    assert m.category_for(outcome="loaded_in_time", max_tier="watch", lines_expected=5, lines_picked=5) == "delayed"
-    assert m.category_for(outcome="picked_late", max_tier="late", lines_expected=5, lines_picked=5) == "delayed"
-    assert m.category_for(outcome="picked_in_time", max_tier="watch", lines_expected=5, lines_picked=5) == "delayed"
+    assert m.category_for(outcome="loaded_late", max_tier="none", lines_expected=5, lines_confirmed=5) == "delayed"
+    assert m.category_for(outcome="loaded_in_time", max_tier="at_risk", lines_expected=5, lines_confirmed=5) == "delayed"
+    assert m.category_for(outcome="loaded_in_time", max_tier="watch", lines_expected=5, lines_confirmed=5) == "delayed"
+    assert m.category_for(outcome="picked_late", max_tier="late", lines_expected=5, lines_confirmed=5) == "delayed"
+    assert m.category_for(outcome="picked_in_time", max_tier="watch", lines_expected=5, lines_confirmed=5) == "delayed"
     # fine: in time and never flagged
-    assert m.category_for(outcome="loaded_in_time", max_tier="none", lines_expected=5, lines_picked=5) == "fine"
-    assert m.category_for(outcome="picked_in_time", max_tier="none", lines_expected=None, lines_picked=4) == "fine"
+    assert m.category_for(outcome="loaded_in_time", max_tier="none", lines_expected=5, lines_confirmed=5) == "fine"
+    assert m.category_for(outcome="picked_in_time", max_tier="none", lines_expected=None, lines_confirmed=4) == "fine"
     # the board lost sight of it
-    assert m.category_for(outcome="unknown", max_tier="none", lines_expected=5, lines_picked=5) == "unknown"
-    assert m.category_for(outcome=None, max_tier="at_risk", lines_expected=5, lines_picked=5) == "open"
+    assert m.category_for(outcome="unknown", max_tier="none", lines_expected=5, lines_confirmed=5) == "unknown"
+    assert m.category_for(outcome=None, max_tier="at_risk", lines_expected=5, lines_confirmed=5) == "open"
 
 
 # ----------------------------------------------------------------- routes without a loading step

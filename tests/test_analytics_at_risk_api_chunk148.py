@@ -42,6 +42,8 @@ def _state(number, **over) -> model.DeliveryState:
                 departure_at=DEP, lines_expected=5, lines_confirmed=5, lines_picked=5, lines_short=0,
                 packages_created=2, packages_loaded=2, last_pick_at=DEP - timedelta(hours=4), last_load_at=DEP - timedelta(hours=3))
     base.update(over)
+    if "lines_confirmed" not in over:  # the helper confirms what it picks unless a test says otherwise
+        base["lines_confirmed"] = base["lines_picked"]
     return model.DeliveryState(**base)
 
 

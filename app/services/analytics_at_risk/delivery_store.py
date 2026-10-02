@@ -271,7 +271,7 @@ def category_expr():
     """The three plain words as SQL, the same rule as `model.category_for`, so a filter and a count
     agree with what each row says."""
     d = AnalyticsAtRiskDelivery
-    incomplete = case((d.lines_expected.is_(None), d.lines_picked == 0), else_=d.lines_picked < d.lines_expected)
+    incomplete = case((d.lines_expected.is_(None), d.lines_confirmed == 0), else_=d.lines_confirmed < d.lines_expected)
     return case(
         (d.outcome.is_(None), "open"),
         (d.outcome == "unknown", "unknown"),

@@ -19,10 +19,11 @@ import re
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
+from app.persistence.models.analytics_at_risk import AnalyticsAtRiskDelivery
 from app.persistence.models.log_transaction import LogTransaction
 from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.services.analytics_at_risk import RULE_VERSION, board_store, delivery_store, model, profile_store, settings_store
@@ -104,8 +105,10 @@ async def read_day(db: AsyncSession, cc: str, *, day: date, tz: tzinfo, grace: t
     return states, close_at, unreadable
 
 
-async def backfill_day(cc: str, *, day: date, now: datetime) -> dict:
-    """Write the closed rows of one past day. Returns the day's counts, or `skipped` with the reason."""
+async def backfill_day(cc: str, *, day: date, now: datetime, replace: bool = False) -> dict:
+    """Write the closed rows of one past day. Returns the day's counts, or `skipped` with the reason.
+    With `replace`, the day's RECONSTRUCTED rows are deleted first and written again under the current
+    rule; live rows are never touched."""
     async with async_session() as db:
         tz = ZoneInfo(await get_customer_timezone(db, cc))
         cfg = await settings_store.effective(db, cc)
@@ -120,6 +123,11 @@ async def backfill_day(cc: str, *, day: date, now: datetime) -> dict:
               "missed": 0, "delayed": 0, "fine": 0}
     async with async_session() as db:
         await _lock(db, cc)
+        if replace:
+            result = await db.execute(delete(AnalyticsAtRiskDelivery).where(
+                AnalyticsAtRiskDelivery.customer_code == cc, AnalyticsAtRiskDelivery.departure_date == day,
+                AnalyticsAtRiskDelivery.reconstructed.is_(True)))
+            counts["replaced"] = int(result.rowcount or 0)
         existing = await delivery_store.rows_for(db, cc, [s.delivery_number for s in states])
         for state in states:
             if any(r.departure_date == day for r in existing.get(state.delivery_number, [])):
@@ -131,7 +139,7 @@ async def backfill_day(cc: str, *, day: date, now: datetime) -> dict:
                                               close_at=state.departure_at + timedelta(minutes=cfg.close_grace_min),
                                               now=now, tz=tz, rule_version=RULE_VERSION)
             word = model.category_for(outcome=row.outcome, max_tier=row.max_tier, lines_expected=row.lines_expected,
-                                      lines_picked=row.lines_picked)
+                                      lines_confirmed=row.lines_confirmed)
             counts["written"] += 1
             if word in counts:
                 counts[word] += 1
@@ -141,7 +149,7 @@ async def backfill_day(cc: str, *, day: date, now: datetime) -> dict:
     return counts
 
 
-async def backfill_tenant(cc: str, *, start: date, end: date, now: datetime | None = None) -> dict:
+async def backfill_tenant(cc: str, *, start: date, end: date, now: datetime | None = None, replace: bool = False) -> dict:
     """Every day from `start` to `end` inclusive, oldest first. Raises on a database error: this is a
     hand-run tool, and a half-written range must be seen, not swallowed."""
     now = now or datetime.now(timezone.utc)
@@ -150,6 +158,6 @@ async def backfill_tenant(cc: str, *, start: date, end: date, now: datetime | No
     days = []
     day = start
     while day <= end:
-        days.append(await backfill_day(cc, day=day, now=now))
+        days.append(await backfill_day(cc, day=day, now=now, replace=replace))
         day += timedelta(days=1)
     return {"status": "completed", "days": days}
