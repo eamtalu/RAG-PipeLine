@@ -54,9 +54,9 @@ class DeliveryState:
     lines_confirmed: int
     lines_picked: int
     lines_short: int
-    #: Packages KNOWN for the delivery: the distinct package numbers on its pick confirmations plus any
-    #: extra package created by hand. Not only the hand-created ones: measured live, most packages are
-    #: made at pick time and `NewDeliveryPackage` alone undercounts them on 3 deliveries in 4.
+    #: Packages KNOWN for the delivery: the distinct package numbers on its pick confirmations that moved
+    #: stock. Measured live, that is where packages are born (99.8% of them were loaded); a hand-made
+    #: package no pick ever filled is an empty box, and a short line's package number is noise.
     packages_created: int
     packages_loaded: int
     last_pick_at: datetime | None

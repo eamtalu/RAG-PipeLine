@@ -5,9 +5,9 @@
 2. The `pick_release` settled rows grouped by delivery: lines confirmed, picked and short, last pick.
 3. The `pick line` lookup read the other way round: how many pick lines name this delivery. This is
    the expected count, known a few minutes before picking starts.
-4. One Core read over the facts of the last `lookback_hours` for three methods: packages created
-   (`NewDeliveryPackage`), loaded one at a time (`LoadDeliveryPackage`) and loaded as a milk list
-   (`LoadDeliveryPackageList`, whose deliveries live inside a JSON string).
+4. One Core read over the facts of the last `lookback_hours` for three methods: the packages the pick
+   confirmations filled (`ConfirmPickLine`), loaded one at a time (`LoadDeliveryPackage`) and loaded as a
+   milk list (`LoadDeliveryPackageList`, whose deliveries live inside a JSON string).
 
 Every read pins the tenant first and is bounded (CLAUDE.md rules 3 and 4). Nothing reads
 `log_transactions`: facts are within one fold cycle of it and already hold what the fold extracted.
@@ -29,9 +29,12 @@ from app.persistence.models.analytics_settlement import AnalyticsSettledRow
 from app.services.analytics.settle_store import NUMBER_SHAPE
 from app.services.analytics_at_risk import model
 
-#: The pick confirmations are read too: 93% of them carry the package number the line was packed into,
-#: which is where most packages are born. `NewDeliveryPackage` alone undercounts them on 3 in 4 deliveries.
-PACKAGE_METHODS = ("ConfirmPickLine", "NewDeliveryPackage", "LoadDeliveryPackage", "LoadDeliveryPackageList")
+#: The packages a delivery is known to have are the package numbers on its pick confirmations that moved
+#: stock: 93% of confirmations carry the package the line was packed into, and over a live week 3,160 of
+#: those 3,167 packages were loaded. `NewDeliveryPackage` is NOT read: a package made by hand that no pick
+#: ever filled is an empty box (2 of 11 were loaded), and a short line's package number is noise (it can
+#: even be another delivery's), so each false "never loaded" came from one of those two.
+PACKAGE_METHODS = ("ConfirmPickLine", "LoadDeliveryPackage", "LoadDeliveryPackageList")
 
 #: How far back the routing rows are read. A delivery is named by a routing call the evening before
 #: its departure at the earliest, and the board keeps yesterday's departures until they are closed.
@@ -156,7 +159,7 @@ async def _expected(db: AsyncSession, cc: str, *, lookup: str, deliveries: Seque
 
 @dataclass
 class _Packages:
-    #: Known packages: the package numbers on the pick confirmations plus any hand-made package.
+    #: Known packages: the package numbers on the pick confirmations that moved stock.
     created: set[str]
     loaded: set[str]
     last_load_at: datetime | None = None
@@ -182,7 +185,7 @@ async def _packages(db: AsyncSession, cc: str, *, since: datetime, until: dateti
         clauses.append(AnalyticsFact.event_time < until)
     rows = (await db.execute(select(
         AnalyticsFact.method, AnalyticsFact.event_time, AnalyticsFact.delivery_number, AnalyticsFact.id,
-        attrs["resp.value"].astext, attrs["PackageNumber"].astext, attrs["PackagesToLoad"].astext, attrs["LoadingDock"].astext,
+        AnalyticsFact.quantity, attrs["PackageNumber"].astext, attrs["PackagesToLoad"].astext, attrs["LoadingDock"].astext,
     ).where(*clauses).order_by(AnalyticsFact.event_time).limit(cap + 1))).all()
     overflow = len(rows) > cap
     out: dict[str, _Packages] = defaultdict(lambda: _Packages(created=set(), loaded=set()))
@@ -200,14 +203,11 @@ async def _packages(db: AsyncSession, cc: str, *, since: datetime, until: dateti
             if key not in route_loaded or at > route_loaded[key]:
                 route_loaded[key] = at
 
-    for method, at, delivery, fact_id, resp_value, package_number, packages_to_load, dock in rows[:cap]:
+    for method, at, delivery, fact_id, quantity, package_number, packages_to_load, dock in rows[:cap]:
         if method == "ConfirmPickLine":
             package = _text(package_number)
-            if delivery and package:
+            if delivery and package and quantity is not None and quantity > 0:
                 out[delivery].created.add(package)
-        elif method == "NewDeliveryPackage":
-            if delivery:
-                out[delivery].created.add(_text(resp_value) or str(fact_id))
         elif method == "LoadDeliveryPackage":
             if delivery:
                 loaded(delivery, _text(package_number) or str(fact_id), at, _text(dock))

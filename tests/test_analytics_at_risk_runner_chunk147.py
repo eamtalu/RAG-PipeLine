@@ -45,7 +45,6 @@ async def _plant_delivery():
     await fx.plant(fx.pick_line_values(CC, "29616", ["600001", "600002"]))
     await fx.plant([fx.pick_fact(CC, "29616", "600001", t0 + timedelta(minutes=10), expected="2", picked="2"),
                     fx.pick_fact(CC, "29616", "600002", t0 + timedelta(minutes=12), expected="1", picked="1"),
-                    fx.package_fact(CC, "29616", "29616/1-1", t0 + timedelta(minutes=20)),
                     # another delivery on the same route was loaded earlier, so BRI03 is a route with a loading step
                     fx.load_fact(CC, "29000", "29000/1-1", t0, dock="BRI03")])
     await fx.settle(CC)

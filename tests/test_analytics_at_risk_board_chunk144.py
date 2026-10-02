@@ -88,8 +88,8 @@ async def test_standard_loads_count_packages_created_and_loaded_by_delivery():
     await fx.plant([fx.route_fact(CC, "29616", route="BRI03", dep_date="20261002", dep_time="1130", when=NOW - timedelta(hours=3))])
     t = NOW - timedelta(hours=1)
     await fx.plant([
-        fx.package_fact(CC, "29616", "29616/1-1", t),
-        fx.package_fact(CC, "29616", "29616/1-2", t + timedelta(minutes=2)),
+        fx.pick_fact(CC, "29616", "600001", t, expected="2", picked="2", package="29616/1-1"),
+        fx.pick_fact(CC, "29616", "600002", t + timedelta(minutes=2), expected="1", picked="1", package="29616/1-2"),
         fx.load_fact(CC, "29616", "29616/1-1", t + timedelta(minutes=20), dock="BRI03"),
         fx.load_fact(CC, "29616", "29616/1-1", t + timedelta(minutes=21), dock="BRI03"),  # a retry of the same package
     ])
@@ -109,7 +109,9 @@ async def test_milk_loads_are_parsed_out_of_the_list_call_so_a_milk_delivery_sho
                     fx.route_fact(CC, "29426", route="BRI05", dep_date="20261002", dep_time="1130", when=NOW - timedelta(hours=3))])
     t = NOW - timedelta(minutes=30)
     await fx.plant([
-        fx.package_fact(CC, "29625", "13716", t), fx.package_fact(CC, "29426", "13714", t), fx.package_fact(CC, "29426", "13715", t),
+        fx.pick_fact(CC, "29625", "600001", t, expected="1", picked="1", package="13716"),
+        fx.pick_fact(CC, "29426", "600002", t, expected="1", picked="1", package="13714"),
+        fx.pick_fact(CC, "29426", "600003", t, expected="1", picked="1", package="13715"),
         fx.load_list_fact(CC, [("29625", "13716"), ("29426", "13714")], t + timedelta(minutes=10)),
     ])
     await fx.settle(CC)
@@ -119,7 +121,9 @@ async def test_milk_loads_are_parsed_out_of_the_list_call_so_a_milk_delivery_sho
     assert states["29625"].last_load_at == t + timedelta(minutes=10)
 
 
-async def test_packages_known_come_from_the_pick_confirmations_plus_any_hand_made_package():
+async def test_packages_known_are_the_ones_the_pick_confirmations_filled():
+    """Not a hand-made package nobody filled (an empty box: 2 of 11 were loaded over a live week) and
+    not the package number on a short line (noise, sometimes another delivery's number)."""
     await fx.plant([fx.route_fact(CC, "29616", route="BRI03", dep_date="20261002", dep_time="1130", when=NOW - timedelta(hours=3))])
     t = NOW - timedelta(hours=2)
     await fx.plant([
@@ -127,12 +131,13 @@ async def test_packages_known_come_from_the_pick_confirmations_plus_any_hand_mad
         fx.pick_fact(CC, "29616", "600002", t + timedelta(minutes=5), expected="2", picked="2", package="29616/1-1"),
         fx.pick_fact(CC, "29616", "600003", t + timedelta(minutes=9), expected="3", picked="3", package="29616/2-1"),
         fx.pick_fact(CC, "29616", "600004", t + timedelta(minutes=12), expected="1", picked="1", package=""),  # 7% carry none
-        fx.package_fact(CC, "29616", "29616/3-1", t + timedelta(minutes=20)),  # an extra, hand-made package
+        fx.pick_fact(CC, "29616", "600005", t + timedelta(minutes=14), expected="2", picked="0", package="28874/3-1"),  # short: not a package
+        fx.package_fact(CC, "29616", "29616/3-1", t + timedelta(minutes=20)),  # hand-made, never filled: an empty box
         fx.load_fact(CC, "29616", "29616/1-1", t + timedelta(minutes=30), dock="BRI03"),
     ])
     await fx.settle(CC)
     s = _by_number(await _read())["29616"]
-    assert (s.packages_created, s.packages_loaded) == (3, 1)
+    assert (s.packages_created, s.packages_loaded) == (2, 1)
 
 
 async def test_a_route_that_loaded_nothing_in_the_lookback_has_no_loading_step():
@@ -167,7 +172,8 @@ async def test_a_delivery_two_days_out_or_two_days_gone_is_not_on_the_board():
 async def test_the_facts_read_stops_at_its_cap_and_reports_overflow():
     await fx.plant([fx.route_fact(CC, "29616", route="BRI03", dep_date="20261002", dep_time="1130", when=NOW - timedelta(hours=3))])
     t = NOW - timedelta(hours=1)
-    await fx.plant([fx.package_fact(CC, "29616", f"29616/1-{i}", t + timedelta(seconds=i)) for i in range(6)])
+    await fx.plant([fx.pick_fact(CC, "29616", f"60000{i}", t + timedelta(seconds=i), expected="1", picked="1", package=f"29616/1-{i}")
+                    for i in range(6)])
     await fx.settle(CC)
     read = await _read(facts_cap=4)
     assert read.overflow is True

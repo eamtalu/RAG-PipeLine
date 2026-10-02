@@ -11,4 +11,6 @@ once a day.
 #: row carries the version it was decided under, so a rule change never rewrites history quietly.
 #: v2 (2026-10-03): a pick line counts as done once confirmed, a short pick included; v1 judged on
 #: lines that moved stock and flagged one closed delivery in four as late on the live data.
-RULE_VERSION = "at-risk-v2"
+#: v3 (2026-10-03): a package is known only from a pick line that moved stock; hand-made packages no pick
+#: filled and short lines' package numbers made half of v2's "never loaded" rows.
+RULE_VERSION = "at-risk-v3"

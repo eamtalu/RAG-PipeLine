@@ -12,8 +12,10 @@ Four bounded reads, in `app/services/analytics_at_risk/board_store.py`, none of 
 2. The `pick_release` settled rows grouped by `delivery_number`: lines confirmed, lines that moved stock, lines short, and the last pick.
 3. The `pick line` lookup read the other way round: how many pick lines name this delivery.
    This is the expected count, known a few minutes before picking starts, because `ListPickLinesByUser` lists the lines first.
-4. The facts of the last 36 hours for `ConfirmPickLine`, `NewDeliveryPackage`, `LoadDeliveryPackage` and `LoadDeliveryPackageList`: packages known and loaded.
-   The packages known for a delivery are the distinct package numbers on its pick confirmations plus any package created by hand; measured live, most packages are born at pick time and `NewDeliveryPackage` alone undercounts them on three deliveries in four.
+4. The facts of the last 36 hours for `ConfirmPickLine`, `LoadDeliveryPackage` and `LoadDeliveryPackageList`: packages known and loaded.
+   The packages known for a delivery are the distinct package numbers on its pick confirmations that moved stock.
+   Measured over a live week, 3,160 of those 3,167 packages were loaded; a package made by hand through `NewDeliveryPackage` that no pick ever filled is an empty box (2 of 11 were loaded), and a short line's package number is noise, sometimes another delivery's.
+   Rule version `at-risk-v3` made that explicit; v2 counted both and half of its "never loaded" rows were one of those.
    The milk load's deliveries live inside the `PackagesToLoad` JSON string and are parsed in Python.
    The loading docks seen on the loads name the routes that have a loading step at all.
 
