@@ -1,5 +1,6 @@
 # COPIED VERBATIM from the edge repository (teams-agent-edge/app/contracts.py). Change there first.
 # Exception, 2026-09-27: `Evidence` and `AnswerPayload.evidence` were added HERE first; the edge must mirror them.
+# Exception, 2026-10-02: `Command` and `QuestionJob.command` (the at-risk check) were added HERE first; the edge must mirror them.
 """The two messages that cross the edge/backend boundary.
 
 These models are the contract with the backend worker (RAG FAST API, `teams_question_worker`).
@@ -16,6 +17,18 @@ from pydantic import BaseModel, Field
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class Command(BaseModel):
+    """An action the tab asks the backend to perform instead of a question: today, marking a delivery
+    on the at-risk board as checked (or taking that back). Rides on a QuestionJob so it reuses the
+    queue, the consumer and the answer poll; the consumer never runs the agent for one."""
+
+    kind: Literal["at_risk_check", "at_risk_uncheck"]
+    delivery_number: str = Field(..., min_length=1, max_length=64)
+    departure_date: str | None = Field(default=None, description="YYYY-MM-DD, when the delivery has more than one row.")
+    by: str = Field(..., min_length=1, max_length=128, description="The Teams display name of the person acting.")
+    note: str | None = Field(default=None, max_length=1000)
 
 
 class QuestionJob(BaseModel):
@@ -43,6 +56,10 @@ class QuestionJob(BaseModel):
         default="bot",
         description="Where the question was typed: the Teams chat, or the Home tab's "
         "chat pane (answered by storing the payload on the job rather than sending it).",
+    )
+    command: Command | None = Field(
+        default=None,
+        description="Set when the job is an action, not a question. Optional so schema_version stays 1.",
     )
 
 

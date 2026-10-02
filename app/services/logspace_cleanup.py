@@ -46,6 +46,12 @@ from app.persistence.models.analytics_record_fact import AnalyticsRecordFact
 from app.persistence.models.analytics_ml import AnalyticsFeatureSet, AnalyticsPrediction
 from app.persistence.models.analytics_forecast import (AnalyticsForecastAccuracy, AnalyticsForecastRun,
                                                        AnalyticsForecastSeries)
+from app.persistence.models.analytics_at_risk import (AnalyticsAtRiskCheck, AnalyticsAtRiskDelivery,
+                                                      AnalyticsAtRiskRouteProfile, AnalyticsAtRiskSettings,
+                                                      AnalyticsAtRiskTenantState)
+from app.persistence.models.analytics_settlement import AnalyticsSettledRow, AnalyticsSettlement
+from app.persistence.models.analytics_lookup import AnalyticsLookup, AnalyticsLookupValue
+from app.persistence.models.analytics_field_meaning import AnalyticsFieldMeaning
 from app.persistence.models.analytics_transaction_registry import AnalyticsTransactionRegistry
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_metric import AnalyticsMetric
@@ -138,13 +144,18 @@ async def purge_logspace(db: AsyncSession, customer_code: str) -> bool:
     #     would have the worker try to fold a tenant that no longer exists.
     # R1 added the two registry tables. This list is enumerated BY NAME, so nothing warns you when a
     # new analytics table is missing from it - a tenant delete would simply leave its rows orphaned.
+    # Chunk 144 added the five deliveries-at-risk tables and, found missing while doing so, the
+    # settlement, lookup and field-meaning tables that chunks 100 to 129 introduced.
     for _analytics in (AnalyticsQualityIssue, AnalyticsMonthlyRollup, AnalyticsDailyRollup,
                        AnalyticsHourlyRollup, AnalyticsFactLedger, AnalyticsFact,
                        AnalyticsTenantState, AnalyticsMetric, AnalyticsPendingWindow,
-                       AnalyticsTransactionRegistry, AnalyticsFieldRegistry,
+                       AnalyticsTransactionRegistry, AnalyticsFieldRegistry, AnalyticsFieldMeaning,
                        AnalyticsRecordFact, AnalyticsPrediction,
                        AnalyticsFeatureSet, AnalyticsForecastAccuracy, AnalyticsForecastSeries,
-                       AnalyticsForecastRun):
+                       AnalyticsForecastRun,
+                       AnalyticsSettledRow, AnalyticsSettlement, AnalyticsLookupValue, AnalyticsLookup,
+                       AnalyticsAtRiskCheck, AnalyticsAtRiskDelivery, AnalyticsAtRiskRouteProfile,
+                       AnalyticsAtRiskSettings, AnalyticsAtRiskTenantState):
         await db.execute(delete(_analytics).where(_analytics.customer_code == customer_code))
 
     # 2b) Jobs → cascades chunks, chunks_entity, embedding_queue, log_entries, log_transactions.

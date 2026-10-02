@@ -112,6 +112,11 @@ erDiagram
     customers ||..o{ analytics_forecast_runs : "tenant key (soft)"
     customers ||..o{ analytics_forecast_series : "tenant key (soft)"
     customers ||..o{ analytics_forecast_accuracy : "tenant key (soft)"
+    customers ||..o{ analytics_at_risk_deliveries : "tenant key (soft)"
+    customers ||..o{ analytics_at_risk_checks : "tenant key (soft)"
+    customers ||..o{ analytics_at_risk_route_profiles : "tenant key (soft)"
+    customers ||..o{ analytics_at_risk_settings : "tenant key (soft)"
+    customers ||..o{ analytics_at_risk_tenant_state : "tenant key (soft)"
 ```
 
 ## Subsystem 1: RAG documents and embeddings
@@ -1160,6 +1165,121 @@ erDiagram
 Unique keys: `analytics_predictions (customer_code, metric, grain, subject_kind, subject, horizon, model_version, target_at)`, `analytics_forecast_series (customer_code, metric, grain, subject_kind, subject)`, `analytics_forecast_accuracy (… , horizon, model_version)`.
 Read indexes: `ix_analytics_predictions_read (customer_code, metric, grain, subject_kind, subject, target_at, predicted_at DESC)` serves the newest-per-target read; `ix_analytics_predictions_score (customer_code, target_at)` the nightly re-score; `ix_analytics_forecast_series_volume` the items page.
 
+### Deliveries at risk
+
+Five more tables, still without a foreign key, from migration `e9a4c7d21f36` (chunks 143 to 150, `app/persistence/models/analytics_at_risk.py`).
+The board of deliveries behind their route's rhythm before the van leaves: `analytics_at_risk_deliveries` is one row per delivery per departure date, written by the at-risk worker every minute (progress, tier, history, thresholds, outcome) except the five `check*` columns, which the API writes when a person marks the delivery as checked.
+`analytics_at_risk_checks` is the acknowledgement ledger, append-only; `analytics_at_risk_route_profiles` is what each route's closed deliveries taught on one day; `analytics_at_risk_settings` is the tenant's floors (no row means the defaults); `analytics_at_risk_tenant_state` is one read for `/status`.
+The board is assembled from the `delivery_route` settled rows (departure, route, customer), the `pick_release` settled rows grouped by delivery, the `pick line` lookup read from a delivery number to its lines, and the facts of three package methods.
+Two indexes on existing tables serve those reads: `ix_analytics_lookup_values_lookup_attr_value (customer_code, lookup, attribute, value)` and `ix_analytics_facts_customer_method_event (customer_code, method, event_time)`.
+A tenant purge deletes from all five explicitly (`logspace_cleanup.py`).
+
+```mermaid
+erDiagram
+    analytics_at_risk_deliveries {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string delivery_number
+        date departure_date "tenant-local, part of the key; updated in place when the WMS moves it"
+        datetime departure_at
+        string route
+        string customer_name
+        string customer_number
+        string tier "none | watch | at_risk | late"
+        string max_tier "highest ever reached"
+        datetime first_flagged_at
+        string first_flagged_tier
+        jsonb tier_history "appended on every change"
+        numeric load_threshold_min
+        string load_threshold_source "learned | floor"
+        numeric pick_threshold_min
+        string pick_threshold_source
+        int lines_expected "NULL when the lookup never saw the lines"
+        int lines_confirmed
+        int lines_picked
+        int lines_short
+        int packages_created
+        int packages_loaded
+        datetime last_pick_at
+        datetime last_load_at
+        string status "open | closed"
+        datetime closed_at
+        string outcome "loaded_in_time | loaded_late | never_loaded | unknown"
+        numeric outcome_lead_min "departure minus last load; negative when late"
+        datetime checked_at "API-written"
+        string checked_by "API-written"
+        text check_note "API-written"
+        string checked_tier "API-written; a higher tier later re-opens"
+        int reopened_count
+        string rule_version
+        datetime last_evaluated_at
+        datetime created_at
+        datetime updated_at
+    }
+    analytics_at_risk_checks {
+        uuid id PK
+        string customer_code "soft tenant key"
+        uuid delivery_id "soft -> analytics_at_risk_deliveries.id"
+        string delivery_number
+        date departure_date
+        string action "checked | unchecked | reopened"
+        string tier
+        string actor "self-declared web name or Teams display name"
+        text note
+        datetime at
+    }
+    analytics_at_risk_route_profiles {
+        uuid id PK
+        string customer_code "soft tenant key"
+        string route
+        date as_of_date
+        int window_days
+        int sample
+        int loaded_sample
+        numeric load_lead_p50
+        numeric load_lead_min
+        numeric pick_lead_p50
+        numeric pick_lead_min
+        numeric learned_load_min "coverage quantile; NULL below min_sample"
+        numeric learned_pick_min
+        string departure_time_mode "HHMM"
+        numeric coverage
+        string rule_version
+        datetime computed_at
+    }
+    analytics_at_risk_settings {
+        uuid id PK
+        string customer_code "soft tenant key, unique"
+        bool enabled
+        int load_floor_min
+        int pick_floor_min
+        int min_sample
+        int window_days
+        int close_grace_min
+        numeric coverage
+        string updated_by
+        datetime updated_at
+    }
+    analytics_at_risk_tenant_state {
+        uuid id PK
+        string customer_code "soft tenant key, unique"
+        datetime last_evaluated_at
+        date last_profiled_date
+        int open_rows
+        text last_error
+        datetime updated_at
+    }
+
+    analytics_at_risk_deliveries ||..o{ analytics_at_risk_checks : "delivery_id (soft)"
+    analytics_at_risk_deliveries ||..o{ analytics_at_risk_route_profiles : "learned from closed rows (soft)"
+    analytics_settled_rows ||..o{ analytics_at_risk_deliveries : "delivery_route and pick_release read (soft)"
+    analytics_lookup_values ||..o{ analytics_at_risk_deliveries : "pick line lookup read (soft)"
+    analytics_facts ||..o{ analytics_at_risk_deliveries : "packages and loads read (soft)"
+```
+
+Unique keys: `analytics_at_risk_deliveries (customer_code, delivery_number, departure_date)`, `analytics_at_risk_route_profiles (customer_code, route, as_of_date)`, `analytics_at_risk_settings (customer_code)`, `analytics_at_risk_tenant_state (customer_code)`.
+Read indexes on the deliveries table: `(customer_code, departure_date, tier)` for the board and history, `(customer_code, departure_at) WHERE status = 'open'` for the close sweep, `(customer_code, checked_at DESC) WHERE checked_at IS NOT NULL` for the checked view, `(customer_code, route, departure_date)` for the profile aggregate.
+
 ### One writer per table
 
 For every analytics table the rule is absolute: **exactly one component may write it.**
@@ -1172,6 +1292,9 @@ The existing log tables do not follow that rule and pretending otherwise would b
 | `analytics_facts`, `analytics_fact_ledger`, `analytics_tenant_state`, `analytics_quality_issues` | the analytics worker |
 | `analytics_hourly_rollups`, `analytics_daily_rollups`, `analytics_monthly_rollups` | the rollup folder |
 | `analytics_metrics` | the API that the interface writes definitions through |
+| `analytics_at_risk_route_profiles`, `analytics_at_risk_tenant_state` | the at-risk worker |
+| `analytics_at_risk_checks`, `analytics_at_risk_settings` | the at-risk API (the worker appends a `reopened` ledger row through the same store function) |
+| `analytics_at_risk_deliveries` | the ONE exception, by design: the at-risk worker owns every state column and the API owns only the five `check*` columns and nothing else; the two sets are disjoint, so neither can overwrite the other's word |
 
 ### Rollups store additive ROLES, never finished answers
 
@@ -1285,6 +1408,8 @@ The nine `analytics_*` tables add **no rows to this table**. They have no enforc
 | `analytics_metrics.id` | `definition_id` on the three rollup tables | which definition a rollup row belongs to; no FK because a FK from a partitioned child made the log partitions undroppable once already |
 | `analytics_feature_sets.id` | `analytics_predictions.feature_set_id` | which training set the model behind a prediction was built from; nullable |
 | `analytics_forecast_runs.id` | `analytics_predictions.run_id`, `analytics_forecast_series.last_run_id` | which forecast pass wrote the row; nullable, no FK |
+| `analytics_at_risk_deliveries.id` | `analytics_at_risk_checks.delivery_id` | which delivery row an acknowledgement was about; the row is rewritten every minute, the ledger row never |
+| `analytics_settled_rows` (`delivery_route`, `pick_release`), `analytics_lookup_values` (`pick line`), `analytics_facts` (three package methods) | `analytics_at_risk_deliveries` | the board is assembled from these four reads every minute; a relationship in data flow, not a column reference |
 | `analytics_settled_rows` (`pick_release`) | `analytics_predictions.actual` | the actual is read from the settled rows after the bucket closes and written onto the prediction; a relationship in data flow, not a column reference |
 | `log_transactions.id` | `analytics_facts.source_transaction_id` | which transaction this fact was derived from; no FK, and deliberately survives the transaction being dropped at 60 days |
 | `log_transactions.id` | `analytics_fact_ledger.source_transaction_id` | same, per version |

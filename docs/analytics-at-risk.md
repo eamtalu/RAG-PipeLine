@@ -1,0 +1,96 @@
+# Deliveries at risk (chunks 143-150)
+
+A board of the deliveries that are behind their route's normal rhythm before the van leaves, for each tenant with a `delivery_route` settlement.
+It learns the rhythm from history, flags what is behind, lets a person mark a flag as checked, and keeps an honest record of whether flagged deliveries really ended late.
+
+## What it reads
+
+Four bounded reads, in `app/services/analytics_at_risk/board_store.py`, none of them against `log_transactions`:
+
+1. The `delivery_route` settlement: one settled row per delivery as `GetNextDeliveryByRoute` last saw it, with the WMS departure date and time (`resp.DeparatureDate`, `resp.DeparatureTime`, the WMS spelling), the route and the customer.
+   The latest observed departure wins, because departures move.
+2. The `pick_release` settled rows grouped by `delivery_number`: lines confirmed, lines that moved stock, lines short, and the last pick.
+3. The `pick line` lookup read the other way round: how many pick lines name this delivery.
+   This is the expected count, known a few minutes before picking starts, because `ListPickLinesByUser` lists the lines first.
+4. The facts of the last 36 hours for `NewDeliveryPackage`, `LoadDeliveryPackage` and `LoadDeliveryPackageList`: packages created and loaded.
+   The milk load's deliveries live inside the `PackagesToLoad` JSON string and are parsed in Python.
+
+## The rule
+
+A delivery is judged against its departure instant and its route's thresholds (`model.tier_for`):
+
+- `watch`: picking is still open and the departure is closer than the route's pick lead.
+- `at_risk`: loading is still open and the departure is closer than the route's load lead.
+- `late`: the departure has passed and either is still open.
+
+A lead is learned per route as a coverage quantile over the closed deliveries of the last 28 days: the lead that nine in ten loaded deliveries met or beat, which is the tenth percentile of lead minutes.
+Below 20 closed deliveries the learned lead is unknown.
+The effective threshold is the larger of the learned lead and the tenant's floor (120 minutes to load, 180 to pick by default), so a slow week can never teach the system to hide risk.
+With the expected line count unknown, only a delivery with no picks at all counts as picking open, so a lookup gap never flags every delivery.
+
+## What it writes
+
+- `analytics_at_risk_deliveries`: one row per delivery per departure date.
+  The worker writes the state (progress, tier, history, thresholds, outcome); the API writes the five check columns.
+  The two writers touch disjoint columns.
+- `analytics_at_risk_checks`: the acknowledgement ledger, append-only (`checked`, `unchecked`, `reopened`).
+- `analytics_at_risk_route_profiles`: one row per route per day with what the history taught.
+- `analytics_at_risk_settings`: the tenant's floors and knobs; no row means the defaults.
+- `analytics_at_risk_tenant_state`: one row for `/status`.
+
+## Acknowledgements
+
+A person marks a flagged delivery as checked with an optional note.
+The web app sends its self-declared logspace name; the Teams tab sends the signed-in display name.
+The check is kept when the tier later rises: the row is counted re-opened, the ledger says so, and the screens show "checked at Watch, now At risk".
+
+## Outcomes
+
+A row closes once its departure plus a grace (180 minutes) has passed: `loaded_in_time` when every package was on the van before the departure, `loaded_late` when the last one went on after, `never_loaded` otherwise.
+`outcome_lead_min` is the minutes between the last load and the departure, negative when late.
+A row still open a day after its departure closes as `unknown`.
+`GET /analytics/at-risk/accuracy` scores flags against outcomes: precision is the share of flagged deliveries that really ended late, recall the share of late deliveries that had been flagged.
+Both are null, not zero, when nothing is scorable.
+
+## When it runs
+
+`app/services/workers/analytics_at_risk_worker.py`, behind `ANALYTICS_AT_RISK_WORKER_ENABLED`, on the worker process.
+It wakes every `ANALYTICS_AT_RISK_POLL_SECONDS` (60) and evaluates every tenant with an enabled `delivery_route` settlement whose settings row is not switched off.
+Once per tenant-local day, after `ANALYTICS_AT_RISK_PROFILE_HOUR_LOCAL` (03:00), it learns the route profiles as of the day before.
+`POST /api/v1/analytics/at-risk/evaluate` runs one pass now; it is sub-second, so there is no run to poll.
+
+## Endpoints
+
+All under `/api/v1/analytics/at-risk`, tenant-scoped by `X-Customer-Code`: `board`, `deliveries/{n}/check` (POST and DELETE), `history`, `checks`, `accuracy`, `settings` (GET and PUT), `routes`, `status`, `evaluate`.
+`app/api/v1/analytics_at_risk.py` documents the parameters and shapes.
+The board carries `stale: true` once the worker has missed three polls, so a quiet board is never mistaken for a calm one.
+
+## The Teams Home block
+
+`app/services/teams/home_at_risk.py` writes an `at_risk` block into the Home snapshot every minute: a summary line, up to twelve flagged deliveries worst first with every figure as text, a person's check, and the accuracy line once twenty departures have closed.
+A "Mark checked" action in the tab travels as a `command` on a `QuestionJob`; the consumer records it through `app/services/teams/commands.py` and never runs the agent for it.
+
+## Enabling on the server
+
+Tenant configuration first, through the existing API with `X-Customer-Code: tmp-live`:
+
+1. `GET /api/v1/analytics/registry/fields?limit=2000`, find the two rows for method `GetNextDeliveryByRoute`, source `response`, fields `resp.DeparatureDate` and `resp.DeparatureTime`, and `PATCH /api/v1/analytics/registry/fields/{id}` with `{"captured": true, "reviewed_by": "amin"}` for each.
+   The fold re-folds the retained 60 days.
+2. `PATCH /api/v1/analytics/lookups/pick%20line` adding `DeliveryNumber`, `LineStatus` (`latest_wins`, not stable) and `ExpectedQty` from the same list source, then `POST /api/v1/analytics/lookups/pick%20line/backfill?days=60`.
+3. Once the re-fold has passed today, `POST /api/v1/analytics/settlements` with the `delivery_route` document (`tests/at_risk_fixtures.py` holds the same declaration as code).
+4. `GET /api/v1/analytics/at-risk/status` must show every readiness flag true.
+
+Then the code:
+
+1. Stop the worker: the facts index on a partitioned parent is a plain build.
+2. `alembic upgrade head` (migration `e9a4c7d21f36`).
+3. Set `ANALYTICS_AT_RISK_WORKER_ENABLED=true` in `.env`; only the worker process starts loops.
+4. Restart `fastapirag`, start `fastapirag-worker`, restart `fastapirag-teams-consumer`.
+5. Read `GET /api/v1/analytics/at-risk/board` and `/routes`: on day one every route runs on the floor until twenty closed deliveries accrue.
+
+## Assumptions
+
+- Default floors of 120 minutes to load and 180 to pick, a sample floor of 20, a 28 day window, a 180 minute close grace and 0.90 coverage.
+  All are per-tenant settings.
+- Expected lines come from the pick-line lookup; a delivery whose lines were never listed shows `expected: null`.
+- A delivery is on the board only once a routing call has named it; Milk deliveries listed only by `ListDeliveriesByRoute` are not, because that list response is truncated at 500 characters.

@@ -304,6 +304,22 @@ class Settings(BaseSettings):
     # Operator override of the automatic ramp trim, per tenant: {"tmp-live": "2026-09-14"}.
     analytics_forecast_history_start: dict[str, str] = {}
 
+    # --- Deliveries at risk (chunks 143-150): every minute, per tenant, over the delivery board ---
+    # OFF by default like every analytics loop: it is only meaningful once a `delivery_route` settlement
+    # has rows. The loop evaluates each tenant every poll and learns the route profiles once per
+    # tenant-local day once that day's clock has passed `profile_hour_local`, as of the day before.
+    analytics_at_risk_worker_enabled: bool = False
+    analytics_at_risk_poll_seconds: float = 60.0
+    analytics_at_risk_profile_hour_local: int = 3
+    # Which settlement names the deliveries (departure, route, customer), which one holds the pick
+    # lines, and which lookup lists the pick lines a delivery expects.
+    analytics_at_risk_settlement: str = "delivery_route"
+    analytics_at_risk_pick_settlement: str = "pick_release"
+    analytics_at_risk_pick_line_lookup: str = "pick line"
+    # How far back the packages-and-loads facts read looks, and how many rows it will read at most.
+    analytics_at_risk_board_lookback_hours: int = 36
+    analytics_at_risk_facts_cap: int = 20000
+
     # Gate source retention on healthy analytics state (Phase 4).
     #
     # log_transactions partitions drop at 60 days. If analytics is broken when that happens, the source

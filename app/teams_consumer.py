@@ -19,6 +19,7 @@ from app.services.analytics_agent.agent import AnalyticsAgent
 from app.services.log_agent.agent import LogDebugAgent
 from app.services.teams.binding_mirror import build_mirror_from_settings
 from app.services.teams.binding_sweep import sweep_once
+from app.services.teams.commands import run_command
 from app.services.teams.consumer import HttpAnswerPoster, TeamsQuestionConsumer
 from app.services.teams.home_snapshot import build_writer_from_settings
 from app.services.teams.home_snapshot import sweep_once as snapshot_sweep_once
@@ -103,7 +104,8 @@ async def _amain() -> None:
         sqs=sqs, queue_url=queue_url, poster=poster, run_agent=_run_agent, load_history=_load_history,
         record_exchange=_record_exchange, customer_ready=_customer_ready,
         concurrency=settings.teams_consumer_concurrency,
-        visibility_seconds=settings.teams_sqs_visibility_seconds, wait_seconds=settings.teams_sqs_wait_seconds)
+        visibility_seconds=settings.teams_sqs_visibility_seconds, wait_seconds=settings.teams_sqs_wait_seconds,
+        run_command=run_command)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

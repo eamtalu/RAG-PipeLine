@@ -28,6 +28,7 @@ from app.services.workers.log_stitch_worker import run_log_stitch_worker, pendin
 from app.services.workers.analytics_worker import run_analytics_worker
 from app.services.workers.analytics_reconcile_worker import run_analytics_reconcile_worker
 from app.services.workers.analytics_forecast_worker import run_analytics_forecast_worker
+from app.services.workers.analytics_at_risk_worker import run_analytics_at_risk_worker
 from app.services.workers.ssh_log_fetcher import run_ssh_log_fetcher
 from app.services.workers.log_parse_worker import run_log_parse_worker, unfinished_ingest_objects
 from app.services.workers.log_partition_worker import run_log_partition_worker
@@ -139,6 +140,13 @@ async def start_background_tasks() -> list[asyncio.Task]:
     else:
         logger.info("Analytics forecast worker disabled (analytics_forecast_worker_enabled=False); "
                     "forecasts run only when triggered from the API")
+    # Deliveries at risk (chunk 149): every minute per tenant, plus the daily route profiles. Its own
+    # gate with its own branches, for the same reason.
+    if settings.analytics_at_risk_worker_enabled:
+        tasks.append(asyncio.create_task(run_analytics_at_risk_worker()))
+    else:
+        logger.info("Analytics at-risk worker disabled (analytics_at_risk_worker_enabled=False); "
+                    "the deliveries board is evaluated only when triggered from the API")
     # Remote SSH log fetcher: the per-customer poll supervisor. ON by default and idle until a source
     # is enabled from the frontend (ssh_log_fetcher_enabled is only a global kill-switch).
     if settings.ssh_log_fetcher_enabled:

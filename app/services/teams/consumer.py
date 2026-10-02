@@ -36,6 +36,7 @@ CUSTOMER_NOT_READY = ("Your organisation's log space is not active on our side y
 MODEL_UNAVAILABLE = ("The assistant's language model is not available right now (the AI service refused our "
                      "credentials or account). Your question has been logged; the team has been alerted.")
 MODEL_BUSY = ("The AI service is busy or unreachable at the moment. Please try again in a minute.")
+COMMAND_UNSUPPORTED = "This consumer cannot record actions yet; the check was not saved."
 
 
 def failure_message(exc: BaseException) -> str:
@@ -82,6 +83,9 @@ ExchangeRecorder = Callable[[str, str, str, str, str], Awaitable[None]]
 
 CustomerCheck = Callable[[str], Awaitable[bool]]
 """customer_code -> True when the log space exists and is active."""
+
+CommandRunner = Callable[[QuestionJob], Awaitable[str]]
+"""A job carrying a `command` -> the one-line confirmation to show. Raises on a refused command."""
 
 
 # ------------------------------------------------------------------------------- HTTP poster
@@ -137,7 +141,7 @@ class TeamsQuestionConsumer:
                  load_history: HistoryLoader, record_exchange: ExchangeRecorder,
                  customer_ready: CustomerCheck, concurrency: int, visibility_seconds: int,
                  wait_seconds: int = 20, heartbeat_seconds: float | None = None,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, run_command: CommandRunner | None = None):
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
         if visibility_seconds < 30:
@@ -145,6 +149,7 @@ class TeamsQuestionConsumer:
         self._sqs, self._queue_url, self._poster = sqs, queue_url, poster
         self._run_agent, self._load_history, self._record = run_agent, load_history, record_exchange
         self._customer_ready = customer_ready
+        self._run_command = run_command
         self._semaphore = asyncio.Semaphore(concurrency)
         self._concurrency = concurrency
         self._visibility, self._wait, self._clock = visibility_seconds, wait_seconds, clock
@@ -229,6 +234,15 @@ class TeamsQuestionConsumer:
             if not await self._customer_ready(job.customer_code):
                 logger.warning("Teams job %s: customer %s missing or inactive", job.job_id, job.customer_code)
                 return AnswerPayload(**base, status="error", answer=CUSTOMER_NOT_READY)
+            if job.command is not None:
+                # An action, not a question: the agent never runs, and nothing is recorded as a turn.
+                if self._run_command is None:
+                    return AnswerPayload(**base, status="error", answer=COMMAND_UNSUPPORTED)
+                try:
+                    return AnswerPayload(**base, status="ok", answer=await self._run_command(job))
+                except Exception as exc:  # noqa: BLE001 - a refused command is a sentence, never a crash
+                    logger.warning("Teams job %s: command %s refused: %s", job.job_id, job.command.kind, exc)
+                    return AnswerPayload(**base, status="error", answer=f"Could not record that: {exc}")
             history = await self._load_history(job.conversation_id, job.customer_code)
             result = await self._run_agent(job.customer_code, job.question, history)
             answer = (result.get("answer") or "").strip() or "I could not find anything to say about that."

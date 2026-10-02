@@ -12,6 +12,9 @@ from app.persistence.models.analytics_ml import (AnalyticsFeatureSet,  # noqa: F
                                                 AnalyticsPrediction)
 from app.persistence.models.analytics_forecast import (AnalyticsForecastAccuracy,  # noqa: F401
                                                        AnalyticsForecastRun, AnalyticsForecastSeries)
+from app.persistence.models.analytics_at_risk import (AnalyticsAtRiskCheck,  # noqa: F401
+                                                      AnalyticsAtRiskDelivery, AnalyticsAtRiskRouteProfile,
+                                                      AnalyticsAtRiskSettings, AnalyticsAtRiskTenantState)
 from app.persistence.models.log_open_stream import (LogOpenStream,  # noqa: F401
                                                     LogPendingRequest)
 from app.config.database import Base
@@ -101,6 +104,12 @@ __all__ = [
     "AnalyticsForecastRun",
     "AnalyticsForecastSeries",
     "AnalyticsForecastAccuracy",
+    # --- deliveries at risk (chunks 143-150) ---
+    "AnalyticsAtRiskDelivery",
+    "AnalyticsAtRiskCheck",
+    "AnalyticsAtRiskRouteProfile",
+    "AnalyticsAtRiskSettings",
+    "AnalyticsAtRiskTenantState",
     # --- stage 2 stream state (S4) ---
     "LogOpenStream",
     "LogPendingRequest",

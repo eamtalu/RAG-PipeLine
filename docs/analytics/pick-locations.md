@@ -37,6 +37,20 @@ POST /api/v1/analytics/lookups
 POST /api/v1/analytics/lookups/pick%20line/backfill?days=60
 ```
 
+Chunks 143 to 150 (deliveries at risk, `docs/analytics-at-risk.md`) extend the `pick line` lookup with three more attributes from the same list source, so the number of lines a delivery expects is known before picking starts:
+
+```
+PATCH /api/v1/analytics/lookups/pick%20line
+{"attributes":[
+  {"name":"Location","sources":[{"method":"ListPickLinesByUser","key_field":"ReportingNumber","value_field":"Location","list":true}]},
+  {"name":"DeliveryNumber","sources":[{"method":"ListPickLinesByUser","key_field":"ReportingNumber","value_field":"DeliveryNumber","list":true}]},
+  {"name":"LineStatus","stable":false,"on_conflict":"latest_wins","sources":[{"method":"ListPickLinesByUser","key_field":"ReportingNumber","value_field":"LineStatus","list":true}]},
+  {"name":"ExpectedQty","sources":[{"method":"ListPickLinesByUser","key_field":"ReportingNumber","value_field":"ExpectedQty","list":true}]}]}
+POST /api/v1/analytics/lookups/pick%20line/backfill?days=60
+```
+
+The element field is `ExpectedQty`, not `ExpectedQuantity`; the list element spelling was verified on a live response on 2026-10-02.
+
 Then `PATCH /api/v1/analytics/settlements/pick_release` with the existing `values` plus the twelve above (the page's docs payload is `pick_release_values.json` next to this file). The patch rebuilds every release under the new rules.
 
 ## Measured on 2026-09-30 before switching on (394 releases, read-only run of the new rules)

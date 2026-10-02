@@ -1,0 +1,215 @@
+"""What the warehouse has done to each delivery on the board: four bounded reads, one state per delivery.
+
+1. The `delivery_route` settlement: one settled row per delivery as `GetNextDeliveryByRoute` last saw
+   it, with the departure date and time, the route and the customer. This is the delivery universe.
+2. The `pick_release` settled rows grouped by delivery: lines confirmed, picked and short, last pick.
+3. The `pick line` lookup read the other way round: how many pick lines name this delivery. This is
+   the expected count, known a few minutes before picking starts.
+4. One Core read over the facts of the last `lookback_hours` for three methods: packages created
+   (`NewDeliveryPackage`), loaded one at a time (`LoadDeliveryPackage`) and loaded as a milk list
+   (`LoadDeliveryPackageList`, whose deliveries live inside a JSON string).
+
+Every read pins the tenant first and is bounded (CLAUDE.md rules 3 and 4). Nothing reads
+`log_transactions`: facts are within one fold cycle of it and already hold what the fold extracted.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, tzinfo
+from typing import Any, Sequence
+
+from sqlalchemy import Numeric, case, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.persistence.models.analytics_fact import AnalyticsFact
+from app.persistence.models.analytics_lookup import AnalyticsLookupValue
+from app.persistence.models.analytics_settlement import AnalyticsSettledRow
+from app.services.analytics.settle_store import NUMBER_SHAPE
+from app.services.analytics_at_risk import model
+
+PACKAGE_METHODS = ("NewDeliveryPackage", "LoadDeliveryPackage", "LoadDeliveryPackageList")
+
+#: How far back the routing rows are read. A delivery is named by a routing call the evening before
+#: its departure at the earliest, and the board keeps yesterday's departures until they are closed.
+ROUTE_LOOKBACK = timedelta(days=3)
+#: Most deliveries one tenant can have named in that window. Live volume is about 100 a day.
+ROUTE_ROWS_CAP = 5000
+#: `IN (...)` lists are cut into pieces this long.
+BATCH = 500
+
+
+@dataclass(frozen=True)
+class BoardRead:
+    states: list[model.DeliveryState]
+    #: The facts read hit its cap, so some packages or loads may be missing from the states.
+    overflow: bool
+    #: Routing rows whose departure date or time could not be read.
+    unreadable_departures: int
+
+
+def _batches(values: Sequence[str]) -> list[Sequence[str]]:
+    return [values[i:i + BATCH] for i in range(0, len(values), BATCH)]
+
+
+def _numeric(name: str):
+    """A settled value as a number, NULL when it is not shaped like one (the settle_store rule)."""
+    text = AnalyticsSettledRow.attributes[name].astext
+    return case((text.op("~")(NUMBER_SHAPE), text.cast(Numeric(30, 6))), else_=None)
+
+
+# ============================================================== 1. deliveries
+
+@dataclass
+class _Route:
+    departure_at: datetime
+    route: str | None
+    customer_name: str | None
+    customer_number: str | None
+
+
+async def _routes(db: AsyncSession, cc: str, *, settlement: str, now: datetime, tz: tzinfo,
+                  today: date) -> tuple[dict[str, _Route], int]:
+    rows = (await db.execute(select(AnalyticsSettledRow.key_parts, AnalyticsSettledRow.attributes,
+                                    AnalyticsSettledRow.warehouse).where(
+        AnalyticsSettledRow.customer_code == cc, AnalyticsSettledRow.settlement == settlement,
+        AnalyticsSettledRow.event_time >= now - ROUTE_LOOKBACK,
+    ).order_by(AnalyticsSettledRow.event_time).limit(ROUTE_ROWS_CAP))).all()
+    out: dict[str, _Route] = {}
+    unreadable = 0
+    for key_parts, attributes, _warehouse in rows:
+        delivery = str((key_parts or [None])[0] or "").strip()
+        if not delivery:
+            continue
+        attrs: dict[str, Any] = attributes or {}
+        departure = model.departure_at(attrs.get("departure_date"), attrs.get("departure_time"), tz)
+        if departure is None:
+            unreadable += 1
+            continue
+        local_date = departure.astimezone(tz).date()
+        if not (today - timedelta(days=1) <= local_date <= today + timedelta(days=1)):
+            continue
+        out[delivery] = _Route(departure_at=departure, route=_text(attrs.get("resp.Route")),
+                               customer_name=_text(attrs.get("resp.CustomerName")),
+                               customer_number=_text(attrs.get("resp.CustomerNumber")))
+    return out, unreadable
+
+
+def _text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+# ============================================================== 2. picks
+
+@dataclass
+class _Picks:
+    confirmed: int = 0
+    picked: int = 0
+    short: int = 0
+    last_pick_at: datetime | None = None
+
+
+async def _picks(db: AsyncSession, cc: str, *, settlement: str, deliveries: Sequence[str]) -> dict[str, _Picks]:
+    out: dict[str, _Picks] = {}
+    picked = _numeric("picked")
+    short = _numeric("is_short")
+    for batch in _batches(deliveries):
+        rows = (await db.execute(select(
+            AnalyticsSettledRow.delivery_number, func.count(), func.count().filter(picked > 0),
+            func.coalesce(func.sum(short), 0), func.max(AnalyticsSettledRow.event_time),
+        ).where(
+            AnalyticsSettledRow.customer_code == cc, AnalyticsSettledRow.settlement == settlement,
+            AnalyticsSettledRow.delivery_number.in_(list(batch)),
+        ).group_by(AnalyticsSettledRow.delivery_number))).all()
+        for delivery, confirmed, picked_n, short_n, last in rows:
+            out[delivery] = _Picks(confirmed=int(confirmed), picked=int(picked_n), short=int(short_n), last_pick_at=last)
+    return out
+
+
+# ============================================================== 3. expected lines
+
+async def _expected(db: AsyncSession, cc: str, *, lookup: str, deliveries: Sequence[str]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for batch in _batches(deliveries):
+        rows = (await db.execute(select(
+            AnalyticsLookupValue.value, func.count(func.distinct(AnalyticsLookupValue.key)),
+        ).where(
+            AnalyticsLookupValue.customer_code == cc, AnalyticsLookupValue.lookup == lookup,
+            AnalyticsLookupValue.attribute == "DeliveryNumber", AnalyticsLookupValue.valid_to.is_(None),
+            AnalyticsLookupValue.value.in_(list(batch)),
+        ).group_by(AnalyticsLookupValue.value))).all()
+        for delivery, n in rows:
+            out[delivery] = int(n)
+    return out
+
+
+# ============================================================== 4. packages and loads
+
+@dataclass
+class _Packages:
+    created: set[str]
+    loaded: set[str]
+    last_load_at: datetime | None = None
+
+
+async def _packages(db: AsyncSession, cc: str, *, now: datetime, lookback_hours: int,
+                    cap: int) -> tuple[dict[str, _Packages], bool]:
+    attrs = AnalyticsFact.attributes
+    rows = (await db.execute(select(
+        AnalyticsFact.method, AnalyticsFact.event_time, AnalyticsFact.delivery_number, AnalyticsFact.id,
+        attrs["resp.value"].astext, attrs["PackageNumber"].astext, attrs["PackagesToLoad"].astext,
+    ).where(
+        AnalyticsFact.customer_code == cc, AnalyticsFact.method.in_(PACKAGE_METHODS),
+        AnalyticsFact.status == "success", AnalyticsFact.event_time >= now - timedelta(hours=lookback_hours),
+    ).order_by(AnalyticsFact.event_time).limit(cap + 1))).all()
+    overflow = len(rows) > cap
+    out: dict[str, _Packages] = defaultdict(lambda: _Packages(created=set(), loaded=set()))
+
+    def loaded(delivery: str, package: str, at: datetime) -> None:
+        p = out[delivery]
+        p.loaded.add(package)
+        if p.last_load_at is None or at > p.last_load_at:
+            p.last_load_at = at
+
+    for method, at, delivery, fact_id, resp_value, package_number, packages_to_load in rows[:cap]:
+        if method == "NewDeliveryPackage":
+            if delivery:
+                out[delivery].created.add(_text(resp_value) or str(fact_id))
+        elif method == "LoadDeliveryPackage":
+            if delivery:
+                loaded(delivery, _text(package_number) or str(fact_id), at)
+        else:
+            for d, p in model.parse_packages_to_load(packages_to_load):
+                loaded(d, p, at)
+    return dict(out), overflow
+
+
+# ============================================================== the board
+
+async def read_states(db: AsyncSession, cc: str, *, now: datetime, tz: tzinfo,
+                      settlement_name: str = "delivery_route", pick_settlement: str = "pick_release",
+                      lookup_name: str = "pick line", lookback_hours: int = 36, facts_cap: int = 20000) -> BoardRead:
+    """Every delivery with a departure yesterday, today or tomorrow on the tenant's clock, with what
+    has been done to it so far. Sorted by departure, then delivery number."""
+    today = now.astimezone(tz).date()
+    routes, unreadable = await _routes(db, cc, settlement=settlement_name, now=now, tz=tz, today=today)
+    deliveries = sorted(routes)
+    picks = await _picks(db, cc, settlement=pick_settlement, deliveries=deliveries) if deliveries else {}
+    expected = await _expected(db, cc, lookup=lookup_name, deliveries=deliveries) if deliveries else {}
+    packages, overflow = await _packages(db, cc, now=now, lookback_hours=lookback_hours, cap=facts_cap)
+    states = []
+    for delivery in deliveries:
+        r, p = routes[delivery], picks.get(delivery, _Picks())
+        k = packages.get(delivery)
+        states.append(model.DeliveryState(
+            delivery_number=delivery, route=r.route, customer_name=r.customer_name, customer_number=r.customer_number,
+            departure_at=r.departure_at, lines_expected=expected.get(delivery), lines_confirmed=p.confirmed,
+            lines_picked=p.picked, lines_short=p.short,
+            packages_created=len(k.created) if k else 0, packages_loaded=len(k.loaded) if k else 0,
+            last_pick_at=p.last_pick_at, last_load_at=k.last_load_at if k else None))
+    states.sort(key=lambda s: (s.departure_at, s.delivery_number))
+    return BoardRead(states=states, overflow=overflow, unreadable_departures=unreadable)
