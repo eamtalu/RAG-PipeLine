@@ -354,6 +354,9 @@ async def test_rows_land_in_the_partition_named_after_their_utc_day(db):
     await _cleanup(db)
     job = await _job(db)
     day = date_type(2026, 8, 5)
+    # a fixed day drifts out of retention as the calendar moves, so the test provisions its own
+    # partition inside the rolled-back transaction instead of relying on what the local DB still has
+    await pt.ensure_coverage(db, days=[day], tables=("log_entries",))
     db.add(LogEntry(customer_code=CC, job_id=job.id,
                     timestamp=datetime(2026, 8, 5, 0, 30, tzinfo=timezone.utc),
                     source_file="c23.log", line_number=1, level="INFO", raw_body="x",
@@ -385,6 +388,7 @@ async def test_replaying_an_identical_line_still_dedups(db):
 
 async def test_a_day_filtered_read_prunes_to_a_single_partition(db):
     """The payoff. Without pruning the feed opens all 60 partitions for one day of data."""
+    await pt.ensure_coverage(db, days=[date_type(2026, 8, 5)], tables=("log_entries",))
     plan = "\n".join(r[0] for r in (await db.execute(text("""
         EXPLAIN SELECT * FROM log_entries
         WHERE timestamp >= '2026-08-05 00:00:00+00' AND timestamp < '2026-08-06 00:00:00+00'
@@ -396,6 +400,7 @@ async def test_a_day_filtered_read_prunes_to_a_single_partition(db):
 
 async def test_the_default_partition_is_excluded_from_a_range_scan(db):
     """A DEFAULT partition holding NULL keys must not be dragged into every bounded query."""
+    await pt.ensure_coverage(db, days=[date_type(2026, 8, 5)], tables=("log_entries",))
     plan = "\n".join(r[0] for r in (await db.execute(text("""
         EXPLAIN SELECT * FROM log_entries
         WHERE timestamp >= '2026-08-05 00:00:00+00' AND timestamp < '2026-08-06 00:00:00+00'

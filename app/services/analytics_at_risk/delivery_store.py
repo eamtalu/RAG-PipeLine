@@ -97,6 +97,8 @@ def _write_progress(row: AnalyticsAtRiskDelivery, state: model.DeliveryState) ->
     row.loading_expected = state.loading_expected
     if state.transaction_names:
         row.transaction_names = list(state.transaction_names)
+    if state.route_loaded_at is not None:
+        row.route_loaded_at = state.route_loaded_at
 
 
 def _write_thresholds(row: AnalyticsAtRiskDelivery, thresholds: model.Thresholds) -> None:
@@ -133,7 +135,7 @@ def _state_from_row(row: AnalyticsAtRiskDelivery) -> model.DeliveryState:
         packages_created=row.packages_created or 0, packages_loaded=row.packages_loaded or 0,
         last_pick_at=row.last_pick_at, last_load_at=row.last_load_at,
         loading_expected=True if row.loading_expected is None else bool(row.loading_expected),
-        transaction_names=tuple(row.transaction_names or ()))
+        transaction_names=tuple(row.transaction_names or ()), route_loaded_at=row.route_loaded_at)
 
 
 def _thresholds_from_row(row: AnalyticsAtRiskDelivery, fallback: model.Thresholds) -> model.Thresholds:

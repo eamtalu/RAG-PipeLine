@@ -97,6 +97,11 @@ async def test_standard_loads_count_packages_created_and_loaded_by_delivery():
     s = _by_number(await _read())["29616"]
     assert (s.packages_created, s.packages_loaded) == (2, 1)
     assert s.last_load_at == t + timedelta(minutes=21)
+    # the route's "van ready" moment is the last scan on its dock that day, whichever delivery it was for
+    await fx.plant([fx.load_fact(CC, "29999", "29999/1-1", t + timedelta(minutes=50), dock="BRI03")])
+    s = _by_number(await _read())["29616"]
+    assert s.route_loaded_at == t + timedelta(minutes=50)
+    assert s.last_load_at == t + timedelta(minutes=21)
 
 
 async def test_milk_loads_are_parsed_out_of_the_list_call_so_a_milk_delivery_shows_as_loaded():

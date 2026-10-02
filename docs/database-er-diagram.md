@@ -1202,6 +1202,7 @@ erDiagram
         int packages_loaded
         datetime last_pick_at
         datetime last_load_at
+        datetime route_loaded_at "the last package scanned onto the route's dock on the departure day; the nearest real departure (b3c4d5e6f7a8)"
         bool loading_expected "false on a route that never scans a load; picking alone decides (f1c2d3e4a5b6)"
         jsonb transaction_names "the picking screens the lines went through; GIN-indexed (a2b3c4d5e6f7)"
         string status "open | closed"

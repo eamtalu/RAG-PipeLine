@@ -69,6 +69,9 @@ The check is kept when the tier later rises: the row is counted re-opened, the l
 
 A row closes once its departure plus a grace (180 minutes) has passed: `loaded_in_time` when every package was on the van before the departure, `loaded_late` when the last one went on after, `never_loaded` otherwise.
 `outcome_lead_min` is the minutes between the last load and the departure, negative when late.
+The WMS records no actual departure: the standard load screen answers OK per package, the milk list answers that all packages are loaded, and sign-off only ends the session.
+The nearest real event is the last package scanned onto the route's loading dock on the departure day, kept on every row of that route and day as `route_loaded_at` (migration `b3c4d5e6f7a8`) and shown beside the target departure as "route loaded".
+Each row also keeps its own `last_load_at`, the moment its last package went on the van.
 A row still open a day after its departure closes as `unknown`.
 `GET /analytics/at-risk/accuracy` scores flags against outcomes: precision is the share of flagged deliveries that really ended late, recall the share of late deliveries that had been flagged.
 Both are null, not zero, when nothing is scorable.

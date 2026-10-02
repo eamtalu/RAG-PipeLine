@@ -104,6 +104,9 @@ class AnalyticsAtRiskDelivery(Base):
     #: The picking screens the delivery's lines went through, as a JSON list of names. GIN-indexed so
     #: the history can filter on one kind of picking.
     transaction_names: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    #: The last package scanned onto the route's dock on the departure day: the van's "ready" moment,
+    #: the nearest thing to a departure the WMS records.
+    route_loaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # --- outcome ---
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", server_default="open")

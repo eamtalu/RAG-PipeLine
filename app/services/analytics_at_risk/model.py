@@ -69,6 +69,10 @@ class DeliveryState:
     #: Pick, Milk Pick, Freezer Pick), so a supervisor can look at one kind of picking at a time. A
     #: delivery that spans two kinds appears under both.
     transaction_names: tuple[str, ...] = ()
+    #: When the ROUTE was fully loaded on the departure day: the last package scanned onto that
+    #: loading dock. The WMS records no departure itself; with vehicle-load auto-despatch on, this is
+    #: the moment the shipment is despatched, so it is the nearest thing to the van leaving.
+    route_loaded_at: datetime | None = None
 
 
 @dataclass(frozen=True)

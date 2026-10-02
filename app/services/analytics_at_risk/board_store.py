@@ -167,10 +167,12 @@ class _PackageRead:
     by_delivery: dict[str, _Packages]
     #: Routes (loading docks) that loaded anything in the window: the routes with a loading step.
     routes_that_load: set[str]
+    #: When each dock was last loaded on each local day: the route's "van ready" moment.
+    route_loaded: dict[tuple[str, date], datetime]
     overflow: bool
 
 
-async def _packages(db: AsyncSession, cc: str, *, now: datetime, lookback_hours: int, cap: int) -> _PackageRead:
+async def _packages(db: AsyncSession, cc: str, *, now: datetime, lookback_hours: int, cap: int, tz: tzinfo) -> _PackageRead:
     attrs = AnalyticsFact.attributes
     rows = (await db.execute(select(
         AnalyticsFact.method, AnalyticsFact.event_time, AnalyticsFact.delivery_number, AnalyticsFact.id,
@@ -182,6 +184,7 @@ async def _packages(db: AsyncSession, cc: str, *, now: datetime, lookback_hours:
     overflow = len(rows) > cap
     out: dict[str, _Packages] = defaultdict(lambda: _Packages(created=set(), loaded=set()))
     routes: set[str] = set()
+    route_loaded: dict[tuple[str, date], datetime] = {}
 
     def loaded(delivery: str, package: str, at: datetime, dock: str | None) -> None:
         p = out[delivery]
@@ -190,6 +193,9 @@ async def _packages(db: AsyncSession, cc: str, *, now: datetime, lookback_hours:
             p.last_load_at = at
         if dock:
             routes.add(dock)
+            key = (dock, at.astimezone(tz).date())
+            if key not in route_loaded or at > route_loaded[key]:
+                route_loaded[key] = at
 
     for method, at, delivery, fact_id, resp_value, package_number, packages_to_load, dock in rows[:cap]:
         if method == "ConfirmPickLine":
@@ -205,7 +211,7 @@ async def _packages(db: AsyncSession, cc: str, *, now: datetime, lookback_hours:
         else:
             for d, p in model.parse_packages_to_load(packages_to_load):
                 loaded(d, p, at, _text(dock))
-    return _PackageRead(by_delivery=dict(out), routes_that_load=routes, overflow=overflow)
+    return _PackageRead(by_delivery=dict(out), routes_that_load=routes, route_loaded=route_loaded, overflow=overflow)
 
 
 # ============================================================== the board
@@ -225,7 +231,7 @@ async def read_states(db: AsyncSession, cc: str, *, now: datetime, tz: tzinfo,
     deliveries = sorted(routes)
     picks = await _picks(db, cc, settlement=pick_settlement, deliveries=deliveries) if deliveries else {}
     expected = await _expected(db, cc, lookup=lookup_name, deliveries=deliveries) if deliveries else {}
-    packages = await _packages(db, cc, now=now, lookback_hours=lookback_hours, cap=facts_cap)
+    packages = await _packages(db, cc, now=now, lookback_hours=lookback_hours, cap=facts_cap, tz=tz)
     loading_routes = packages.routes_that_load | set(routes_that_load or ())
     states = []
     for delivery in deliveries:
@@ -238,6 +244,7 @@ async def read_states(db: AsyncSession, cc: str, *, now: datetime, tz: tzinfo,
             packages_created=len(k.created) if k else 0, packages_loaded=len(k.loaded) if k else 0,
             last_pick_at=p.last_pick_at, last_load_at=k.last_load_at if k else None,
             loading_expected=r.route in loading_routes if r.route else True,
-            transaction_names=p.transaction_names))
+            transaction_names=p.transaction_names,
+            route_loaded_at=packages.route_loaded.get((r.route, r.departure_at.astimezone(tz).date())) if r.route else None))
     states.sort(key=lambda s: (s.departure_at, s.delivery_number))
     return BoardRead(states=states, overflow=packages.overflow, unreadable_departures=unreadable)

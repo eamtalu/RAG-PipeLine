@@ -58,7 +58,7 @@ async def _board_states():
     return [
         _state("fine"),
         _state("watch", departure_at=DEP + timedelta(minutes=60), lines_picked=2, packages_created=0, packages_loaded=0),  # 150 min: inside pick lead
-        _state("risk", packages_loaded=1, last_load_at=DEP - timedelta(hours=3)),  # 90 min: inside load lead
+        _state("risk", packages_loaded=1, last_load_at=DEP - timedelta(hours=3), route_loaded_at=DEP - timedelta(hours=2)),  # 90 min: inside load lead
         _state("late", departure_at=yesterday, packages_loaded=1),
     ]
 
@@ -82,6 +82,9 @@ async def test_board_lists_open_deliveries_sorted_by_tier_then_minutes():
     assert risk["packages"] == {"created": 2, "loaded": 1}
     assert risk["check"] is None and risk["reopened"] is False
     assert risk["departure_at"] == DEP.isoformat() and risk["departure_date"] == "2026-10-02"
+    assert risk["last_load_at"] == (DEP - timedelta(hours=3)).isoformat()
+    assert risk["route_loaded_at"] == (DEP - timedelta(hours=2)).isoformat()
+    assert out["deliveries"][3]["route_loaded_at"] is None
     assert risk["first_flagged_at"] == NOW.isoformat()
     late = out["deliveries"][0]
     assert late["tier"] == "late" and late["minutes_to_departure"].startswith("-")

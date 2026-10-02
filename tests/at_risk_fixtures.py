@@ -194,7 +194,8 @@ async def settle(cc: str) -> None:
 def closed_delivery(cc: str, delivery: str, *, route: str, departure_at: datetime, last_load_at: datetime | None,
                     outcome: str, last_pick_at: datetime | None = None, max_tier: str = "none",
                     first_flagged_at: datetime | None = None, transaction_names: tuple[str, ...] = ("Brighton Stock Pick",),
-                    lines_expected: int | None = 5, lines_picked: int = 5, customer_name: str | None = "BOK SHOP HORSHAM") -> AnalyticsAtRiskDelivery:
+                    lines_expected: int | None = 5, lines_picked: int = 5, customer_name: str | None = "BOK SHOP HORSHAM",
+                    route_loaded_at: datetime | None = None) -> AnalyticsAtRiskDelivery:
     """A closed row, for profile, accuracy and history tests."""
     lead = None if last_load_at is None else Decimal(str(round((departure_at - last_load_at).total_seconds() / 60, 2)))
     return AnalyticsAtRiskDelivery(
@@ -203,7 +204,7 @@ def closed_delivery(cc: str, delivery: str, *, route: str, departure_at: datetim
         first_flagged_at=first_flagged_at, first_flagged_tier=max_tier if first_flagged_at else None,
         lines_expected=lines_expected, lines_confirmed=lines_picked, lines_picked=lines_picked, packages_created=2,
         packages_loaded=2 if outcome != "never_loaded" else 1, last_pick_at=last_pick_at, last_load_at=last_load_at,
-        loading_expected=not outcome.startswith("picked_"), transaction_names=list(transaction_names),
+        loading_expected=not outcome.startswith("picked_"), transaction_names=list(transaction_names), route_loaded_at=route_loaded_at,
         status="closed", closed_at=departure_at, outcome=outcome, outcome_lead_min=lead,
         rule_version=RULE_VERSION, last_evaluated_at=departure_at)
 

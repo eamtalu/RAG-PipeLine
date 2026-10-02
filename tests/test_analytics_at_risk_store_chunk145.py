@@ -212,7 +212,8 @@ async def test_a_check_names_the_departure_when_two_rows_share_a_delivery_number
 async def test_closing_writes_the_three_outcomes_and_the_lead_of_the_last_load():
     before = DEP - timedelta(hours=4)
     await _apply([
-        _state(delivery_number="A", lines_picked=5, packages_created=2, packages_loaded=2, last_load_at=DEP - timedelta(hours=4)),
+        _state(delivery_number="A", lines_picked=5, packages_created=2, packages_loaded=2, last_load_at=DEP - timedelta(hours=4),
+               route_loaded_at=DEP - timedelta(minutes=10)),
         _state(delivery_number="B", lines_picked=5, packages_created=2, packages_loaded=2, last_load_at=DEP + timedelta(minutes=5)),
         _state(delivery_number="C", lines_picked=5, packages_created=2, packages_loaded=1, last_load_at=DEP - timedelta(hours=4)),
         _state(delivery_number="D", departure_at=DEP + timedelta(days=1)),  # tomorrow: untouched
@@ -227,6 +228,8 @@ async def test_closing_writes_the_three_outcomes_and_the_lead_of_the_last_load()
     assert closed == 3
     a, b, c, d = [await _row(x) for x in "ABCD"]
     assert (a.status, a.outcome, a.outcome_lead_min, a.closed_at, a.tier) == ("closed", "loaded_in_time", Decimal("240"), now, "none")
+    assert a.route_loaded_at == DEP - timedelta(minutes=10)  # the van-ready moment of its route, kept beside the target
+    assert b.route_loaded_at is None
     assert (b.outcome, b.outcome_lead_min, b.tier, b.max_tier) == ("loaded_late", Decimal("-5"), "none", "none")
     assert (c.outcome, c.outcome_lead_min, c.tier, c.max_tier) == ("never_loaded", Decimal("240"), "late", "late")
     assert d.status == "open"

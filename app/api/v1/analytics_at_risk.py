@@ -99,7 +99,7 @@ def _row_json(row: AnalyticsAtRiskDelivery, now: datetime) -> dict:
         "lines": {"expected": row.lines_expected, "confirmed": int(row.lines_confirmed or 0),
                   "picked": int(row.lines_picked or 0), "short": int(row.lines_short or 0)},
         "packages": {"created": int(row.packages_created or 0), "loaded": int(row.packages_loaded or 0)},
-        "last_pick_at": _iso(row.last_pick_at), "last_load_at": _iso(row.last_load_at),
+        "last_pick_at": _iso(row.last_pick_at), "last_load_at": _iso(row.last_load_at), "route_loaded_at": _iso(row.route_loaded_at),
         "loading_expected": True if row.loading_expected is None else bool(row.loading_expected),
         "transaction_names": list(row.transaction_names or []),
         "category": model.category_for(outcome=row.outcome, max_tier=row.max_tier, lines_expected=row.lines_expected,
