@@ -100,6 +100,7 @@ def _row_json(row: AnalyticsAtRiskDelivery, now: datetime) -> dict:
                   "picked": int(row.lines_picked or 0), "short": int(row.lines_short or 0)},
         "packages": {"created": int(row.packages_created or 0), "loaded": int(row.packages_loaded or 0)},
         "last_pick_at": _iso(row.last_pick_at), "last_load_at": _iso(row.last_load_at),
+        "loading_expected": True if row.loading_expected is None else bool(row.loading_expected),
         "status": row.status, "closed_at": _iso(row.closed_at), "outcome": row.outcome,
         "outcome_lead_min": _s(row.outcome_lead_min), "check": check, "reopened": reopened,
         "tier_history": list(row.tier_history or []), "rule_version": row.rule_version,
@@ -239,7 +240,7 @@ def _ratio(numerator: int, denominator: int) -> str | None:
 def _scored(counts: dict) -> dict:
     flagged, flagged_late, late_not_flagged = counts["flagged"], counts["flagged_late"], counts["late_not_flagged"]
     return {**counts, "precision": _ratio(flagged_late, flagged), "recall": _ratio(flagged_late, flagged_late + late_not_flagged),
-            "outcomes": {o: counts.pop(o) for o in ("loaded_in_time", "loaded_late", "never_loaded", "unknown")}}
+            "outcomes": {o: counts.pop(o) for o in delivery_store.SCORED_OUTCOMES}}
 
 
 @router.get("/accuracy")
@@ -252,8 +253,7 @@ async def read_accuracy(days: int = 28, customer: str = Depends(get_current_cust
     end = _now().astimezone(tz).date() - timedelta(days=1)
     start = end - timedelta(days=days - 1)
     agg = await delivery_store.accuracy(db, customer, start=start, end=end)
-    keys = ("departures", "flagged", "flagged_late", "late_not_flagged", "flagged_not_late",
-            "loaded_in_time", "loaded_late", "never_loaded", "unknown")
+    keys = ("departures", "flagged", "flagged_late", "late_not_flagged", "flagged_not_late", *delivery_store.SCORED_OUTCOMES)
     total = {k: sum(r[k] for r in agg["routes"].values()) for k in keys}
     return {"window": {"start": start.isoformat(), "end": end.isoformat(), "days": days},
             "total": {**_scored(dict(total)), "by_tier": agg["by_tier"]},

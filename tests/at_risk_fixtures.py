@@ -128,10 +128,12 @@ def route_fact(cc: str, delivery: str, *, route: str, dep_date: str, dep_time: s
 
 
 def pick_fact(cc: str, delivery: str, reporting_number: str, when: datetime, *, expected: str, picked: str,
-              status: str = "success", item: str = "104568", user: str = "BCHAM") -> AnalyticsFact:
+              status: str = "success", item: str = "104568", user: str = "BCHAM", package: str | None = None) -> AnalyticsFact:
+    """One pick confirmation. `package` is the package number the line was packed into; on the live
+    data 93% of confirmations carry one, and it is where most packages are born."""
     return _fact(cc, "ConfirmPickLine", when, status=status, delivery=delivery, attributes={
         "ReportingNumber": reporting_number, "ExpectedQuantity": expected, "QuantityPicked": picked,
-        "PickListSuffix": "1", "OrderLine": "1"},
+        "PickListSuffix": "1", "OrderLine": "1", "PackageNumber": package if package is not None else f"{delivery}/1-1"},
         quantity_classification="pick" if Decimal(picked) > 0 else "attempt", item_number=item, user_name=user,
         quantity=Decimal(picked))
 

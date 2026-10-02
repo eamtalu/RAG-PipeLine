@@ -54,11 +54,14 @@ async def evaluate_tenant(cc: str, *, now: datetime | None = None) -> dict:
             if not cfg.enabled:
                 return {"status": "skipped", "reason": "disabled in settings"}
             profiles = await profile_store.latest(db, cc)
+            # A route whose history holds any loaded delivery has a loading step, whatever the last 36 hours show.
+            routes_that_load = {route for route, p in profiles.items() if (p.loaded_sample or 0) > 0}
             board = await board_store.read_states(
                 db, cc, now=now, tz=tz, settlement_name=settings.analytics_at_risk_settlement,
                 pick_settlement=settings.analytics_at_risk_pick_settlement,
                 lookup_name=settings.analytics_at_risk_pick_line_lookup,
-                lookback_hours=settings.analytics_at_risk_board_lookback_hours, facts_cap=settings.analytics_at_risk_facts_cap)
+                lookback_hours=settings.analytics_at_risk_board_lookback_hours, facts_cap=settings.analytics_at_risk_facts_cap,
+                routes_that_load=routes_that_load)
         thresholds_for = profile_store.thresholds_for(profiles, cfg)
         by_number = {s.delivery_number: s for s in board.states}
         async with async_session() as db:

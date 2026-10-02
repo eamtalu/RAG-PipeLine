@@ -1202,9 +1202,10 @@ erDiagram
         int packages_loaded
         datetime last_pick_at
         datetime last_load_at
+        bool loading_expected "false on a route that never scans a load; picking alone decides (f1c2d3e4a5b6)"
         string status "open | closed"
         datetime closed_at
-        string outcome "loaded_in_time | loaded_late | never_loaded | unknown"
+        string outcome "loaded_in_time | loaded_late | never_loaded | picked_in_time | picked_late | unknown"
         numeric outcome_lead_min "departure minus last load; negative when late"
         datetime checked_at "API-written"
         string checked_by "API-written"

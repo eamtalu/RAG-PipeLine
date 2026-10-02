@@ -58,8 +58,12 @@ def minutes_text(minutes: Decimal) -> str:
 def progress_text(row: AnalyticsAtRiskDelivery) -> str:
     expected = row.lines_expected
     lines = f"{row.lines_picked} of {expected} lines" if expected is not None else f"{row.lines_picked} lines picked"
-    if row.packages_created:
+    if row.loading_expected is False:
+        packages = "no loading step on this route"
+    elif row.packages_created:
         packages = f"{row.packages_loaded} of {row.packages_created} packages loaded"
+    elif row.packages_loaded:
+        packages = f"{row.packages_loaded} loaded"
     else:
         packages = "no package yet"
     return f"{lines} · {packages}"

@@ -212,7 +212,7 @@ async def test_accuracy_counts_flagged_against_actually_late():
     assert out["window"] == {"start": "2026-09-04", "end": "2026-10-01", "days": 28}
     assert (total["departures"], total["flagged"], total["flagged_late"], total["late_not_flagged"], total["flagged_not_late"]) == (11, 4, 3, 1, 1)
     assert total["precision"] == "0.75" and total["recall"] == "0.75"
-    assert total["outcomes"] == {"loaded_in_time": 6, "loaded_late": 3, "never_loaded": 1, "unknown": 1}
+    assert total["outcomes"] == {"loaded_in_time": 6, "loaded_late": 3, "never_loaded": 1, "picked_in_time": 0, "picked_late": 0, "unknown": 1}
     assert total["by_tier"] == {"at_risk": {"flagged": 4, "late": 3}}
     assert [r["route"] for r in out["routes"]] == ["BRI01", "BRI03"]
     assert out["routes"][1]["flagged"] == 4 and out["routes"][0]["departures"] == 1

@@ -20,8 +20,9 @@ from app.persistence.models.analytics_at_risk import AnalyticsAtRiskDelivery, An
 from app.services.analytics_at_risk import model
 from app.services.analytics_at_risk.settings_store import Settings
 
-#: Outcomes a profile learns from. `unknown` rows have no board data and teach nothing.
-LEARNING_OUTCOMES = ("loaded_in_time", "loaded_late", "never_loaded")
+#: Outcomes a profile learns from. `unknown` rows have no board data and teach nothing. A route
+#: without a loading step teaches its pick lead only (its load leads are simply absent).
+LEARNING_OUTCOMES = ("loaded_in_time", "loaded_late", "never_loaded", "picked_in_time", "picked_late")
 #: Most closed rows one computation reads. 28 days at a few hundred departures a day is well under it.
 ROWS_CAP = 50000
 

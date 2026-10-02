@@ -94,6 +94,7 @@ def _write_progress(row: AnalyticsAtRiskDelivery, state: model.DeliveryState) ->
     row.lines_picked, row.lines_short = state.lines_picked, state.lines_short
     row.packages_created, row.packages_loaded = state.packages_created, state.packages_loaded
     row.last_pick_at, row.last_load_at = state.last_pick_at, state.last_load_at
+    row.loading_expected = state.loading_expected
 
 
 def _write_thresholds(row: AnalyticsAtRiskDelivery, thresholds: model.Thresholds) -> None:
@@ -128,7 +129,8 @@ def _state_from_row(row: AnalyticsAtRiskDelivery) -> model.DeliveryState:
         customer_number=row.customer_number, departure_at=row.departure_at, lines_expected=row.lines_expected,
         lines_confirmed=row.lines_confirmed or 0, lines_picked=row.lines_picked or 0, lines_short=row.lines_short or 0,
         packages_created=row.packages_created or 0, packages_loaded=row.packages_loaded or 0,
-        last_pick_at=row.last_pick_at, last_load_at=row.last_load_at)
+        last_pick_at=row.last_pick_at, last_load_at=row.last_load_at,
+        loading_expected=True if row.loading_expected is None else bool(row.loading_expected))
 
 
 def _thresholds_from_row(row: AnalyticsAtRiskDelivery, fallback: model.Thresholds) -> model.Thresholds:
@@ -219,8 +221,9 @@ async def sweep(db: AsyncSession, cc: str, *, now: datetime, older_than: timedel
 
 # ============================================================== reads for the screens
 
-#: Outcomes that count as "actually late" when the flags are scored.
-LATE_OUTCOMES = ("loaded_late", "never_loaded")
+#: Outcomes that count as "actually late" when the flags are scored (the model's list).
+LATE_OUTCOMES = model.LATE_OUTCOMES
+SCORED_OUTCOMES = ("loaded_in_time", "loaded_late", "never_loaded", "picked_in_time", "picked_late", "unknown")
 TIER_ORDER = case({"late": 3, "at_risk": 2, "watch": 1}, value=AnalyticsAtRiskDelivery.tier, else_=0)
 
 
@@ -279,7 +282,7 @@ async def accuracy(db: AsyncSession, cc: str, *, start: date, end: date) -> dict
         func.count().filter(flagged & late).label("flagged_late"),
         func.count().filter(~flagged & late).label("late_not_flagged"),
         func.count().filter(flagged & ~late).label("flagged_not_late"),
-        *[func.count().filter(d.outcome == o).label(o) for o in ("loaded_in_time", "loaded_late", "never_loaded", "unknown")],
+        *[func.count().filter(d.outcome == o).label(o) for o in SCORED_OUTCOMES],
     ).group_by(d.route).order_by(d.route))).mappings().all()
     tiers = (await db.execute(select(d.max_tier, func.count().label("flagged"), func.count().filter(late).label("late")).where(
         d.customer_code == cc, d.status == "closed", d.departure_date >= start, d.departure_date <= end, flagged,

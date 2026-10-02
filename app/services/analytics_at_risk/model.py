@@ -54,10 +54,17 @@ class DeliveryState:
     lines_confirmed: int
     lines_picked: int
     lines_short: int
+    #: Packages KNOWN for the delivery: the distinct package numbers on its pick confirmations plus any
+    #: extra package created by hand. Not only the hand-created ones: measured live, most packages are
+    #: made at pick time and `NewDeliveryPackage` alone undercounts them on 3 deliveries in 4.
     packages_created: int
     packages_loaded: int
     last_pick_at: datetime | None
     last_load_at: datetime | None
+    #: Whether this delivery's route has a loading step at all. The BRILA routes (the Gatwick run among
+    #: them) are picked and packed but never scanned onto a van, measured over 30 days, so judging them
+    #: on loading would flag every one of them every day. False means picking alone decides.
+    loading_expected: bool = True
 
 
 @dataclass(frozen=True)
@@ -143,7 +150,13 @@ def picking_open(state: DeliveryState) -> bool:
 
 
 def loading_open(state: DeliveryState) -> bool:
-    return state.packages_created == 0 or state.packages_loaded < state.packages_created
+    """Packages still to load. A route without a loading step is never open. Otherwise open while
+    nothing has been loaded, or fewer packages are loaded than are known; a load of a package nobody
+    "created" through the app still counts, because the pick confirmations are where most packages
+    are born."""
+    if not state.loading_expected:
+        return False
+    return state.packages_loaded == 0 or state.packages_loaded < state.packages_created
 
 
 def tier_for(state: DeliveryState, now: datetime, thresholds: Thresholds) -> Tier:
@@ -162,13 +175,24 @@ def tier_for(state: DeliveryState, now: datetime, thresholds: Thresholds) -> Tie
 
 def outcome_for(state: DeliveryState) -> tuple[str, Decimal | None]:
     """How the delivery ended, once its departure is behind us: `(outcome, lead minutes of the last
-    load, negative when it came after the departure)`."""
+    load, negative when it came after the departure)`. On a route without a loading step the last
+    PICK decides instead: `picked_in_time` when every line was picked before the departure, else
+    `picked_late`, with the lead measured to that last pick."""
+    if not state.loading_expected:
+        lead = None if state.last_pick_at is None else minutes_to_departure(state.departure_at, state.last_pick_at)
+        if picking_open(state) or lead is None or lead < 0:
+            return "picked_late", lead
+        return "picked_in_time", lead
     lead = None if state.last_load_at is None else minutes_to_departure(state.departure_at, state.last_load_at)
     if loading_open(state):
         return "never_loaded", lead
     if lead is not None and lead < 0:
         return "loaded_late", lead
     return "loaded_in_time", lead
+
+
+#: Outcomes that count as "actually late" when the flags are scored.
+LATE_OUTCOMES = ("loaded_late", "never_loaded", "picked_late")
 
 
 # ============================================================== learning

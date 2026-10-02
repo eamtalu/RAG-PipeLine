@@ -232,6 +232,22 @@ async def test_closing_writes_the_three_outcomes_and_the_lead_of_the_last_load()
     assert d.status == "open"
 
 
+async def test_a_route_without_a_loading_step_closes_on_its_last_pick():
+    before = DEP - timedelta(hours=4)
+    await _apply([
+        _state(delivery_number="G1", route="BRILAT", loading_expected=False, lines_picked=5, last_pick_at=DEP - timedelta(hours=2)),
+        _state(delivery_number="G2", route="BRILAT", loading_expected=False, lines_picked=3, last_pick_at=DEP - timedelta(hours=2)),
+    ], before)
+    g1 = await _row("G1")
+    assert (g1.loading_expected, g1.tier) == (False, "none")  # no package, no load, and that is not held against it
+    async with async_session() as db:
+        closed = await delivery_store.close_due(db, CC, {}, now=DEP + timedelta(hours=3), grace=timedelta(hours=3), tz=LONDON)
+        await db.commit()
+    g1, g2 = await _row("G1"), await _row("G2")
+    assert (closed, g1.outcome, g1.outcome_lead_min, g1.tier) == (2, "picked_in_time", Decimal("120"), "none")
+    assert (g2.outcome, g2.tier, g2.max_tier) == ("picked_late", "late", "late")
+
+
 async def test_the_sweep_closes_a_day_old_open_row_as_unknown():
     await _apply([_state()], DEP - timedelta(hours=8))
     async with async_session() as db:

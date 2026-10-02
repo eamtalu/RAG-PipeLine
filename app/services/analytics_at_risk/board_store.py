@@ -29,7 +29,9 @@ from app.persistence.models.analytics_settlement import AnalyticsSettledRow
 from app.services.analytics.settle_store import NUMBER_SHAPE
 from app.services.analytics_at_risk import model
 
-PACKAGE_METHODS = ("NewDeliveryPackage", "LoadDeliveryPackage", "LoadDeliveryPackageList")
+#: The pick confirmations are read too: 93% of them carry the package number the line was packed into,
+#: which is where most packages are born. `NewDeliveryPackage` alone undercounts them on 3 in 4 deliveries.
+PACKAGE_METHODS = ("ConfirmPickLine", "NewDeliveryPackage", "LoadDeliveryPackage", "LoadDeliveryPackageList")
 
 #: How far back the routing rows are read. A delivery is named by a routing call the evening before
 #: its departure at the earliest, and the board keeps yesterday's departures until they are closed.
@@ -151,65 +153,87 @@ async def _expected(db: AsyncSession, cc: str, *, lookup: str, deliveries: Seque
 
 @dataclass
 class _Packages:
+    #: Known packages: the package numbers on the pick confirmations plus any hand-made package.
     created: set[str]
     loaded: set[str]
     last_load_at: datetime | None = None
 
 
-async def _packages(db: AsyncSession, cc: str, *, now: datetime, lookback_hours: int,
-                    cap: int) -> tuple[dict[str, _Packages], bool]:
+@dataclass
+class _PackageRead:
+    by_delivery: dict[str, _Packages]
+    #: Routes (loading docks) that loaded anything in the window: the routes with a loading step.
+    routes_that_load: set[str]
+    overflow: bool
+
+
+async def _packages(db: AsyncSession, cc: str, *, now: datetime, lookback_hours: int, cap: int) -> _PackageRead:
     attrs = AnalyticsFact.attributes
     rows = (await db.execute(select(
         AnalyticsFact.method, AnalyticsFact.event_time, AnalyticsFact.delivery_number, AnalyticsFact.id,
-        attrs["resp.value"].astext, attrs["PackageNumber"].astext, attrs["PackagesToLoad"].astext,
+        attrs["resp.value"].astext, attrs["PackageNumber"].astext, attrs["PackagesToLoad"].astext, attrs["LoadingDock"].astext,
     ).where(
         AnalyticsFact.customer_code == cc, AnalyticsFact.method.in_(PACKAGE_METHODS),
         AnalyticsFact.status == "success", AnalyticsFact.event_time >= now - timedelta(hours=lookback_hours),
     ).order_by(AnalyticsFact.event_time).limit(cap + 1))).all()
     overflow = len(rows) > cap
     out: dict[str, _Packages] = defaultdict(lambda: _Packages(created=set(), loaded=set()))
+    routes: set[str] = set()
 
-    def loaded(delivery: str, package: str, at: datetime) -> None:
+    def loaded(delivery: str, package: str, at: datetime, dock: str | None) -> None:
         p = out[delivery]
         p.loaded.add(package)
         if p.last_load_at is None or at > p.last_load_at:
             p.last_load_at = at
+        if dock:
+            routes.add(dock)
 
-    for method, at, delivery, fact_id, resp_value, package_number, packages_to_load in rows[:cap]:
-        if method == "NewDeliveryPackage":
+    for method, at, delivery, fact_id, resp_value, package_number, packages_to_load, dock in rows[:cap]:
+        if method == "ConfirmPickLine":
+            package = _text(package_number)
+            if delivery and package:
+                out[delivery].created.add(package)
+        elif method == "NewDeliveryPackage":
             if delivery:
                 out[delivery].created.add(_text(resp_value) or str(fact_id))
         elif method == "LoadDeliveryPackage":
             if delivery:
-                loaded(delivery, _text(package_number) or str(fact_id), at)
+                loaded(delivery, _text(package_number) or str(fact_id), at, _text(dock))
         else:
             for d, p in model.parse_packages_to_load(packages_to_load):
-                loaded(d, p, at)
-    return dict(out), overflow
+                loaded(d, p, at, _text(dock))
+    return _PackageRead(by_delivery=dict(out), routes_that_load=routes, overflow=overflow)
 
 
 # ============================================================== the board
 
 async def read_states(db: AsyncSession, cc: str, *, now: datetime, tz: tzinfo,
                       settlement_name: str = "delivery_route", pick_settlement: str = "pick_release",
-                      lookup_name: str = "pick line", lookback_hours: int = 36, facts_cap: int = 20000) -> BoardRead:
+                      lookup_name: str = "pick line", lookback_hours: int = 36, facts_cap: int = 20000,
+                      routes_that_load: set[str] | None = None) -> BoardRead:
     """Every delivery with a departure yesterday, today or tomorrow on the tenant's clock, with what
-    has been done to it so far. Sorted by departure, then delivery number."""
+    has been done to it so far. Sorted by departure, then delivery number.
+
+    A delivery's route has a loading step when the route loaded anything in the lookback window or
+    when the caller says so from the route's history (`routes_that_load`); otherwise the delivery is
+    judged on picking alone."""
     today = now.astimezone(tz).date()
     routes, unreadable = await _routes(db, cc, settlement=settlement_name, now=now, tz=tz, today=today)
     deliveries = sorted(routes)
     picks = await _picks(db, cc, settlement=pick_settlement, deliveries=deliveries) if deliveries else {}
     expected = await _expected(db, cc, lookup=lookup_name, deliveries=deliveries) if deliveries else {}
-    packages, overflow = await _packages(db, cc, now=now, lookback_hours=lookback_hours, cap=facts_cap)
+    packages = await _packages(db, cc, now=now, lookback_hours=lookback_hours, cap=facts_cap)
+    loading_routes = packages.routes_that_load | set(routes_that_load or ())
     states = []
     for delivery in deliveries:
         r, p = routes[delivery], picks.get(delivery, _Picks())
-        k = packages.get(delivery)
+        k = packages.by_delivery.get(delivery)
         states.append(model.DeliveryState(
             delivery_number=delivery, route=r.route, customer_name=r.customer_name, customer_number=r.customer_number,
             departure_at=r.departure_at, lines_expected=expected.get(delivery), lines_confirmed=p.confirmed,
             lines_picked=p.picked, lines_short=p.short,
             packages_created=len(k.created) if k else 0, packages_loaded=len(k.loaded) if k else 0,
-            last_pick_at=p.last_pick_at, last_load_at=k.last_load_at if k else None))
+            last_pick_at=p.last_pick_at, last_load_at=k.last_load_at if k else None,
+            loading_expected=r.route in loading_routes if r.route else True))
     states.sort(key=lambda s: (s.departure_at, s.delivery_number))
-    return BoardRead(states=states, overflow=overflow, unreadable_departures=unreadable)
+    return BoardRead(states=states, overflow=packages.overflow, unreadable_departures=unreadable)

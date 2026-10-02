@@ -25,9 +25,42 @@ def _state(**over) -> m.DeliveryState:
     base = dict(delivery_number="29616", route="BRI03", customer_name="BOK SHOP HORSHAM", customer_number="10567",
                 departure_at=datetime(2026, 10, 2, 10, 30, tzinfo=UTC), lines_expected=5, lines_confirmed=0,
                 lines_picked=0, lines_short=0, packages_created=0, packages_loaded=0, last_pick_at=None,
-                last_load_at=None)
+                last_load_at=None, loading_expected=True)
     base.update(over)
     return m.DeliveryState(**base)
+
+
+# ----------------------------------------------------------------- routes without a loading step
+
+def test_a_route_that_never_loads_is_judged_on_picking_only():
+    # BRILA routes (the Gatwick run) are picked and packed but never scanned onto a van, measured over 30 days.
+    inside_load = datetime(2026, 10, 2, 9, 0, tzinfo=UTC)  # 90 min left: inside the load lead
+    assert m.tier_for(_state(lines_picked=5, packages_created=2, loading_expected=False), inside_load, THRESHOLDS) is m.Tier.none
+    assert m.tier_for(_state(lines_picked=2, loading_expected=False), inside_load, THRESHOLDS) is m.Tier.watch
+    after = datetime(2026, 10, 2, 10, 31, tzinfo=UTC)
+    assert m.tier_for(_state(lines_picked=5, loading_expected=False), after, THRESHOLDS) is m.Tier.none
+    assert m.tier_for(_state(lines_picked=4, loading_expected=False), after, THRESHOLDS) is m.Tier.late
+
+
+def test_outcome_without_a_loading_step_is_decided_by_the_last_pick():
+    dep = datetime(2026, 10, 2, 10, 30, tzinfo=UTC)
+    done = _state(lines_picked=5, loading_expected=False, last_pick_at=dep - timedelta(hours=2))
+    assert m.outcome_for(done) == ("picked_in_time", Decimal("120"))
+    late = _state(lines_picked=5, loading_expected=False, last_pick_at=dep + timedelta(minutes=10))
+    assert m.outcome_for(late) == ("picked_late", Decimal("-10"))
+    short = _state(lines_picked=3, loading_expected=False, last_pick_at=dep - timedelta(hours=2))
+    assert m.outcome_for(short) == ("picked_late", Decimal("120"))
+    assert m.outcome_for(_state(loading_expected=False)) == ("picked_late", None)
+
+
+def test_loading_is_open_only_while_fewer_packages_are_loaded_than_are_known():
+    # The known packages come from the pick confirmations plus any extra package created by hand.
+    # Loads of packages nobody "created" through the app still count: nothing loaded is open, anything
+    # loaded that covers every known package is closed.
+    assert m.loading_open(_state(packages_created=0, packages_loaded=0)) is True
+    assert m.loading_open(_state(packages_created=0, packages_loaded=1)) is False
+    assert m.loading_open(_state(packages_created=3, packages_loaded=2)) is True
+    assert m.loading_open(_state(packages_created=3, packages_loaded=4)) is False
 
 
 THRESHOLDS = m.Thresholds(load_min=Decimal("120"), load_source="floor", pick_min=Decimal("180"), pick_source="floor")

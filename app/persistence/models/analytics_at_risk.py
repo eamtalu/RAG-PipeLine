@@ -26,7 +26,8 @@ from app.config.database import Base
 
 TIERS = ("none", "watch", "at_risk", "late")
 STATUSES = ("open", "closed")
-OUTCOMES = ("loaded_in_time", "loaded_late", "never_loaded", "unknown")
+#: `picked_*` are the outcomes of a route without a loading step, where the last pick decides.
+OUTCOMES = ("loaded_in_time", "loaded_late", "never_loaded", "picked_in_time", "picked_late", "unknown")
 CHECK_ACTIONS = ("checked", "unchecked", "reopened")
 THRESHOLD_SOURCES = ("learned", "floor")
 
@@ -97,6 +98,9 @@ class AnalyticsAtRiskDelivery(Base):
     packages_loaded: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     last_pick_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_load_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: Whether the route has a loading step. False for routes that never scan a load (the BRILA runs);
+    #: the last pick then decides the tier and the outcome.
+    loading_expected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
 
     # --- outcome ---
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", server_default="open")

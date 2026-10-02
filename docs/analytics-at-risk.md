@@ -12,8 +12,17 @@ Four bounded reads, in `app/services/analytics_at_risk/board_store.py`, none of 
 2. The `pick_release` settled rows grouped by `delivery_number`: lines confirmed, lines that moved stock, lines short, and the last pick.
 3. The `pick line` lookup read the other way round: how many pick lines name this delivery.
    This is the expected count, known a few minutes before picking starts, because `ListPickLinesByUser` lists the lines first.
-4. The facts of the last 36 hours for `NewDeliveryPackage`, `LoadDeliveryPackage` and `LoadDeliveryPackageList`: packages created and loaded.
+4. The facts of the last 36 hours for `ConfirmPickLine`, `NewDeliveryPackage`, `LoadDeliveryPackage` and `LoadDeliveryPackageList`: packages known and loaded.
+   The packages known for a delivery are the distinct package numbers on its pick confirmations plus any package created by hand; measured live, most packages are born at pick time and `NewDeliveryPackage` alone undercounts them on three deliveries in four.
    The milk load's deliveries live inside the `PackagesToLoad` JSON string and are parsed in Python.
+   The loading docks seen on the loads name the routes that have a loading step at all.
+
+### Routes without a loading step
+
+The BRILA routes (the Gatwick run among them) are picked and packed but never scanned onto a van: not one load in thirty days of history.
+Judging them on loading would flag every one of them every day, so the board decides per route whether loading is expected: a route has a loading step when it loaded anything in the last 36 hours or when its profile holds any loaded delivery.
+A delivery on a route without a loading step is judged on picking alone, never reaches `at_risk` through loading, and closes as `picked_in_time` or `picked_late` by its last pick instead of `loaded_in_time`, `loaded_late` or `never_loaded`.
+The decision is kept on the delivery row (`loading_expected`, migration `f1c2d3e4a5b6`).
 
 ## The rule
 

@@ -113,6 +113,37 @@ async def test_milk_loads_are_parsed_out_of_the_list_call_so_a_milk_delivery_sho
     assert states["29625"].last_load_at == t + timedelta(minutes=10)
 
 
+async def test_packages_known_come_from_the_pick_confirmations_plus_any_hand_made_package():
+    await fx.plant([fx.route_fact(CC, "29616", route="BRI03", dep_date="20261002", dep_time="1130", when=NOW - timedelta(hours=3))])
+    t = NOW - timedelta(hours=2)
+    await fx.plant([
+        fx.pick_fact(CC, "29616", "600001", t, expected="4", picked="4", package="29616/1-1"),
+        fx.pick_fact(CC, "29616", "600002", t + timedelta(minutes=5), expected="2", picked="2", package="29616/1-1"),
+        fx.pick_fact(CC, "29616", "600003", t + timedelta(minutes=9), expected="3", picked="3", package="29616/2-1"),
+        fx.pick_fact(CC, "29616", "600004", t + timedelta(minutes=12), expected="1", picked="1", package=""),  # 7% carry none
+        fx.package_fact(CC, "29616", "29616/3-1", t + timedelta(minutes=20)),  # an extra, hand-made package
+        fx.load_fact(CC, "29616", "29616/1-1", t + timedelta(minutes=30), dock="BRI03"),
+    ])
+    await fx.settle(CC)
+    s = _by_number(await _read())["29616"]
+    assert (s.packages_created, s.packages_loaded) == (3, 1)
+
+
+async def test_a_route_that_loaded_nothing_in_the_lookback_has_no_loading_step():
+    await fx.plant([fx.route_fact(CC, "29616", route="BRI03", dep_date="20261002", dep_time="1130", when=NOW - timedelta(hours=3)),
+                    fx.route_fact(CC, "28518", route="BRILAT", dep_date="20261002", dep_time="1200", when=NOW - timedelta(hours=3))])
+    t = NOW - timedelta(hours=1)
+    await fx.plant([fx.package_fact(CC, "29616", "29616/1-1", t), fx.load_fact(CC, "29616", "29616/1-1", t + timedelta(minutes=5), dock="BRI03"),
+                    fx.package_fact(CC, "28518", "28518/1-1", t, route="BRILAT")])
+    await fx.settle(CC)
+    states = _by_number(await _read())
+    assert states["29616"].loading_expected is True
+    assert states["28518"].loading_expected is False
+    # the caller can widen it with what the route's history says
+    read = await _read(routes_that_load={"BRILAT"})
+    assert _by_number(read)["28518"].loading_expected is True
+
+
 async def test_a_delivery_two_days_out_or_two_days_gone_is_not_on_the_board():
     await fx.plant([
         fx.route_fact(CC, "1", route="BRI01", dep_date="20261004", dep_time="1130", when=NOW - timedelta(hours=1)),  # two days out
