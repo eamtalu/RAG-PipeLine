@@ -82,11 +82,13 @@ async def compute(db: AsyncSession, cc: str, *, as_of: date, settings: Settings,
     return out
 
 
-async def latest(db: AsyncSession, cc: str) -> dict[str, AnalyticsAtRiskRouteProfile]:
-    """The newest profile per route."""
-    rows = (await db.execute(select(AnalyticsAtRiskRouteProfile).where(
-        AnalyticsAtRiskRouteProfile.customer_code == cc,
-    ).order_by(AnalyticsAtRiskRouteProfile.route, AnalyticsAtRiskRouteProfile.as_of_date.desc()).limit(ROWS_CAP))).scalars().all()
+async def latest(db: AsyncSession, cc: str, *, as_of: date | None = None) -> dict[str, AnalyticsAtRiskRouteProfile]:
+    """The newest profile per route; with `as_of`, the newest on or before that day, which is what a
+    replay of that day must judge with."""
+    clauses = [AnalyticsAtRiskRouteProfile.customer_code == cc]
+    if as_of is not None:
+        clauses.append(AnalyticsAtRiskRouteProfile.as_of_date <= as_of)
+    rows = (await db.execute(select(AnalyticsAtRiskRouteProfile).where(*clauses).order_by(AnalyticsAtRiskRouteProfile.route, AnalyticsAtRiskRouteProfile.as_of_date.desc()).limit(ROWS_CAP))).scalars().all()
     out: dict[str, AnalyticsAtRiskRouteProfile] = {}
     for row in rows:
         out.setdefault(row.route, row)

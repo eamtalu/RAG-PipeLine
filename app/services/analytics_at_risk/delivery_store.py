@@ -54,7 +54,8 @@ def _money(value: Decimal | None) -> str | None:
     return None if value is None else format(value.quantize(Decimal("0.01")).normalize(), "f")
 
 
-def _history_entry(tier: model.Tier, at: datetime, minutes: Decimal, thresholds: model.Thresholds) -> dict:
+def history_entry(tier: model.Tier, at: datetime, minutes: Decimal, thresholds: model.Thresholds) -> dict:
+    """One `tier_history` element, the shape the API carries."""
     if tier in (model.Tier.at_risk, model.Tier.late):
         threshold, source = thresholds.load_min, thresholds.load_source
     elif tier is model.Tier.watch:
@@ -112,7 +113,7 @@ async def _write_tier(db: AsyncSession, row: AnalyticsAtRiskDelivery, tier: mode
     old = row.tier or "none"
     if tier.value == old:
         return
-    row.tier_history = [*(row.tier_history or []), _history_entry(tier, now, minutes, thresholds)]
+    row.tier_history = [*(row.tier_history or []), history_entry(tier, now, minutes, thresholds)]
     if _rank(tier.value) > _rank(row.max_tier):
         row.max_tier = tier.value
     if tier is not model.Tier.none and row.first_flagged_at is None:
@@ -210,6 +211,27 @@ async def close_due(db: AsyncSession, cc: str, states: Mapping[str, model.Delive
         closed += 1
     await db.flush()
     return closed
+
+
+def write_closed(db: AsyncSession, cc: str, state: model.DeliveryState, *, thresholds: model.Thresholds,
+                 replay: model.Replay, close_at: datetime, now: datetime, tz: tzinfo, rule_version: str) -> AnalyticsAtRiskDelivery:
+    """A CLOSED row written after the fact by the backfill: the progress and thresholds as `apply`
+    writes them, the tier story from the replay, the outcome from the final state, and `reconstructed`
+    set so the accuracy score can leave it out. The caller has checked no row exists for this
+    delivery and departure date. Does NOT commit."""
+    row = AnalyticsAtRiskDelivery(customer_code=cc, delivery_number=state.delivery_number,
+                                  departure_date=state.departure_at.astimezone(tz).date(), departure_at=state.departure_at,
+                                  tier=replay.final_tier.value, max_tier=replay.max_tier.value,
+                                  first_flagged_at=replay.first_flagged_at,
+                                  first_flagged_tier=None if replay.first_flagged_tier is None else replay.first_flagged_tier.value,
+                                  tier_history=[history_entry(c.tier, c.at, c.minutes_to_departure, thresholds) for c in replay.changes],
+                                  reconstructed=True, rule_version=rule_version, last_evaluated_at=now)
+    _write_progress(row, state)
+    _write_thresholds(row, thresholds)
+    outcome, lead = model.outcome_for(state)
+    row.status, row.closed_at, row.outcome, row.outcome_lead_min = "closed", close_at, outcome, lead
+    db.add(row)
+    return row
 
 
 async def sweep(db: AsyncSession, cc: str, *, now: datetime, older_than: timedelta = SWEEP_AFTER) -> int:
@@ -322,13 +344,15 @@ async def history_counts(db: AsyncSession, cc: str, *, start: date, end: date, t
 
 async def accuracy(db: AsyncSession, cc: str, *, start: date, end: date) -> dict:
     """Flags scored against outcomes over the closed rows departing between `start` and `end`, as one
-    SQL aggregate per route. "Flagged" is a row that ever reached a tier; "late" is an outcome in
+    SQL aggregate per route. Reconstructed rows are left out. "Flagged" is a row that ever reached a tier; "late" is an outcome in
     `LATE_OUTCOMES`. Returns `{"routes": {route: counts}, "by_tier": {tier: {flagged, late}}}` with
     plain integers; the API shapes the totals and the ratios."""
     d = AnalyticsAtRiskDelivery
     flagged = d.max_tier != "none"
     late = d.outcome.in_(LATE_OUTCOMES)
-    base = select(d.route).where(d.customer_code == cc, d.status == "closed", d.departure_date >= start, d.departure_date <= end)
+    # a reconstructed row's flags were computed from its clocks, not observed, so scoring them would score the replay
+    base = select(d.route).where(d.customer_code == cc, d.status == "closed", d.departure_date >= start, d.departure_date <= end,
+                                 d.reconstructed.is_(False))
     rows = (await db.execute(base.add_columns(
         func.count().label("departures"),
         func.count().filter(flagged).label("flagged"),
@@ -339,6 +363,7 @@ async def accuracy(db: AsyncSession, cc: str, *, start: date, end: date) -> dict
     ).group_by(d.route).order_by(d.route))).mappings().all()
     tiers = (await db.execute(select(d.max_tier, func.count().label("flagged"), func.count().filter(late).label("late")).where(
         d.customer_code == cc, d.status == "closed", d.departure_date >= start, d.departure_date <= end, flagged,
+        d.reconstructed.is_(False),
     ).group_by(d.max_tier))).mappings().all()
     return {"routes": {r["route"]: {k: int(v) for k, v in r.items() if k != "route"} for r in rows},
             "by_tier": {t["max_tier"]: {"flagged": int(t["flagged"]), "late": int(t["late"])} for t in tiers}}

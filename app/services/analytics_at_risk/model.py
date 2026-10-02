@@ -179,6 +179,69 @@ def tier_for(state: DeliveryState, now: datetime, thresholds: Thresholds) -> Tie
     return Tier.none
 
 
+# ============================================================== replaying the rule over the clocks
+
+#: The worker judges every minute, so a lead crossed at 09:30:00 is seen at the next tick. The replay
+#: evaluates one minute after each crossing to land on the same instant.
+TICK = timedelta(minutes=1)
+
+
+@dataclass(frozen=True)
+class TierChange:
+    tier: Tier
+    at: datetime
+    minutes_to_departure: Decimal
+
+
+@dataclass(frozen=True)
+class Replay:
+    changes: tuple[TierChange, ...]
+    first_flagged_at: datetime | None
+    first_flagged_tier: Tier | None
+    max_tier: Tier
+    final_tier: Tier
+
+
+def state_as_of(state: DeliveryState, at: datetime) -> DeliveryState:
+    """The delivery as the board would have seen it at `at`, from its final clocks: before its last
+    pick the picking was still open, before its last load the loading was. Exact for the question the
+    rule asks (open or not), whatever the counts were on the way."""
+    picking_done = state.last_pick_at is not None and at >= state.last_pick_at
+    loading_done = state.last_load_at is not None and at >= state.last_load_at
+    return DeliveryState(
+        delivery_number=state.delivery_number, route=state.route, customer_name=state.customer_name,
+        customer_number=state.customer_number, departure_at=state.departure_at, lines_expected=state.lines_expected,
+        lines_confirmed=state.lines_confirmed if picking_done else 0, lines_picked=state.lines_picked if picking_done else 0,
+        lines_short=state.lines_short if picking_done else 0, packages_created=state.packages_created,
+        packages_loaded=state.packages_loaded if loading_done else 0,
+        last_pick_at=state.last_pick_at if picking_done else None, last_load_at=state.last_load_at if loading_done else None,
+        loading_expected=state.loading_expected, transaction_names=state.transaction_names, route_loaded_at=state.route_loaded_at)
+
+
+def replay_tiers(state: DeliveryState, thresholds: Thresholds, *, close_at: datetime) -> Replay:
+    """What the minute pass would have recorded for a delivery whose clocks are all known: the tier
+    changes in order, the first flag, the highest tier and the tier at the close. The tier can only
+    change at a handful of instants: one tick after each lead is crossed and after the departure, the
+    moment picking finished, the moment loading finished, and the close itself."""
+    departure = state.departure_at
+    instants = {departure - timedelta(minutes=float(thresholds.pick_min)) + TICK,
+                departure - timedelta(minutes=float(thresholds.load_min)) + TICK, departure + TICK, close_at}
+    for finished in (state.last_pick_at, state.last_load_at):
+        if finished is not None:
+            instants.add(finished)
+    changes: list[TierChange] = []
+    current = Tier.none
+    for at in sorted(x for x in instants if x <= close_at):
+        tier = tier_for(state_as_of(state, at), at, thresholds)
+        if tier is not current:
+            changes.append(TierChange(tier=tier, at=at, minutes_to_departure=minutes_to_departure(departure, at)))
+            current = tier
+    flagged = [c for c in changes if c.tier is not Tier.none]
+    max_tier = max((c.tier for c in changes), key=lambda t: TIER_RANK[t], default=Tier.none)
+    return Replay(changes=tuple(changes), first_flagged_at=flagged[0].at if flagged else None,
+                  first_flagged_tier=flagged[0].tier if flagged else None, max_tier=max_tier, final_tier=current)
+
+
 # ============================================================== outcome
 
 def outcome_for(state: DeliveryState) -> tuple[str, Decimal | None]:

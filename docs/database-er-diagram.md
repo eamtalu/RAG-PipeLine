@@ -1203,6 +1203,7 @@ erDiagram
         datetime last_pick_at
         datetime last_load_at
         datetime route_loaded_at "the last package scanned onto the route's dock on the departure day; the nearest real departure (b3c4d5e6f7a8)"
+        bool reconstructed "written by the backfill from the logs after the fact; kept out of the accuracy score (c4d5e6f7a8b9)"
         bool loading_expected "false on a route that never scans a load; picking alone decides (f1c2d3e4a5b6)"
         jsonb transaction_names "the picking screens the lines went through; GIN-indexed (a2b3c4d5e6f7)"
         string status "open | closed"
@@ -1278,6 +1279,7 @@ erDiagram
     analytics_settled_rows ||..o{ analytics_at_risk_deliveries : "delivery_route and pick_release read (soft)"
     analytics_lookup_values ||..o{ analytics_at_risk_deliveries : "pick line lookup read (soft)"
     analytics_facts ||..o{ analytics_at_risk_deliveries : "packages and loads read (soft)"
+    log_transactions ||..o{ analytics_at_risk_deliveries : "departures of past days read by the backfill (soft)"
 ```
 
 Unique keys: `analytics_at_risk_deliveries (customer_code, delivery_number, departure_date)`, `analytics_at_risk_route_profiles (customer_code, route, as_of_date)`, `analytics_at_risk_settings (customer_code)`, `analytics_at_risk_tenant_state (customer_code)`.

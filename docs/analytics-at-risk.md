@@ -76,6 +76,23 @@ A row still open a day after its departure closes as `unknown`.
 `GET /analytics/at-risk/accuracy` scores flags against outcomes: precision is the share of flagged deliveries that really ended late, recall the share of late deliveries that had been flagged.
 Both are null, not zero, when nothing is scorable.
 
+## Backfilling the days before the switch-on
+
+The worker can only judge a delivery whose routing call was folded after the departure fields were approved, because approving a field never rewrites old facts.
+So on the day the feature is switched on the history is empty, and the first closed rows appear three hours after the next departures.
+`app/services/analytics_at_risk/backfill.py` fills the days before that, run once by hand:
+
+```
+cd /opt/RAG-Pipeline/RAG-PipeLine && PYTHONPATH=$PWD venv/bin/python -m app.tools.at_risk_backfill tmp-live 2026-09-25 2026-10-02
+```
+
+For each day, oldest first, it reads the departures straight from the routing calls' response text in `log_transactions` (the latest call per delivery wins, as on the board), reuses the board's reads for picks, expected lines, packages and loads up to the day's close, replays the tier rule over the clocks (`model.replay_tiers`: one tick after each lead is crossed, at each completion, at the departure and at the close), and writes a closed row per delivery with the outcome, the three plain words and the tier story.
+Each day is judged with the profiles learned up to the day before, and its own profile is learned once it is written, so the words match what the live rule would have said.
+Rows written this way carry `reconstructed = true` (migration `c4d5e6f7a8b9`).
+They fill the history and teach the route profiles, but the accuracy score leaves them out, because their flags were computed from the clocks rather than observed minute by minute.
+A live row is never overwritten, a day whose deliveries have not all closed is skipped, and each day commits on its own, so an interrupted run resumes by running it again.
+The raw log retention bounds how far back it can go: 60 days of `log_transactions`, and on tmp-live the ingest only became complete on 14 Sep 2026.
+
 ## When it runs
 
 `app/services/workers/analytics_at_risk_worker.py`, behind `ANALYTICS_AT_RISK_WORKER_ENABLED`, on the worker process.
@@ -111,6 +128,7 @@ Then the code:
 3. Set `ANALYTICS_AT_RISK_WORKER_ENABLED=true` in `.env`; only the worker process starts loops.
 4. Restart `fastapirag`, start `fastapirag-worker`, restart `fastapirag-teams-consumer`.
 5. Read `GET /api/v1/analytics/at-risk/board` and `/routes`: on day one every route runs on the floor until twenty closed deliveries accrue.
+6. Optionally run the backfill above for the days before the switch-on, so the history and the route learning start full.
 
 ## Assumptions
 

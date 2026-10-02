@@ -26,6 +26,9 @@ from app.persistence.models.analytics_field_registry import AnalyticsFieldRegist
 from app.persistence.models.analytics_lookup import AnalyticsLookup, AnalyticsLookupValue
 from app.persistence.models.analytics_settlement import AnalyticsSettledRow, AnalyticsSettlement
 from app.persistence.models.customer import Customer
+from app.persistence.models.job import Job
+from app.persistence.models.log_transaction import LogTransaction
+from app.persistence import partitioning as pt
 from app.services.analytics import lookup as lk
 from app.services.analytics import lookup_store
 from app.services.analytics import settle as st
@@ -81,6 +84,8 @@ async def wipe(cc: str) -> None:
     async with async_session() as db:
         for model in MODELS:
             await db.execute(delete(model).where(model.customer_code == cc))
+        await db.execute(delete(LogTransaction).where(LogTransaction.customer_code == cc))
+        await db.execute(delete(Job).where(Job.customer_code == cc))
         await db.execute(delete(Customer).where(Customer.customer_code == cc))
         await db.commit()
 
@@ -154,6 +159,37 @@ def load_list_fact(cc: str, pairs: list[tuple[str, str]], when: datetime, *, doc
     return _fact(cc, "LoadDeliveryPackageList", when, transaction_name="Milk Load (Brighton)", attributes={
         "LoadingDock": dock, "resp.value": "All Packages Loaded",
         "PackagesToLoad": json.dumps([{"DeliveryNumber": d, "PackageNumber": p} for d, p in pairs])})
+
+
+# ============================================================== raw routing calls (for the backfill)
+
+def routing_call(delivery: str, *, route: str, dep_date: str, dep_time: str, when: datetime,
+                 customer_name: str = "BOK SHOP HORSHAM", customer_number: str = "10567", status: str = "success") -> dict:
+    """One `GetNextDeliveryByRoute` call as `log_transactions` holds it: the response text, capped at
+    500 characters by the ingest, with the fields in the order the live WMS writes them."""
+    summary = json.dumps({"DeliveryNumber": delivery, "PickListSuffix": "1", "CustomerNumber": customer_number,
+                          "CustomerName": customer_name, "CustomerPostCode": "BN3 4AD", "StockZone": "A1", "PickingSequence": "0",
+                          "Route": route, "PickingStatus": "40", "Picker": "", "DeparatureDate": dep_date, "DeparatureTime": dep_time,
+                          "PackingStatus": "10", "NumberOfLines": "1", "LinesToPick": "1", "LinesToPack": "1", "HasPackages": False,
+                          "TotalDeliveries": 12, "TotalLines": 102, "PackageNumbers": [], "PackageDetails": [],
+                          "M3UserCredentials": "HIDDEN", "AccessToken": "HIDDEN"}, separators=(",", ":"))[:500]
+    return dict(method="GetNextDeliveryByRoute", started_at=when, ended_at=when, date=when.astimezone(LONDON).date(),
+                status=status, response_summary=summary, transaction_name="Brighton Stock Pick", route=route,
+                attributes={"Route": route, "DepartureDate": dep_date})
+
+
+async def plant_calls(cc: str, calls: list[dict]) -> None:
+    """Write raw transactions under one job, provisioning the day partitions the rows need."""
+    async with async_session() as db:
+        await pt.ensure_coverage(db, days=sorted({c["started_at"].astimezone(timezone.utc).date() for c in calls}),
+                                 tables=("log_transactions",))
+        job = Job(customer_code=cc, filename=f"{cc}.log", storage_key=f"{cc}/{uuid.uuid4().hex}/calls.log",
+                  document_type="transaction_log", status="completed")
+        db.add(job)
+        await db.flush()
+        for c in calls:
+            db.add(LogTransaction(id=uuid.uuid4(), job_id=job.id, customer_code=cc, sealed=True, warehouse="BRI", **c))
+        await db.commit()
 
 
 # ============================================================== lookup values

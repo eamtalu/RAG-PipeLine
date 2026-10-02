@@ -107,6 +107,10 @@ class AnalyticsAtRiskDelivery(Base):
     #: The last package scanned onto the route's dock on the departure day: the van's "ready" moment,
     #: the nearest thing to a departure the WMS records.
     route_loaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: True when the row was written by the backfill after the fact, from the clocks in the logs, rather
+    #: than watched minute by minute. Such a row is history and teaches the route profiles, but the
+    #: accuracy score leaves it out: its flags were computed, not observed.
+    reconstructed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     # --- outcome ---
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", server_default="open")
