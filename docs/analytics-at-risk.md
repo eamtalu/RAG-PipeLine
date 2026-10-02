@@ -47,6 +47,18 @@ With the expected line count unknown, only a delivery with no picks at all count
 - `analytics_at_risk_settings`: the tenant's floors and knobs; no row means the defaults.
 - `analytics_at_risk_tenant_state`: one row for `/status`.
 
+## The three plain words
+
+Every closed delivery is also given one of three words (`model.category_for`, mirrored in SQL by `delivery_store.category_expr` so a filter and a count agree with the row):
+
+- `missed`: the van left without it. A package was never loaded, or lines were never picked.
+- `delayed`: it got away, but behind the route's rhythm (flagged Watch or At risk before the departure) or after the departure time.
+- `fine`: in time and never flagged.
+
+Two edge cases exist for honesty: `unknown` when the board lost sight of the delivery before it closed, and `open` while it has not closed.
+The delivery row also keeps the picking screens its lines went through (`transaction_names`, migration `a2b3c4d5e6f7`), so a supervisor can look at one kind of picking at a time; a delivery that spans two kinds appears under both.
+`GET /analytics/at-risk/history` filters on `category` (a comma list), `transaction` and `delivery` (the start of a number), and returns `counts` per category and the `transactions` seen over the whole range under every filter except the category one, which is what the stacked bar beside the table is drawn from.
+
 ## Acknowledgements
 
 A person marks a flagged delivery as checked with an optional note.

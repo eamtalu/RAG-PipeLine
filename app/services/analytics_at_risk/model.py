@@ -65,6 +65,10 @@ class DeliveryState:
     #: them) are picked and packed but never scanned onto a van, measured over 30 days, so judging them
     #: on loading would flag every one of them every day. False means picking alone decides.
     loading_expected: bool = True
+    #: The picking screens this delivery's lines went through (Brighton Stock Pick, JIT and Shorts
+    #: Pick, Milk Pick, Freezer Pick), so a supervisor can look at one kind of picking at a time. A
+    #: delivery that spans two kinds appears under both.
+    transaction_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -193,6 +197,34 @@ def outcome_for(state: DeliveryState) -> tuple[str, Decimal | None]:
 
 #: Outcomes that count as "actually late" when the flags are scored.
 LATE_OUTCOMES = ("loaded_late", "never_loaded", "picked_late")
+
+#: The three plain words a supervisor reads, plus the two edge cases.
+CATEGORIES = ("missed", "delayed", "fine", "unknown", "open")
+
+
+def category_for(*, outcome: str | None, max_tier: str | None, lines_expected: int | None, lines_picked: int) -> str:
+    """One plain word for a closed delivery.
+
+    - `missed`: the van left without it. A package was never loaded, or lines were never picked.
+    - `delayed`: it got away, but behind the route's rhythm (flagged Watch or At risk before the
+      departure) or after the departure time.
+    - `fine`: in time and never flagged.
+    - `unknown`: the board lost sight of it before it closed; `open`: not closed yet.
+    """
+    if outcome is None:
+        return "open"
+    if outcome == "unknown":
+        return "unknown"
+    if outcome == "never_loaded":
+        return "missed"
+    if outcome == "picked_late":
+        incomplete = lines_picked < lines_expected if lines_expected is not None else lines_picked == 0
+        return "missed" if incomplete else "delayed"
+    if outcome == "loaded_late":
+        return "delayed"
+    if TIER_RANK[Tier(max_tier or "none")] > 0:
+        return "delayed"
+    return "fine"
 
 
 # ============================================================== learning

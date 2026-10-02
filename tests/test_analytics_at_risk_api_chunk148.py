@@ -192,6 +192,34 @@ async def test_history_pages_closed_rows_by_keyset_without_overlap():
     assert e.value.status_code == 422
 
 
+async def test_history_filters_by_category_picking_screen_and_delivery_and_carries_the_counts():
+    day = date(2026, 9, 30)
+    dep = fx.local_day(day, 11, 30)
+    await fx.plant([
+        fx.closed_delivery(CC, "fine1", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(hours=4), outcome="loaded_in_time"),
+        fx.closed_delivery(CC, "slow1", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(hours=1), outcome="loaded_in_time",
+                           max_tier="at_risk", first_flagged_at=dep - timedelta(hours=2), transaction_names=("Brighton Stock Pick", "JIT and Shorts Pick (Brighton)")),
+        fx.closed_delivery(CC, "gone1", route="BRI06", departure_at=dep, last_load_at=dep - timedelta(hours=3), outcome="never_loaded",
+                           max_tier="late", transaction_names=("Milk Pick (Brighton)",), customer_name="HILTON"),
+    ])
+    async with async_session() as db:
+        default = await api.read_history(start="2026-09-30", end="2026-09-30", category="missed,delayed", customer=CC, db=db)
+        jit = await api.read_history(start="2026-09-30", end="2026-09-30", transaction="JIT and Shorts Pick (Brighton)", customer=CC, db=db)
+        one = await api.read_history(start="2026-09-30", end="2026-09-30", delivery="gone", customer=CC, db=db)
+    assert sorted(r["delivery_number"] for r in default["rows"]) == ["gone1", "slow1"]
+    assert {r["delivery_number"]: r["category"] for r in default["rows"]} == {"gone1": "missed", "slow1": "delayed"}
+    # the counts cover the whole range, not just the category filter, so the bar keeps its shape as pills change
+    assert default["counts"] == {"missed": 1, "delayed": 1, "fine": 1, "unknown": 0}
+    assert default["transactions"] == ["Brighton Stock Pick", "JIT and Shorts Pick (Brighton)", "Milk Pick (Brighton)"]
+    assert [r["delivery_number"] for r in jit["rows"]] == ["slow1"] and jit["counts"] == {"missed": 0, "delayed": 1, "fine": 0, "unknown": 0}
+    assert [r["delivery_number"] for r in one["rows"]] == ["gone1"] and one["rows"][0]["transaction_names"] == ["Milk Pick (Brighton)"]
+    assert one["rows"][0]["customer_name"] == "HILTON"
+    with pytest.raises(HTTPException) as e:
+        async with async_session() as db:
+            await api.read_history(start="2026-09-30", end="2026-09-30", category="bad", customer=CC, db=db)
+    assert e.value.status_code == 422
+
+
 async def test_accuracy_counts_flagged_against_actually_late():
     day = date(2026, 9, 30)
     plant = []

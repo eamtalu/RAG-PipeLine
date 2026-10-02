@@ -248,6 +248,58 @@ async def test_a_route_without_a_loading_step_closes_on_its_last_pick():
     assert (g2.outcome, g2.tier, g2.max_tier) == ("picked_late", "late", "late")
 
 
+async def _history_set():
+    day = date(2026, 9, 30)
+    dep = fx.local_day(day, 11, 30)
+    await fx.plant([
+        fx.closed_delivery(CC, "fine1", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(hours=4), outcome="loaded_in_time",
+                           transaction_names=("Brighton Stock Pick",), customer_name="BOK SHOP"),
+        fx.closed_delivery(CC, "delayed1", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(hours=1), outcome="loaded_in_time",
+                           max_tier="at_risk", first_flagged_at=dep - timedelta(hours=2), transaction_names=("Brighton Stock Pick", "JIT and Shorts Pick (Brighton)")),
+        fx.closed_delivery(CC, "delayed2", route="BRI06", departure_at=dep, last_load_at=dep + timedelta(minutes=5), outcome="loaded_late",
+                           transaction_names=("JIT and Shorts Pick (Brighton)",)),
+        fx.closed_delivery(CC, "missed1", route="BRI06", departure_at=dep, last_load_at=dep - timedelta(hours=3), outcome="never_loaded",
+                           max_tier="late", transaction_names=("Milk Pick (Brighton)",), customer_name="HILTON"),
+        fx.closed_delivery(CC, "missed2", route="BRILAT", departure_at=dep, last_load_at=None, outcome="picked_late",
+                           lines_expected=5, lines_picked=3, max_tier="late", transaction_names=("JIT and Shorts Pick (Brighton)",)),
+        fx.closed_delivery(CC, "delayed3", route="BRILAT", departure_at=dep, last_load_at=None, outcome="picked_late",
+                           lines_expected=5, lines_picked=5, max_tier="late", transaction_names=("JIT and Shorts Pick (Brighton)",)),
+        fx.closed_delivery(CC, "lost", route="BRI01", departure_at=dep, last_load_at=None, outcome="unknown"),
+    ])
+    return day
+
+
+async def test_history_filters_on_category_picking_screen_and_delivery_number():
+    day = await _history_set()
+    async with async_session() as db:
+        kw = dict(start=day, end=day, limit=50)
+        everything, _ = await delivery_store.history_rows(db, CC, **kw)
+        missed, _ = await delivery_store.history_rows(db, CC, categories=["missed"], **kw)
+        default, _ = await delivery_store.history_rows(db, CC, categories=["missed", "delayed"], **kw)
+        jit, _ = await delivery_store.history_rows(db, CC, transaction="JIT and Shorts Pick (Brighton)", **kw)
+        jit_missed, _ = await delivery_store.history_rows(db, CC, transaction="JIT and Shorts Pick (Brighton)", categories=["missed"], **kw)
+        by_number, _ = await delivery_store.history_rows(db, CC, delivery="miss", **kw)
+    assert len(everything) == 7
+    assert sorted(r.delivery_number for r in missed) == ["missed1", "missed2"]
+    assert sorted(r.delivery_number for r in default) == ["delayed1", "delayed2", "delayed3", "missed1", "missed2"]
+    # a delivery that spans two kinds of picking appears under both
+    assert sorted(r.delivery_number for r in jit) == ["delayed1", "delayed2", "delayed3", "missed2"]
+    assert [r.delivery_number for r in jit_missed] == ["missed2"]
+    assert sorted(r.delivery_number for r in by_number) == ["missed1", "missed2"]
+
+
+async def test_history_counts_feed_the_pie_and_the_picking_pills():
+    day = await _history_set()
+    async with async_session() as db:
+        summary = await delivery_store.history_counts(db, CC, start=day, end=day)
+        jit = await delivery_store.history_counts(db, CC, start=day, end=day, transaction="JIT and Shorts Pick (Brighton)")
+        none = await delivery_store.history_counts(db, CC, start=day + timedelta(days=1), end=day + timedelta(days=1))
+    assert summary["counts"] == {"missed": 2, "delayed": 3, "fine": 1, "unknown": 1}
+    assert summary["transactions"] == ["Brighton Stock Pick", "JIT and Shorts Pick (Brighton)", "Milk Pick (Brighton)"]
+    assert jit["counts"] == {"missed": 1, "delayed": 3, "fine": 0, "unknown": 0}
+    assert none == {"counts": {"missed": 0, "delayed": 0, "fine": 0, "unknown": 0}, "transactions": []}
+
+
 async def test_the_sweep_closes_a_day_old_open_row_as_unknown():
     await _apply([_state()], DEP - timedelta(hours=8))
     async with async_session() as db:

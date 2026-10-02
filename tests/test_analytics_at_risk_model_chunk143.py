@@ -30,6 +30,27 @@ def _state(**over) -> m.DeliveryState:
     return m.DeliveryState(**base)
 
 
+# ----------------------------------------------------------------- the three plain categories
+
+def test_category_is_missed_delayed_or_fine():
+    # missed: the van left without it
+    assert m.category_for(outcome="never_loaded", max_tier="late", lines_expected=5, lines_picked=5) == "missed"
+    assert m.category_for(outcome="picked_late", max_tier="late", lines_expected=5, lines_picked=3) == "missed"
+    assert m.category_for(outcome="picked_late", max_tier="late", lines_expected=None, lines_picked=0) == "missed"
+    # delayed: it got away, but behind the rhythm or after the departure
+    assert m.category_for(outcome="loaded_late", max_tier="none", lines_expected=5, lines_picked=5) == "delayed"
+    assert m.category_for(outcome="loaded_in_time", max_tier="at_risk", lines_expected=5, lines_picked=5) == "delayed"
+    assert m.category_for(outcome="loaded_in_time", max_tier="watch", lines_expected=5, lines_picked=5) == "delayed"
+    assert m.category_for(outcome="picked_late", max_tier="late", lines_expected=5, lines_picked=5) == "delayed"
+    assert m.category_for(outcome="picked_in_time", max_tier="watch", lines_expected=5, lines_picked=5) == "delayed"
+    # fine: in time and never flagged
+    assert m.category_for(outcome="loaded_in_time", max_tier="none", lines_expected=5, lines_picked=5) == "fine"
+    assert m.category_for(outcome="picked_in_time", max_tier="none", lines_expected=None, lines_picked=4) == "fine"
+    # the board lost sight of it
+    assert m.category_for(outcome="unknown", max_tier="none", lines_expected=5, lines_picked=5) == "unknown"
+    assert m.category_for(outcome=None, max_tier="at_risk", lines_expected=5, lines_picked=5) == "open"
+
+
 # ----------------------------------------------------------------- routes without a loading step
 
 def test_a_route_that_never_loads_is_judged_on_picking_only():

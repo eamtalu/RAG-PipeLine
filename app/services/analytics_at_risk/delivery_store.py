@@ -95,6 +95,8 @@ def _write_progress(row: AnalyticsAtRiskDelivery, state: model.DeliveryState) ->
     row.packages_created, row.packages_loaded = state.packages_created, state.packages_loaded
     row.last_pick_at, row.last_load_at = state.last_pick_at, state.last_load_at
     row.loading_expected = state.loading_expected
+    if state.transaction_names:
+        row.transaction_names = list(state.transaction_names)
 
 
 def _write_thresholds(row: AnalyticsAtRiskDelivery, thresholds: model.Thresholds) -> None:
@@ -130,7 +132,8 @@ def _state_from_row(row: AnalyticsAtRiskDelivery) -> model.DeliveryState:
         lines_confirmed=row.lines_confirmed or 0, lines_picked=row.lines_picked or 0, lines_short=row.lines_short or 0,
         packages_created=row.packages_created or 0, packages_loaded=row.packages_loaded or 0,
         last_pick_at=row.last_pick_at, last_load_at=row.last_load_at,
-        loading_expected=True if row.loading_expected is None else bool(row.loading_expected))
+        loading_expected=True if row.loading_expected is None else bool(row.loading_expected),
+        transaction_names=tuple(row.transaction_names or ()))
 
 
 def _thresholds_from_row(row: AnalyticsAtRiskDelivery, fallback: model.Thresholds) -> model.Thresholds:
@@ -240,24 +243,55 @@ async def board_rows(db: AsyncSession, cc: str, *, dates: Sequence[date], tiers:
     return list((await db.execute(stmt)).scalars().all())
 
 
+def category_expr():
+    """The three plain words as SQL, the same rule as `model.category_for`, so a filter and a count
+    agree with what each row says."""
+    d = AnalyticsAtRiskDelivery
+    incomplete = case((d.lines_expected.is_(None), d.lines_picked == 0), else_=d.lines_picked < d.lines_expected)
+    return case(
+        (d.outcome.is_(None), "open"),
+        (d.outcome == "unknown", "unknown"),
+        (d.outcome == "never_loaded", "missed"),
+        ((d.outcome == "picked_late") & incomplete, "missed"),
+        (d.outcome.in_(("picked_late", "loaded_late")), "delayed"),
+        (d.max_tier != "none", "delayed"),
+        else_="fine")
+
+
+def _history_where(cc: str, *, start: date, end: date, tier: str | None, checked: bool | None, route: str | None,
+                   outcome: str | None, categories: Sequence[str] | None, transaction: str | None, delivery: str | None):
+    d = AnalyticsAtRiskDelivery
+    clauses = [d.customer_code == cc, d.status == "closed", d.departure_date >= start, d.departure_date <= end]
+    if tier:
+        clauses.append(d.max_tier == tier)
+    if checked is True:
+        clauses.append(d.checked_at.is_not(None))
+    elif checked is False:
+        clauses.append(d.checked_at.is_(None))
+    if route:
+        clauses.append(d.route == route)
+    if outcome:
+        clauses.append(d.outcome == outcome)
+    if categories:
+        clauses.append(category_expr().in_(list(categories)))
+    if transaction:
+        clauses.append(d.transaction_names.contains([transaction]))
+    if delivery:
+        clauses.append(d.delivery_number.ilike(f"{delivery.strip()}%"))
+    return clauses
+
+
 async def history_rows(db: AsyncSession, cc: str, *, start: date, end: date, tier: str | None = None,
                        checked: bool | None = None, route: str | None = None, outcome: str | None = None,
+                       categories: Sequence[str] | None = None, transaction: str | None = None, delivery: str | None = None,
                        limit: int = 200, after: tuple[datetime, str] | None = None) -> tuple[list[AnalyticsAtRiskDelivery], bool]:
     """Closed rows with a departure between `start` and `end`, newest departure first, keyset-paged on
-    `(departure_at, delivery_number)`. `tier` filters on the highest tier the row reached."""
-    stmt = select(AnalyticsAtRiskDelivery).where(
-        AnalyticsAtRiskDelivery.customer_code == cc, AnalyticsAtRiskDelivery.status == "closed",
-        AnalyticsAtRiskDelivery.departure_date >= start, AnalyticsAtRiskDelivery.departure_date <= end)
-    if tier:
-        stmt = stmt.where(AnalyticsAtRiskDelivery.max_tier == tier)
-    if checked is True:
-        stmt = stmt.where(AnalyticsAtRiskDelivery.checked_at.is_not(None))
-    elif checked is False:
-        stmt = stmt.where(AnalyticsAtRiskDelivery.checked_at.is_(None))
-    if route:
-        stmt = stmt.where(AnalyticsAtRiskDelivery.route == route)
-    if outcome:
-        stmt = stmt.where(AnalyticsAtRiskDelivery.outcome == outcome)
+    `(departure_at, delivery_number)`. `tier` filters on the highest tier the row reached; `categories`
+    on the plain word; `transaction` on a picking screen the delivery went through; `delivery` on the
+    start of the delivery number."""
+    stmt = select(AnalyticsAtRiskDelivery).where(*_history_where(
+        cc, start=start, end=end, tier=tier, checked=checked, route=route, outcome=outcome, categories=categories,
+        transaction=transaction, delivery=delivery))
     if after is not None:
         at, number = after
         stmt = stmt.where((AnalyticsAtRiskDelivery.departure_at < at) |
@@ -265,6 +299,23 @@ async def history_rows(db: AsyncSession, cc: str, *, start: date, end: date, tie
     rows = list((await db.execute(stmt.order_by(AnalyticsAtRiskDelivery.departure_at.desc(), AnalyticsAtRiskDelivery.delivery_number.desc())
                                   .limit(limit + 1))).scalars().all())
     return rows[:limit], len(rows) > limit
+
+
+async def history_counts(db: AsyncSession, cc: str, *, start: date, end: date, tier: str | None = None,
+                         checked: bool | None = None, route: str | None = None, outcome: str | None = None,
+                         transaction: str | None = None, delivery: str | None = None) -> dict:
+    """The pie beside the history: how many closed rows fall in each category over the range, under
+    every filter EXCEPT the category one, plus the picking screens seen, so the filter pills can be
+    drawn from what is there. Two small aggregates, never a row read."""
+    d = AnalyticsAtRiskDelivery
+    where = _history_where(cc, start=start, end=end, tier=tier, checked=checked, route=route, outcome=outcome,
+                           categories=None, transaction=transaction, delivery=delivery)
+    cat = category_expr().label("category")
+    counts = {c: 0 for c in ("missed", "delayed", "fine", "unknown")}
+    for category, n in (await db.execute(select(cat, func.count()).where(*where).group_by(cat))).all():
+        counts[category] = int(n)
+    names = (await db.execute(select(func.distinct(func.jsonb_array_elements_text(d.transaction_names))).where(*where))).scalars().all()
+    return {"counts": counts, "transactions": sorted(n for n in names if n)}
 
 
 async def accuracy(db: AsyncSession, cc: str, *, start: date, end: date) -> dict:

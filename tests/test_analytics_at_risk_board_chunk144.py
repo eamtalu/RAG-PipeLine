@@ -70,6 +70,7 @@ async def test_pick_progress_comes_from_the_pick_release_rows_per_delivery():
     # which is how pick_release defines `is_short`)
     assert (s.lines_confirmed, s.lines_picked, s.lines_short) == (3, 2, 2)
     assert s.last_pick_at == t + timedelta(minutes=9)
+    assert s.transaction_names == ("Brighton Stock Pick",)
     assert "29999" not in states  # no routing call ever named it, so it has no departure to be late for
 
 

@@ -113,6 +113,7 @@ class _Picks:
     picked: int = 0
     short: int = 0
     last_pick_at: datetime | None = None
+    transaction_names: tuple[str, ...] = ()
 
 
 async def _picks(db: AsyncSession, cc: str, *, settlement: str, deliveries: Sequence[str]) -> dict[str, _Picks]:
@@ -123,12 +124,14 @@ async def _picks(db: AsyncSession, cc: str, *, settlement: str, deliveries: Sequ
         rows = (await db.execute(select(
             AnalyticsSettledRow.delivery_number, func.count(), func.count().filter(picked > 0),
             func.coalesce(func.sum(short), 0), func.max(AnalyticsSettledRow.event_time),
+            func.array_agg(func.distinct(AnalyticsSettledRow.transaction_name)),
         ).where(
             AnalyticsSettledRow.customer_code == cc, AnalyticsSettledRow.settlement == settlement,
             AnalyticsSettledRow.delivery_number.in_(list(batch)),
         ).group_by(AnalyticsSettledRow.delivery_number))).all()
-        for delivery, confirmed, picked_n, short_n, last in rows:
-            out[delivery] = _Picks(confirmed=int(confirmed), picked=int(picked_n), short=int(short_n), last_pick_at=last)
+        for delivery, confirmed, picked_n, short_n, last, names in rows:
+            out[delivery] = _Picks(confirmed=int(confirmed), picked=int(picked_n), short=int(short_n), last_pick_at=last,
+                                   transaction_names=tuple(sorted(n for n in (names or []) if n)))
     return out
 
 
@@ -234,6 +237,7 @@ async def read_states(db: AsyncSession, cc: str, *, now: datetime, tz: tzinfo,
             lines_picked=p.picked, lines_short=p.short,
             packages_created=len(k.created) if k else 0, packages_loaded=len(k.loaded) if k else 0,
             last_pick_at=p.last_pick_at, last_load_at=k.last_load_at if k else None,
-            loading_expected=r.route in loading_routes if r.route else True))
+            loading_expected=r.route in loading_routes if r.route else True,
+            transaction_names=p.transaction_names))
     states.sort(key=lambda s: (s.departure_at, s.delivery_number))
     return BoardRead(states=states, overflow=packages.overflow, unreadable_departures=unreadable)

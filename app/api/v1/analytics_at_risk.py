@@ -101,6 +101,9 @@ def _row_json(row: AnalyticsAtRiskDelivery, now: datetime) -> dict:
         "packages": {"created": int(row.packages_created or 0), "loaded": int(row.packages_loaded or 0)},
         "last_pick_at": _iso(row.last_pick_at), "last_load_at": _iso(row.last_load_at),
         "loading_expected": True if row.loading_expected is None else bool(row.loading_expected),
+        "transaction_names": list(row.transaction_names or []),
+        "category": model.category_for(outcome=row.outcome, max_tier=row.max_tier, lines_expected=row.lines_expected,
+                                       lines_picked=int(row.lines_picked or 0)),
         "status": row.status, "closed_at": _iso(row.closed_at), "outcome": row.outcome,
         "outcome_lead_min": _s(row.outcome_lead_min), "check": check, "reopened": reopened,
         "tier_history": list(row.tier_history or []), "rule_version": row.rule_version,
@@ -204,12 +207,19 @@ async def read_checks(start: str | None = None, end: str | None = None, limit: i
 
 @router.get("/history")
 async def read_history(start: str, end: str, tier: str | None = None, checked: bool | None = None, route: str | None = None,
-                       outcome: str | None = None, limit: int = 200, after: str | None = None,
+                       outcome: str | None = None, category: str | None = None, transaction: str | None = None,
+                       delivery: str | None = None, limit: int = 200, after: str | None = None,
                        customer: str = Depends(get_current_customer), db: AsyncSession = Depends(get_session)):
     """Closed rows departing between `start` and `end` (tenant-local dates, at most 180 days apart),
-    newest first, keyset paged. `tier` filters on the highest tier the row reached."""
+    newest first, keyset paged. `tier` filters on the highest tier the row reached; `category` is a
+    comma list of the plain words (missed, delayed, fine, unknown); `transaction` a picking screen the
+    delivery went through; `delivery` the start of a delivery number. `counts` and `transactions`
+    describe the whole range under every filter except `category`, for the pie and the pills."""
     _check("tier", tier, TIERS)
     _check("outcome", outcome, OUTCOMES)
+    categories = [c.strip() for c in (category or "").split(",") if c.strip()]
+    for c in categories:
+        _check("category", c, model.CATEGORIES)
     start_d, end_d = _date("start", start), _date("end", end)
     if end_d < start_d:
         raise HTTPException(422, detail="end must not be before start")
@@ -222,13 +232,15 @@ async def read_history(start: str, end: str, tier: str | None = None, checked: b
             cursor = (datetime.fromisoformat(at_text), number)
         except ValueError:
             raise HTTPException(422, detail="after must be a value this endpoint returned")
-    rows, truncated = await delivery_store.history_rows(db, customer, start=start_d, end=end_d, tier=tier, checked=checked,
-                                                        route=route, outcome=outcome, limit=min(max(limit, 1), HISTORY_MAX),
-                                                        after=cursor)
+    filters = dict(tier=tier, checked=checked, route=route, outcome=outcome, transaction=transaction or None, delivery=delivery or None)
+    rows, truncated = await delivery_store.history_rows(db, customer, start=start_d, end=end_d, categories=categories or None,
+                                                        limit=min(max(limit, 1), HISTORY_MAX), after=cursor, **filters)
+    summary = await delivery_store.history_counts(db, customer, start=start_d, end=end_d, **filters) if cursor is None else None
     now = _now()
     return {"start": start_d.isoformat(), "end": end_d.isoformat(), "rows": [_row_json(r, now) for r in rows],
             "truncated": truncated,
-            "next_after": f"{rows[-1].departure_at.isoformat()}|{rows[-1].delivery_number}" if rows and truncated else None}
+            "next_after": f"{rows[-1].departure_at.isoformat()}|{rows[-1].delivery_number}" if rows and truncated else None,
+            "counts": summary["counts"] if summary else None, "transactions": summary["transactions"] if summary else None}
 
 
 def _ratio(numerator: int, denominator: int) -> str | None:

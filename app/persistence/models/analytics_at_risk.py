@@ -101,6 +101,9 @@ class AnalyticsAtRiskDelivery(Base):
     #: Whether the route has a loading step. False for routes that never scan a load (the BRILA runs);
     #: the last pick then decides the tier and the outcome.
     loading_expected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    #: The picking screens the delivery's lines went through, as a JSON list of names. GIN-indexed so
+    #: the history can filter on one kind of picking.
+    transaction_names: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
 
     # --- outcome ---
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", server_default="open")

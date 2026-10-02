@@ -1203,6 +1203,7 @@ erDiagram
         datetime last_pick_at
         datetime last_load_at
         bool loading_expected "false on a route that never scans a load; picking alone decides (f1c2d3e4a5b6)"
+        jsonb transaction_names "the picking screens the lines went through; GIN-indexed (a2b3c4d5e6f7)"
         string status "open | closed"
         datetime closed_at
         string outcome "loaded_in_time | loaded_late | never_loaded | picked_in_time | picked_late | unknown"
