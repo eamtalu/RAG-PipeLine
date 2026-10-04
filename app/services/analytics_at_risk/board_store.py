@@ -172,6 +172,8 @@ class _PackageRead:
     routes_that_load: set[str]
     #: When each dock was last loaded on each local day: the route's "van ready" moment.
     route_loaded: dict[tuple[str, date], datetime]
+    #: When each dock was first loaded on each local day: the van's loading started.
+    route_loading_from: dict[tuple[str, date], datetime]
     overflow: bool
 
 
@@ -191,6 +193,7 @@ async def _packages(db: AsyncSession, cc: str, *, since: datetime, until: dateti
     out: dict[str, _Packages] = defaultdict(lambda: _Packages(created=set(), loaded=set()))
     routes: set[str] = set()
     route_loaded: dict[tuple[str, date], datetime] = {}
+    route_loading_from: dict[tuple[str, date], datetime] = {}
 
     def loaded(delivery: str, package: str, at: datetime, dock: str | None) -> None:
         p = out[delivery]
@@ -202,6 +205,8 @@ async def _packages(db: AsyncSession, cc: str, *, since: datetime, until: dateti
             key = (dock, at.astimezone(tz).date())
             if key not in route_loaded or at > route_loaded[key]:
                 route_loaded[key] = at
+            if key not in route_loading_from or at < route_loading_from[key]:
+                route_loading_from[key] = at
 
     for method, at, delivery, fact_id, quantity, package_number, packages_to_load, dock in rows[:cap]:
         if method == "ConfirmPickLine":
@@ -214,13 +219,16 @@ async def _packages(db: AsyncSession, cc: str, *, since: datetime, until: dateti
         else:
             for d, p in model.parse_packages_to_load(packages_to_load):
                 loaded(d, p, at, _text(dock))
-    return _PackageRead(by_delivery=dict(out), routes_that_load=routes, route_loaded=route_loaded, overflow=overflow)
+    return _PackageRead(by_delivery=dict(out), routes_that_load=routes, route_loaded=route_loaded,
+                        route_loading_from=route_loading_from, overflow=overflow)
 
 
 # ============================================================== one state from the pieces
 
 def assemble(delivery: str, r: _Route, p: _Picks, k: _Packages | None, *, expected: int | None,
-             loading_routes: set[str], route_loaded: dict[tuple[str, date], datetime], tz: tzinfo) -> model.DeliveryState:
+             loading_routes: set[str], route_loaded: dict[tuple[str, date], datetime],
+             route_loading_from: dict[tuple[str, date], datetime], tz: tzinfo) -> model.DeliveryState:
+    day_key = (r.route, r.departure_at.astimezone(tz).date()) if r.route else None
     return model.DeliveryState(
         delivery_number=delivery, route=r.route, customer_name=r.customer_name, customer_number=r.customer_number,
         departure_at=r.departure_at, lines_expected=expected, lines_confirmed=p.confirmed,
@@ -229,7 +237,8 @@ def assemble(delivery: str, r: _Route, p: _Picks, k: _Packages | None, *, expect
         last_pick_at=p.last_pick_at, last_load_at=k.last_load_at if k else None,
         loading_expected=r.route in loading_routes if r.route else True,
         transaction_names=p.transaction_names,
-        route_loaded_at=route_loaded.get((r.route, r.departure_at.astimezone(tz).date())) if r.route else None)
+        route_loaded_at=route_loaded.get(day_key) if day_key else None,
+        route_loading_from=route_loading_from.get(day_key) if day_key else None)
 
 
 # ============================================================== the board
@@ -252,6 +261,7 @@ async def read_states(db: AsyncSession, cc: str, *, now: datetime, tz: tzinfo,
     packages = await _packages(db, cc, since=now - timedelta(hours=lookback_hours), until=None, cap=facts_cap, tz=tz)
     loading_routes = packages.routes_that_load | set(routes_that_load or ())
     states = [assemble(d, routes[d], picks.get(d, _Picks()), packages.by_delivery.get(d), expected=expected.get(d),
-                       loading_routes=loading_routes, route_loaded=packages.route_loaded, tz=tz) for d in deliveries]
+                       loading_routes=loading_routes, route_loaded=packages.route_loaded,
+                       route_loading_from=packages.route_loading_from, tz=tz) for d in deliveries]
     states.sort(key=lambda s: (s.departure_at, s.delivery_number))
     return BoardRead(states=states, overflow=packages.overflow, unreadable_departures=unreadable)

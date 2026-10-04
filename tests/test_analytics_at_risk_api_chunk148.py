@@ -25,7 +25,8 @@ LONDON = fx.LONDON
 UTC = timezone.utc
 DEP = datetime(2026, 10, 2, 10, 30, tzinfo=UTC)  # 11:30 BST on 2 Oct
 NOW = DEP - timedelta(minutes=90)
-TH = model.Thresholds(load_min=Decimal("120"), load_source="floor", pick_min=Decimal("180"), pick_source="floor")
+USUAL = DEP - timedelta(minutes=60)  # the van is usually ready an hour before the WMS departure, so NOW sits on the window edge
+CLOCK_FOR = fx.clock_before_departure(60)
 
 
 @pytest.fixture(autouse=True)
@@ -49,19 +50,19 @@ def _state(number, **over) -> model.DeliveryState:
 
 async def _apply(states, now=NOW):
     async with async_session() as db:
-        await delivery_store.apply(db, CC, states, now=now, tz=LONDON, thresholds_for=lambda r: TH, rule_version=RULE_VERSION)
+        await delivery_store.apply(db, CC, states, now=now, tz=LONDON, clock_for=CLOCK_FOR, rule_version=RULE_VERSION)
         await state_store.touch(db, CC, last_evaluated_at=now, open_rows=len(states))
         await db.commit()
 
 
 async def _board_states():
-    """Four open deliveries: one fine, one watch, one at risk, one late (yesterday's departure)."""
+    """Four open deliveries: one fine, one watch, one at risk, one left behind (yesterday's departure)."""
     yesterday = DEP - timedelta(days=1)
     return [
         _state("fine"),
-        _state("watch", departure_at=DEP + timedelta(minutes=60), lines_picked=2, packages_created=0, packages_loaded=0),  # 150 min: inside pick lead
-        _state("risk", packages_loaded=1, last_load_at=DEP - timedelta(hours=3), route_loaded_at=DEP - timedelta(hours=2)),  # 90 min: inside load lead
-        _state("late", departure_at=yesterday, packages_loaded=1),
+        _state("watch", lines_picked=2, packages_created=1, packages_loaded=1),  # picking open, its one package on the van
+        _state("risk", packages_loaded=1, last_load_at=DEP - timedelta(hours=3), route_loaded_at=DEP - timedelta(hours=2)),  # a package off the van
+        _state("behind", departure_at=yesterday, packages_loaded=1),  # the van went yesterday without it
     ]
 
 
@@ -73,13 +74,14 @@ async def test_board_lists_open_deliveries_sorted_by_tier_then_minutes():
         out = await api.read_board(window="both", customer=CC, db=db)
     assert out["timezone"] == "Europe/London" and out["stale"] is False
     assert out["evaluated_at"] == NOW.isoformat() and out["now"] == NOW.isoformat()
-    assert out["counts"] == {"open": 4, "watch": 1, "at_risk": 1, "late": 1, "checked": 0}
-    assert out["settings"] == {"load_floor_min": 120, "pick_floor_min": 180}
-    assert [d["delivery_number"] for d in out["deliveries"]] == ["late", "risk", "watch", "fine"]
+    assert out["counts"] == {"open": 4, "watch": 1, "at_risk": 1, "left_behind": 1, "checked": 0}
+    assert out["settings"] == {"warn_before_min": 30, "gone_after_min": 20}
+    assert [d["delivery_number"] for d in out["deliveries"]] == ["behind", "risk", "watch", "fine"]
     risk = out["deliveries"][1]
     assert risk["tier"] == "at_risk" and risk["max_tier"] == "at_risk"
     assert risk["minutes_to_departure"] == "90" and isinstance(risk["lines"]["expected"], int)
-    assert risk["threshold"] == {"load_min": "120", "load_source": "floor", "pick_min": "180", "pick_source": "floor"}
+    assert (risk["usual_ready_at"], risk["usual_ready_source"], risk["minutes_to_usual_ready"]) == (USUAL.isoformat(), "learned", "30")
+    assert risk["before_van_min"] == "60" and risk["van_late_min"] == "-60"  # on the van an hour before it was ready; the van an hour early
     assert risk["lines"] == {"expected": 5, "confirmed": 5, "picked": 5, "short": 0}
     assert risk["packages"] == {"created": 2, "loaded": 1}
     assert risk["check"] is None and risk["reopened"] is False
@@ -88,8 +90,8 @@ async def test_board_lists_open_deliveries_sorted_by_tier_then_minutes():
     assert risk["route_loaded_at"] == (DEP - timedelta(hours=2)).isoformat()
     assert out["deliveries"][3]["route_loaded_at"] is None
     assert risk["first_flagged_at"] == NOW.isoformat()
-    late = out["deliveries"][0]
-    assert late["tier"] == "late" and late["minutes_to_departure"].startswith("-")
+    behind = out["deliveries"][0]
+    assert behind["tier"] == "left_behind" and behind["minutes_to_departure"].startswith("-") and behind["minutes_to_usual_ready"].startswith("-")
 
 
 async def test_board_windows_and_tier_filter():
@@ -99,7 +101,7 @@ async def test_board_windows_and_tier_filter():
         tomorrow = await api.read_board(window="tomorrow", customer=CC, db=db)
         risky = await api.read_board(window="both", tier="at_risk", customer=CC, db=db)
     # yesterday's departure that is still open is overdue, so it stays on today's board until it closes
-    assert sorted(d["delivery_number"] for d in today["deliveries"]) == ["fine", "late", "risk", "watch"]
+    assert sorted(d["delivery_number"] for d in today["deliveries"]) == ["behind", "fine", "risk", "watch"]
     assert [d["delivery_number"] for d in tomorrow["deliveries"]] == ["tomorrow"]
     assert [d["delivery_number"] for d in risky["deliveries"]] == ["risk"]
     with pytest.raises(HTTPException) as e:
@@ -148,8 +150,7 @@ async def test_a_reopened_check_is_visible_on_the_board():
     async with async_session() as db:
         await api.check_delivery("watch", body={"checked_by": "amin"}, customer=CC, db=db)
     # the watch delivery's loading is now behind too
-    await _apply([_state("watch", departure_at=DEP + timedelta(minutes=60), lines_picked=5, packages_created=0, packages_loaded=0)],
-                 now=DEP - timedelta(minutes=30))  # 90 min left: at_risk
+    await _apply([_state("watch", lines_picked=5, packages_created=2, packages_loaded=1)], now=DEP - timedelta(minutes=50))  # at_risk
     async with async_session() as db:
         out = await api.read_board(window="both", customer=CC, db=db)
     row = next(d for d in out["deliveries"] if d["delivery_number"] == "watch")
@@ -201,28 +202,60 @@ async def test_history_filters_by_category_picking_screen_and_delivery_and_carri
     day = date(2026, 9, 30)
     dep = fx.local_day(day, 11, 30)
     await fx.plant([
-        fx.closed_delivery(CC, "fine1", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(hours=4), outcome="loaded_in_time"),
-        fx.closed_delivery(CC, "slow1", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(hours=1), outcome="loaded_in_time",
+        fx.closed_delivery(CC, "fine1", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(hours=4), outcome="loaded_in_time",
+                           usual_ready_at=dep - timedelta(hours=1)),
+        fx.closed_delivery(CC, "slow1", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(minutes=30), outcome="loaded_in_time",
+                           usual_ready_at=dep - timedelta(hours=1), route_loaded_at=dep - timedelta(minutes=25),
                            max_tier="at_risk", first_flagged_at=dep - timedelta(hours=2), transaction_names=("Brighton Stock Pick", "JIT and Shorts Pick (Brighton)")),
         fx.closed_delivery(CC, "gone1", route="BRI06", departure_at=dep, last_load_at=dep - timedelta(hours=3), outcome="never_loaded",
-                           max_tier="late", transaction_names=("Milk Pick (Brighton)",), customer_name="HILTON"),
+                           usual_ready_at=dep - timedelta(hours=1), max_tier="left_behind", transaction_names=("Milk Pick (Brighton)",), customer_name="HILTON"),
     ])
     async with async_session() as db:
-        default = await api.read_history(start="2026-09-30", end="2026-09-30", category="missed,delayed", customer=CC, db=db)
+        default = await api.read_history(start="2026-09-30", end="2026-09-30", category="missed,held", customer=CC, db=db)
         jit = await api.read_history(start="2026-09-30", end="2026-09-30", transaction="JIT and Shorts Pick (Brighton)", customer=CC, db=db)
         one = await api.read_history(start="2026-09-30", end="2026-09-30", delivery="gone", customer=CC, db=db)
     assert sorted(r["delivery_number"] for r in default["rows"]) == ["gone1", "slow1"]
-    assert {r["delivery_number"]: r["category"] for r in default["rows"]} == {"gone1": "missed", "slow1": "delayed"}
+    assert {r["delivery_number"]: r["category"] for r in default["rows"]} == {"gone1": "missed", "slow1": "held"}
+    slow = next(r for r in default["rows"] if r["delivery_number"] == "slow1")
+    assert (slow["before_van_min"], slow["van_late_min"]) == ("5", "35")  # on the van 5 min before it was ready; the van 35 min late
     # the counts cover the whole range, not just the category filter, so the bar keeps its shape as pills change
-    assert default["counts"] == {"missed": 1, "delayed": 1, "fine": 1, "unknown": 0}
+    assert default["counts"] == {"missed": 1, "held": 1, "fine": 1, "unknown": 0}
     assert default["transactions"] == ["Brighton Stock Pick", "JIT and Shorts Pick (Brighton)", "Milk Pick (Brighton)"]
-    assert [r["delivery_number"] for r in jit["rows"]] == ["slow1"] and jit["counts"] == {"missed": 0, "delayed": 1, "fine": 0, "unknown": 0}
+    assert [r["delivery_number"] for r in jit["rows"]] == ["slow1"] and jit["counts"] == {"missed": 0, "held": 1, "fine": 0, "unknown": 0}
     assert [r["delivery_number"] for r in one["rows"]] == ["gone1"] and one["rows"][0]["transaction_names"] == ["Milk Pick (Brighton)"]
     assert one["rows"][0]["customer_name"] == "HILTON"
     with pytest.raises(HTTPException) as e:
         async with async_session() as db:
             await api.read_history(start="2026-09-30", end="2026-09-30", category="bad", customer=CC, db=db)
     assert e.value.status_code == 422
+
+
+async def test_vans_aggregate_one_row_per_route_per_day():
+    day = date(2026, 9, 30)
+    dep = fx.local_day(day, 11, 30)
+    usual, ready = dep - timedelta(hours=1), dep - timedelta(minutes=25)
+    await fx.plant([
+        fx.closed_delivery(CC, "f", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(hours=4), outcome="loaded_in_time",
+                           usual_ready_at=usual, route_loaded_at=ready, route_loading_from=dep - timedelta(hours=5)),
+        fx.closed_delivery(CC, "h", route="BRI03", departure_at=dep, last_load_at=ready, outcome="loaded_in_time",
+                           usual_ready_at=usual, route_loaded_at=ready, route_loading_from=dep - timedelta(hours=5)),
+        fx.closed_delivery(CC, "m", route="BRI03", departure_at=dep, last_load_at=None, outcome="never_loaded",
+                           usual_ready_at=usual, route_loaded_at=ready, route_loading_from=dep - timedelta(hours=5), max_tier="left_behind"),
+        fx.closed_delivery(CC, "g", route="BRILA1", departure_at=dep, last_load_at=None, last_pick_at=dep - timedelta(hours=2), outcome="picked_in_time",
+                           usual_ready_at=dep - timedelta(hours=1)),
+    ])
+    async with async_session() as db:
+        out = await api.read_vans(start="2026-09-30", end="2026-09-30", customer=CC, db=db)
+    assert [v["route"] for v in out["vans"]] == ["BRI03", "BRILA1"]
+    van = out["vans"][0]
+    assert (van["deliveries"], van["held"], van["missed"], van["fine"]) == (3, 1, 1, 1)
+    assert (van["loading_from"], van["ready_at"], van["usual_ready_at"]) == (_iso(dep - timedelta(hours=5)), _iso(ready), _iso(usual))
+    assert van["late_min"] == "35" and van["loading_expected"] is True and van["reconstructed"] is False
+    assert out["vans"][1]["loading_expected"] is False and out["vans"][1]["ready_at"] is None
+
+
+def _iso(d):
+    return d.isoformat()
 
 
 async def test_accuracy_counts_flagged_against_actually_late():
@@ -238,6 +271,7 @@ async def test_accuracy_counts_flagged_against_actually_late():
             outcome="never_loaded" if late and i == 9 else "loaded_late" if late else "loaded_in_time",
             max_tier="at_risk" if flagged else "none", first_flagged_at=fx.local_day(day, 9, 0) if flagged else None))
     plant.append(fx.closed_delivery(CC, "u", route="BRI01", departure_at=fx.local_day(day, 11, 30), last_load_at=None, outcome="unknown"))
+    # the accuracy tile keeps its old meaning: flagged against the deliveries that really were late or never loaded
     await fx.plant(plant)
     async with async_session() as db:
         out = await api.read_accuracy(days=28, customer=CC, db=db)
@@ -263,19 +297,21 @@ async def test_accuracy_with_nothing_closed_says_so_with_nulls_not_zeros():
 async def test_settings_default_then_persist_and_refuse_a_bad_range():
     async with async_session() as db:
         before = await api.read_settings(customer=CC, db=db)
-    assert before["defaulted"] is True and before["load_floor_min"] == 120 and before["coverage"] == "0.9"
+    assert before["defaulted"] is True and before["warn_before_min"] == 30 and before["gone_after_min"] == 20 and before["coverage"] == "0.9"
     with pytest.raises(HTTPException) as e:
         async with async_session() as db:
-            await api.put_settings(body={"load_floor_min": -5, "coverage": 2}, customer=CC, db=db)
-    assert e.value.status_code == 422 and "load_floor_min" in str(e.value.detail) and "coverage" in str(e.value.detail)
+            await api.put_settings(body={"warn_before_min": -5, "coverage": 2}, customer=CC, db=db)
+    assert e.value.status_code == 422 and "warn_before_min" in str(e.value.detail) and "coverage" in str(e.value.detail)
     async with async_session() as db:
-        after = await api.put_settings(body={"load_floor_min": 90, "updated_by": "amin"}, customer=CC, db=db)
-    assert (after["defaulted"], after["load_floor_min"], after["pick_floor_min"], after["updated_by"]) == (False, 90, 180, "amin")
+        after = await api.put_settings(body={"warn_before_min": 45, "updated_by": "amin"}, customer=CC, db=db)
+    assert (after["defaulted"], after["warn_before_min"], after["gone_after_min"], after["min_days"], after["updated_by"]) == (False, 45, 20, 5, "amin")
 
 
-async def test_routes_read_the_latest_profile_with_the_effective_threshold():
+async def test_routes_read_the_latest_profile_with_the_vans_usual_ready_time():
     rows = [fx.closed_delivery(CC, f"d{i}", route="BRI03", departure_at=fx.local_day(date(2026, 10, 1) - timedelta(days=i % 10), 11, 30),
                                last_load_at=fx.local_day(date(2026, 10, 1) - timedelta(days=i % 10), 11, 30) - timedelta(minutes=200 + 10 * i),
+                               route_loaded_at=fx.local_day(date(2026, 10, 1) - timedelta(days=i % 10), 7, 0),
+                               route_loading_from=fx.local_day(date(2026, 10, 1) - timedelta(days=i % 10), 5, 30),
                                outcome="loaded_in_time") for i in range(20)]
     await fx.plant(rows)
     from app.services.analytics_at_risk import runner
@@ -285,8 +321,10 @@ async def test_routes_read_the_latest_profile_with_the_effective_threshold():
     assert len(out["routes"]) == 1
     r = out["routes"][0]
     assert (r["route"], r["as_of_date"], r["sample"], r["loaded_sample"]) == ("BRI03", "2026-10-01", 20, 20)
-    assert r["learned_load_min"] == "219" and r["effective_load_min"] == "219" and r["load_source"] == "learned"
+    assert (r["loading_expected"], r["van_days"], r["usual_ready"], r["usual_source"]) == (True, 10, "07:00", "learned")
+    assert (r["van_ready_p50"], r["van_ready_latest"], r["loading_from_p50"]) == ("07:00", "07:00", "05:30")
     assert r["departure_time_mode"] == "1130"
+    assert out["windows"] == {"warn_before_min": 30, "gone_after_min": 20} and out["min_days"] == 5
 
 
 async def test_status_readiness_flags_say_what_a_tenant_still_lacks():

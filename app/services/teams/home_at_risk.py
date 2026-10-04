@@ -3,7 +3,8 @@
 The web tab reads the board through `/analytics/at-risk/*`. The Teams tab cannot reach this server,
 so the same rows are read here, once a minute, into one small block the edge only draws: a summary
 line, up to twelve deliveries worst first, and the accuracy line. Every value a person reads is text
-decided here; `tier` and `minutes_to_departure` ride alongside only so the edge can colour and order.
+decided here; `tier` and `minutes_to_departure` (to the van's usual ready time) ride alongside only
+so the edge can colour and order.
 
 The honesty rules are the web page's: a check is shown as the person's word and re-opened when the
 tier rises past it; the accuracy line appears only once enough departures have closed; and a board
@@ -27,8 +28,8 @@ MIN_SCORED_DEPARTURES = 20
 STALE_POLLS = 3
 NO_BOARD_NOTE = "no delivery board yet · the worker needs a delivery_route settlement to read"
 STALE_NOTE = "the board has not been refreshed for a while · the figures below may be behind"
-TIER_TEXT = {"none": "fine", "watch": "Watch", "at_risk": "At risk", "late": "Late"}
-TIER_ORDER = {"late": 3, "at_risk": 2, "watch": 1, "none": 0}
+TIER_TEXT = {"none": "fine", "watch": "Watch", "at_risk": "At risk", "left_behind": "Left behind"}
+TIER_ORDER = {"left_behind": 3, "at_risk": 2, "watch": 1, "none": 0}
 
 
 # ============================================================== text
@@ -45,14 +46,15 @@ def _plural(n: int, word: str) -> str:
 
 
 def minutes_text(minutes: Decimal) -> str:
+    """Minutes to the van's usual ready time, as words."""
     m = int(minutes.to_integral_value(rounding="ROUND_HALF_UP"))
     if m < 0:
-        return f"left {abs(m)} min ago"
+        return f"usual time passed {abs(m)} min ago"
     if m == 0:
-        return "due now"
+        return "van usually ready now"
     if m >= 120:
-        return f"{m // 60} h {m % 60:02d} to go"
-    return f"{m} min to go"
+        return f"van usually ready in {m // 60} h {m % 60:02d}"
+    return f"van usually ready in {m} min"
 
 
 def progress_text(row: AnalyticsAtRiskDelivery) -> str:
@@ -75,29 +77,30 @@ def last_text(row: AnalyticsAtRiskDelivery, tz: ZoneInfo) -> str:
     return f"{pick} · {load}"
 
 
-def threshold_text(row: AnalyticsAtRiskDelivery) -> str:
-    if row.tier in ("at_risk", "late"):
-        minutes, source = row.load_threshold_min, row.load_threshold_source
-        verb = "needs loading"
-    else:
-        minutes, source = row.pick_threshold_min, row.pick_threshold_source
-        verb = "needs picking"
-    if minutes is None:
+def threshold_text(row: AnalyticsAtRiskDelivery, tz: ZoneInfo) -> str:
+    """Why the row is flagged, in the van's terms."""
+    if row.usual_ready_at is None:
         return ""
-    m = int(Decimal(str(minutes)).to_integral_value(rounding="ROUND_HALF_UP"))
-    origin = "learned from this route's history" if source == "learned" else "the configured floor"
-    return f"{verb} {m} min before departure · {origin}"
+    when = _hhmm(row.usual_ready_at, tz)
+    origin = "learned from this route's days" if row.usual_ready_source == "learned" else "no rhythm learned yet, so the WMS departure stands in"
+    if row.tier == "left_behind":
+        what = "the van is taken as gone and this delivery is not on it"
+    elif row.tier == "at_risk":
+        what = "packages still off the van"
+    else:
+        what = "picking not finished"
+    return f"{what} · van usually ready by {when} · {origin}"
 
 
 def summary_text(counts: dict) -> str:
     parts = []
-    if counts["late"]:
-        parts.append(f"{counts['late']} late")
+    if counts["left_behind"]:
+        parts.append(f"{counts['left_behind']} left behind")
     if counts["at_risk"]:
         parts.append(f"{counts['at_risk']} at risk")
     if counts["watch"]:
         parts.append(f"{counts['watch']} to watch")
-    fine = counts["open"] - counts["late"] - counts["at_risk"] - counts["watch"]
+    fine = counts["open"] - counts["left_behind"] - counts["at_risk"] - counts["watch"]
     parts.append(f"{fine} fine")
     if counts["checked"]:
         parts.append(f"{counts['checked']} checked")
@@ -108,11 +111,11 @@ def empty_text(today_closed: list[AnalyticsAtRiskDelivery], next_departure: date
     nxt = f" · next departure {_day_month(next_departure.astimezone(tz).date())} {_hhmm(next_departure, tz)}" if next_departure else ""
     if not today_closed:
         return f"No departures today{nxt}"
-    late = sum(r.outcome in delivery_store.LATE_OUTCOMES for r in today_closed)
+    missed = sum(r.outcome in delivery_store.LATE_OUTCOMES for r in today_closed)
     n = len(today_closed)
-    if late == 0:
-        return f"All {_plural(n, 'departure')} today left on time{nxt}"
-    return f"{_plural(n, 'departure')} today · {late} left late · {n - late} on time{nxt}"
+    if missed == 0:
+        return f"All {_plural(n, 'departure')} today went out{nxt}"
+    return f"{_plural(n, 'departure')} today · {missed} left behind · {n - missed} went out{nxt}"
 
 
 def accuracy_text(agg: dict, *, days: int) -> str:
@@ -124,7 +127,7 @@ def accuracy_text(agg: dict, *, days: int) -> str:
     recall = totals["flagged_late"] / late if late else None
     p = "–" if precision is None else f"{precision * 100:.0f}%"
     r = "–" if recall is None else f"{recall * 100:.0f}%"
-    return (f"last {days} days · flagged {totals['flagged']} · actually late {late} · "
+    return (f"last {days} days · flagged {totals['flagged']} · actually left behind {late} · "
             f"precision {p} · recall {r}")
 
 
@@ -133,18 +136,20 @@ def build_rows(rows: list[AnalyticsAtRiskDelivery], now: datetime, tz: ZoneInfo)
     ordered = sorted(rows, key=lambda r: (-TIER_ORDER.get(r.tier, 0), r.departure_at, r.delivery_number))
     out = []
     for row in ordered[:MAX_ROWS]:
-        minutes = model.minutes_to_departure(row.departure_at, now)
+        clock_at = row.usual_ready_at or row.departure_at
+        minutes = model.minutes_to_departure(clock_at, now)
         checked = None
         reopened = False
         if row.checked_at is not None:
             checked = {"by": row.checked_by or "someone", "at_text": _hhmm(row.checked_at, tz), "note": row.check_note}
             reopened = TIER_ORDER.get(row.tier, 0) > TIER_ORDER.get(row.checked_tier or "none", 0)
         out.append({
-            "delivery_number": row.delivery_number, "route": row.route or "–", "departure_at": row.departure_at.isoformat(),
-            "departure_text": _hhmm(row.departure_at, tz), "minutes_to_departure": int(minutes.to_integral_value(rounding="ROUND_HALF_UP")),
+            "delivery_number": row.delivery_number, "route": row.route or "–", "departure_at": clock_at.isoformat(),
+            "departure_text": f"van usually ready {_hhmm(clock_at, tz)}" if row.usual_ready_source == "learned" else f"WMS departure {_hhmm(clock_at, tz)}",
+            "minutes_to_departure": int(minutes.to_integral_value(rounding="ROUND_HALF_UP")),
             "minutes_text": minutes_text(minutes), "tier": row.tier, "tier_text": TIER_TEXT.get(row.tier, row.tier),
             "customer_name": row.customer_name, "progress_text": progress_text(row), "last_text": last_text(row, tz),
-            "threshold_text": threshold_text(row) if row.tier != "none" else "",
+            "threshold_text": threshold_text(row, tz) if row.tier != "none" else "",
             "checked": checked, "reopened_count": int(row.reopened_count or 0),
             "reopened_text": f"checked at {TIER_TEXT.get(row.checked_tier or 'none')} · now {TIER_TEXT.get(row.tier)}" if reopened else "",
         })
@@ -161,7 +166,7 @@ async def compute(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneI
     cfg = await settings_store.effective(db, customer_code)
     open_rows = await delivery_store.board_rows(db, customer_code, dates=[today - timedelta(days=1), today, today + timedelta(days=1)])
     stale = (now - state.last_evaluated_at) > timedelta(seconds=settings.analytics_at_risk_poll_seconds * STALE_POLLS)
-    counts = {"open": len(open_rows), "late": sum(r.tier == "late" for r in open_rows),
+    counts = {"open": len(open_rows), "left_behind": sum(r.tier == "left_behind" for r in open_rows),
               "at_risk": sum(r.tier == "at_risk" for r in open_rows), "watch": sum(r.tier == "watch" for r in open_rows),
               "checked": sum(r.checked_at is not None for r in open_rows)}
     flagged = [r for r in open_rows if r.tier != "none"]
@@ -179,8 +184,8 @@ async def compute(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneI
         "stale": stale,
         "note": STALE_NOTE if stale else "",
         "as_of_text": f"as of {_hhmm(state.last_evaluated_at, tz)}",
-        "caption": (f"departures today and tomorrow · thresholds learned per route · "
-                    f"floor {cfg.load_floor_min} min load, {cfg.pick_floor_min} min pick"),
+        "caption": (f"departures today and tomorrow · each route's van has a learned ready time · "
+                    f"warned {cfg.warn_before_min} min before it · left behind {cfg.gone_after_min} min of quiet after it"),
         "summary": {**counts, "text": summary_text(counts)},
         "empty_text": empty,
         "deliveries": rows,

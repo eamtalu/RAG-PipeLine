@@ -62,13 +62,15 @@ async def evaluate_tenant(cc: str, *, now: datetime | None = None) -> dict:
                 lookup_name=settings.analytics_at_risk_pick_line_lookup,
                 lookback_hours=settings.analytics_at_risk_board_lookback_hours, facts_cap=settings.analytics_at_risk_facts_cap,
                 routes_that_load=routes_that_load)
-        thresholds_for = profile_store.thresholds_for(profiles, cfg)
+        clock_for = profile_store.clock_for(profiles, cfg, tz)
         by_number = {s.delivery_number: s for s in board.states}
         async with async_session() as db:
             await _lock(db, cc)
-            stats = await delivery_store.apply(db, cc, board.states, now=now, tz=tz, thresholds_for=thresholds_for,
+            stats = await delivery_store.apply(db, cc, board.states, now=now, tz=tz, clock_for=clock_for,
                                                rule_version=RULE_VERSION)
-            closed = await delivery_store.close_due(db, cc, by_number, now=now, grace=timedelta(minutes=cfg.close_grace_min), tz=tz)
+            closed = await delivery_store.close_due(db, cc, by_number, now=now, grace=timedelta(minutes=cfg.close_grace_min), tz=tz,
+                                                    warn_before=timedelta(minutes=cfg.warn_before_min),
+                                                    gone_after=timedelta(minutes=cfg.gone_after_min))
             swept = await delivery_store.sweep(db, cc, now=now)
             open_rows = len(await delivery_store.open_rows(db, cc))
             await state_store.touch(db, cc, last_evaluated_at=now, open_rows=open_rows, last_error=None)

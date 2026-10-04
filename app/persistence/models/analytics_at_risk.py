@@ -24,23 +24,26 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.config.database import Base
 
-TIERS = ("none", "watch", "at_risk", "late")
+TIERS = ("none", "watch", "at_risk", "left_behind")
 STATUSES = ("open", "closed")
 #: `picked_*` are the outcomes of a route without a loading step, where the last pick decides.
 OUTCOMES = ("loaded_in_time", "loaded_late", "never_loaded", "picked_in_time", "picked_late", "unknown")
 CHECK_ACTIONS = ("checked", "unchecked", "reopened")
 THRESHOLD_SOURCES = ("learned", "floor")
 
-#: The floors a tenant starts with. A floor is the LEAST lead a delivery may have before it is
-#: flagged; the learned lead only ever raises it. 120 minutes to load and 180 to pick are below every
-#: lead the live routes kept over 14 days (the tightest was 201), so on day one they flag only the
-#: genuinely late, and once a route has learned its own rhythm they stop mattering.
-DEFAULT_LOAD_FLOOR_MIN = 120
-DEFAULT_PICK_FLOOR_MIN = 180
-DEFAULT_MIN_SAMPLE = 20
+#: The windows around the van. A route's van is usually ready at a learned time of day (the time the
+#: dock's last scan landed on nine days in ten); a delivery still being picked or loaded inside
+#: `warn_before` minutes of it is watched or at risk, and once the usual time has passed and the dock
+#: has been quiet for `gone_after` minutes the van is taken as gone and the delivery as left behind.
+#: `min_days` is how many days of van history a route needs before its rhythm counts; until then the
+#: WMS departure time stands in, which flags late but never falsely.
+DEFAULT_WARN_BEFORE_MIN = 30
+DEFAULT_GONE_AFTER_MIN = 20
+DEFAULT_MIN_DAYS = 5
 DEFAULT_WINDOW_DAYS = 28
 DEFAULT_CLOSE_GRACE_MIN = 180
 DEFAULT_COVERAGE = "0.900"
+CLOCK_SOURCES = ("learned", "wms_departure")
 
 
 def _now() -> datetime:
@@ -81,12 +84,12 @@ class AnalyticsAtRiskDelivery(Base):
     max_tier: Mapped[str] = mapped_column(String(16), nullable=False, default="none", server_default="none")
     first_flagged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     first_flagged_tier: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    #: `[{tier, at, minutes_to_departure, threshold_min, threshold_source}]`, appended on every change.
+    #: `[{tier, at, minutes_to_usual_ready, usual_ready_at, source}]`, appended on every change.
     tier_history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
-    load_threshold_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
-    load_threshold_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    pick_threshold_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
-    pick_threshold_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    #: When this delivery's van is usually ready: the route's learned time of day on the departure day,
+    #: or the WMS departure when the route has no rhythm yet (`usual_ready_source` says which).
+    usual_ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    usual_ready_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # --- progress ---
     #: From the pick-line lookup. NULL when the lookup never saw this delivery's lines; never zero for unknown.
@@ -104,8 +107,9 @@ class AnalyticsAtRiskDelivery(Base):
     #: The picking screens the delivery's lines went through, as a JSON list of names. GIN-indexed so
     #: the history can filter on one kind of picking.
     transaction_names: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
-    #: The last package scanned onto the route's dock on the departure day: the van's "ready" moment,
-    #: the nearest thing to a departure the WMS records.
+    #: The first and last package scanned onto the route's dock on the departure day: when the van's
+    #: loading started, and the van's "ready" moment, the nearest thing to a departure the WMS records.
+    route_loading_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     route_loaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     #: True when the row was written by the backfill after the fact, from the clocks in the logs, rather
     #: than watched minute by minute. Such a row is history and teaches the route profiles, but the
@@ -156,7 +160,8 @@ class AnalyticsAtRiskCheck(Base):
 
 
 class AnalyticsAtRiskRouteProfile(Base):
-    """What one route's closed deliveries taught on one day."""
+    """What one route's closed days taught on one day: when its van is usually ready. Times of day
+    are minutes after local midnight, so a quantile over days is arithmetic."""
 
     __tablename__ = "analytics_at_risk_route_profiles"
     __table_args__ = (
@@ -172,13 +177,19 @@ class AnalyticsAtRiskRouteProfile(Base):
     #: Closed deliveries in the window, and those that were loaded at all.
     sample: Mapped[int] = mapped_column(Integer, nullable=False)
     loaded_sample: Mapped[int] = mapped_column(Integer, nullable=False)
-    load_lead_p50: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
-    load_lead_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
-    pick_lead_p50: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
-    pick_lead_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
-    #: The coverage quantiles. NULL below the sample floor, so the floor alone applies.
-    learned_load_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
-    learned_pick_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
+    #: Days in the window on which the route's van loaded anything, and the time of day its last scan
+    #: landed: the coverage quantile (usual), the median and the latest. NULL below `min_days`.
+    van_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    van_ready_usual_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
+    van_ready_p50_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
+    van_ready_latest_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
+    #: When the dock's first scan usually lands: loading starts.
+    loading_from_p50_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
+    #: The same for the route's last pick of the day, which stands in for the van on a route that never
+    #: scans a load.
+    pick_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    pick_done_usual_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
+    pick_done_p50_min: Mapped[object | None] = mapped_column(Numeric(10, 2), nullable=True)
     #: Informative: the departure time (HHMM) most of the route's deliveries carried.
     departure_time_mode: Mapped[str | None] = mapped_column(String(4), nullable=True)
     coverage: Mapped[object] = mapped_column(Numeric(4, 3), nullable=False)
@@ -187,19 +198,19 @@ class AnalyticsAtRiskRouteProfile(Base):
 
 
 class AnalyticsAtRiskSettings(Base):
-    """The tenant's floors and knobs. One row, or none for the defaults."""
+    """The tenant's windows and knobs. One row, or none for the defaults."""
 
     __tablename__ = "analytics_at_risk_settings"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     customer_code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
-    load_floor_min: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_LOAD_FLOOR_MIN,
-                                                server_default=str(DEFAULT_LOAD_FLOOR_MIN))
-    pick_floor_min: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_PICK_FLOOR_MIN,
-                                                server_default=str(DEFAULT_PICK_FLOOR_MIN))
-    min_sample: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_MIN_SAMPLE,
-                                            server_default=str(DEFAULT_MIN_SAMPLE))
+    warn_before_min: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_WARN_BEFORE_MIN,
+                                                 server_default=str(DEFAULT_WARN_BEFORE_MIN))
+    gone_after_min: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_GONE_AFTER_MIN,
+                                                server_default=str(DEFAULT_GONE_AFTER_MIN))
+    min_days: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_MIN_DAYS,
+                                          server_default=str(DEFAULT_MIN_DAYS))
     window_days: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_WINDOW_DAYS,
                                              server_default=str(DEFAULT_WINDOW_DAYS))
     close_grace_min: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_CLOSE_GRACE_MIN,

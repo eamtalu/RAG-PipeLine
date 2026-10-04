@@ -1,4 +1,4 @@
-"""The tenant's floors and knobs: one row, or the defaults when there is none."""
+"""The tenant's windows and knobs: one row, or the defaults when there is none."""
 
 from __future__ import annotations
 
@@ -9,15 +9,15 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.persistence.models.analytics_at_risk import (DEFAULT_CLOSE_GRACE_MIN, DEFAULT_COVERAGE, DEFAULT_LOAD_FLOOR_MIN,
-                                                      DEFAULT_MIN_SAMPLE, DEFAULT_PICK_FLOOR_MIN, DEFAULT_WINDOW_DAYS,
+from app.persistence.models.analytics_at_risk import (DEFAULT_CLOSE_GRACE_MIN, DEFAULT_COVERAGE, DEFAULT_GONE_AFTER_MIN,
+                                                      DEFAULT_MIN_DAYS, DEFAULT_WARN_BEFORE_MIN, DEFAULT_WINDOW_DAYS,
                                                       AnalyticsAtRiskSettings)
 
 #: What `put` may change, and the closed range each must fall in.
 RANGES: dict[str, tuple[Decimal, Decimal]] = {
-    "load_floor_min": (Decimal(0), Decimal(1440)),
-    "pick_floor_min": (Decimal(0), Decimal(1440)),
-    "min_sample": (Decimal(1), Decimal(1000)),
+    "warn_before_min": (Decimal(0), Decimal(720)),
+    "gone_after_min": (Decimal(0), Decimal(720)),
+    "min_days": (Decimal(1), Decimal(60)),
     "window_days": (Decimal(7), Decimal(90)),
     "close_grace_min": (Decimal(0), Decimal(1440)),
     "coverage": (Decimal("0.5"), Decimal("0.99")),
@@ -28,9 +28,12 @@ FIELDS = ("enabled", *RANGES, "updated_by")
 @dataclass(frozen=True)
 class Settings:
     enabled: bool
-    load_floor_min: int
-    pick_floor_min: int
-    min_sample: int
+    #: Minutes before the van's usual ready time at which an unfinished delivery is watched or at risk.
+    warn_before_min: int
+    #: Minutes of quiet on the dock, after the usual time, before the van is taken as gone.
+    gone_after_min: int
+    #: Days of van history a route needs before its rhythm counts; until then the WMS departure stands in.
+    min_days: int
     window_days: int
     close_grace_min: int
     coverage: Decimal
@@ -40,14 +43,14 @@ class Settings:
     updated_at: datetime | None = None
 
 
-DEFAULTS = Settings(enabled=True, load_floor_min=DEFAULT_LOAD_FLOOR_MIN, pick_floor_min=DEFAULT_PICK_FLOOR_MIN,
-                    min_sample=DEFAULT_MIN_SAMPLE, window_days=DEFAULT_WINDOW_DAYS, close_grace_min=DEFAULT_CLOSE_GRACE_MIN,
+DEFAULTS = Settings(enabled=True, warn_before_min=DEFAULT_WARN_BEFORE_MIN, gone_after_min=DEFAULT_GONE_AFTER_MIN,
+                    min_days=DEFAULT_MIN_DAYS, window_days=DEFAULT_WINDOW_DAYS, close_grace_min=DEFAULT_CLOSE_GRACE_MIN,
                     coverage=Decimal(DEFAULT_COVERAGE), defaulted=True)
 
 
 def _from_row(row: AnalyticsAtRiskSettings) -> Settings:
-    return Settings(enabled=bool(row.enabled), load_floor_min=int(row.load_floor_min), pick_floor_min=int(row.pick_floor_min),
-                    min_sample=int(row.min_sample), window_days=int(row.window_days), close_grace_min=int(row.close_grace_min),
+    return Settings(enabled=bool(row.enabled), warn_before_min=int(row.warn_before_min), gone_after_min=int(row.gone_after_min),
+                    min_days=int(row.min_days), window_days=int(row.window_days), close_grace_min=int(row.close_grace_min),
                     coverage=Decimal(str(row.coverage)), defaulted=False, updated_by=row.updated_by, updated_at=row.updated_at)
 
 

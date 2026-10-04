@@ -1,18 +1,25 @@
 """The rules. Pure: no database, no clock, no settings.
 
-A delivery is described by what the warehouse has done to it (`DeliveryState`) and judged against
-its departure instant and its route's thresholds. Three tiers:
+The clock is the VAN, not the WMS departure time. On every live route the van is fully loaded four
+to five hours before the 11:30 the WMS prints: 11:30 is a planning time nobody loads against. What a
+route does have is a rhythm: its dock's last scan lands at much the same time of day, day after day.
+So each route learns the time its van is usually ready (the coverage quantile of those daily times,
+nine days in ten), and every delivery on that route is judged against that instant on its departure
+day:
 
-- `watch`: picking is still open and the departure is closer than the route's normal pick lead;
-- `at_risk`: loading is still open and the departure is closer than the route's normal load lead;
-- `late`: the departure has passed and either is still open.
+- `watch`: picking is not finished and the van is usually ready within the warning window;
+- `at_risk`: packages are still off the van and the van is usually ready within the window, or the
+  usual time has passed;
+- `left_behind`: the usual time has passed and the dock has been quiet for the gone window, so the
+  van is taken as gone, and this delivery is not on it.
 
-The lead a route "normally" keeps is learned as a coverage quantile: the lead that nine in ten
-loaded deliveries met or beat, which is the TENTH percentile of lead minutes, not the ninetieth.
-On the live routes the ninetieth is five to eight hours and would flag every delivery before loading
-even starts. The learned value is unknown below a sample floor, and whatever is learned is held to a
-configured floor: the effective threshold is the larger of the two, so a slow week can never teach
-the system to hide risk.
+A route with too few days of history has no rhythm yet; the WMS departure stands in, which flags late
+but never falsely. A route that never scans a load (the BRILA runs) is judged on its last pick of the
+day the same way.
+
+Once the day is over, a delivery is `missed` when the van went without it, `held` when its last
+package went on after the van's usual time (the van ran late and this delivery was on it late), and
+`fine` otherwise.
 """
 
 from __future__ import annotations
@@ -24,8 +31,7 @@ from datetime import datetime, timedelta, tzinfo
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
-#: Leads outside this band are data problems (a load logged before the departure was even known, or
-#: a departure that moved a day), not rhythm. They are dropped before the sample is counted.
+#: Times of day outside this band (minutes after local midnight) are data problems, not rhythm.
 LEAD_MIN = Decimal(0)
 LEAD_MAX = Decimal(1440)
 
@@ -34,10 +40,10 @@ class Tier(str, enum.Enum):
     none = "none"
     watch = "watch"
     at_risk = "at_risk"
-    late = "late"
+    left_behind = "left_behind"
 
 
-TIER_RANK: dict[Tier, int] = {Tier.none: 0, Tier.watch: 1, Tier.at_risk: 2, Tier.late: 3}
+TIER_RANK: dict[Tier, int] = {Tier.none: 0, Tier.watch: 1, Tier.at_risk: 2, Tier.left_behind: 3}
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,7 @@ class DeliveryState:
     route: str | None
     customer_name: str | None
     customer_number: str | None
+    #: The WMS departure: a planning time, kept for reference and as the clock of last resort.
     departure_at: datetime
     #: None when the pick-line lookup has not seen this delivery's lines. Never zero for "unknown".
     lines_expected: int | None
@@ -69,20 +76,27 @@ class DeliveryState:
     #: Pick, Milk Pick, Freezer Pick), so a supervisor can look at one kind of picking at a time. A
     #: delivery that spans two kinds appears under both.
     transaction_names: tuple[str, ...] = ()
-    #: When the ROUTE was fully loaded on the departure day: the last package scanned onto that
-    #: loading dock. The WMS records no departure itself; with vehicle-load auto-despatch on, this is
-    #: the moment the shipment is despatched, so it is the nearest thing to the van leaving.
+    #: The last package scanned onto the ROUTE's dock on the departure day, so far: the van's "ready"
+    #: moment once the day is over, and while the day runs, how long the dock has been quiet.
     route_loaded_at: datetime | None = None
+    #: The first scan on that dock on the departure day: the van's loading started.
+    route_loading_from: datetime | None = None
+
+    @property
+    def last_at(self) -> datetime | None:
+        """The clock the outcome reads: the last load, or the last pick on a route without loading."""
+        return self.last_load_at if self.loading_expected else self.last_pick_at
 
 
 @dataclass(frozen=True)
-class Thresholds:
-    """The effective leads for one route, in minutes, and where each came from."""
+class RouteClock:
+    """When this delivery's van is usually ready, and the windows around it."""
 
-    load_min: Decimal
-    load_source: str
-    pick_min: Decimal
-    pick_source: str
+    usual_ready_at: datetime
+    #: `learned` from the route's days, or `wms_departure` when the route has no rhythm yet.
+    source: str
+    warn_before: timedelta
+    gone_after: timedelta
 
 
 # ============================================================== departure
@@ -151,8 +165,7 @@ def parse_packages_to_load(raw: Any) -> list[tuple[str, str]]:
 
 def picking_open(state: DeliveryState) -> bool:
     """Lines still to pick. A line is done once it is CONFIRMED, whether it moved stock or was declared
-    short: a short pick is the warehouse's answer for that line, not a line still waiting, and judging
-    on `lines_picked` instead flagged one closed delivery in four as late on the live data. With the
+    short: a short pick is the warehouse's answer for that line, not a line still waiting. With the
     expected count unknown, only a delivery with NO confirmation yet counts as open: a lookup gap must
     not flag every delivery that has been picked."""
     if state.lines_expected is None:
@@ -163,28 +176,43 @@ def picking_open(state: DeliveryState) -> bool:
 def loading_open(state: DeliveryState) -> bool:
     """Packages still to load. A route without a loading step is never open. Otherwise open while
     nothing has been loaded, or fewer packages are loaded than are known; a load of a package nobody
-    "created" through the app still counts, because the pick confirmations are where most packages
-    are born."""
+    "created" through the app still counts, because the pick confirmations are where packages are born."""
     if not state.loading_expected:
         return False
     return state.packages_loaded == 0 or state.packages_loaded < state.packages_created
 
 
-def tier_for(state: DeliveryState, now: datetime, thresholds: Thresholds) -> Tier:
-    minutes = minutes_to_departure(state.departure_at, now)
+def minutes_to_departure(departure: datetime, now: datetime) -> Decimal:
+    """Signed minutes from `now` to an instant, exact to the second. Negative once it has passed."""
+    gap: timedelta = departure - now
+    return (Decimal(gap.days * 86400 + gap.seconds) + Decimal(gap.microseconds) / Decimal(1_000_000)) / Decimal(60)
+
+
+def van_gone(state: DeliveryState, now: datetime, clock: RouteClock) -> bool:
+    """The van is taken as gone once its usual time has passed and the dock has been quiet for the gone
+    window: no scan since `route_loaded_at`, or never a scan at all. On a route without a loading step
+    the usual time plus the window decides alone."""
+    if now < clock.usual_ready_at + clock.gone_after:
+        return False
+    if not state.loading_expected or state.route_loaded_at is None:
+        return True
+    return now - state.route_loaded_at >= clock.gone_after
+
+
+def tier_for(state: DeliveryState, now: datetime, clock: RouteClock) -> Tier:
     picking, loading = picking_open(state), loading_open(state)
-    if minutes < 0 and (picking or loading):
-        return Tier.late
-    if loading and minutes < thresholds.load_min:
-        return Tier.at_risk
-    if picking and minutes < thresholds.pick_min:
-        return Tier.watch
-    return Tier.none
+    if not (picking or loading):
+        return Tier.none
+    if van_gone(state, now, clock):
+        return Tier.left_behind
+    if now < clock.usual_ready_at - clock.warn_before:
+        return Tier.none
+    return Tier.at_risk if loading else Tier.watch
 
 
 # ============================================================== replaying the rule over the clocks
 
-#: The worker judges every minute, so a lead crossed at 09:30:00 is seen at the next tick. The replay
+#: The worker judges every minute, so a window crossed at 06:26:00 is seen at the next tick. The replay
 #: evaluates one minute after each crossing to land on the same instant.
 TICK = timedelta(minutes=1)
 
@@ -193,7 +221,7 @@ TICK = timedelta(minutes=1)
 class TierChange:
     tier: Tier
     at: datetime
-    minutes_to_departure: Decimal
+    minutes_to_usual_ready: Decimal
 
 
 @dataclass(frozen=True)
@@ -207,10 +235,13 @@ class Replay:
 
 def state_as_of(state: DeliveryState, at: datetime) -> DeliveryState:
     """The delivery as the board would have seen it at `at`, from its final clocks: before its last
-    pick the picking was still open, before its last load the loading was. Exact for the question the
-    rule asks (open or not), whatever the counts were on the way."""
-    picking_done = state.last_pick_at is not None and at >= state.last_pick_at
-    loading_done = state.last_load_at is not None and at >= state.last_load_at
+    pick the picking was still open, before its last load the loading was, and until the dock's last
+    scan the dock was still busy. Exact for the questions the rule asks."""
+    # a clock that was never recorded leaves the final counts as they are: nothing is known to undo
+    picking_done = state.last_pick_at is None or at >= state.last_pick_at
+    loading_done = state.last_load_at is None or at >= state.last_load_at
+    dock_last = None if state.route_loaded_at is None else min(state.route_loaded_at, at)
+    dock_from = None if state.route_loading_from is None or at < state.route_loading_from else state.route_loading_from
     return DeliveryState(
         delivery_number=state.delivery_number, route=state.route, customer_name=state.customer_name,
         customer_number=state.customer_number, departure_at=state.departure_at, lines_expected=state.lines_expected,
@@ -218,26 +249,29 @@ def state_as_of(state: DeliveryState, at: datetime) -> DeliveryState:
         lines_short=state.lines_short if picking_done else 0, packages_created=state.packages_created,
         packages_loaded=state.packages_loaded if loading_done else 0,
         last_pick_at=state.last_pick_at if picking_done else None, last_load_at=state.last_load_at if loading_done else None,
-        loading_expected=state.loading_expected, transaction_names=state.transaction_names, route_loaded_at=state.route_loaded_at)
+        loading_expected=state.loading_expected, transaction_names=state.transaction_names,
+        route_loaded_at=dock_last, route_loading_from=dock_from)
 
 
-def replay_tiers(state: DeliveryState, thresholds: Thresholds, *, close_at: datetime) -> Replay:
+def replay_tiers(state: DeliveryState, clock: RouteClock, *, close_at: datetime) -> Replay:
     """What the minute pass would have recorded for a delivery whose clocks are all known: the tier
     changes in order, the first flag, the highest tier and the tier at the close. The tier can only
-    change at a handful of instants: one tick after each lead is crossed and after the departure, the
-    moment picking finished, the moment loading finished, and the close itself."""
-    departure = state.departure_at
-    instants = {departure - timedelta(minutes=float(thresholds.pick_min)) + TICK,
-                departure - timedelta(minutes=float(thresholds.load_min)) + TICK, departure + TICK, close_at}
+    change at a handful of instants: one tick after the warning window opens, after the usual time,
+    after the gone window (from the usual time or from the dock's last scan), the moments picking and
+    loading finished, and the close itself."""
+    usual = clock.usual_ready_at
+    instants = {usual - clock.warn_before + TICK, usual + TICK, usual + clock.gone_after + TICK, close_at}
+    if state.route_loaded_at is not None:
+        instants.add(state.route_loaded_at + clock.gone_after + TICK)
     for finished in (state.last_pick_at, state.last_load_at):
         if finished is not None:
             instants.add(finished)
     changes: list[TierChange] = []
     current = Tier.none
     for at in sorted(x for x in instants if x <= close_at):
-        tier = tier_for(state_as_of(state, at), at, thresholds)
+        tier = tier_for(state_as_of(state, at), at, clock)
         if tier is not current:
-            changes.append(TierChange(tier=tier, at=at, minutes_to_departure=minutes_to_departure(departure, at)))
+            changes.append(TierChange(tier=tier, at=at, minutes_to_usual_ready=minutes_to_departure(usual, at)))
             current = tier
     flagged = [c for c in changes if c.tier is not Tier.none]
     max_tier = max((c.tier for c in changes), key=lambda t: TIER_RANK[t], default=Tier.none)
@@ -269,17 +303,18 @@ def outcome_for(state: DeliveryState) -> tuple[str, Decimal | None]:
 LATE_OUTCOMES = ("loaded_late", "never_loaded", "picked_late")
 
 #: The three plain words a supervisor reads, plus the two edge cases.
-CATEGORIES = ("missed", "delayed", "fine", "unknown", "open")
+CATEGORIES = ("missed", "held", "fine", "unknown", "open")
 
 
-def category_for(*, outcome: str | None, max_tier: str | None, lines_expected: int | None, lines_confirmed: int) -> str:
+def category_for(*, outcome: str | None, last_at: datetime | None, usual_ready_at: datetime | None,
+                 lines_expected: int | None, lines_confirmed: int) -> str:
     """One plain word for a closed delivery.
 
-    - `missed`: the van left without it. A package was never loaded, or lines were never confirmed
+    - `missed`: the van went without it. A package was never loaded, or lines were never confirmed
       (picked or declared short).
-    - `delayed`: it got away, but behind the route's rhythm (flagged Watch or At risk before the
-      departure) or after the departure time.
-    - `fine`: in time and never flagged.
+    - `held`: it was on the van, but after the van's usual ready time, or after the WMS departure: the
+      van ran late and this delivery was one of those still going on.
+    - `fine`: on the van before the usual time.
     - `unknown`: the board lost sight of it before it closed; `open`: not closed yet.
     """
     if outcome is None:
@@ -290,11 +325,13 @@ def category_for(*, outcome: str | None, max_tier: str | None, lines_expected: i
         return "missed"
     if outcome == "picked_late":
         incomplete = lines_confirmed < lines_expected if lines_expected is not None else lines_confirmed == 0
-        return "missed" if incomplete else "delayed"
+        if incomplete:
+            return "missed"
+        return "held"
     if outcome == "loaded_late":
-        return "delayed"
-    if TIER_RANK[Tier(max_tier or "none")] > 0:
-        return "delayed"
+        return "held"
+    if last_at is not None and usual_ready_at is not None and last_at > usual_ready_at:
+        return "held"
     return "fine"
 
 
@@ -321,12 +358,10 @@ def coverage_quantile(leads: Iterable[Decimal], *, coverage: Decimal, min_sample
     return usable[lower] + (usable[lower + 1] - usable[lower]) * fraction
 
 
-def effective_threshold(learned: Decimal | None, floor: Decimal) -> tuple[Decimal, str]:
-    """The larger of the learned lead and the floor, and which one won. A tie is `learned`: the
-    floor changed nothing."""
-    if learned is None or learned < floor:
-        return floor, "floor"
-    return learned, "learned"
+def usual_time(times: Iterable[Decimal], *, coverage: Decimal, min_days: int) -> Decimal | None:
+    """The time of day (minutes after local midnight) by which the van was ready on `coverage` of the
+    days: the `coverage` quantile, since for a time of day smaller is earlier. None below `min_days`."""
+    return coverage_quantile(times, coverage=Decimal(1) - coverage, min_sample=min_days)
 
 
 def numeric(value: Any) -> Decimal | None:

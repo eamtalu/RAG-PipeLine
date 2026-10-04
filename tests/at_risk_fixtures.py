@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -225,13 +225,34 @@ async def settle(cc: str) -> None:
         await db.commit()
 
 
+# ============================================================== clocks
+
+WARN = timedelta(minutes=30)
+GONE = timedelta(minutes=20)
+
+
+def clock(usual_ready_at: datetime, *, source: str = "learned", warn: timedelta = WARN, gone: timedelta = GONE):
+    """One van clock, for tests that judge a single delivery."""
+    from app.services.analytics_at_risk import model
+    return model.RouteClock(usual_ready_at=usual_ready_at, source=source, warn_before=warn, gone_after=gone)
+
+
+def clock_before_departure(minutes: int, *, source: str = "learned"):
+    """A `clock_for` whose van is usually ready `minutes` before each delivery's WMS departure."""
+    def for_state(state):
+        return clock(state.departure_at - timedelta(minutes=minutes), source=source)
+    return for_state
+
+
 # ============================================================== stored board rows
 
 def closed_delivery(cc: str, delivery: str, *, route: str, departure_at: datetime, last_load_at: datetime | None,
                     outcome: str, last_pick_at: datetime | None = None, max_tier: str = "none",
                     first_flagged_at: datetime | None = None, transaction_names: tuple[str, ...] = ("Brighton Stock Pick",),
                     lines_expected: int | None = 5, lines_picked: int = 5, customer_name: str | None = "BOK SHOP HORSHAM",
-                    route_loaded_at: datetime | None = None, lines_confirmed: int | None = None) -> AnalyticsAtRiskDelivery:
+                    route_loaded_at: datetime | None = None, lines_confirmed: int | None = None,
+                    usual_ready_at: datetime | None = None, usual_ready_source: str | None = None,
+                    route_loading_from: datetime | None = None) -> AnalyticsAtRiskDelivery:
     """A closed row, for profile, accuracy and history tests."""
     lead = None if last_load_at is None else Decimal(str(round((departure_at - last_load_at).total_seconds() / 60, 2)))
     return AnalyticsAtRiskDelivery(
@@ -242,6 +263,8 @@ def closed_delivery(cc: str, delivery: str, *, route: str, departure_at: datetim
         lines_picked=lines_picked, packages_created=2,
         packages_loaded=2 if outcome != "never_loaded" else 1, last_pick_at=last_pick_at, last_load_at=last_load_at,
         loading_expected=not outcome.startswith("picked_"), transaction_names=list(transaction_names), route_loaded_at=route_loaded_at,
+        route_loading_from=route_loading_from, usual_ready_at=usual_ready_at,
+        usual_ready_source=usual_ready_source or ("learned" if usual_ready_at is not None else None),
         status="closed", closed_at=departure_at, outcome=outcome, outcome_lead_min=lead,
         rule_version=RULE_VERSION, last_evaluated_at=departure_at)
 

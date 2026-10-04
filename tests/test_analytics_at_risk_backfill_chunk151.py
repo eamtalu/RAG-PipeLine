@@ -27,7 +27,6 @@ UTC = timezone.utc
 DAY = date(2026, 10, 1)
 DEP = datetime(2026, 10, 1, 10, 30, tzinfo=UTC)  # 11:30 BST on 1 Oct
 GRACE = timedelta(minutes=180)
-TH = model.Thresholds(load_min=Decimal(120), load_source="floor", pick_min=Decimal(180), pick_source="floor")
 
 
 @pytest.fixture(autouse=True)
@@ -46,56 +45,16 @@ def _state(**over) -> model.DeliveryState:
     return model.DeliveryState(**base)
 
 
-# ============================================================== the replay (pure)
+# ============================================================== the replay against the van (the pure rule has its own pins in chunk 143)
 
-def test_a_delivery_loaded_well_ahead_is_never_flagged():
-    replay = model.replay_tiers(_state(), TH, close_at=DEP + GRACE)
-    assert replay.changes == () and replay.max_tier is model.Tier.none and replay.first_flagged_at is None
-    assert replay.final_tier is model.Tier.none
-
-
-def test_a_load_inside_the_lead_is_flagged_at_the_minute_the_lead_was_crossed_and_cleared_at_the_load():
-    load = DEP - timedelta(minutes=30)
-    replay = model.replay_tiers(_state(last_load_at=load), TH, close_at=DEP + GRACE)
-    assert [(c.tier, c.at) for c in replay.changes] == [
-        (model.Tier.at_risk, DEP - timedelta(minutes=120) + timedelta(minutes=1)),
-        (model.Tier.none, load),
-    ]
-    assert replay.first_flagged_at == DEP - timedelta(minutes=119) and replay.first_flagged_tier is model.Tier.at_risk
+def test_the_replay_judges_against_the_van_clock():
+    usual = DEP - timedelta(minutes=270)
+    clock = fx.clock(usual)
+    held = _state(last_load_at=usual + timedelta(minutes=5), route_loaded_at=usual + timedelta(minutes=5))
+    replay = model.replay_tiers(held, clock, close_at=DEP + GRACE)
+    # the last pick landed exactly on the window edge, which counts as inside, so the flag lands there rather than a tick later
+    assert [(c.tier, c.at) for c in replay.changes] == [(model.Tier.at_risk, usual - timedelta(minutes=30)), (model.Tier.none, usual + timedelta(minutes=5))]
     assert replay.max_tier is model.Tier.at_risk and replay.final_tier is model.Tier.none
-    assert replay.changes[0].minutes_to_departure == Decimal(119)
-
-
-def test_a_package_never_loaded_goes_at_risk_then_late_and_stays_late():
-    replay = model.replay_tiers(_state(packages_loaded=0, last_load_at=None), TH, close_at=DEP + GRACE)
-    assert [(c.tier, c.at) for c in replay.changes] == [
-        (model.Tier.at_risk, DEP - timedelta(minutes=119)),
-        (model.Tier.late, DEP + timedelta(minutes=1)),
-    ]
-    assert replay.final_tier is model.Tier.late
-
-
-def test_slow_picking_is_watched_then_at_risk_then_cleared():
-    pick, load = DEP - timedelta(minutes=150), DEP - timedelta(minutes=100)
-    replay = model.replay_tiers(_state(last_pick_at=pick, last_load_at=load), TH, close_at=DEP + GRACE)
-    assert [(c.tier, c.at) for c in replay.changes] == [
-        (model.Tier.watch, DEP - timedelta(minutes=179)),
-        (model.Tier.none, pick),
-        (model.Tier.at_risk, DEP - timedelta(minutes=119)),
-        (model.Tier.none, load),
-    ]
-    assert replay.max_tier is model.Tier.at_risk
-
-
-def test_a_route_without_a_loading_step_is_judged_on_its_last_pick():
-    pick = DEP + timedelta(minutes=10)
-    replay = model.replay_tiers(_state(loading_expected=False, packages_loaded=0, last_load_at=None, last_pick_at=pick),
-                                TH, close_at=DEP + GRACE)
-    assert [(c.tier, c.at) for c in replay.changes] == [
-        (model.Tier.watch, DEP - timedelta(minutes=179)),
-        (model.Tier.late, DEP + timedelta(minutes=1)),
-        (model.Tier.none, pick),
-    ]
 
 
 # ============================================================== the routing universe from the raw calls
@@ -138,7 +97,7 @@ async def _plant_day() -> None:
     await fx.plant([
         fx.pick_fact(CC, "29616", "600001", p, expected="2", picked="2", package="29616/1-1"),
         fx.pick_fact(CC, "29616", "600002", p + timedelta(minutes=2), expected="1", picked="1", package="29616/1-1"),
-        fx.load_fact(CC, "29616", "29616/1-1", DEP - timedelta(minutes=30), dock="BRI03"),  # inside the 120 lead
+        fx.load_fact(CC, "29616", "29616/1-1", DEP + timedelta(minutes=5), dock="BRI03"),  # after the WMS departure, which stands in for the van
         fx.pick_fact(CC, "29700", "600003", p, expected="1", picked="1", package="29700/1-1"),  # picked, never loaded
         fx.pick_fact(CC, "29750", "600004", p, expected="2", picked="2", package="29750/1-1"),
         fx.pick_fact(CC, "29750", "600005", p + timedelta(minutes=1), expected="3", picked="0", package=""),  # declared short
@@ -162,21 +121,24 @@ async def test_backfill_writes_closed_reconstructed_rows_and_leaves_the_live_row
     out = await backfill.backfill_tenant(CC, start=DAY, end=DAY, now=DEP + timedelta(days=1))
     assert out["status"] == "completed"
     assert out["days"] == [{"date": "2026-10-01", "deliveries": 4, "written": 3, "existing": 1, "unreadable": 0,
-                            "missed": 1, "delayed": 1, "fine": 1}]
+                            "missed": 1, "held": 1, "fine": 1}]
     short = (await _rows())["29750"]  # one line short, every package loaded four hours ahead: fine, not delayed
     assert (short.lines_expected, short.lines_confirmed, short.lines_picked, short.lines_short) == (2, 2, 1, 1)
     assert (short.outcome, short.max_tier) == ("loaded_in_time", "none")
     rows = await _rows()
     a = rows["29616"]
-    assert (a.status, a.outcome, a.reconstructed, a.closed_at) == ("closed", "loaded_in_time", True, DEP + GRACE)
-    assert (a.max_tier, a.tier, a.first_flagged_tier, a.first_flagged_at) == ("at_risk", "none", "at_risk", DEP - timedelta(minutes=119))
-    assert a.last_load_at == DEP - timedelta(minutes=30) and a.route_loaded_at == DEP - timedelta(minutes=30)
+    assert (a.status, a.outcome, a.reconstructed, a.closed_at) == ("closed", "loaded_late", True, DEP + GRACE)
+    # no profile yet, so the WMS departure stood in: at risk from one tick inside the window, cleared by the load
+    assert (a.usual_ready_at, a.usual_ready_source) == (DEP, "wms_departure")
+    assert (a.max_tier, a.tier, a.first_flagged_tier, a.first_flagged_at) == ("at_risk", "none", "at_risk", DEP - timedelta(minutes=29))
+    assert a.last_load_at == DEP + timedelta(minutes=5) and a.route_loaded_at == DEP + timedelta(minutes=5)
+    assert a.route_loading_from == DEP - timedelta(hours=4)
     assert (a.lines_expected, a.lines_picked, a.packages_created, a.packages_loaded) == (2, 2, 1, 1)
     assert a.transaction_names == ["Brighton Stock Pick"] and a.customer_name == "BOK SHOP HORSHAM"
-    assert (a.load_threshold_min, a.load_threshold_source) == (Decimal("120"), "floor")
-    assert [h["tier"] for h in a.tier_history] == ["at_risk", "none"]
+    assert [h["tier"] for h in a.tier_history] == ["at_risk", "none"] and a.tier_history[0]["source"] == "wms_departure"
     b = rows["29700"]
-    assert (b.outcome, b.max_tier, b.tier, b.reconstructed) == ("never_loaded", "late", "late", True)
+    assert (b.outcome, b.max_tier, b.tier, b.reconstructed) == ("never_loaded", "left_behind", "left_behind", True)
+    assert b.first_flagged_at == DEP - timedelta(minutes=29)
     live = rows["29800"]
     assert live.reconstructed is False and live.rule_version == fx.RULE_VERSION and live.max_tier == "none"
     async with async_session() as db:
@@ -218,4 +180,4 @@ async def test_the_api_row_says_when_it_was_reconstructed():
         out = await api.read_history(start="2026-10-01", end="2026-10-01", customer=CC, db=db)
     by = {r["delivery_number"]: r for r in out["rows"]}
     assert by["29616"]["reconstructed"] is True and by["29800"]["reconstructed"] is False
-    assert by["29616"]["category"] == "delayed" and by["29700"]["category"] == "missed"
+    assert by["29616"]["category"] == "held" and by["29700"]["category"] == "missed" and by["29750"]["category"] == "fine"

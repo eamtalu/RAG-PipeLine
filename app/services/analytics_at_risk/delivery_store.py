@@ -1,7 +1,7 @@
 """The board rows: one per delivery per departure, kept current by the worker.
 
 `apply` takes the states the board read produced and upserts a row for each: the progress columns are
-overwritten, the tier is recomputed against the route's thresholds, every tier change is appended to
+overwritten, the tier is recomputed against the route's van clock, every tier change is appended to
 the history, and a check a person left is kept but counted re-opened when the tier rises past it.
 `close_due` turns open rows whose departure plus grace has passed into outcomes; `sweep` closes a row
 left open for a day as unknown, so a disabled settlement can never leave a delivery "open" forever.
@@ -54,16 +54,11 @@ def _money(value: Decimal | None) -> str | None:
     return None if value is None else format(value.quantize(Decimal("0.01")).normalize(), "f")
 
 
-def history_entry(tier: model.Tier, at: datetime, minutes: Decimal, thresholds: model.Thresholds) -> dict:
-    """One `tier_history` element, the shape the API carries."""
-    if tier in (model.Tier.at_risk, model.Tier.late):
-        threshold, source = thresholds.load_min, thresholds.load_source
-    elif tier is model.Tier.watch:
-        threshold, source = thresholds.pick_min, thresholds.pick_source
-    else:
-        threshold, source = None, None
-    return {"tier": tier.value, "at": at.isoformat(), "minutes_to_departure": _money(minutes),
-            "threshold_min": _money(threshold), "threshold_source": source}
+def history_entry(tier: model.Tier, at: datetime, minutes: Decimal, clock: model.RouteClock) -> dict:
+    """One `tier_history` element, the shape the API carries: the tier, when, how many minutes before
+    the van's usual ready time, and which clock that was."""
+    return {"tier": tier.value, "at": at.isoformat(), "minutes_to_usual_ready": _money(minutes),
+            "usual_ready_at": clock.usual_ready_at.isoformat(), "source": clock.source}
 
 
 # ============================================================== reading rows
@@ -100,20 +95,21 @@ def _write_progress(row: AnalyticsAtRiskDelivery, state: model.DeliveryState) ->
         row.transaction_names = list(state.transaction_names)
     if state.route_loaded_at is not None:
         row.route_loaded_at = state.route_loaded_at
+    if state.route_loading_from is not None:
+        row.route_loading_from = state.route_loading_from
 
 
-def _write_thresholds(row: AnalyticsAtRiskDelivery, thresholds: model.Thresholds) -> None:
-    row.load_threshold_min, row.load_threshold_source = thresholds.load_min, thresholds.load_source
-    row.pick_threshold_min, row.pick_threshold_source = thresholds.pick_min, thresholds.pick_source
+def _write_clock(row: AnalyticsAtRiskDelivery, clock: model.RouteClock) -> None:
+    row.usual_ready_at, row.usual_ready_source = clock.usual_ready_at, clock.source
 
 
 async def _write_tier(db: AsyncSession, row: AnalyticsAtRiskDelivery, tier: model.Tier, *, now: datetime,
-                      minutes: Decimal, thresholds: model.Thresholds, stats: ApplyStats) -> None:
+                      minutes: Decimal, clock: model.RouteClock, stats: ApplyStats) -> None:
     """The tier, its history, the first flag, max_tier and a re-open when a check is overtaken."""
     old = row.tier or "none"
     if tier.value == old:
         return
-    row.tier_history = [*(row.tier_history or []), history_entry(tier, now, minutes, thresholds)]
+    row.tier_history = [*(row.tier_history or []), history_entry(tier, now, minutes, clock)]
     if _rank(tier.value) > _rank(row.max_tier):
         row.max_tier = tier.value
     if tier is not model.Tier.none and row.first_flagged_at is None:
@@ -136,20 +132,22 @@ def _state_from_row(row: AnalyticsAtRiskDelivery) -> model.DeliveryState:
         packages_created=row.packages_created or 0, packages_loaded=row.packages_loaded or 0,
         last_pick_at=row.last_pick_at, last_load_at=row.last_load_at,
         loading_expected=True if row.loading_expected is None else bool(row.loading_expected),
-        transaction_names=tuple(row.transaction_names or ()), route_loaded_at=row.route_loaded_at)
+        transaction_names=tuple(row.transaction_names or ()), route_loaded_at=row.route_loaded_at,
+        route_loading_from=row.route_loading_from)
 
 
-def _thresholds_from_row(row: AnalyticsAtRiskDelivery, fallback: model.Thresholds) -> model.Thresholds:
-    if row.load_threshold_min is None or row.pick_threshold_min is None:
-        return fallback
-    return model.Thresholds(load_min=Decimal(str(row.load_threshold_min)), load_source=row.load_threshold_source or "floor",
-                            pick_min=Decimal(str(row.pick_threshold_min)), pick_source=row.pick_threshold_source or "floor")
+def _clock_from_row(row: AnalyticsAtRiskDelivery, *, warn_before: timedelta, gone_after: timedelta) -> model.RouteClock:
+    """The clock the row was last judged with; the WMS departure when none was written."""
+    if row.usual_ready_at is None:
+        return model.RouteClock(usual_ready_at=row.departure_at, source="wms_departure", warn_before=warn_before, gone_after=gone_after)
+    return model.RouteClock(usual_ready_at=row.usual_ready_at, source=row.usual_ready_source or "learned",
+                            warn_before=warn_before, gone_after=gone_after)
 
 
 # ============================================================== apply
 
 async def apply(db: AsyncSession, cc: str, states: Iterable[model.DeliveryState], *, now: datetime, tz: tzinfo,
-                thresholds_for: Callable[[str | None], model.Thresholds], rule_version: str) -> ApplyStats:
+                clock_for: Callable[[model.DeliveryState], model.RouteClock], rule_version: str) -> ApplyStats:
     """Upsert one row per state and judge its tier. A delivery whose row for that departure is already
     closed is left alone: the board still names it the next morning, and that is not news."""
     stats = ApplyStats()
@@ -174,12 +172,12 @@ async def apply(db: AsyncSession, cc: str, states: Iterable[model.DeliveryState]
                 continue  # moved onto a departure that already has its closed row
             row.departure_date = departure_date
             stats.moved += 1
-        thresholds = thresholds_for(state.route)
+        clock = clock_for(state)
         _write_progress(row, state)
-        _write_thresholds(row, thresholds)
-        tier = model.tier_for(state, now, thresholds)
-        await _write_tier(db, row, tier, now=now, minutes=model.minutes_to_departure(state.departure_at, now),
-                          thresholds=thresholds, stats=stats)
+        _write_clock(row, clock)
+        tier = model.tier_for(state, now, clock)
+        await _write_tier(db, row, tier, now=now, minutes=model.minutes_to_departure(clock.usual_ready_at, now),
+                          clock=clock, stats=stats)
         row.rule_version, row.last_evaluated_at = rule_version, now
         stats.evaluated += 1
     await db.flush()
@@ -189,11 +187,12 @@ async def apply(db: AsyncSession, cc: str, states: Iterable[model.DeliveryState]
 # ============================================================== closing
 
 async def close_due(db: AsyncSession, cc: str, states: Mapping[str, model.DeliveryState], *, now: datetime,
-                    grace: timedelta, tz: tzinfo, fallback: model.Thresholds | None = None) -> int:
-    """Close every open row whose departure plus `grace` has passed. The latest state, when the board
-    still has one, refreshes the progress first so a load that landed after the last evaluation counts.
-    The final tier is judged at `now`: a row still open after departure closes `late`."""
-    fallback = fallback or model.Thresholds(Decimal(0), "floor", Decimal(0), "floor")
+                    grace: timedelta, tz: tzinfo, warn_before: timedelta = timedelta(minutes=30),
+                    gone_after: timedelta = timedelta(minutes=20)) -> int:
+    """Close every open row whose WMS departure plus `grace` has passed (the van is hours gone by then).
+    The latest state, when the board still has one, refreshes the progress first so a load that landed
+    after the last evaluation counts. The final tier is judged at `now`: a row still open closes
+    `left_behind`."""
     closed = 0
     for row in await open_rows(db, cc):
         if row.departure_at + grace > now:
@@ -202,9 +201,9 @@ async def close_due(db: AsyncSession, cc: str, states: Mapping[str, model.Delive
         if state is not None and state.departure_at.astimezone(tz).date() == row.departure_date:
             _write_progress(row, state)
         state = _state_from_row(row)
-        thresholds = _thresholds_from_row(row, fallback)
-        await _write_tier(db, row, model.tier_for(state, now, thresholds), now=now,
-                          minutes=model.minutes_to_departure(row.departure_at, now), thresholds=thresholds, stats=ApplyStats())
+        clock = _clock_from_row(row, warn_before=warn_before, gone_after=gone_after)
+        await _write_tier(db, row, model.tier_for(state, now, clock), now=now,
+                          minutes=model.minutes_to_departure(clock.usual_ready_at, now), clock=clock, stats=ApplyStats())
         outcome, lead = model.outcome_for(state)
         row.status, row.closed_at, row.outcome, row.outcome_lead_min = "closed", now, outcome, lead
         row.last_evaluated_at = now
@@ -213,21 +212,21 @@ async def close_due(db: AsyncSession, cc: str, states: Mapping[str, model.Delive
     return closed
 
 
-def write_closed(db: AsyncSession, cc: str, state: model.DeliveryState, *, thresholds: model.Thresholds,
+def write_closed(db: AsyncSession, cc: str, state: model.DeliveryState, *, clock: model.RouteClock,
                  replay: model.Replay, close_at: datetime, now: datetime, tz: tzinfo, rule_version: str) -> AnalyticsAtRiskDelivery:
-    """A CLOSED row written after the fact by the backfill: the progress and thresholds as `apply`
-    writes them, the tier story from the replay, the outcome from the final state, and `reconstructed`
-    set so the accuracy score can leave it out. The caller has checked no row exists for this
-    delivery and departure date. Does NOT commit."""
+    """A CLOSED row written after the fact by the backfill: the progress and clock as `apply` writes
+    them, the tier story from the replay, the outcome from the final state, and `reconstructed` set so
+    the accuracy score can leave it out. The caller has checked no row exists for this delivery and
+    departure date. Does NOT commit."""
     row = AnalyticsAtRiskDelivery(customer_code=cc, delivery_number=state.delivery_number,
                                   departure_date=state.departure_at.astimezone(tz).date(), departure_at=state.departure_at,
                                   tier=replay.final_tier.value, max_tier=replay.max_tier.value,
                                   first_flagged_at=replay.first_flagged_at,
                                   first_flagged_tier=None if replay.first_flagged_tier is None else replay.first_flagged_tier.value,
-                                  tier_history=[history_entry(c.tier, c.at, c.minutes_to_departure, thresholds) for c in replay.changes],
+                                  tier_history=[history_entry(c.tier, c.at, c.minutes_to_usual_ready, clock) for c in replay.changes],
                                   reconstructed=True, rule_version=rule_version, last_evaluated_at=now)
     _write_progress(row, state)
-    _write_thresholds(row, thresholds)
+    _write_clock(row, clock)
     outcome, lead = model.outcome_for(state)
     row.status, row.closed_at, row.outcome, row.outcome_lead_min = "closed", close_at, outcome, lead
     db.add(row)
@@ -251,7 +250,7 @@ async def sweep(db: AsyncSession, cc: str, *, now: datetime, older_than: timedel
 #: Outcomes that count as "actually late" when the flags are scored (the model's list).
 LATE_OUTCOMES = model.LATE_OUTCOMES
 SCORED_OUTCOMES = ("loaded_in_time", "loaded_late", "never_loaded", "picked_in_time", "picked_late", "unknown")
-TIER_ORDER = case({"late": 3, "at_risk": 2, "watch": 1}, value=AnalyticsAtRiskDelivery.tier, else_=0)
+TIER_ORDER = case({"left_behind": 3, "at_risk": 2, "watch": 1}, value=AnalyticsAtRiskDelivery.tier, else_=0)
 
 
 async def board_rows(db: AsyncSession, cc: str, *, dates: Sequence[date], tiers: Sequence[str] | None = None,
@@ -267,6 +266,12 @@ async def board_rows(db: AsyncSession, cc: str, *, dates: Sequence[date], tiers:
     return list((await db.execute(stmt)).scalars().all())
 
 
+def last_at_expr():
+    """The clock the outcome reads, as SQL: the last load, or the last pick on a route without loading."""
+    d = AnalyticsAtRiskDelivery
+    return case((d.loading_expected.is_(False), d.last_pick_at), else_=d.last_load_at)
+
+
 def category_expr():
     """The three plain words as SQL, the same rule as `model.category_for`, so a filter and a count
     agree with what each row says."""
@@ -277,8 +282,8 @@ def category_expr():
         (d.outcome == "unknown", "unknown"),
         (d.outcome == "never_loaded", "missed"),
         ((d.outcome == "picked_late") & incomplete, "missed"),
-        (d.outcome.in_(("picked_late", "loaded_late")), "delayed"),
-        (d.max_tier != "none", "delayed"),
+        (d.outcome.in_(("picked_late", "loaded_late")), "held"),
+        (d.usual_ready_at.is_not(None) & (last_at_expr() > d.usual_ready_at), "held"),
         else_="fine")
 
 
@@ -335,7 +340,7 @@ async def history_counts(db: AsyncSession, cc: str, *, start: date, end: date, t
     where = _history_where(cc, start=start, end=end, tier=tier, checked=checked, route=route, outcome=outcome,
                            categories=None, transaction=transaction, delivery=delivery)
     cat = category_expr().label("category")
-    counts = {c: 0 for c in ("missed", "delayed", "fine", "unknown")}
+    counts = {c: 0 for c in ("missed", "held", "fine", "unknown")}
     for category, n in (await db.execute(select(cat, func.count()).where(*where).group_by(cat))).all():
         counts[category] = int(n)
     names = (await db.execute(select(func.distinct(func.jsonb_array_elements_text(d.transaction_names))).where(*where))).scalars().all()
@@ -367,3 +372,26 @@ async def accuracy(db: AsyncSession, cc: str, *, start: date, end: date) -> dict
     ).group_by(d.max_tier))).mappings().all()
     return {"routes": {r["route"]: {k: int(v) for k, v in r.items() if k != "route"} for r in rows},
             "by_tier": {t["max_tier"]: {"flagged": int(t["flagged"]), "late": int(t["late"])} for t in tiers}}
+
+
+async def vans(db: AsyncSession, cc: str, *, start: date, end: date, limit: int = 2000) -> list[dict]:
+    """One row per route per departure day over the closed rows: when the van's loading started, when
+    it was ready, when it is usually ready, how late it ran, and how many deliveries it carried, held
+    or went without. The month-end view of the vans themselves. Bounded by `limit` rows."""
+    d = AnalyticsAtRiskDelivery
+    cat = category_expr()
+    rows = (await db.execute(select(
+        d.route, d.departure_date, func.min(d.route_loading_from), func.max(d.route_loaded_at), func.max(d.usual_ready_at),
+        func.max(d.usual_ready_source), func.bool_and(d.loading_expected), func.count(),
+        func.count().filter(cat == "held"), func.count().filter(cat == "missed"), func.count().filter(cat == "fine"),
+        func.max(d.departure_at), func.bool_or(d.reconstructed),
+    ).where(d.customer_code == cc, d.status == "closed", d.departure_date >= start, d.departure_date <= end, d.route.is_not(None))
+      .group_by(d.route, d.departure_date).order_by(d.departure_date.desc(), d.route).limit(limit))).all()
+    out = []
+    for route, day, loading_from, ready_at, usual_at, source, loading, n, held, missed, fine, departure_at, reconstructed in rows:
+        late = None if ready_at is None or usual_at is None else model.minutes_to_departure(ready_at, usual_at)
+        out.append({"route": route, "departure_date": day, "loading_from": loading_from, "ready_at": ready_at,
+                    "usual_ready_at": usual_at, "usual_ready_source": source, "loading_expected": bool(loading),
+                    "deliveries": int(n), "held": int(held), "missed": int(missed), "fine": int(fine),
+                    "late_min": late, "departure_at": departure_at, "reconstructed": bool(reconstructed)})
+    return out

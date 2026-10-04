@@ -4,10 +4,11 @@
     POST   /analytics/at-risk/deliveries/{n}/check        a person's word that someone has looked at it
     DELETE /analytics/at-risk/deliveries/{n}/check        take that word back
     GET    /analytics/at-risk/history                     closed rows between two departure dates, keyset paged
+    GET    /analytics/at-risk/vans                        one row per route per day: when the van was ready, how late, what it carried
     GET    /analytics/at-risk/checks                      the acknowledgement ledger, newest first
     GET    /analytics/at-risk/accuracy                    flags scored against outcomes: precision and recall
-    GET    /analytics/at-risk/settings  PUT               the tenant's floors and knobs
-    GET    /analytics/at-risk/routes                      what each route's history taught, with the effective threshold
+    GET    /analytics/at-risk/settings  PUT               the tenant's windows and knobs
+    GET    /analytics/at-risk/routes                      when each route's van is usually ready, learned from its days
     GET    /analytics/at-risk/status                      one row for a page header, with readiness flags
     POST   /analytics/at-risk/evaluate                    run one pass now (sub-second; no 202 needed)
 
@@ -81,21 +82,35 @@ async def _tz(db: AsyncSession, cc: str) -> ZoneInfo:
     return ZoneInfo(await get_customer_timezone(db, cc))
 
 
+def _minutes(a: datetime | None, b: datetime | None) -> str | None:
+    """Signed minutes from `b` to `a` as a short decimal string, None when either is missing."""
+    if a is None or b is None:
+        return None
+    return _s(model.minutes_to_departure(a, b).quantize(Decimal("0.01")))
+
+
 def _row_json(row: AnalyticsAtRiskDelivery, now: datetime) -> dict:
     check = None
     if row.checked_at is not None:
         check = {"checked_at": _iso(row.checked_at), "checked_by": row.checked_by, "note": row.check_note,
                  "tier": row.checked_tier, "reopened_count": int(row.reopened_count or 0)}
     reopened = check is not None and model.TIER_RANK[model.Tier(row.tier)] > model.TIER_RANK[model.Tier(row.checked_tier or "none")]
+    loading = True if row.loading_expected is None else bool(row.loading_expected)
+    last_at = row.last_load_at if loading else row.last_pick_at
     return {
         "delivery_number": row.delivery_number, "route": row.route, "customer_name": row.customer_name,
         "customer_number": row.customer_number, "departure_at": _iso(row.departure_at),
         "departure_date": row.departure_date.isoformat(),
         "minutes_to_departure": _s(model.minutes_to_departure(row.departure_at, now).quantize(Decimal("0.01"))),
+        # the van clock: when this delivery's van is usually ready, where that came from, and the live countdown
+        "usual_ready_at": _iso(row.usual_ready_at), "usual_ready_source": row.usual_ready_source,
+        "minutes_to_usual_ready": _minutes(row.usual_ready_at, now),
+        "route_loading_from": _iso(row.route_loading_from),
+        # once closed: how long before the van was ready this delivery was on it, and how late the van ran
+        "before_van_min": _minutes(row.route_loaded_at, last_at),
+        "van_late_min": _minutes(row.route_loaded_at, row.usual_ready_at),
         "tier": row.tier, "max_tier": row.max_tier, "first_flagged_at": _iso(row.first_flagged_at),
         "first_flagged_tier": row.first_flagged_tier,
-        "threshold": {"load_min": _s(row.load_threshold_min), "load_source": row.load_threshold_source,
-                      "pick_min": _s(row.pick_threshold_min), "pick_source": row.pick_threshold_source},
         "lines": {"expected": row.lines_expected, "confirmed": int(row.lines_confirmed or 0),
                   "picked": int(row.lines_picked or 0), "short": int(row.lines_short or 0)},
         "packages": {"created": int(row.packages_created or 0), "loaded": int(row.packages_loaded or 0)},
@@ -103,8 +118,8 @@ def _row_json(row: AnalyticsAtRiskDelivery, now: datetime) -> dict:
         "reconstructed": bool(row.reconstructed),
         "loading_expected": True if row.loading_expected is None else bool(row.loading_expected),
         "transaction_names": list(row.transaction_names or []),
-        "category": model.category_for(outcome=row.outcome, max_tier=row.max_tier, lines_expected=row.lines_expected,
-                                       lines_confirmed=int(row.lines_confirmed or 0)),
+        "category": model.category_for(outcome=row.outcome, last_at=last_at, usual_ready_at=row.usual_ready_at,
+                                       lines_expected=row.lines_expected, lines_confirmed=int(row.lines_confirmed or 0)),
         "status": row.status, "closed_at": _iso(row.closed_at), "outcome": row.outcome,
         "outcome_lead_min": _s(row.outcome_lead_min), "check": check, "reopened": reopened,
         "tier_history": list(row.tier_history or []), "rule_version": row.rule_version,
@@ -134,10 +149,10 @@ async def read_board(window: str = "both", tier: str | None = None, include_clos
     stale = evaluated_at is None or (now - evaluated_at) > timedelta(seconds=settings.analytics_at_risk_poll_seconds * STALE_POLLS)
     open_rows = [r for r in rows if r.status == "open"]
     counts = {"open": len(open_rows), "watch": sum(r.tier == "watch" for r in open_rows),
-              "at_risk": sum(r.tier == "at_risk" for r in open_rows), "late": sum(r.tier == "late" for r in open_rows),
+              "at_risk": sum(r.tier == "at_risk" for r in open_rows), "left_behind": sum(r.tier == "left_behind" for r in open_rows),
               "checked": sum(r.checked_at is not None for r in open_rows)}
     return {"timezone": tz.key, "now": now.isoformat(), "evaluated_at": _iso(evaluated_at), "stale": stale,
-            "settings": {"load_floor_min": cfg.load_floor_min, "pick_floor_min": cfg.pick_floor_min},
+            "settings": {"warn_before_min": cfg.warn_before_min, "gone_after_min": cfg.gone_after_min},
             "counts": counts, "deliveries": [_row_json(r, now) for r in rows]}
 
 
@@ -213,7 +228,7 @@ async def read_history(start: str, end: str, tier: str | None = None, checked: b
                        customer: str = Depends(get_current_customer), db: AsyncSession = Depends(get_session)):
     """Closed rows departing between `start` and `end` (tenant-local dates, at most 180 days apart),
     newest first, keyset paged. `tier` filters on the highest tier the row reached; `category` is a
-    comma list of the plain words (missed, delayed, fine, unknown); `transaction` a picking screen the
+    comma list of the plain words (missed, held, fine, unknown); `transaction` a picking screen the
     delivery went through; `delivery` the start of a delivery number. `counts` and `transactions`
     describe the whole range under every filter except `category`, for the pie and the pills."""
     _check("tier", tier, TIERS)
@@ -242,6 +257,25 @@ async def read_history(start: str, end: str, tier: str | None = None, checked: b
             "truncated": truncated,
             "next_after": f"{rows[-1].departure_at.isoformat()}|{rows[-1].delivery_number}" if rows and truncated else None,
             "counts": summary["counts"] if summary else None, "transactions": summary["transactions"] if summary else None}
+
+
+@router.get("/vans")
+async def read_vans(start: str, end: str, customer: str = Depends(get_current_customer), db: AsyncSession = Depends(get_session)):
+    """One row per route per departure day over the closed rows: when the van's loading started, when it
+    was ready, when it is usually ready, how late it ran (minutes, negative when early) and how many
+    deliveries it carried, held or went without. One SQL aggregate, bounded."""
+    start_d, end_d = _date("start", start), _date("end", end)
+    if end_d < start_d:
+        raise HTTPException(422, detail="end must not be before start")
+    if end_d - start_d > HISTORY_SPAN_MAX:
+        raise HTTPException(422, detail=f"start and end may be at most {HISTORY_SPAN_MAX.days} days apart")
+    rows = await delivery_store.vans(db, customer, start=start_d, end=end_d)
+    return {"start": start_d.isoformat(), "end": end_d.isoformat(), "vans": [
+        {"route": v["route"], "departure_date": v["departure_date"].isoformat(), "departure_at": _iso(v["departure_at"]),
+         "loading_from": _iso(v["loading_from"]), "ready_at": _iso(v["ready_at"]), "usual_ready_at": _iso(v["usual_ready_at"]),
+         "usual_ready_source": v["usual_ready_source"], "loading_expected": v["loading_expected"], "late_min": _s(v["late_min"]),
+         "deliveries": v["deliveries"], "held": v["held"], "missed": v["missed"], "fine": v["fine"], "reconstructed": v["reconstructed"]}
+        for v in rows]}
 
 
 def _ratio(numerator: int, denominator: int) -> str | None:
@@ -276,8 +310,8 @@ async def read_accuracy(days: int = 28, customer: str = Depends(get_current_cust
 # ============================================================== settings, routes, status
 
 def _settings_json(s: settings_store.Settings) -> dict:
-    return {"enabled": s.enabled, "load_floor_min": s.load_floor_min, "pick_floor_min": s.pick_floor_min,
-            "min_sample": s.min_sample, "window_days": s.window_days, "close_grace_min": s.close_grace_min,
+    return {"enabled": s.enabled, "warn_before_min": s.warn_before_min, "gone_after_min": s.gone_after_min,
+            "min_days": s.min_days, "window_days": s.window_days, "close_grace_min": s.close_grace_min,
             "coverage": _s(s.coverage), "defaulted": s.defaulted, "updated_by": s.updated_by, "updated_at": _iso(s.updated_at)}
 
 
@@ -288,7 +322,7 @@ async def read_settings(customer: str = Depends(get_current_customer), db: Async
 
 @router.put("/settings")
 async def put_settings(body: dict = Body(...), customer: str = Depends(get_current_customer), db: AsyncSession = Depends(get_session)):
-    """Change any of the floors and knobs. Ranges are checked and every problem is reported at once."""
+    """Change any of the windows and knobs. Ranges are checked and every problem is reported at once."""
     changes = {k: v for k, v in (body or {}).items()}
     problems = settings_store.validate(changes)
     if problems:
@@ -298,23 +332,34 @@ async def put_settings(body: dict = Body(...), customer: str = Depends(get_curre
     return _settings_json(out)
 
 
+def _hhmm(minutes) -> str | None:
+    """Minutes after local midnight as HH:MM, None when unknown."""
+    if minutes is None:
+        return None
+    m = int(Decimal(str(minutes)).to_integral_value(rounding="ROUND_HALF_UP")) % 1440
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
 @router.get("/routes")
 async def read_routes(customer: str = Depends(get_current_customer), db: AsyncSession = Depends(get_session)):
-    """The latest profile per route with the threshold the board is judged against."""
+    """The latest profile per route: when its van is usually ready (nine days in ten), the median and
+    the latest, when loading usually starts, and the same for the last pick on a route without a loading
+    step. A route below `min_days` has no `usual` yet and runs on the WMS departure."""
     cfg = await settings_store.effective(db, customer)
     profiles = await profile_store.latest(db, customer)
-    for_route = profile_store.thresholds_for(profiles, cfg)
     out = []
     for route, p in sorted(profiles.items()):
-        th = for_route(route)
+        loading = (p.loaded_sample or 0) > 0
+        usual = p.van_ready_usual_min if loading else p.pick_done_usual_min
         out.append({"route": route, "as_of_date": p.as_of_date.isoformat(), "window_days": p.window_days, "sample": p.sample,
-                    "loaded_sample": p.loaded_sample, "learned_load_min": _s(p.learned_load_min), "effective_load_min": _s(th.load_min),
-                    "load_source": th.load_source, "learned_pick_min": _s(p.learned_pick_min), "effective_pick_min": _s(th.pick_min),
-                    "pick_source": th.pick_source, "load_lead_p50": _s(p.load_lead_p50), "load_lead_min": _s(p.load_lead_min),
-                    "pick_lead_p50": _s(p.pick_lead_p50), "pick_lead_min": _s(p.pick_lead_min),
+                    "loaded_sample": p.loaded_sample, "loading_expected": loading,
+                    "usual_ready": _hhmm(usual), "usual_source": "learned" if usual is not None else "wms_departure",
+                    "van_days": p.van_days, "van_ready_usual": _hhmm(p.van_ready_usual_min), "van_ready_p50": _hhmm(p.van_ready_p50_min),
+                    "van_ready_latest": _hhmm(p.van_ready_latest_min), "loading_from_p50": _hhmm(p.loading_from_p50_min),
+                    "pick_days": p.pick_days, "pick_done_usual": _hhmm(p.pick_done_usual_min), "pick_done_p50": _hhmm(p.pick_done_p50_min),
                     "departure_time_mode": p.departure_time_mode, "coverage": _s(p.coverage), "computed_at": _iso(p.computed_at)})
-    return {"routes": out, "floors": {"load_floor_min": cfg.load_floor_min, "pick_floor_min": cfg.pick_floor_min},
-            "min_sample": cfg.min_sample}
+    return {"routes": out, "windows": {"warn_before_min": cfg.warn_before_min, "gone_after_min": cfg.gone_after_min},
+            "min_days": cfg.min_days}
 
 
 async def _readiness(db: AsyncSession, cc: str) -> dict:

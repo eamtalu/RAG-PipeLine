@@ -26,7 +26,8 @@ LONDON = fx.LONDON
 UTC = timezone.utc
 DEP = datetime(2026, 10, 2, 10, 30, tzinfo=UTC)  # 11:30 BST on 2 Oct
 NOW = DEP - timedelta(minutes=90)  # 10:00 London
-TH = model.Thresholds(load_min=Decimal("120"), load_source="floor", pick_min=Decimal("219"), pick_source="learned")
+USUAL = DEP - timedelta(minutes=60)  # the van is usually ready at 10:30; NOW sits on the window edge
+CLOCK_FOR = fx.clock_before_departure(60)
 
 
 @pytest.fixture(autouse=True)
@@ -49,7 +50,7 @@ def _state(number, **over) -> model.DeliveryState:
 
 async def _apply(states, now=NOW):
     async with async_session() as db:
-        await delivery_store.apply(db, CC, states, now=now, tz=LONDON, thresholds_for=lambda r: TH, rule_version=RULE_VERSION)
+        await delivery_store.apply(db, CC, states, now=now, tz=LONDON, clock_for=CLOCK_FOR, rule_version=RULE_VERSION)
         await state_store.touch(db, CC, last_evaluated_at=now, open_rows=len(states))
         await db.commit()
 
@@ -65,36 +66,38 @@ async def test_without_rows_the_block_says_so():
 async def test_the_block_lists_flagged_deliveries_worst_first_as_text():
     await _apply([
         _state("fine"),
-        _state("watch", departure_at=DEP + timedelta(minutes=60), lines_picked=2, packages_created=0, packages_loaded=0),
+        _state("watch", lines_picked=2, packages_created=1, packages_loaded=1),
         _state("risk", packages_loaded=1, customer_name="Tesco Hove"),
-        _state("late", departure_at=DEP - timedelta(days=1), packages_loaded=1),
+        _state("behind", departure_at=DEP - timedelta(days=1), packages_loaded=1),
     ])
     async with async_session() as db:
         block = await home_at_risk.compute(db, CC, NOW, LONDON)
     assert block["available"] is True and block["stale"] is False and block["note"] == ""
     assert block["as_of_text"] == "as of 10:00"
-    assert block["caption"] == "departures today and tomorrow · thresholds learned per route · floor 120 min load, 180 min pick"
-    assert block["summary"] == {"open": 4, "late": 1, "at_risk": 1, "watch": 1, "checked": 0,
-                                "text": "1 late · 1 at risk · 1 to watch · 1 fine"}
+    assert block["caption"] == ("departures today and tomorrow · each route's van has a learned ready time · "
+                                "warned 30 min before it · left behind 20 min of quiet after it")
+    assert block["summary"] == {"open": 4, "left_behind": 1, "at_risk": 1, "watch": 1, "checked": 0,
+                                "text": "1 left behind · 1 at risk · 1 to watch · 1 fine"}
     assert block["empty_text"] is None and block["more_text"] == ""
-    assert [d["delivery_number"] for d in block["deliveries"]] == ["late", "risk", "watch"]
+    assert [d["delivery_number"] for d in block["deliveries"]] == ["behind", "risk", "watch"]
     risk = block["deliveries"][1]
     assert (risk["tier"], risk["tier_text"], risk["route"], risk["customer_name"]) == ("at_risk", "At risk", "BRI03", "Tesco Hove")
-    assert (risk["departure_text"], risk["minutes_to_departure"], risk["minutes_text"]) == ("11:30", 90, "90 min to go")
+    assert (risk["departure_text"], risk["minutes_to_departure"], risk["minutes_text"]) == ("van usually ready 10:30", 30, "van usually ready in 30 min")
     assert risk["progress_text"] == "5 of 5 lines · 1 of 2 packages loaded"
     assert risk["last_text"] == "last pick 07:30 · last load 08:30"
-    assert risk["threshold_text"] == "needs loading 120 min before departure · the configured floor"
+    assert risk["threshold_text"] == "packages still off the van · van usually ready by 10:30 · learned from this route's days"
     assert risk["checked"] is None and risk["reopened_text"] == ""
     watch = block["deliveries"][2]
-    assert watch["threshold_text"] == "needs picking 219 min before departure · learned from this route's history"
-    assert watch["progress_text"] == "2 of 5 lines · no package yet" and watch["minutes_text"] == "2 h 30 to go"
-    late = block["deliveries"][0]
-    assert late["minutes_text"].startswith("left ") and late["tier_text"] == "Late"
+    assert watch["threshold_text"] == "picking not finished · van usually ready by 10:30 · learned from this route's days"
+    assert watch["progress_text"] == "2 of 5 lines · 1 of 1 packages loaded"
+    behind = block["deliveries"][0]
+    assert behind["minutes_text"].startswith("usual time passed ") and behind["tier_text"] == "Left behind"
+    assert behind["threshold_text"].startswith("the van is taken as gone and this delivery is not on it")
     assert block["accuracy_text"].startswith("accuracy · not enough closed departures yet · 0 of 20 needed")
 
 
 async def test_a_check_shows_the_persons_name_and_reopens_in_words_when_the_tier_rises():
-    await _apply([_state("watch", departure_at=DEP + timedelta(minutes=60), lines_picked=2, packages_created=0, packages_loaded=0)])
+    await _apply([_state("watch", lines_picked=2, packages_created=1, packages_loaded=1)])
     async with async_session() as db:
         await check_store.check(db, CC, "watch", actor="Amin Talukder", note="loader called", now=NOW + timedelta(minutes=1))
         await db.commit()
@@ -102,10 +105,9 @@ async def test_a_check_shows_the_persons_name_and_reopens_in_words_when_the_tier
     row = block["deliveries"][0]
     assert row["checked"] == {"by": "Amin Talukder", "at_text": "10:01", "note": "loader called"}
     assert row["reopened_text"] == "" and block["summary"]["checked"] == 1
-    await _apply([_state("watch", departure_at=DEP + timedelta(minutes=60), lines_picked=5, packages_created=0, packages_loaded=0)],
-                 now=DEP - timedelta(minutes=30))  # 90 min left: at risk
+    await _apply([_state("watch", lines_picked=5, packages_created=2, packages_loaded=1)], now=DEP - timedelta(minutes=50))  # at risk
     async with async_session() as db:
-        block = await home_at_risk.compute(db, CC, DEP - timedelta(minutes=29), LONDON)
+        block = await home_at_risk.compute(db, CC, DEP - timedelta(minutes=49), LONDON)
     row = block["deliveries"][0]
     assert row["tier"] == "at_risk" and row["checked"]["by"] == "Amin Talukder" and row["reopened_count"] == 1
     assert row["reopened_text"] == "checked at Watch · now At risk"
@@ -131,7 +133,7 @@ async def test_an_empty_board_after_the_vans_have_gone_names_the_day_and_the_nex
         await db.commit()
         block = await home_at_risk.compute(db, CC, DEP + timedelta(hours=3), LONDON)
     assert block["deliveries"] == [] and block["summary"]["text"] == "0 fine"
-    assert block["empty_text"] == "3 departures today · 1 left late · 2 on time"
+    assert block["empty_text"] == "3 departures today · 1 left behind · 2 went out"
 
 
 async def test_the_accuracy_line_appears_once_enough_departures_have_closed():
@@ -148,11 +150,13 @@ async def test_the_accuracy_line_appears_once_enough_departures_have_closed():
         await state_store.touch(db, CC, last_evaluated_at=NOW)
         await db.commit()
         block = await home_at_risk.compute(db, CC, NOW, LONDON)
-    assert block["accuracy_text"] == "last 14 days · flagged 6 · actually late 5 · precision 67% · recall 80%"
+    assert block["accuracy_text"] == "last 14 days · flagged 6 · actually left behind 5 · precision 67% · recall 80%"
 
 
 async def test_the_snapshot_carries_the_block_and_survives_its_failure(monkeypatch):
-    await _apply([_state("risk", packages_loaded=1)])
+    # the snapshot reads the board on the real clock, so the delivery departs today, whatever day the test runs
+    today_dep = datetime.combine(datetime.now(LONDON).date(), datetime.min.time(), tzinfo=LONDON) + timedelta(hours=11, minutes=30)
+    await _apply([_state("risk", departure_at=today_dep, packages_loaded=1)], now=today_dep - timedelta(minutes=90))
     async with async_session() as db:
         snap = await home_snapshot.compute(db, CC)
     assert snap is not None and snap["at_risk"]["available"] is True

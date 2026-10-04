@@ -13,4 +13,6 @@ once a day.
 #: lines that moved stock and flagged one closed delivery in four as late on the live data.
 #: v3 (2026-10-03): a package is known only from a pick line that moved stock; hand-made packages no pick
 #: filled and short lines' package numbers made half of v2's "never loaded" rows.
-RULE_VERSION = "at-risk-v3"
+#: van-v1 (2026-10-04): the van is the clock. Each route learns the time of day its van is usually
+#: ready; deliveries are judged against that, not against the WMS departure time.
+RULE_VERSION = "van-v1"

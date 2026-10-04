@@ -26,42 +26,56 @@ Judging them on loading would flag every one of them every day, so the board dec
 A delivery on a route without a loading step is judged on picking alone, never reaches `at_risk` through loading, and closes as `picked_in_time` or `picked_late` by its last pick instead of `loaded_in_time`, `loaded_late` or `never_loaded`.
 The decision is kept on the delivery row (`loading_expected`, migration `f1c2d3e4a5b6`).
 
-## The rule
+## The rule: the van is the clock
 
-A delivery is judged against its departure instant and its route's thresholds (`model.tier_for`):
+The WMS departure time (11:30 on weekdays, 12:00 on Saturdays) is a planning time.
+Measured over a live week, every BRI route's van was fully loaded four to five hours before it (the dock's last scan landed between 05:50 and 07:50), so a lead measured back from 11:30 said "at risk" and "4 h 31 before" about the same delivery.
+What a route does have is a rhythm: its dock's last scan lands at much the same time of day, day after day (BRI04 by 06:56 on nine days in ten, BRI06 by 07:48, BRI08 by 07:31).
 
-- `watch`: picking is still open and the departure is closer than the route's pick lead.
-- `at_risk`: loading is still open and the departure is closer than the route's load lead.
-- `late`: the departure has passed and either is still open.
+Each route learns the time its van is usually ready: the coverage quantile (0.90 by default) of the daily van-ready time over the last 28 days, unknown below 5 days of history.
+A delivery is judged against that instant on its own departure day (`model.tier_for`, with the clock from `profile_store.clock_for`):
 
-A lead is learned per route as a coverage quantile over the closed deliveries of the last 28 days: the lead that nine in ten loaded deliveries met or beat, which is the tenth percentile of lead minutes.
-Below 20 closed deliveries the learned lead is unknown.
-The effective threshold is the larger of the learned lead and the tenant's floor (120 minutes to load, 180 to pick by default), so a slow week can never teach the system to hide risk.
+- `watch`: picking is not finished and the van is usually ready within the warning window (30 minutes by default).
+- `at_risk`: packages are still off the van and the van is usually ready within the window, or the usual time has passed.
+- `left_behind`: the usual time has passed and the dock has been quiet for the gone window (20 minutes by default), so the van is taken as gone, and this delivery is not on it.
+
+A route with too few days of history has no rhythm yet, and its WMS departure stands in (`usual_ready_source = wms_departure`), which flags late but never falsely.
+A route that never scans a load (the BRILA runs) learns from its last pick of the day instead and is judged on picking alone.
+Nothing is flagged before the warning window, however slow the morning looks.
+
 A pick line is done once it is confirmed, whether it moved stock or was declared short: a short pick is the warehouse's answer for that line, not a line still waiting.
-Rule version `at-risk-v2` made that explicit; v1 judged on lines that moved stock and flagged one closed delivery in four as late on the live data, because most deliveries carry a short line.
 With the expected line count unknown, only a delivery with no confirmation at all counts as picking open, so a lookup gap never flags every delivery.
+Rule versions: `at-risk-v1` judged on lines that moved stock and flagged one closed delivery in four; `at-risk-v2` counted confirmed lines; `at-risk-v3` knew a package only from a pick that moved stock; `van-v1` made the van the clock.
+
+### Routes without a loading step
+
+The BRILA routes (Shake Shack Gatwick daily, BRILA1/2/3) are picked and packed but never scanned onto a van, measured over 30 days.
+Their deliveries carry `loading_expected = false`, the last pick decides the tier and the outcome (`picked_in_time` / `picked_late`), and the route's clock is the time its picking is usually done.
 
 ## What it writes
 
 - `analytics_at_risk_deliveries`: one row per delivery per departure date.
-  The worker writes the state (progress, tier, history, thresholds, outcome); the API writes the five check columns.
+  The worker writes the state (progress, tier, history, the van clock, outcome); the API writes the five check columns.
   The two writers touch disjoint columns.
 - `analytics_at_risk_checks`: the acknowledgement ledger, append-only (`checked`, `unchecked`, `reopened`).
-- `analytics_at_risk_route_profiles`: one row per route per day with what the history taught.
-- `analytics_at_risk_settings`: the tenant's floors and knobs; no row means the defaults.
+- `analytics_at_risk_route_profiles`: one row per route per day: when its van is usually ready, learned from its days.
+- `analytics_at_risk_settings`: the tenant's windows and knobs (warning window, quiet window, days of history needed, coverage, learning window, close grace); no row means the defaults.
 - `analytics_at_risk_tenant_state`: one row for `/status`.
 
 ## The three plain words
 
-Every closed delivery is also given one of three words (`model.category_for`, mirrored in SQL by `delivery_store.category_expr` so a filter and a count agree with the row):
+Every closed delivery is given one of three words (`model.category_for`, mirrored in SQL by `delivery_store.category_expr` so a filter and a count agree with the row):
 
-- `missed`: the van left without it. A package was never loaded, or lines were never confirmed (picked or declared short).
-- `delayed`: it got away, but behind the route's rhythm (flagged Watch or At risk before the departure) or after the departure time.
-- `fine`: in time and never flagged.
+- `missed`: the van went without it. A package was never loaded, or lines were never confirmed (picked or declared short).
+- `held`: it was on the van, but after the van's usual ready time, or after the WMS departure. The van ran late and this delivery was one of those still going on. The history shows "held the van".
+- `fine`: on the van before the usual time.
 
 Two edge cases exist for honesty: `unknown` when the board lost sight of the delivery before it closed, and `open` while it has not closed.
-The delivery row also keeps the picking screens its lines went through (`transaction_names`, migration `a2b3c4d5e6f7`), so a supervisor can look at one kind of picking at a time; a delivery that spans two kinds appears under both.
-`GET /analytics/at-risk/history` filters on `category` (a comma list), `transaction` and `delivery` (the start of a number), and returns `counts` per category and the `transactions` seen over the whole range under every filter except the category one, which is what the stacked bar beside the table is drawn from.
+The tiers a delivery passed through on the way do not decide the word; the clocks do.
+The delivery row also keeps the picking screens its lines went through (`transaction_names`), so a supervisor can look at one kind of picking at a time; a delivery that spans two kinds appears under both.
+`GET /analytics/at-risk/history` filters on `category` (a comma list), `transaction` and `delivery` (the start of a number), and returns `counts` per word and the `transactions` seen over the whole range under every filter except the category one, which is what the stacked bar beside the table is drawn from.
+Each row also carries `before_van_min` (minutes between its last load and the van being ready) and `van_late_min` (minutes the van ran past its usual time, negative when early).
+`GET /analytics/at-risk/vans` aggregates the same rows per route per day: when loading started, when the van was ready, when it is usually ready, how late it ran and how many deliveries it carried, held or went without.
 
 ## Acknowledgements
 
@@ -74,7 +88,7 @@ The check is kept when the tier later rises: the row is counted re-opened, the l
 A row closes once its departure plus a grace (180 minutes) has passed: `loaded_in_time` when every package was on the van before the departure, `loaded_late` when the last one went on after, `never_loaded` otherwise.
 `outcome_lead_min` is the minutes between the last load and the departure, negative when late.
 The WMS records no actual departure: the standard load screen answers OK per package, the milk list answers that all packages are loaded, and sign-off only ends the session.
-The nearest real event is the last package scanned onto the route's loading dock on the departure day, kept on every row of that route and day as `route_loaded_at` (migration `b3c4d5e6f7a8`) and shown beside the target departure as "route loaded".
+The nearest real event is the last package scanned onto the route's loading dock on the departure day, kept on every row of that route and day as `route_loaded_at` and shown as "van ready"; the dock's first scan is `route_loading_from`, "loading from".
 Each row also keeps its own `last_load_at`, the moment its last package went on the van.
 A row still open a day after its departure closes as `unknown`.
 `GET /analytics/at-risk/accuracy` scores flags against outcomes: precision is the share of flagged deliveries that really ended late, recall the share of late deliveries that had been flagged.
@@ -90,8 +104,8 @@ So on the day the feature is switched on the history is empty, and the first clo
 cd /opt/RAG-Pipeline/RAG-PipeLine && PYTHONPATH=$PWD venv/bin/python -m app.tools.at_risk_backfill tmp-live 2026-09-25 2026-10-02
 ```
 
-For each day, oldest first, it reads the departures straight from the routing calls' response text in `log_transactions` (the latest call per delivery wins, as on the board), reuses the board's reads for picks, expected lines, packages and loads up to the day's close, replays the tier rule over the clocks (`model.replay_tiers`: one tick after each lead is crossed, at each completion, at the departure and at the close), and writes a closed row per delivery with the outcome, the three plain words and the tier story.
-Each day is judged with the profiles learned up to the day before, and its own profile is learned once it is written, so the words match what the live rule would have said.
+For each day, oldest first, it reads the departures straight from the routing calls' response text in `log_transactions` (the latest call per delivery wins, as on the board), reuses the board's reads for picks, expected lines, packages and loads up to the day's close, replays the tier rule over the clocks (`model.replay_tiers`: one tick after the warning window opens, after the usual time, after the gone window, at each completion and at the close), and writes a closed row per delivery with the outcome, the three plain words and the tier story.
+Each day is judged with the van clock learned up to the day before, and its own profile is learned once it is written, so the words match what the live rule would have said.
 Rows written this way carry `reconstructed = true` (migration `c4d5e6f7a8b9`).
 They fill the history and teach the route profiles, but the accuracy score leaves them out, because their flags were computed from the clocks rather than observed minute by minute.
 A live row is never overwritten, a day whose deliveries have not all closed is skipped, and each day commits on its own, so an interrupted run resumes by running it again.
@@ -137,7 +151,7 @@ Then the code:
 
 ## Assumptions
 
-- Default floors of 120 minutes to load and 180 to pick, a sample floor of 20, a 28 day window, a 180 minute close grace and 0.90 coverage.
+- Defaults: a 30 minute warning window, a 20 minute quiet window, 5 days of van history before a route's rhythm counts, a 28 day learning window, a 180 minute close grace and 0.90 coverage.
   All are per-tenant settings.
 - Expected lines come from the pick-line lookup; a delivery whose lines were never listed shows `expected: null`.
 - A delivery is on the board only once a routing call has named it; Milk deliveries listed only by `ListDeliveriesByRoute` are not, because that list response is truncated at 500 characters.

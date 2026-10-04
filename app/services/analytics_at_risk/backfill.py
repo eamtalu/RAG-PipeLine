@@ -7,7 +7,7 @@ calls' response text in `log_transactions`, the picks, expected lines and loads 
 bounded reads the board uses, the tier rule is replayed over the clocks (`model.replay_tiers`), and a
 CLOSED row is written for each delivery, marked `reconstructed`.
 
-Day by day, in date order: each day's thresholds come from the profiles learned up to the day before,
+Day by day, in date order: each day's van clock comes from the profiles learned up to the day before,
 and once the day is written its profile is learned, so the replay judges as the live system would have.
 A live row is never overwritten, and a day whose deliveries have not all closed is refused.
 """
@@ -100,7 +100,8 @@ async def read_day(db: AsyncSession, cc: str, *, day: date, tz: tzinfo, grace: t
         logger.warning("At-risk backfill %s %s: the facts read hit its cap of %d rows", cc, day, settings.analytics_at_risk_facts_cap)
     loading_routes = packages.routes_that_load | routes_that_load
     states = [board_store.assemble(d, routes[d], picks.get(d, board_store._Picks()), packages.by_delivery.get(d),
-                                   expected=expected.get(d), loading_routes=loading_routes, route_loaded=packages.route_loaded, tz=tz)
+                                   expected=expected.get(d), loading_routes=loading_routes, route_loaded=packages.route_loaded,
+                                   route_loading_from=packages.route_loading_from, tz=tz)
               for d in deliveries]
     return states, close_at, unreadable
 
@@ -118,9 +119,9 @@ async def backfill_day(cc: str, *, day: date, now: datetime, replace: bool = Fal
                                                        routes_that_load=routes_that_load)
     if close_at is not None and close_at > now:
         return {"date": day.isoformat(), "skipped": "not closed yet"}
-    thresholds_for = profile_store.thresholds_for(profiles, cfg)
+    clock_for = profile_store.clock_for(profiles, cfg, tz)
     counts = {"date": day.isoformat(), "deliveries": len(states), "written": 0, "existing": 0, "unreadable": unreadable,
-              "missed": 0, "delayed": 0, "fine": 0}
+              "missed": 0, "held": 0, "fine": 0}
     async with async_session() as db:
         await _lock(db, cc)
         if replace:
@@ -133,13 +134,13 @@ async def backfill_day(cc: str, *, day: date, now: datetime, replace: bool = Fal
             if any(r.departure_date == day for r in existing.get(state.delivery_number, [])):
                 counts["existing"] += 1
                 continue
-            thresholds = thresholds_for(state.route)
-            replay = model.replay_tiers(state, thresholds, close_at=state.departure_at + timedelta(minutes=cfg.close_grace_min))
-            row = delivery_store.write_closed(db, cc, state, thresholds=thresholds, replay=replay,
-                                              close_at=state.departure_at + timedelta(minutes=cfg.close_grace_min),
+            clock = clock_for(state)
+            close_at = state.departure_at + timedelta(minutes=cfg.close_grace_min)
+            replay = model.replay_tiers(state, clock, close_at=close_at)
+            row = delivery_store.write_closed(db, cc, state, clock=clock, replay=replay, close_at=close_at,
                                               now=now, tz=tz, rule_version=RULE_VERSION)
-            word = model.category_for(outcome=row.outcome, max_tier=row.max_tier, lines_expected=row.lines_expected,
-                                      lines_confirmed=row.lines_confirmed)
+            word = model.category_for(outcome=row.outcome, last_at=state.last_at, usual_ready_at=clock.usual_ready_at,
+                                      lines_expected=row.lines_expected, lines_confirmed=row.lines_confirmed)
             counts["written"] += 1
             if word in counts:
                 counts[word] += 1

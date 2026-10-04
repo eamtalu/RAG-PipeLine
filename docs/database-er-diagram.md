@@ -1168,7 +1168,7 @@ Read indexes: `ix_analytics_predictions_read (customer_code, metric, grain, subj
 ### Deliveries at risk
 
 Five more tables, still without a foreign key, from migration `e9a4c7d21f36` (chunks 143 to 150, `app/persistence/models/analytics_at_risk.py`).
-The board of deliveries behind their route's rhythm before the van leaves: `analytics_at_risk_deliveries` is one row per delivery per departure date, written by the at-risk worker every minute (progress, tier, history, thresholds, outcome) except the five `check*` columns, which the API writes when a person marks the delivery as checked.
+The board of deliveries behind their route's rhythm before the van leaves: `analytics_at_risk_deliveries` is one row per delivery per departure date, written by the at-risk worker every minute (progress, tier, history, the van clock, outcome) except the five `check*` columns, which the API writes when a person marks the delivery as checked.
 `analytics_at_risk_checks` is the acknowledgement ledger, append-only; `analytics_at_risk_route_profiles` is what each route's closed deliveries taught on one day; `analytics_at_risk_settings` is the tenant's floors (no row means the defaults); `analytics_at_risk_tenant_state` is one read for `/status`.
 The board is assembled from the `delivery_route` settled rows (departure, route, customer), the `pick_release` settled rows grouped by delivery, the `pick line` lookup read from a delivery number to its lines, and the facts of three package methods.
 Two indexes on existing tables serve those reads: `ix_analytics_lookup_values_lookup_attr_value (customer_code, lookup, attribute, value)` and `ix_analytics_facts_customer_method_event (customer_code, method, event_time)`.
@@ -1190,10 +1190,8 @@ erDiagram
         datetime first_flagged_at
         string first_flagged_tier
         jsonb tier_history "appended on every change"
-        numeric load_threshold_min
-        string load_threshold_source "learned | floor"
-        numeric pick_threshold_min
-        string pick_threshold_source
+        datetime usual_ready_at "when this delivery's van is usually ready: the route's learned time of day, or the WMS departure (d5e6f7a8b9c0)"
+        string usual_ready_source "learned | wms_departure"
         int lines_expected "NULL when the lookup never saw the lines"
         int lines_confirmed
         int lines_picked
@@ -1202,14 +1200,15 @@ erDiagram
         int packages_loaded
         datetime last_pick_at
         datetime last_load_at
-        datetime route_loaded_at "the last package scanned onto the route's dock on the departure day; the nearest real departure (b3c4d5e6f7a8)"
+        datetime route_loading_from "the first package scanned onto the route's dock on the departure day: loading started (d5e6f7a8b9c0)"
+        datetime route_loaded_at "the last package scanned onto the route's dock on the departure day: the van ready, the nearest real departure (b3c4d5e6f7a8)"
         bool reconstructed "written by the backfill from the logs after the fact; kept out of the accuracy score (c4d5e6f7a8b9)"
         bool loading_expected "false on a route that never scans a load; picking alone decides (f1c2d3e4a5b6)"
         jsonb transaction_names "the picking screens the lines went through; GIN-indexed (a2b3c4d5e6f7)"
         string status "open | closed"
         datetime closed_at
         string outcome "loaded_in_time | loaded_late | never_loaded | picked_in_time | picked_late | unknown"
-        numeric outcome_lead_min "departure minus last load; negative when late"
+        numeric outcome_lead_min "WMS departure minus last load; negative when late"
         datetime checked_at "API-written"
         string checked_by "API-written"
         text check_note "API-written"
@@ -1240,12 +1239,14 @@ erDiagram
         int window_days
         int sample
         int loaded_sample
-        numeric load_lead_p50
-        numeric load_lead_min
-        numeric pick_lead_p50
-        numeric pick_lead_min
-        numeric learned_load_min "coverage quantile; NULL below min_sample"
-        numeric learned_pick_min
+        int van_days "days in the window the route's van loaded anything (d5e6f7a8b9c0)"
+        numeric van_ready_usual_min "minutes after local midnight by which the van was ready on coverage of the days; NULL below min_days"
+        numeric van_ready_p50_min
+        numeric van_ready_latest_min
+        numeric loading_from_p50_min "when the dock's first scan usually lands"
+        int pick_days
+        numeric pick_done_usual_min "the same for the last pick, for a route without a loading step"
+        numeric pick_done_p50_min
         string departure_time_mode "HHMM"
         numeric coverage
         string rule_version
@@ -1255,9 +1256,9 @@ erDiagram
         uuid id PK
         string customer_code "soft tenant key, unique"
         bool enabled
-        int load_floor_min
-        int pick_floor_min
-        int min_sample
+        int warn_before_min "minutes before the van's usual ready time at which an unfinished delivery is flagged (d5e6f7a8b9c0)"
+        int gone_after_min "minutes of quiet on the dock after the usual time before the van is taken as gone"
+        int min_days "days of van history a route needs before its rhythm counts"
         int window_days
         int close_grace_min
         numeric coverage

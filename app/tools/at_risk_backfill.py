@@ -30,7 +30,7 @@ def main() -> None:
             print(f'{day["date"]}  skipped: {day["skipped"]}')
         else:
             print(f'{day["date"]}  deliveries {day["deliveries"]:>4}  written {day["written"]:>4}  existing {day["existing"]:>4}  '
-                  f'missed {day["missed"]:>3}  delayed {day["delayed"]:>3}  fine {day["fine"]:>3}  unreadable calls {day["unreadable"]}'
+                  f'missed {day["missed"]:>3}  held {day["held"]:>3}  fine {day["fine"]:>3}  unreadable calls {day["unreadable"]}'
                   + (f'  replaced {day["replaced"]}' if "replaced" in day else ""))
 
 
