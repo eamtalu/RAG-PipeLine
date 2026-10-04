@@ -89,7 +89,7 @@ def _minutes(a: datetime | None, b: datetime | None) -> str | None:
     return _s(model.minutes_to_departure(a, b).quantize(Decimal("0.01")))
 
 
-def _row_json(row: AnalyticsAtRiskDelivery, now: datetime) -> dict:
+def _row_json(row: AnalyticsAtRiskDelivery, now: datetime, held_after: timedelta = timedelta(0)) -> dict:
     check = None
     if row.checked_at is not None:
         check = {"checked_at": _iso(row.checked_at), "checked_by": row.checked_by, "note": row.check_note,
@@ -119,7 +119,8 @@ def _row_json(row: AnalyticsAtRiskDelivery, now: datetime) -> dict:
         "loading_expected": True if row.loading_expected is None else bool(row.loading_expected),
         "transaction_names": list(row.transaction_names or []),
         "category": model.category_for(outcome=row.outcome, last_at=last_at, usual_ready_at=row.usual_ready_at,
-                                       lines_expected=row.lines_expected, lines_confirmed=int(row.lines_confirmed or 0)),
+                                       lines_expected=row.lines_expected, lines_confirmed=int(row.lines_confirmed or 0),
+                                       held_after=held_after),
         "status": row.status, "closed_at": _iso(row.closed_at), "outcome": row.outcome,
         "outcome_lead_min": _s(row.outcome_lead_min), "check": check, "reopened": reopened,
         "tier_history": list(row.tier_history or []), "rule_version": row.rule_version,
@@ -153,7 +154,7 @@ async def read_board(window: str = "both", tier: str | None = None, include_clos
               "checked": sum(r.checked_at is not None for r in open_rows)}
     return {"timezone": tz.key, "now": now.isoformat(), "evaluated_at": _iso(evaluated_at), "stale": stale,
             "settings": {"warn_before_min": cfg.warn_before_min, "gone_after_min": cfg.gone_after_min},
-            "counts": counts, "deliveries": [_row_json(r, now) for r in rows]}
+            "counts": counts, "deliveries": [_row_json(r, now, timedelta(minutes=cfg.held_after_min)) for r in rows]}
 
 
 # ============================================================== checks
@@ -178,7 +179,8 @@ async def _acknowledge(db: AsyncSession, cc: str, delivery_number: str, body: di
     except check_store.AmbiguousDelivery as exc:
         raise HTTPException(409, detail=str(exc))
     await db.commit()
-    return _row_json(row, now)
+    cfg = await settings_store.effective(db, cc)
+    return _row_json(row, now, timedelta(minutes=cfg.held_after_min))
 
 
 @router.post("/deliveries/{delivery_number}/check")
@@ -248,12 +250,14 @@ async def read_history(start: str, end: str, tier: str | None = None, checked: b
             cursor = (datetime.fromisoformat(at_text), number)
         except ValueError:
             raise HTTPException(422, detail="after must be a value this endpoint returned")
-    filters = dict(tier=tier, checked=checked, route=route, outcome=outcome, transaction=transaction or None, delivery=delivery or None)
+    held_after = timedelta(minutes=(await settings_store.effective(db, customer)).held_after_min)
+    filters = dict(tier=tier, checked=checked, route=route, outcome=outcome, transaction=transaction or None, delivery=delivery or None,
+                   held_after=held_after)
     rows, truncated = await delivery_store.history_rows(db, customer, start=start_d, end=end_d, categories=categories or None,
                                                         limit=min(max(limit, 1), HISTORY_MAX), after=cursor, **filters)
     summary = await delivery_store.history_counts(db, customer, start=start_d, end=end_d, **filters) if cursor is None else None
     now = _now()
-    return {"start": start_d.isoformat(), "end": end_d.isoformat(), "rows": [_row_json(r, now) for r in rows],
+    return {"start": start_d.isoformat(), "end": end_d.isoformat(), "rows": [_row_json(r, now, held_after) for r in rows],
             "truncated": truncated,
             "next_after": f"{rows[-1].departure_at.isoformat()}|{rows[-1].delivery_number}" if rows and truncated else None,
             "counts": summary["counts"] if summary else None, "transactions": summary["transactions"] if summary else None}
@@ -269,7 +273,8 @@ async def read_vans(start: str, end: str, customer: str = Depends(get_current_cu
         raise HTTPException(422, detail="end must not be before start")
     if end_d - start_d > HISTORY_SPAN_MAX:
         raise HTTPException(422, detail=f"start and end may be at most {HISTORY_SPAN_MAX.days} days apart")
-    rows = await delivery_store.vans(db, customer, start=start_d, end=end_d)
+    held_after = timedelta(minutes=(await settings_store.effective(db, customer)).held_after_min)
+    rows = await delivery_store.vans(db, customer, start=start_d, end=end_d, held_after=held_after)
     return {"start": start_d.isoformat(), "end": end_d.isoformat(), "vans": [
         {"route": v["route"], "departure_date": v["departure_date"].isoformat(), "departure_at": _iso(v["departure_at"]),
          "loading_from": _iso(v["loading_from"]), "ready_at": _iso(v["ready_at"]), "usual_ready_at": _iso(v["usual_ready_at"]),
@@ -311,7 +316,7 @@ async def read_accuracy(days: int = 28, customer: str = Depends(get_current_cust
 
 def _settings_json(s: settings_store.Settings) -> dict:
     return {"enabled": s.enabled, "warn_before_min": s.warn_before_min, "gone_after_min": s.gone_after_min,
-            "min_days": s.min_days, "window_days": s.window_days, "close_grace_min": s.close_grace_min,
+            "min_days": s.min_days, "held_after_min": s.held_after_min, "window_days": s.window_days, "close_grace_min": s.close_grace_min,
             "coverage": _s(s.coverage), "defaulted": s.defaulted, "updated_by": s.updated_by, "updated_at": _iso(s.updated_at)}
 
 

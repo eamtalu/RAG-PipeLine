@@ -140,7 +140,8 @@ async def backfill_day(cc: str, *, day: date, now: datetime, replace: bool = Fal
             row = delivery_store.write_closed(db, cc, state, clock=clock, replay=replay, close_at=close_at,
                                               now=now, tz=tz, rule_version=RULE_VERSION)
             word = model.category_for(outcome=row.outcome, last_at=state.last_at, usual_ready_at=clock.usual_ready_at,
-                                      lines_expected=row.lines_expected, lines_confirmed=row.lines_confirmed)
+                                      lines_expected=row.lines_expected, lines_confirmed=row.lines_confirmed,
+                                      held_after=timedelta(minutes=cfg.held_after_min))
             counts["written"] += 1
             if word in counts:
                 counts[word] += 1

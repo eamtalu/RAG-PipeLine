@@ -272,10 +272,11 @@ def last_at_expr():
     return case((d.loading_expected.is_(False), d.last_pick_at), else_=d.last_load_at)
 
 
-def category_expr():
+def category_expr(held_after: timedelta = timedelta(0)):
     """The three plain words as SQL, the same rule as `model.category_for`, so a filter and a count
-    agree with what each row says."""
+    agree with what each row says. `held_after` is the tenant's setting."""
     d = AnalyticsAtRiskDelivery
+    late_enough = (last_at_expr() - d.usual_ready_at >= held_after) if held_after else (last_at_expr() > d.usual_ready_at)
     incomplete = case((d.lines_expected.is_(None), d.lines_confirmed == 0), else_=d.lines_confirmed < d.lines_expected)
     return case(
         (d.outcome.is_(None), "open"),
@@ -283,12 +284,13 @@ def category_expr():
         (d.outcome == "never_loaded", "missed"),
         ((d.outcome == "picked_late") & incomplete, "missed"),
         (d.outcome.in_(("picked_late", "loaded_late")), "held"),
-        (d.usual_ready_at.is_not(None) & (last_at_expr() > d.usual_ready_at), "held"),
+        (d.usual_ready_at.is_not(None) & late_enough, "held"),
         else_="fine")
 
 
 def _history_where(cc: str, *, start: date, end: date, tier: str | None, checked: bool | None, route: str | None,
-                   outcome: str | None, categories: Sequence[str] | None, transaction: str | None, delivery: str | None):
+                   outcome: str | None, categories: Sequence[str] | None, transaction: str | None, delivery: str | None,
+                   held_after: timedelta = timedelta(0)):
     d = AnalyticsAtRiskDelivery
     clauses = [d.customer_code == cc, d.status == "closed", d.departure_date >= start, d.departure_date <= end]
     if tier:
@@ -302,7 +304,7 @@ def _history_where(cc: str, *, start: date, end: date, tier: str | None, checked
     if outcome:
         clauses.append(d.outcome == outcome)
     if categories:
-        clauses.append(category_expr().in_(list(categories)))
+        clauses.append(category_expr(held_after).in_(list(categories)))
     if transaction:
         clauses.append(d.transaction_names.contains([transaction]))
     if delivery:
@@ -313,14 +315,15 @@ def _history_where(cc: str, *, start: date, end: date, tier: str | None, checked
 async def history_rows(db: AsyncSession, cc: str, *, start: date, end: date, tier: str | None = None,
                        checked: bool | None = None, route: str | None = None, outcome: str | None = None,
                        categories: Sequence[str] | None = None, transaction: str | None = None, delivery: str | None = None,
-                       limit: int = 200, after: tuple[datetime, str] | None = None) -> tuple[list[AnalyticsAtRiskDelivery], bool]:
+                       limit: int = 200, after: tuple[datetime, str] | None = None,
+                       held_after: timedelta = timedelta(0)) -> tuple[list[AnalyticsAtRiskDelivery], bool]:
     """Closed rows with a departure between `start` and `end`, newest departure first, keyset-paged on
     `(departure_at, delivery_number)`. `tier` filters on the highest tier the row reached; `categories`
     on the plain word; `transaction` on a picking screen the delivery went through; `delivery` on the
     start of the delivery number."""
     stmt = select(AnalyticsAtRiskDelivery).where(*_history_where(
         cc, start=start, end=end, tier=tier, checked=checked, route=route, outcome=outcome, categories=categories,
-        transaction=transaction, delivery=delivery))
+        transaction=transaction, delivery=delivery, held_after=held_after))
     if after is not None:
         at, number = after
         stmt = stmt.where((AnalyticsAtRiskDelivery.departure_at < at) |
@@ -332,14 +335,14 @@ async def history_rows(db: AsyncSession, cc: str, *, start: date, end: date, tie
 
 async def history_counts(db: AsyncSession, cc: str, *, start: date, end: date, tier: str | None = None,
                          checked: bool | None = None, route: str | None = None, outcome: str | None = None,
-                         transaction: str | None = None, delivery: str | None = None) -> dict:
+                         transaction: str | None = None, delivery: str | None = None, held_after: timedelta = timedelta(0)) -> dict:
     """The pie beside the history: how many closed rows fall in each category over the range, under
     every filter EXCEPT the category one, plus the picking screens seen, so the filter pills can be
     drawn from what is there. Two small aggregates, never a row read."""
     d = AnalyticsAtRiskDelivery
     where = _history_where(cc, start=start, end=end, tier=tier, checked=checked, route=route, outcome=outcome,
                            categories=None, transaction=transaction, delivery=delivery)
-    cat = category_expr().label("category")
+    cat = category_expr(held_after).label("category")
     counts = {c: 0 for c in ("missed", "held", "fine", "unknown")}
     for category, n in (await db.execute(select(cat, func.count()).where(*where).group_by(cat))).all():
         counts[category] = int(n)
@@ -374,12 +377,12 @@ async def accuracy(db: AsyncSession, cc: str, *, start: date, end: date) -> dict
             "by_tier": {t["max_tier"]: {"flagged": int(t["flagged"]), "late": int(t["late"])} for t in tiers}}
 
 
-async def vans(db: AsyncSession, cc: str, *, start: date, end: date, limit: int = 2000) -> list[dict]:
+async def vans(db: AsyncSession, cc: str, *, start: date, end: date, limit: int = 2000, held_after: timedelta = timedelta(0)) -> list[dict]:
     """One row per route per departure day over the closed rows: when the van's loading started, when
     it was ready, when it is usually ready, how late it ran, and how many deliveries it carried, held
     or went without. The month-end view of the vans themselves. Bounded by `limit` rows."""
     d = AnalyticsAtRiskDelivery
-    cat = category_expr()
+    cat = category_expr(held_after)
     rows = (await db.execute(select(
         d.route, d.departure_date, func.min(d.route_loading_from), func.max(d.route_loaded_at), func.max(d.usual_ready_at),
         func.max(d.usual_ready_source), func.bool_and(d.loading_expected), func.count(),

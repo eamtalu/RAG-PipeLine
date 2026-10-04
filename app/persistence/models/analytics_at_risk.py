@@ -40,6 +40,8 @@ THRESHOLD_SOURCES = ("learned", "floor")
 DEFAULT_WARN_BEFORE_MIN = 30
 DEFAULT_GONE_AFTER_MIN = 20
 DEFAULT_MIN_DAYS = 5
+#: A delivery "held the van" only when it went on this many minutes or more after the van's usual time.
+DEFAULT_HELD_AFTER_MIN = 60
 DEFAULT_WINDOW_DAYS = 28
 DEFAULT_CLOSE_GRACE_MIN = 180
 DEFAULT_COVERAGE = "0.900"
@@ -211,6 +213,8 @@ class AnalyticsAtRiskSettings(Base):
                                                 server_default=str(DEFAULT_GONE_AFTER_MIN))
     min_days: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_MIN_DAYS,
                                           server_default=str(DEFAULT_MIN_DAYS))
+    held_after_min: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_HELD_AFTER_MIN,
+                                                server_default=str(DEFAULT_HELD_AFTER_MIN))
     window_days: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_WINDOW_DAYS,
                                              server_default=str(DEFAULT_WINDOW_DAYS))
     close_grace_min: Mapped[int] = mapped_column(Integer, nullable=False, default=DEFAULT_CLOSE_GRACE_MIN,

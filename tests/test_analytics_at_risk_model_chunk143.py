@@ -64,6 +64,11 @@ def test_category_is_missed_held_or_fine():
     # fine: on the van before the usual time, whatever the tiers said on the way
     assert m.category_for(outcome="loaded_in_time", last_at=before, usual_ready_at=USUAL, lines_expected=5, lines_confirmed=5) == "fine"
     assert m.category_for(outcome="picked_in_time", last_at=before, usual_ready_at=USUAL, lines_expected=None, lines_confirmed=4) == "fine"
+    # the tenant's allowance: on the van 40 minutes after the usual time reads fine under a 60 minute allowance, 90 minutes reads held
+    hour = timedelta(minutes=60)
+    assert m.category_for(outcome="loaded_in_time", last_at=USUAL + timedelta(minutes=40), usual_ready_at=USUAL, lines_expected=5, lines_confirmed=5, held_after=hour) == "fine"
+    assert m.category_for(outcome="loaded_in_time", last_at=USUAL + timedelta(minutes=60), usual_ready_at=USUAL, lines_expected=5, lines_confirmed=5, held_after=hour) == "held"
+    assert m.category_for(outcome="loaded_late", last_at=dep + timedelta(minutes=5), usual_ready_at=USUAL, lines_expected=5, lines_confirmed=5, held_after=hour) == "held"
     # no clock written (an old row): loaded in time is fine
     assert m.category_for(outcome="loaded_in_time", last_at=after, usual_ready_at=None, lines_expected=5, lines_confirmed=5) == "fine"
     # the board lost sight of it

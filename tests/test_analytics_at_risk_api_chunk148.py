@@ -203,12 +203,16 @@ async def test_history_filters_by_category_picking_screen_and_delivery_and_carri
     dep = fx.local_day(day, 11, 30)
     await fx.plant([
         fx.closed_delivery(CC, "fine1", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(hours=4), outcome="loaded_in_time",
-                           usual_ready_at=dep - timedelta(hours=1)),
+                           usual_ready_at=dep - timedelta(hours=2)),
+        # on the van 90 minutes after the usual time: past the 60 minute default, so it held the van
         fx.closed_delivery(CC, "slow1", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(minutes=30), outcome="loaded_in_time",
-                           usual_ready_at=dep - timedelta(hours=1), route_loaded_at=dep - timedelta(minutes=25),
+                           usual_ready_at=dep - timedelta(hours=2), route_loaded_at=dep - timedelta(minutes=25),
                            max_tier="at_risk", first_flagged_at=dep - timedelta(hours=2), transaction_names=("Brighton Stock Pick", "JIT and Shorts Pick (Brighton)")),
         fx.closed_delivery(CC, "gone1", route="BRI06", departure_at=dep, last_load_at=dep - timedelta(hours=3), outcome="never_loaded",
-                           usual_ready_at=dep - timedelta(hours=1), max_tier="left_behind", transaction_names=("Milk Pick (Brighton)",), customer_name="HILTON"),
+                           usual_ready_at=dep - timedelta(hours=2), max_tier="left_behind", transaction_names=("Milk Pick (Brighton)",), customer_name="HILTON"),
+        # on the van 40 minutes after the usual time: inside the 60 minute allowance, so it reads fine
+        fx.closed_delivery(CC, "near1", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(minutes=80), outcome="loaded_in_time",
+                           usual_ready_at=dep - timedelta(hours=2), route_loaded_at=dep - timedelta(minutes=25)),
     ])
     async with async_session() as db:
         default = await api.read_history(start="2026-09-30", end="2026-09-30", category="missed,held", customer=CC, db=db)
@@ -217,9 +221,9 @@ async def test_history_filters_by_category_picking_screen_and_delivery_and_carri
     assert sorted(r["delivery_number"] for r in default["rows"]) == ["gone1", "slow1"]
     assert {r["delivery_number"]: r["category"] for r in default["rows"]} == {"gone1": "missed", "slow1": "held"}
     slow = next(r for r in default["rows"] if r["delivery_number"] == "slow1")
-    assert (slow["before_van_min"], slow["van_late_min"]) == ("5", "35")  # on the van 5 min before it was ready; the van 35 min late
+    assert (slow["before_van_min"], slow["van_late_min"]) == ("5", "95")  # on the van 5 min before it was ready; the van 95 min late
     # the counts cover the whole range, not just the category filter, so the bar keeps its shape as pills change
-    assert default["counts"] == {"missed": 1, "held": 1, "fine": 1, "unknown": 0}
+    assert default["counts"] == {"missed": 1, "held": 1, "fine": 2, "unknown": 0}
     assert default["transactions"] == ["Brighton Stock Pick", "JIT and Shorts Pick (Brighton)", "Milk Pick (Brighton)"]
     assert [r["delivery_number"] for r in jit["rows"]] == ["slow1"] and jit["counts"] == {"missed": 0, "held": 1, "fine": 0, "unknown": 0}
     assert [r["delivery_number"] for r in one["rows"]] == ["gone1"] and one["rows"][0]["transaction_names"] == ["Milk Pick (Brighton)"]
@@ -233,7 +237,7 @@ async def test_history_filters_by_category_picking_screen_and_delivery_and_carri
 async def test_vans_aggregate_one_row_per_route_per_day():
     day = date(2026, 9, 30)
     dep = fx.local_day(day, 11, 30)
-    usual, ready = dep - timedelta(hours=1), dep - timedelta(minutes=25)
+    usual, ready = dep - timedelta(hours=2), dep - timedelta(minutes=25)
     await fx.plant([
         fx.closed_delivery(CC, "f", route="BRI03", departure_at=dep, last_load_at=dep - timedelta(hours=4), outcome="loaded_in_time",
                            usual_ready_at=usual, route_loaded_at=ready, route_loading_from=dep - timedelta(hours=5)),
@@ -250,7 +254,7 @@ async def test_vans_aggregate_one_row_per_route_per_day():
     van = out["vans"][0]
     assert (van["deliveries"], van["held"], van["missed"], van["fine"]) == (3, 1, 1, 1)
     assert (van["loading_from"], van["ready_at"], van["usual_ready_at"]) == (_iso(dep - timedelta(hours=5)), _iso(ready), _iso(usual))
-    assert van["late_min"] == "35" and van["loading_expected"] is True and van["reconstructed"] is False
+    assert van["late_min"] == "95" and van["loading_expected"] is True and van["reconstructed"] is False
     assert out["vans"][1]["loading_expected"] is False and out["vans"][1]["ready_at"] is None
 
 
@@ -304,7 +308,7 @@ async def test_settings_default_then_persist_and_refuse_a_bad_range():
     assert e.value.status_code == 422 and "warn_before_min" in str(e.value.detail) and "coverage" in str(e.value.detail)
     async with async_session() as db:
         after = await api.put_settings(body={"warn_before_min": 45, "updated_by": "amin"}, customer=CC, db=db)
-    assert (after["defaulted"], after["warn_before_min"], after["gone_after_min"], after["min_days"], after["updated_by"]) == (False, 45, 20, 5, "amin")
+    assert (after["defaulted"], after["warn_before_min"], after["gone_after_min"], after["min_days"], after["held_after_min"], after["updated_by"]) == (False, 45, 20, 5, 60, "amin")
 
 
 async def test_routes_read_the_latest_profile_with_the_vans_usual_ready_time():

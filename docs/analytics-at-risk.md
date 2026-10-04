@@ -67,7 +67,7 @@ Their deliveries carry `loading_expected = false`, the last pick decides the tie
 Every closed delivery is given one of three words (`model.category_for`, mirrored in SQL by `delivery_store.category_expr` so a filter and a count agree with the row):
 
 - `missed`: the van went without it. A package was never loaded, or lines were never confirmed (picked or declared short).
-- `held`: it was on the van, but after the van's usual ready time, or after the WMS departure. The van ran late and this delivery was one of those still going on. The history shows "held the van".
+- `held`: it was on the van, but `held_after_min` minutes or more (60 by default) after the van's usual ready time, or after the WMS departure. The van ran noticeably late and this delivery was one of those still going on. The history shows "held the van".
 - `fine`: on the van before the usual time.
 
 Two edge cases exist for honesty: `unknown` when the board lost sight of the delivery before it closed, and `open` while it has not closed.
@@ -151,7 +151,7 @@ Then the code:
 
 ## Assumptions
 
-- Defaults: a 30 minute warning window, a 20 minute quiet window, 5 days of van history before a route's rhythm counts, a 28 day learning window, a 180 minute close grace and 0.90 coverage.
+- Defaults: a 30 minute warning window, a 20 minute quiet window, 5 days of van history before a route's rhythm counts, 60 minutes past the usual time before a delivery "held the van", a 28 day learning window, a 180 minute close grace and 0.90 coverage.
   All are per-tenant settings.
 - Expected lines come from the pick-line lookup; a delivery whose lines were never listed shows `expected: null`.
 - A delivery is on the board only once a routing call has named it; Milk deliveries listed only by `ListDeliveriesByRoute` are not, because that list response is truncated at 500 characters.

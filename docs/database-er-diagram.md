@@ -1259,6 +1259,7 @@ erDiagram
         int warn_before_min "minutes before the van's usual ready time at which an unfinished delivery is flagged (d5e6f7a8b9c0)"
         int gone_after_min "minutes of quiet on the dock after the usual time before the van is taken as gone"
         int min_days "days of van history a route needs before its rhythm counts"
+        int held_after_min "minutes past the van's usual time before a delivery held it (e6f7a8b9c0d1)"
         int window_days
         int close_grace_min
         numeric coverage

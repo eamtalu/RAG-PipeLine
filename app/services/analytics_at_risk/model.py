@@ -307,13 +307,13 @@ CATEGORIES = ("missed", "held", "fine", "unknown", "open")
 
 
 def category_for(*, outcome: str | None, last_at: datetime | None, usual_ready_at: datetime | None,
-                 lines_expected: int | None, lines_confirmed: int) -> str:
+                 lines_expected: int | None, lines_confirmed: int, held_after: timedelta = timedelta(0)) -> str:
     """One plain word for a closed delivery.
 
     - `missed`: the van went without it. A package was never loaded, or lines were never confirmed
       (picked or declared short).
-    - `held`: it was on the van, but after the van's usual ready time, or after the WMS departure: the
-      van ran late and this delivery was one of those still going on.
+    - `held`: it was on the van, but `held_after` or more past the van's usual ready time, or after the
+      WMS departure: the van ran noticeably late and this delivery was one of those still going on.
     - `fine`: on the van before the usual time.
     - `unknown`: the board lost sight of it before it closed; `open`: not closed yet.
     """
@@ -330,7 +330,7 @@ def category_for(*, outcome: str | None, last_at: datetime | None, usual_ready_a
         return "held"
     if outcome == "loaded_late":
         return "held"
-    if last_at is not None and usual_ready_at is not None and last_at > usual_ready_at:
+    if last_at is not None and usual_ready_at is not None and last_at - usual_ready_at >= held_after and (held_after or last_at > usual_ready_at):
         return "held"
     return "fine"
 

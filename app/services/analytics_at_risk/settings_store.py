@@ -10,14 +10,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.analytics_at_risk import (DEFAULT_CLOSE_GRACE_MIN, DEFAULT_COVERAGE, DEFAULT_GONE_AFTER_MIN,
-                                                      DEFAULT_MIN_DAYS, DEFAULT_WARN_BEFORE_MIN, DEFAULT_WINDOW_DAYS,
-                                                      AnalyticsAtRiskSettings)
+                                                      DEFAULT_HELD_AFTER_MIN, DEFAULT_MIN_DAYS, DEFAULT_WARN_BEFORE_MIN,
+                                                      DEFAULT_WINDOW_DAYS, AnalyticsAtRiskSettings)
 
 #: What `put` may change, and the closed range each must fall in.
 RANGES: dict[str, tuple[Decimal, Decimal]] = {
     "warn_before_min": (Decimal(0), Decimal(720)),
     "gone_after_min": (Decimal(0), Decimal(720)),
     "min_days": (Decimal(1), Decimal(60)),
+    "held_after_min": (Decimal(0), Decimal(720)),
     "window_days": (Decimal(7), Decimal(90)),
     "close_grace_min": (Decimal(0), Decimal(1440)),
     "coverage": (Decimal("0.5"), Decimal("0.99")),
@@ -34,6 +35,8 @@ class Settings:
     gone_after_min: int
     #: Days of van history a route needs before its rhythm counts; until then the WMS departure stands in.
     min_days: int
+    #: Minutes after the van's usual time a delivery must have gone on before it "held the van".
+    held_after_min: int
     window_days: int
     close_grace_min: int
     coverage: Decimal
@@ -44,13 +47,15 @@ class Settings:
 
 
 DEFAULTS = Settings(enabled=True, warn_before_min=DEFAULT_WARN_BEFORE_MIN, gone_after_min=DEFAULT_GONE_AFTER_MIN,
-                    min_days=DEFAULT_MIN_DAYS, window_days=DEFAULT_WINDOW_DAYS, close_grace_min=DEFAULT_CLOSE_GRACE_MIN,
+                    min_days=DEFAULT_MIN_DAYS, held_after_min=DEFAULT_HELD_AFTER_MIN, window_days=DEFAULT_WINDOW_DAYS,
+                    close_grace_min=DEFAULT_CLOSE_GRACE_MIN,
                     coverage=Decimal(DEFAULT_COVERAGE), defaulted=True)
 
 
 def _from_row(row: AnalyticsAtRiskSettings) -> Settings:
     return Settings(enabled=bool(row.enabled), warn_before_min=int(row.warn_before_min), gone_after_min=int(row.gone_after_min),
-                    min_days=int(row.min_days), window_days=int(row.window_days), close_grace_min=int(row.close_grace_min),
+                    min_days=int(row.min_days), held_after_min=int(row.held_after_min), window_days=int(row.window_days),
+                    close_grace_min=int(row.close_grace_min),
                     coverage=Decimal(str(row.coverage)), defaulted=False, updated_by=row.updated_by, updated_at=row.updated_at)
 
 
