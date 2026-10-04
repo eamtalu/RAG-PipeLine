@@ -2,9 +2,10 @@
 
 The web tab reads the board through `/analytics/at-risk/*`. The Teams tab cannot reach this server,
 so the same rows are read here, once a minute, into one small block the edge only draws: a summary
-line, up to twelve deliveries worst first, and the accuracy line. Every value a person reads is text
-decided here; `tier` and `minutes_to_departure` (to the van's usual ready time) ride alongside only
-so the edge can colour and order.
+line, the FLAGGED deliveries worst first (never the fine ones: the tab is a to-do list, and a quiet
+board says so in words), and the accuracy line. Every value a person reads is text decided here, the
+same figures the web board shows; `tier` and `minutes_to_departure` (to the van's usual ready time)
+ride alongside only so the edge can colour, filter and order.
 
 The honesty rules are the web page's: a check is shown as the person's word and re-opened when the
 tier rises past it; the accuracy line appears only once enough departures have closed; and a board
@@ -23,7 +24,8 @@ from app.persistence.models.analytics_at_risk import AnalyticsAtRiskDelivery
 from app.services.analytics_at_risk import delivery_store, model, settings_store, state_store
 from app.settings import settings
 
-MAX_ROWS = 12
+#: The tab scrolls, so this is a safety cap, not a page.
+MAX_ROWS = 60
 MIN_SCORED_DEPARTURES = 20
 STALE_POLLS = 3
 NO_BOARD_NOTE = "no delivery board yet · the worker needs a delivery_route settlement to read"
@@ -69,6 +71,27 @@ def progress_text(row: AnalyticsAtRiskDelivery) -> str:
     else:
         packages = "no package yet"
     return f"{lines} · {packages}"
+
+
+def lines_text(row: AnalyticsAtRiskDelivery) -> str:
+    """The web board's lines cell: picked over expected, with the short count."""
+    expected = "?" if row.lines_expected is None else str(row.lines_expected)
+    short = f" · {row.lines_short} short" if row.lines_short else ""
+    return f"{row.lines_picked} / {expected}{short}"
+
+
+def packages_text(row: AnalyticsAtRiskDelivery) -> str:
+    """The web board's packages cell: loaded over known, or the words for a route that never loads."""
+    if row.loading_expected is False:
+        return "no loading step"
+    return f"{row.packages_loaded} / {row.packages_created}"
+
+
+def clock_text(row: AnalyticsAtRiskDelivery, tz: ZoneInfo) -> str:
+    at = row.usual_ready_at or row.departure_at
+    if row.usual_ready_source == "learned":
+        return f"van usually ready {_hhmm(at, tz)}"
+    return f"WMS departure {_hhmm(at, tz)} · no rhythm learned yet"
 
 
 def last_text(row: AnalyticsAtRiskDelivery, tz: ZoneInfo) -> str:
@@ -149,6 +172,8 @@ def build_rows(rows: list[AnalyticsAtRiskDelivery], now: datetime, tz: ZoneInfo)
             "minutes_to_departure": int(minutes.to_integral_value(rounding="ROUND_HALF_UP")),
             "minutes_text": minutes_text(minutes), "tier": row.tier, "tier_text": TIER_TEXT.get(row.tier, row.tier),
             "customer_name": row.customer_name, "progress_text": progress_text(row), "last_text": last_text(row, tz),
+            "lines_text": lines_text(row), "packages_text": packages_text(row), "clock_text": clock_text(row, tz),
+            "clock_source": row.usual_ready_source or "wms_departure",
             "threshold_text": threshold_text(row, tz) if row.tier != "none" else "",
             "checked": checked, "reopened_count": int(row.reopened_count or 0),
             "reopened_text": f"checked at {TIER_TEXT.get(row.checked_tier or 'none')} · now {TIER_TEXT.get(row.tier)}" if reopened else "",
@@ -171,14 +196,17 @@ async def compute(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneI
               "checked": sum(r.checked_at is not None for r in open_rows)}
     flagged = [r for r in open_rows if r.tier != "none"]
     empty = None
+    if open_rows and not flagged:
+        n = len(open_rows)
+        empty = f"nothing to watch right now · {n} {'delivery' if n == 1 else 'deliveries'} open, all on course"
     if not open_rows:
         closed_today = [r for r in await delivery_store.board_rows(db, customer_code, dates=[today], include_closed=True)
                         if r.status == "closed"]
         upcoming = await delivery_store.board_rows(db, customer_code, dates=[today + timedelta(days=1), today + timedelta(days=2)])
         empty = empty_text(closed_today, min((r.departure_at for r in upcoming), default=None), tz)
     agg = await delivery_store.accuracy(db, customer_code, start=today - timedelta(days=14), end=today - timedelta(days=1))
-    rows = build_rows(flagged or open_rows, now, tz)
-    more = len(flagged or open_rows) - len(rows)
+    rows = build_rows(flagged, now, tz)
+    more = len(flagged) - len(rows)
     return {
         "available": True,
         "stale": stale,

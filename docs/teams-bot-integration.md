@@ -67,3 +67,10 @@ Questions typed in the tab arrive on the same queue with `source="tab"` and are 
 Chunk 150 adds `at_risk`, the deliveries-at-risk block (`app/services/teams/home_at_risk.py`): a summary line, up to twelve deliveries behind their route's rhythm worst first with every figure as text, a person's check with their name and the re-open wording when the tier rises past it, and the accuracy line once twenty departures have closed.
 It reads only the stored board rows the at-risk worker keeps (`docs/analytics-at-risk.md`), so a tenant without a `delivery_route` settlement gets the two-field "no board yet" block, and a worker that has stopped writing shows `stale`.
 The tab's "Mark checked" action travels back on the same queue as a `command` on the `QuestionJob` (`Command` in `contracts.py`, mirrored on the edge); the consumer records it through `app/services/teams/commands.py` with the sender's display name and never runs the agent for it.
+
+
+### The at-risk card as a to-do list (5 October 2026)
+
+The `at_risk` block lists only the flagged deliveries; the fine ones are counted in `summary` and never listed, and a board with nothing flagged says so in `empty_text`.
+Each delivery carries the web board's cells as text: `lines_text` (picked over expected, with the short count), `packages_text` (loaded over known, or "no loading step"), `clock_text` and `clock_source` (the van's usual ready time and whether it was learned or the WMS departure stands in), `last_text` and `threshold_text` (why it is flagged).
+The tab draws three tier chips above the list that filter like the web page's category bar, and the list is five rows tall, scrolling past that.

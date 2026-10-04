@@ -79,17 +79,22 @@ async def test_the_block_lists_flagged_deliveries_worst_first_as_text():
     assert block["summary"] == {"open": 4, "left_behind": 1, "at_risk": 1, "watch": 1, "checked": 0,
                                 "text": "1 left behind · 1 at risk · 1 to watch · 1 fine"}
     assert block["empty_text"] is None and block["more_text"] == ""
+    # only the flagged ones: the fine delivery is counted in the summary, never listed
     assert [d["delivery_number"] for d in block["deliveries"]] == ["behind", "risk", "watch"]
     risk = block["deliveries"][1]
     assert (risk["tier"], risk["tier_text"], risk["route"], risk["customer_name"]) == ("at_risk", "At risk", "BRI03", "Tesco Hove")
     assert (risk["departure_text"], risk["minutes_to_departure"], risk["minutes_text"]) == ("van usually ready 10:30", 30, "van usually ready in 30 min")
     assert risk["progress_text"] == "5 of 5 lines · 1 of 2 packages loaded"
     assert risk["last_text"] == "last pick 07:30 · last load 08:30"
+    # the web board's cells, as text
+    assert (risk["lines_text"], risk["packages_text"]) == ("5 / 5", "1 / 2")
+    assert (risk["clock_text"], risk["clock_source"]) == ("van usually ready 10:30", "learned")
     assert risk["threshold_text"] == "packages still off the van · van usually ready by 10:30 · learned from this route's days"
     assert risk["checked"] is None and risk["reopened_text"] == ""
     watch = block["deliveries"][2]
     assert watch["threshold_text"] == "picking not finished · van usually ready by 10:30 · learned from this route's days"
     assert watch["progress_text"] == "2 of 5 lines · 1 of 1 packages loaded"
+    assert watch["lines_text"] == "2 / 5" and watch["packages_text"] == "1 / 1"
     behind = block["deliveries"][0]
     assert behind["minutes_text"].startswith("usual time passed ") and behind["tier_text"] == "Left behind"
     assert behind["threshold_text"].startswith("the van is taken as gone and this delivery is not on it")
@@ -113,12 +118,26 @@ async def test_a_check_shows_the_persons_name_and_reopens_in_words_when_the_tier
     assert row["reopened_text"] == "checked at Watch · now At risk"
 
 
-async def test_a_stale_board_says_so_and_a_long_list_is_cut_with_a_count():
-    await _apply([_state(f"r{i:02d}", packages_loaded=1) for i in range(15)], now=NOW - timedelta(minutes=10))
+async def test_a_stale_board_says_so_and_a_long_list_is_cut_with_a_count(monkeypatch):
+    monkeypatch.setattr(home_at_risk, "MAX_ROWS", 12)
+    # fifteen vans usually ready 20 minutes after this pass, each with a package still off: all at risk
+    await _apply([_state(f"r{i:02d}", departure_at=DEP - timedelta(minutes=20), packages_loaded=1) for i in range(15)], now=NOW - timedelta(minutes=10))
     async with async_session() as db:
         block = await home_at_risk.compute(db, CC, NOW, LONDON)
     assert block["stale"] is True and block["note"] == home_at_risk.STALE_NOTE
     assert len(block["deliveries"]) == 12 and block["more_text"] == "and 3 more"
+
+
+async def test_a_board_with_nothing_flagged_lists_nothing_and_says_so():
+    await _apply([_state("a"), _state("b"), _state("c", lines_expected=None, lines_short=2, packages_loaded=3)])
+    async with async_session() as db:
+        block = await home_at_risk.compute(db, CC, NOW, LONDON)
+    assert block["deliveries"] == [] and block["summary"]["text"] == "3 fine"
+    assert block["empty_text"] == "nothing to watch right now · 3 deliveries open, all on course"
+    # a lookup gap and a short line read the way the web board prints them
+    flagged = home_at_risk.build_rows([r for r in await delivery_store.board_rows(db, CC, dates=[DEP.date()])], NOW, LONDON)
+    c = next(r for r in flagged if r["delivery_number"] == "c")
+    assert (c["lines_text"], c["packages_text"]) == ("5 / ? · 2 short", "3 / 2")
 
 
 async def test_an_empty_board_after_the_vans_have_gone_names_the_day_and_the_next_departure():
@@ -126,9 +145,9 @@ async def test_an_empty_board_after_the_vans_have_gone_names_the_day_and_the_nex
                  now=DEP - timedelta(hours=4))
     async with async_session() as db:
         await delivery_store.close_due(db, CC, {}, now=DEP + timedelta(hours=3), grace=timedelta(hours=3), tz=LONDON)
-        # tomorrow's delivery is loaded already, so nothing is flagged, but it is open: not empty
+        # tomorrow's delivery is loaded already, so nothing is flagged and nothing is listed, but it is open: the words say so
         block = await home_at_risk.compute(db, CC, DEP + timedelta(hours=3), LONDON)
-        assert block["empty_text"] is None and [d["delivery_number"] for d in block["deliveries"]] == ["tomorrow"]
+        assert block["deliveries"] == [] and block["empty_text"] == "nothing to watch right now · 1 delivery open, all on course"
         await db.execute(AnalyticsAtRiskDelivery.__table__.delete().where(AnalyticsAtRiskDelivery.delivery_number == "tomorrow"))
         await db.commit()
         block = await home_at_risk.compute(db, CC, DEP + timedelta(hours=3), LONDON)
