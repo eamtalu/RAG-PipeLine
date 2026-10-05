@@ -124,9 +124,45 @@ DEFAULT_ROWS = 10
 MAX_ROWS = 25
 
 
+#: Tools whose result carries its own `table` ({title, columns, rows, facts}): drawn as it is.
+SHAPED_TABLE_TOOLS = ("at_risk_history", "at_risk_board", "at_risk_vans")
+
+
+def _shaped(trace: list[dict]) -> dict | None:
+    """The last at-risk table in the trace, when it is the latest table-bearing call."""
+    for t in reversed(trace):
+        if t["tool"] in ("aggregate_releases", "list_releases"):
+            return None
+        if t["tool"] not in SHAPED_TABLE_TOOLS:
+            continue
+        try:
+            result = json.loads(t.get("result") or "")
+        except (TypeError, ValueError):
+            continue
+        table = result.get("table") if isinstance(result, dict) else None
+        if "error" in result or not table or not table.get("rows"):
+            continue
+        return table
+    return None
+
+
+def _shaped_markdown(table: dict, max_rows: int) -> str:
+    columns = table["columns"]
+    lines = ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
+    for r in table["rows"][:max_rows]:
+        lines.append("| " + " | ".join(str(c) for c in r) + " |")
+    facts = " · ".join(f"{k}: {v}" for k, v in (table.get("facts") or {}).items())
+    caption = f"From the data: {table.get('title', '')}" + (f" · {facts}" if facts else "") + f" · {min(len(table['rows']), max_rows)} of {len(table['rows'])} row(s)."
+    return caption + "\n\n" + "\n".join(lines)
+
+
 def render(trace: list[dict], max_rows: int | None = None) -> str | None:
-    """A markdown table from the last sorted aggregate or the last listing in the trace, or None.
-    Rows shown: the limit the model asked the tool for, else 10, never more than 25."""
+    """A markdown table from the last sorted aggregate or the last listing in the trace, or from the
+    last at-risk tool that shaped its own table, or None. Rows shown: the limit the model asked the
+    tool for, else 10, never more than 25."""
+    shaped = _shaped(trace)
+    if shaped is not None:
+        return _shaped_markdown(shaped, max_rows or MAX_ROWS)
     for t in reversed(trace):
         if t["tool"] not in ("aggregate_releases", "list_releases"):
             continue
@@ -208,12 +244,22 @@ def _list_table(result: dict, max_rows: int) -> str:
 
 # ============================================================== the same rows, as data for a card
 
-def structured(trace: list[dict], max_rows: int | None = None, *, link: str | None = None) -> dict | None:
+def structured(trace: list[dict], max_rows: int | None = None, *, link: str | None = None,
+               at_risk_link: str | None = None) -> dict | None:
     """The evidence as DATA, for a client that draws its own table: Teams renders an Adaptive Card
     Table from this, with widths and right-aligned numbers, instead of guessing from markdown.
 
     {"title", "columns": [{"name", "align"}], "rows": [[str, …]], "facts": {…}, "link"}
     Same source and same rows as `render`, so the text and the card never disagree."""
+    shaped = _shaped(trace)
+    if shaped is not None:
+        n = max_rows or MAX_ROWS
+        numeric = {"deliveries", "held", "missed", "lines", "packages"}
+        out = {"title": shaped.get("title", ""), "columns": [{"name": c, "align": "right" if c in numeric else "left"} for c in shaped["columns"]],
+               "rows": [[str(c) for c in r] for r in shaped["rows"][:n]], "facts": dict(shaped.get("facts") or {})}
+        if at_risk_link:
+            out["link"] = at_risk_link
+        return out
     for t in reversed(trace):
         if t["tool"] not in ("aggregate_releases", "list_releases"):
             continue

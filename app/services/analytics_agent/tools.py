@@ -5,7 +5,9 @@ Two families, one list:
 - the eight the Claude debugging agent already has (search_transactions … explain_freshness),
   wrapped unchanged from `log_agent.tools`, so the LangGraph agent answers the same questions;
 - four over the pick-release settlement, calling `settle_reads`, the same functions the HTTP
-  endpoints call. Nothing here queries the database itself.
+  endpoints call;
+- five over deliveries at risk (`at_risk_tools`), calling the at-risk stores the board, history and
+  Teams card read. Nothing here queries the database itself.
 
 Every tool takes the tenant from the closure, never from the model. Results are JSON text, which
 is what a tool message carries; a problem is returned AS the result, not raised, so the model reads
@@ -29,6 +31,7 @@ from app.services.analytics import lookup_store
 from app.services.analytics import settle_query
 from app.services.analytics import settle_reads
 from app.services.agent_core.guards import wrap_tool
+from app.services.analytics_agent import at_risk_tools
 from app.services.log_agent import tools as log_tools
 
 MAX_WINDOW_DAYS = 92
@@ -435,8 +438,13 @@ def build_tools(db: AsyncSession, customer_code: str) -> list[BaseTool]:
     async def run_release(name: str, args: dict) -> str:
         return await run_release_tool(name, args, db, customer_code)
 
+    async def run_at_risk(name: str, args: dict) -> str:
+        return await at_risk_tools.run_at_risk_tool(name, args, db, customer_code)
+
     return ([_wrap(spec, run_log) for spec in log_tools.TOOLS]
-            + [_wrap(spec, run_release) for spec in RELEASE_TOOLS])
+            + [_wrap(spec, run_release) for spec in RELEASE_TOOLS]
+            + [_wrap(spec, run_at_risk) for spec in at_risk_tools.AT_RISK_TOOLS])
 
 
-TOOL_NAMES = [t["name"] for t in log_tools.TOOLS] + [t["name"] for t in RELEASE_TOOLS]
+TOOL_NAMES = ([t["name"] for t in log_tools.TOOLS] + [t["name"] for t in RELEASE_TOOLS]
+              + [t["name"] for t in at_risk_tools.AT_RISK_TOOLS])

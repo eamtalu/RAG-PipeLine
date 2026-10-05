@@ -23,6 +23,7 @@ from langchain_core.tools import BaseTool
 from app.services.agent_core import grounded
 from app.services.agent_core.grounded import GroundedAgent
 from app.services.analytics_agent import evidence
+from app.services.analytics_agent import at_risk_tools
 from app.services.analytics_agent.tools import RECIPES, RELEASE_TOOLS, build_tools
 from app.settings import settings
 
@@ -31,13 +32,29 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """You are the analytics assistant for a warehouse picking operation run on an Infor M3 WMS.
 You answer questions by calling tools that read this logspace's data. You never guess a number.
 
-Two kinds of data, two kinds of tool:
+Three kinds of data, three kinds of tool:
 - Pick-list RELEASES (settled rows, one row per release): describe_releases, aggregate_releases,
   list_releases, explain_release. Use these for anything about picking: lines, deliveries, pickers,
   customers, items, shortfalls, zero-picks, over-picks, refusals, how long a line took.
+- DELIVERIES AT RISK and the VANS: describe_at_risk, at_risk_history, at_risk_board, at_risk_vans,
+  explain_at_risk_delivery. Use these for anything about deliveries missing their van, being at
+  risk, left behind, holding the van, vans running late, when a route's van is usually ready, or
+  what happened to one delivery. Never answer these from the release tools.
 - Raw LOG transactions and metrics: search_transactions, count_transactions, find_errors,
   get_transaction, search_entries, list_metrics, query_metric, explain_freshness. Use these for
   why one API call failed, what a transaction did, or a registered metric.
+
+Rules for deliveries at risk:
+- The clock is the VAN, not the WMS departure time: each route's van is usually ready at a learned
+  time of day, hours before the 11:30 the WMS prints. Say times as the tools give them.
+- Call describe_at_risk once before the first at_risk tool in a conversation; copy the matching
+  recipe. Three words for a closed delivery: missed (the van went without it), held the van (on the
+  van only after the van's usual time plus the allowance), fine. Three live tiers: Watch, At risk,
+  Left behind. Keep the words; do not translate them into "late" or "delayed".
+- Counts come from `counts` or `summary` in the result; quote them, never add rows up. Rows marked
+  reconstructed were written from the logs after the fact; say so only if asked how the data was made.
+- "This week" is the last 7 days, "this month" the first of the month to today; pass dates as
+  YYYY-MM-DD, or day: "today" / "yesterday"; the tool resolves them on the warehouse's clock.
 
 Rules for release answers:
 - Call describe_releases once before your first aggregate_releases or list_releases, so every field
@@ -94,10 +111,12 @@ UNGROUNDED_NUDGE = ("\n\n(Your draft was discarded: these figures appear in no t
 
 #: What this agent is for, for the topic gate, and its reply to anything else.
 DOMAIN = ("questions about this warehouse's picking operation and its data: pick-list releases, lines, deliveries, "
-          "pickers, customers, items, shortfalls, zero-picks, over-picks, refusals, timings, and the handheld/M3 "
-          "log transactions of this logspace (what a call did, why it failed).")
-DECLINE = ("I can only help with this warehouse's picking and log data: for example lines, deliveries, pickers, "
-           "shortfalls and zero-picks, or why a handheld call failed. Try \"top 5 shorted items today\".")
+          "pickers, customers, items, shortfalls, zero-picks, over-picks, refusals, timings, deliveries at risk of "
+          "missing their van (missed, held the van, fine; watch, at risk, left behind), the vans and when each route's "
+          "van is usually ready, and the handheld/M3 log transactions of this logspace (what a call did, why it failed).")
+DECLINE = ("I can only help with this warehouse's picking, delivery and log data: for example lines, deliveries, pickers, "
+           "shortfalls and zero-picks, which deliveries missed their van or held it, or why a handheld call failed. "
+           "Try \"top 5 shorted items today\" or \"which deliveries were missed this week\".")
 
 
 def make_model(model_name: str | None = None) -> BaseChatModel:
@@ -113,10 +132,10 @@ _short = grounded.short
 
 #: Tools that describe the schema rather than read data. A numeric answer resting only on these
 #: was made up.
-SCHEMA_TOOLS = frozenset({"describe_releases", "list_metrics", "explain_freshness"})
+SCHEMA_TOOLS = frozenset({"describe_releases", "list_metrics", "explain_freshness", "describe_at_risk"})
 
 #: The tool schemas and recipes as text: numbers in them were given to the model, not invented by it.
-_TOOL_TEXT = json.dumps([RELEASE_TOOLS, RECIPES], default=str)
+_TOOL_TEXT = json.dumps([RELEASE_TOOLS, RECIPES, at_risk_tools.AT_RISK_TOOLS, at_risk_tools.RECIPES], default=str)
 
 
 def _looks_fabricated(answer: str, trace: list[dict]) -> str | None:
@@ -127,6 +146,11 @@ def _page_link() -> str | None:
     """The pick releases page, when the app has a public address; a card can then open it."""
     base = (settings.app_public_base_url or "").rstrip("/")
     return f"{base}/matrix/releases" if base else None
+
+
+def _at_risk_link() -> str | None:
+    base = (settings.app_public_base_url or "").rstrip("/")
+    return f"{base}/matrix/at-risk" if base else None
 
 
 class AnalyticsAgent(GroundedAgent):
@@ -152,4 +176,4 @@ class AnalyticsAgent(GroundedAgent):
         return evidence.render(trace)
 
     def structured_evidence(self, trace: list[dict]) -> dict | None:
-        return evidence.structured(trace, link=_page_link())
+        return evidence.structured(trace, link=_page_link(), at_risk_link=_at_risk_link())

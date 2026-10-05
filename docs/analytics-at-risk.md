@@ -125,6 +125,20 @@ All under `/api/v1/analytics/at-risk`, tenant-scoped by `X-Customer-Code`: `boar
 `app/api/v1/analytics_at_risk.py` documents the parameters and shapes.
 The board carries `stale: true` once the worker has missed three polls, so a quiet board is never mistaken for a calm one.
 
+## Asking the assistant
+
+The analytics assistant (Teams Ask and `/analytics/agent/ask`) answers questions about deliveries at risk through five tools in `app/services/analytics_agent/at_risk_tools.py`, reading the same stores as the pages:
+
+- `describe_at_risk`: the vocabulary, the tenant's windows, each route's usual van time and recipes for common questions.
+- `at_risk_history`: closed deliveries over a day or a range, filtered by word, route, customer, picking kind or delivery number, with counts per word over the range.
+- `at_risk_board`: the live board, flagged rows only unless asked, with the van clock and why each is flagged.
+- `at_risk_vans`: one row per route per day: loading from, van ready, usually by, late by, carried, held, missed.
+- `explain_at_risk_delivery`: one delivery's clocks, tiers and checks.
+
+Dates resolve on the warehouse's clock (`day: today|yesterday|YYYY-MM-DD`, or `start`/`end` dates; no dates means the last seven days).
+List-shaped results carry a `table` that the evidence layer draws unchanged, so the card and the prose never disagree, and the grounding guard checks every figure against the tool results as it does for releases.
+The system prompt names the three words and three tiers and forbids answering these questions from the release tools.
+
 ## The Teams Home block
 
 `app/services/teams/home_at_risk.py` writes an `at_risk` block into the Home snapshot every minute: a summary line, up to twelve flagged deliveries worst first with every figure as text, a person's check, and the accuracy line once twenty departures have closed.

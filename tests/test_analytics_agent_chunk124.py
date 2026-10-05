@@ -168,7 +168,8 @@ async def test_the_bound_tools_carry_no_tenant_argument():
     async with async_session() as db:
         tools = agent_tools.build_tools(db, CC)
     names = [t.name for t in tools]
-    assert names[-4:] == ["describe_releases", "aggregate_releases", "list_releases", "explain_release"]
+    assert names[-9:-5] == ["describe_releases", "aggregate_releases", "list_releases", "explain_release"]
+    assert names[-5:] == ["describe_at_risk", "at_risk_history", "at_risk_board", "at_risk_vans", "explain_at_risk_delivery"]
     assert "search_transactions" in names and "query_metric" in names
     for t in tools:
         assert "customer_code" not in t.args and "customer" not in t.args, t.name

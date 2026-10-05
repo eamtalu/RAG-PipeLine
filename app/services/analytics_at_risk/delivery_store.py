@@ -290,7 +290,7 @@ def category_expr(held_after: timedelta = timedelta(0)):
 
 def _history_where(cc: str, *, start: date, end: date, tier: str | None, checked: bool | None, route: str | None,
                    outcome: str | None, categories: Sequence[str] | None, transaction: str | None, delivery: str | None,
-                   held_after: timedelta = timedelta(0)):
+                   held_after: timedelta = timedelta(0), customer: str | None = None):
     d = AnalyticsAtRiskDelivery
     clauses = [d.customer_code == cc, d.status == "closed", d.departure_date >= start, d.departure_date <= end]
     if tier:
@@ -309,6 +309,8 @@ def _history_where(cc: str, *, start: date, end: date, tier: str | None, checked
         clauses.append(d.transaction_names.contains([transaction]))
     if delivery:
         clauses.append(d.delivery_number.ilike(f"{delivery.strip()}%"))
+    if customer:
+        clauses.append(d.customer_name.ilike(f"%{customer.strip()}%"))
     return clauses
 
 
@@ -316,14 +318,14 @@ async def history_rows(db: AsyncSession, cc: str, *, start: date, end: date, tie
                        checked: bool | None = None, route: str | None = None, outcome: str | None = None,
                        categories: Sequence[str] | None = None, transaction: str | None = None, delivery: str | None = None,
                        limit: int = 200, after: tuple[datetime, str] | None = None,
-                       held_after: timedelta = timedelta(0)) -> tuple[list[AnalyticsAtRiskDelivery], bool]:
+                       held_after: timedelta = timedelta(0), customer: str | None = None) -> tuple[list[AnalyticsAtRiskDelivery], bool]:
     """Closed rows with a departure between `start` and `end`, newest departure first, keyset-paged on
     `(departure_at, delivery_number)`. `tier` filters on the highest tier the row reached; `categories`
     on the plain word; `transaction` on a picking screen the delivery went through; `delivery` on the
     start of the delivery number."""
     stmt = select(AnalyticsAtRiskDelivery).where(*_history_where(
         cc, start=start, end=end, tier=tier, checked=checked, route=route, outcome=outcome, categories=categories,
-        transaction=transaction, delivery=delivery, held_after=held_after))
+        transaction=transaction, delivery=delivery, held_after=held_after, customer=customer))
     if after is not None:
         at, number = after
         stmt = stmt.where((AnalyticsAtRiskDelivery.departure_at < at) |
@@ -335,13 +337,14 @@ async def history_rows(db: AsyncSession, cc: str, *, start: date, end: date, tie
 
 async def history_counts(db: AsyncSession, cc: str, *, start: date, end: date, tier: str | None = None,
                          checked: bool | None = None, route: str | None = None, outcome: str | None = None,
-                         transaction: str | None = None, delivery: str | None = None, held_after: timedelta = timedelta(0)) -> dict:
+                         transaction: str | None = None, delivery: str | None = None, held_after: timedelta = timedelta(0),
+                         customer: str | None = None) -> dict:
     """The pie beside the history: how many closed rows fall in each category over the range, under
     every filter EXCEPT the category one, plus the picking screens seen, so the filter pills can be
     drawn from what is there. Two small aggregates, never a row read."""
     d = AnalyticsAtRiskDelivery
     where = _history_where(cc, start=start, end=end, tier=tier, checked=checked, route=route, outcome=outcome,
-                           categories=None, transaction=transaction, delivery=delivery)
+                           categories=None, transaction=transaction, delivery=delivery, held_after=held_after, customer=customer)
     cat = category_expr(held_after).label("category")
     counts = {c: 0 for c in ("missed", "held", "fine", "unknown")}
     for category, n in (await db.execute(select(cat, func.count()).where(*where).group_by(cat))).all():
