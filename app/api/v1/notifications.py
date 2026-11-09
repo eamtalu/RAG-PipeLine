@@ -30,6 +30,7 @@ from app.persistence.repositories.customer_repository import (
 from app.persistence.repositories.notification_repository import (
     NotificationRepository, get_notification_repository,
 )
+from app.services.notifications import channel_secrets
 from app.services.notifications.channels import (
     KNOWN_CHANNEL_TYPES, IMPLEMENTED_CHANNEL_TYPES, get_channel,
 )
@@ -101,7 +102,7 @@ class UpdateRuleRequest(BaseModel):
 def _ser_channel(c: CustomerNotificationChannel) -> dict:
     return {
         "id": str(c.id), "customer_code": c.customer_code, "channel_type": c.channel_type,
-        "name": c.name, "config": c.config, "enabled": c.enabled,
+        "name": c.name, "config": channel_secrets.public_config(c.config), "enabled": c.enabled,
         "implemented": c.channel_type in IMPLEMENTED_CHANNEL_TYPES,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
@@ -206,10 +207,17 @@ async def update_channel_endpoint(
     channel_id: str, body: UpdateChannelRequest,
     repo: NotificationRepository = Depends(get_notification_repository),
 ):
-    row = await repo.update_channel(_parse_uuid(channel_id, "channel"),
-                                    name=body.name, config=body.config, enabled=body.enabled)
-    if row is None:
+    cid = _parse_uuid(channel_id, "channel")
+    current = await repo.get_channel(cid)
+    if current is None:
         raise HTTPException(404, detail=f"Unknown channel: {channel_id!r}")
+    # Secrets in the new config move into the store before the row is written; the masked form
+    # the UI echoes back keeps the stored secret, an explicit null removes it.
+    config = (await channel_secrets.seal_config(repo.db, customer_code=current.customer_code,
+                                                channel_id=current.id, config=body.config,
+                                                previous=current.config)
+              if body.config is not None else None)
+    row = await repo.update_channel(cid, name=body.name, config=config, enabled=body.enabled)
     return _ser_channel(row)
 
 
@@ -217,8 +225,12 @@ async def update_channel_endpoint(
 async def delete_channel_endpoint(
     channel_id: str, repo: NotificationRepository = Depends(get_notification_repository),
 ):
-    if not await repo.delete_channel(_parse_uuid(channel_id, "channel")):
+    cid = _parse_uuid(channel_id, "channel")
+    row = await repo.get_channel(cid)
+    if row is None:
         raise HTTPException(404, detail=f"Unknown channel: {channel_id!r}")
+    await channel_secrets.delete_for_channel(repo.db, row)  # same commit as the row below
+    await repo.delete_channel(cid)
     return None
 
 
@@ -242,7 +254,7 @@ async def test_channel_endpoint(
         payload={"facts": {"Channel": row.name, "Type": row.channel_type}},
     )
     try:
-        await adapter.send(event, row.config or {})
+        await adapter.send(event, await channel_secrets.reveal_config(repo.db, row))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, detail=f"Channel test failed: {exc}")
     return {"ok": True, "channel_id": str(row.id)}
@@ -277,8 +289,14 @@ async def create_channel_endpoint(
 ):
     code = await _require_customer(customer_code, customers)
     _require_deliverable_channel_type(body.channel_type)
+    # The id is fixed first so the webhook URL is sealed under this channel's name and committed
+    # together with the row; the row itself never holds the plain value.
+    channel_id = uuid.uuid4()
+    config = await channel_secrets.seal_config(repo.db, customer_code=code, channel_id=channel_id,
+                                               config=body.config, previous=None)
     row = await repo.create_channel(customer_code=code, channel_type=body.channel_type,
-                                    name=body.name, config=body.config, enabled=body.enabled)
+                                    name=body.name, config=config, enabled=body.enabled,
+                                    channel_id=channel_id)
     return _ser_channel(row)
 
 

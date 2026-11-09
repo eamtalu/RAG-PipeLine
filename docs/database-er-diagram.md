@@ -84,6 +84,7 @@ erDiagram
     customers ||--o{ teams_tenant_bindings : "FK (enforced)"
     customers ||..o{ teams_conversation_turns : "soft"
     customers ||..o{ agent_runs : "soft"
+    customers ||..o{ tenant_secrets : "soft"
 
     customers ||..o{ jobs : "tenant key (soft)"
     customers ||..o{ log_entries : "tenant key (soft)"
@@ -704,7 +705,7 @@ erDiagram
         string customer_code "soft tenant key"
         string channel_type "teams/slack/whatsapp"
         string name "unique w/ customer_code+type"
-        jsonb config "webhook url, secrets"
+        jsonb config "transport settings; a secret value is a reference into tenant_secrets"
         bool enabled
         datetime created_at
         datetime updated_at
@@ -1399,6 +1400,35 @@ erDiagram
     customers ||..o{ agent_runs : "tenant of"
 ```
 
+## Subsystem 10: Tenant secrets
+
+A tenant's secret values live here sealed at rest, never inside another table's JSON: a notification channel's webhook URL today, a data connector's credential later.
+Each row is sealed with its own random data key (AES-256-GCM); that data key is wrapped with a master key from settings whose id is stored in `key_id`, so the master key can be rotated by re-wrapping the data keys without touching a single ciphertext (`app/services/secrets/envelope.py`).
+`owner` names what the secret belongs to (`notification_channel:<id>`) and `kind` what it is (`webhook_url`); the pair is what a new value replaces.
+The referencing row keeps only the secret's id (`customer_notification_channels.config.webhook_url_secret_id`), and every read requires the tenant code, so a secret is never revealed to another tenant.
+The API returns a `webhook_url_set` flag and never the value.
+
+```mermaid
+erDiagram
+    customers {
+        string customer_code UK
+    }
+
+    tenant_secrets {
+        uuid id PK
+        string customer_code "soft tenant key; indexed with owner"
+        string kind "webhook_url"
+        string owner "notification_channel:<id>"
+        string key_id "which master key wraps the data key"
+        bytes wrapped_key "nonce + data key wrapped by the master key"
+        bytes ciphertext "nonce + value sealed by the data key"
+        datetime created_at
+        datetime rotated_at "last re-wrap"
+    }
+
+    customers ||..o{ tenant_secrets : "tenant of"
+```
+
 ## Full relationship reference
 
 ### Enforced foreign keys (solid lines)
@@ -1427,11 +1457,12 @@ The nine `analytics_*` tables add **no rows to this table**. They have no enforc
 
 | Logical parent | Referencing column | Meaning |
 | --- | --- | --- |
-| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, agent_runs, the notification tables, and every `analytics_*` table including the ML and forecast ones | tenant partition key |
+| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, agent_runs, tenant_secrets, the notification tables, and every `analytics_*` table including the ML and forecast ones | tenant partition key |
 | `analytics_metrics.id` | `definition_id` on the three rollup tables | which definition a rollup row belongs to; no FK because a FK from a partitioned child made the log partitions undroppable once already |
 | `analytics_feature_sets.id` | `analytics_predictions.feature_set_id` | which training set the model behind a prediction was built from; nullable |
 | `analytics_forecast_runs.id` | `analytics_predictions.run_id`, `analytics_forecast_series.last_run_id` | which forecast pass wrote the row; nullable, no FK |
 | `analytics_at_risk_deliveries.id` | `analytics_at_risk_checks.delivery_id` | which delivery row an acknowledgement was about; the row is rewritten every minute, the ledger row never |
+| `tenant_secrets.id` | `customer_notification_channels.config.webhook_url_secret_id` (inside the JSON) | the sealed webhook URL of the channel; deleted with the channel, and with the tenant |
 | `analytics_settled_rows` (`delivery_route`, `pick_release`), `analytics_lookup_values` (`pick line`), `analytics_facts` (three package methods) | `analytics_at_risk_deliveries` | the board is assembled from these four reads every minute; a relationship in data flow, not a column reference |
 | `analytics_settled_rows` (`pick_release`) | `analytics_predictions.actual` | the actual is read from the settled rows after the bucket closes and written onto the prediction; a relationship in data flow, not a column reference |
 | `log_transactions.id` | `analytics_facts.source_transaction_id` | which transaction this fact was derived from; no FK, and deliberately survives the transaction being dropped at 60 days |

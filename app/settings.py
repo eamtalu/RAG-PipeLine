@@ -415,6 +415,12 @@ class Settings(BaseSettings):
     # at rest. Empty ⇒ inline secrets are refused and a private_key_path (file on the backend host)
     # must be used instead.
     ssh_secret_key: str = ""
+    # --- tenant secrets (app/services/secrets): webhook URLs today, connector credentials later.
+    # Master keys as `kid=<urlsafe base64 of 32 random bytes>,...`; new secrets are wrapped under
+    # secrets_active_key_id (defaults to the only key). Rotation: add a key, make it active, run
+    # scripts/rotate_secrets_master_key.py, remove the old key. Empty = the store refuses to seal.
+    secrets_master_keys: str = ""
+    secrets_active_key_id: str = ""
 
     # --- SSH hardening (see docs/ssh-log-fetch-hardening-and-per-customer-poller.md) ---
     ssh_operation_timeout_seconds: float = 60.0   # per-SFTP-op (glob/stat/open/read/close) hard ceiling

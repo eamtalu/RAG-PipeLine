@@ -121,3 +121,16 @@ def _register_notification_test_tenants():
             await eng.dispose()
 
     asyncio.run(_seed())
+
+
+# --- the secrets store ------------------------------------------------------------------------------
+#: A fixed master key for the whole run, so endpoints that seal a webhook URL work in tests exactly as
+#: they do in production. Not a real key: tests never leave this machine.
+_TEST_MASTER_KEY = "test1=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+
+@pytest.fixture(autouse=True)
+def _configured_secrets_store(monkeypatch):
+    if not settings.secrets_master_keys:
+        monkeypatch.setattr(settings, "secrets_master_keys", _TEST_MASTER_KEY)
+        monkeypatch.setattr(settings, "secrets_active_key_id", "test1")

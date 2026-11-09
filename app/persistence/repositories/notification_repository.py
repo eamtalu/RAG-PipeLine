@@ -39,8 +39,12 @@ class NotificationRepository:
 
     # ----- channels -----------------------------------------------------------------------------
     async def create_channel(self, *, customer_code: str, channel_type: str, name: str,
-                             config: dict, enabled: bool = True) -> CustomerNotificationChannel:
+                             config: dict, enabled: bool = True,
+                             channel_id: uuid.UUID | None = None) -> CustomerNotificationChannel:
+        # The caller may fix the id up front, so a secret can be sealed under the channel's name
+        # before the row exists and land in the same commit.
         row = CustomerNotificationChannel(
+            id=channel_id or uuid.uuid4(),
             customer_code=customer_code, channel_type=channel_type, name=name,
             config=config or {}, enabled=enabled,
         )

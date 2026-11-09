@@ -31,6 +31,7 @@ from app.persistence.models.notification import (
     NotificationDelivery,
     DeliveryStatus,
 )
+from app.services.notifications import channel_secrets
 from app.services.notifications import tenant_gate
 from app.services.notifications.bus import bus
 from app.services.notifications.events import NotificationEvent
@@ -182,7 +183,7 @@ async def _resolve_channels(db: AsyncSession,
 
 # ---- delivery attempt (shared by publish + retry) -------------------------------------------------
 async def _send(adapter, delivery: NotificationDelivery,
-                channel_row: CustomerNotificationChannel | None, event_row) -> None:
+                channel_row: CustomerNotificationChannel | None, event_row, *, db) -> None:
     """Hand the event to its transport, or raise.
 
     Every reason a send cannot proceed is raised rather than returned, so all of them land on the same
@@ -196,7 +197,9 @@ async def _send(adapter, delivery: NotificationDelivery,
         raise RuntimeError("target channel is disabled")
     if adapter is None:
         raise RuntimeError(f"no adapter registered for channel type {delivery.channel_type!r}")
-    await adapter.send(_event_from_row(event_row), channel_row.config or {})
+    # The webhook URL lives in the secrets store; it is revealed here, for this send only.
+    await adapter.send(_event_from_row(event_row),
+                       await channel_secrets.reveal_config(db, channel_row))
 
 
 def _record_success(delivery: NotificationDelivery) -> None:
@@ -231,7 +234,8 @@ async def _attempt_delivery(delivery_id: uuid.UUID) -> None:
         delivery, event_row, channel_row = loaded
 
         try:
-            await _send(get_channel(delivery.channel_type), delivery, channel_row, event_row)
+            await _send(get_channel(delivery.channel_type), delivery, channel_row, event_row,
+                        db=db)
         except Exception as exc:  # noqa: BLE001 — any failure → record + schedule retry
             _record_failure(delivery, exc)
             logger.warning("notification delivery %s failed (attempt %d, status=%s): %s",

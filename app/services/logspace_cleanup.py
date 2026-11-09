@@ -66,6 +66,8 @@ from app.persistence.models.notification import (
     NotificationRule,
     NotificationEvent,
 )
+from app.persistence.models.agent_run import AgentRun
+from app.persistence.models.tenant_secret import TenantSecret
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +181,9 @@ async def purge_logspace(db: AsyncSession, customer_code: str) -> bool:
     await db.execute(delete(NotificationRule).where(NotificationRule.customer_code == customer_code))
     await db.execute(delete(CustomerNotificationChannel).where(
         CustomerNotificationChannel.customer_code == customer_code))
+    # The tenant's sealed secrets (webhook URLs) and its agent run ledger: soft tenant key, no FK.
+    await db.execute(delete(TenantSecret).where(TenantSecret.customer_code == customer_code))
+    await db.execute(delete(AgentRun).where(AgentRun.customer_code == customer_code))
 
     # 4) The tenant row → cascades customer_display_names + logspace_presence.
     await db.execute(delete(Customer).where(Customer.customer_code == customer_code))
