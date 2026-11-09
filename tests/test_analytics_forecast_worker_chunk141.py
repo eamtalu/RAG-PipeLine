@@ -166,7 +166,11 @@ async def test_a_run_left_running_by_a_dead_process_is_swept_and_the_tenant_is_d
         await run_store.claim(db, run.id)
         await db.commit()
         assert (await run_store.running(db, CC)) is not None
-        swept = await run_store.sweep_stale(db, now=now + run_store.STALE_AFTER + timedelta(minutes=1))
+        # The row is dated by the database clock (real time) and `running()` reads it against real
+        # time too, so the sweep's cut-off must be relative to real time as well. The hard-coded
+        # `now` above is only for the due-tenant check further down.
+        just_past_stale = datetime.now(UTC) + run_store.STALE_AFTER + timedelta(minutes=1)
+        swept = await run_store.sweep_stale(db, now=just_past_stale)
         await db.commit()
         got = await run_store.get(db, CC, run.id)
     assert swept >= 1
