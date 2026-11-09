@@ -31,6 +31,7 @@ import logging
 
 from sqlalchemy import distinct, func, select
 
+from app import log_context
 from app.settings import settings
 from app.config.database import async_session
 from app.persistence.models.log_regroup_pending import LogRegroupPending
@@ -113,6 +114,8 @@ async def drain_once() -> dict:
     stats = {"customers": 0, "windows": 0, "consumed": 0, "abandoned": 0, "failed": 0}
     for cc in await customers_with_due_work():
         stats["customers"] += 1
+        log_context.tenant_var.set(cc)
+        log_context.request_id_var.set(log_context.new_request_id())
         try:
             _merge_result(stats, await _stitch_customer(cc))
         except Exception:
@@ -120,6 +123,7 @@ async def drain_once() -> dict:
             logger.exception(
                 "Stitch worker: finalize failed for %s — its windows stay open for retry; "
                 "other tenants are unaffected", cc)
+    log_context.clear()
     return stats
 
 

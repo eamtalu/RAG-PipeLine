@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
+from app import log_context
 from app.config.database import async_session
 from app.persistence.models.analytics_settlement import AnalyticsSettlement
 from app.persistence.repositories.customer_repository import get_customer_timezone
@@ -69,6 +70,8 @@ async def forecast_once(now: datetime | None = None) -> dict:
     due = await due_tenants(now, run_hour=settings.analytics_forecast_run_hour_local)
     stats = {"due": len(due), "completed": 0, "skipped": 0, "failed": 0}
     for cc, as_of in due:
+        log_context.tenant_var.set(cc)
+        log_context.request_id_var.set(log_context.new_request_id())
         try:
             result = await runner.run_tenant(cc, as_of_date=as_of, trigger="nightly")
         except Exception:
@@ -81,6 +84,7 @@ async def forecast_once(now: datetime | None = None) -> dict:
             logger.info("Forecast for %s as of %s skipped: %s", cc, as_of, result.get("reason"))
         elif status != "completed":
             logger.error("Forecast for %s as of %s: %s", cc, as_of, result)
+    log_context.clear()
     return stats
 
 

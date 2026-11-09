@@ -10,6 +10,7 @@ from app.settings import settings
 from app.background import setup_logging, start_background_tasks, stop_background_tasks
 from app.api.v1.log_sources import _fetch_tasks as _ssh_fetch_tasks
 from app.middleware.idempotency import IdempotencyMiddleware
+from app.middleware.request_context import RequestContextMiddleware
 
 # `setup_logging` is re-exported here so `app.main.setup_logging` keeps working (tests + habit).
 __all__ = ["app", "setup_logging", "lifespan"]
@@ -51,6 +52,8 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 # Idempotency-Key de-duplication for allowlisted mutating POSTs. Opt-in (no-op unless the request
 # carries an Idempotency-Key on an allowlisted path), so it never affects reads/uploads/other routes.
 app.add_middleware(IdempotencyMiddleware)
+# Added last, so outermost: every layer below logs with the request id and the tenant.
+app.add_middleware(RequestContextMiddleware)
 app.include_router(api_router)
 
 

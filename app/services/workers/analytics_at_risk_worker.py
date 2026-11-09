@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
+from app import log_context
 from app.config.database import async_session
 from app.persistence.models.analytics_at_risk import AnalyticsAtRiskSettings
 from app.persistence.models.analytics_settlement import AnalyticsSettlement
@@ -64,6 +65,8 @@ async def evaluate_once(now: datetime | None = None) -> dict:
     stats = {"tenants": 0, "completed": 0, "skipped": 0, "failed": 0, "profiled": 0}
     for cc in await candidates():
         stats["tenants"] += 1
+        log_context.tenant_var.set(cc)
+        log_context.request_id_var.set(log_context.new_request_id())
         try:
             result = await runner.evaluate_tenant(cc, now=now)
         except Exception:
@@ -86,6 +89,7 @@ async def evaluate_once(now: datetime | None = None) -> dict:
                     logger.error("At-risk profile for %s as of %s: %s", cc, as_of, profiled)
         except Exception:
             logger.exception("At-risk profile for %s raised; other tenants are unaffected", cc)
+    log_context.clear()
     return stats
 
 

@@ -25,6 +25,7 @@ import anthropic
 import httpx
 from pydantic import ValidationError
 
+from app import log_context
 from app.services.agent_runs.claims import Claim
 from app.services.teams.contracts import AnswerPayload, QuestionJob
 
@@ -241,6 +242,11 @@ class TeamsQuestionConsumer:
             await self._delete(receipt)
             return
 
+        # Every line of this job's processing names the job and its tenant, heartbeat included.
+        with log_context.bind(request_id=job.job_id, tenant=job.customer_code):
+            await self._process_job(job, receipt)
+
+    async def _process_job(self, job: QuestionJob, receipt: str) -> None:
         heartbeat = asyncio.create_task(self._heartbeat(receipt))
         started = self._clock()
         try:

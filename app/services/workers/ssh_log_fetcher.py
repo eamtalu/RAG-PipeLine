@@ -22,6 +22,7 @@ import logging
 
 from sqlalchemy import func, select
 
+from app import log_context
 from app.settings import settings
 from app.config.database import async_session
 from app.persistence.models.log_ssh_source import LogSshSource
@@ -67,8 +68,10 @@ async def _poll_customer_once(customer_code: str) -> dict:
 async def _customer_loop(customer_code: str) -> None:
     """One tenant's forever loop: fetch, log anything notable, sleep its cadence. Survives errors;
     only CancelledError (reap/shutdown) stops it."""
+    log_context.tenant_var.set(customer_code)
     logger.info("SSH poll loop started for %s", customer_code)
     while True:
+        log_context.request_id_var.set(log_context.new_request_id())
         try:
             stats = await _poll_customer_once(customer_code)
             if (stats.get("entries_ingested") or stats.get("errors") or stats.get("auto_disabled")

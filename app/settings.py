@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # when the process is started bare, e.g. `uvicorn main:app`, where stdout isn't captured durably).
     # Empty => no file handler. Rotation keeps log_file_max_bytes per file, log_file_backup_count files.
     log_level: str = "INFO"
+    # "json": one JSON object per line with ts, level, logger, msg, request_id, tenant (and exc),
+    # for journald and jq; "text": the same fields in a plain line, for a terminal.
+    log_output: Literal["json", "text"] = "json"
     log_file: str = ""                       # e.g. "/var/log/rag-backend.log" or "~/rag-backend.log"
     log_file_max_bytes: int = 10 * 1024 * 1024   # 10 MB per file before rotating
     log_file_backup_count: int = 5               # keep this many rotated files

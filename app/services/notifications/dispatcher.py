@@ -31,6 +31,7 @@ from app.persistence.models.notification import (
     NotificationDelivery,
     DeliveryStatus,
 )
+from app import log_context
 from app.services.notifications import channel_secrets
 from app.services.notifications import tenant_gate
 from app.services.notifications.bus import bus
@@ -233,16 +234,18 @@ async def _attempt_delivery(delivery_id: uuid.UUID) -> None:
             return
         delivery, event_row, channel_row = loaded
 
-        try:
-            await _send(get_channel(delivery.channel_type), delivery, channel_row, event_row,
-                        db=db)
-        except Exception as exc:  # noqa: BLE001 — any failure → record + schedule retry
-            _record_failure(delivery, exc)
-            logger.warning("notification delivery %s failed (attempt %d, status=%s): %s",
-                           delivery.id, delivery.attempts, delivery.status, exc)
-        else:
-            _record_success(delivery)
-        await db.commit()
+        with log_context.bind(request_id=str(delivery.id),
+                              tenant=getattr(event_row, "customer_code", None)):
+            try:
+                await _send(get_channel(delivery.channel_type), delivery, channel_row,
+                            event_row, db=db)
+            except Exception as exc:  # noqa: BLE001 — any failure → record + schedule retry
+                _record_failure(delivery, exc)
+                logger.warning("notification delivery %s failed (attempt %d, status=%s): %s",
+                               delivery.id, delivery.attempts, delivery.status, exc)
+            else:
+                _record_success(delivery)
+            await db.commit()
 
 
 def _record_throttled(delivery: NotificationDelivery, exc: ChannelRateLimited) -> None:

@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import distinct, select
 
+from app import log_context
 from app.config.database import async_session
 from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
 from app.services.analytics.reconcile import reconcile_tenant
@@ -59,6 +60,8 @@ async def reconcile_once() -> dict:
     stats = {"tenants": 0, "healthy": 0, "with_findings": 0, "findings": 0, "failed": 0}
     for cc in await _tenants():
         stats["tenants"] += 1
+        log_context.tenant_var.set(cc)
+        log_context.request_id_var.set(log_context.new_request_id())
         try:
             async with async_session() as db:
                 report = await reconcile_tenant(db, cc, window=window, repair=False)
@@ -74,6 +77,7 @@ async def reconcile_once() -> dict:
         else:
             stats["with_findings"] += 1
             stats["findings"] += len(report["findings"])
+    log_context.clear()
     return stats
 
 

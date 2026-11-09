@@ -17,10 +17,13 @@ poller. See docs/background-workers-web-worker-split.md.
 """
 
 import asyncio
+import json
 import logging
+from datetime import datetime, timezone
 import os
 from logging.handlers import RotatingFileHandler
 
+from app import log_context
 from app.settings import settings
 from app.services.workers.embedding_worker import run_worker
 from app.services.workers.log_watcher import run_log_watcher
@@ -40,11 +43,64 @@ from app.services.notifications import dispatcher as notification_dispatcher
 logger = logging.getLogger(__name__)
 
 
+class JsonFormatter(logging.Formatter):
+    """One JSON object per line: ts, level, logger, msg, request_id, tenant, and exc when raised."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        line = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc)
+                                  .isoformat(timespec="milliseconds"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            "request_id": getattr(record, "request_id", None),
+            "tenant": getattr(record, "tenant", None),
+        }
+        if record.exc_info:
+            line["exc"] = self.formatException(record.exc_info)
+        return json.dumps(line, default=str)
+
+
+class TextFormatter(logging.Formatter):
+    """A plain line with the same two fields, "-" when unbound: for a terminal, not for journald."""
+
+    def __init__(self) -> None:
+        super().__init__("%(asctime)s %(name)s %(levelname)s %(ctx)s %(message)s")
+
+    def format(self, record: logging.LogRecord) -> str:
+        record.ctx = (f"request_id={getattr(record, 'request_id', None) or '-'} "
+                      f"tenant={getattr(record, 'tenant', None) or '-'}")
+        return super().format(record)
+
+
+def build_formatter() -> logging.Formatter:
+    """The formatter settings.log_output asks for; both carry the request id and the tenant.
+
+    ("json") -> JsonFormatter ; ("text") -> "<ts> <logger> <level> request_id=<id> tenant=<t> <msg>"
+    """
+    return TextFormatter() if settings.log_output == "text" else JsonFormatter()
+
+
+_plain_record_factory = logging.getLogRecordFactory()
+
+
+def _record_with_context(*args, **kwargs) -> logging.LogRecord:
+    """The stock record plus the bound request id and tenant, so every line carries them."""
+    record = _plain_record_factory(*args, **kwargs)
+    record.request_id = log_context.request_id_var.get()
+    record.tenant = log_context.tenant_var.get()
+    return record
+
+
 def setup_logging() -> None:
     """Configure root logging: always to stdout/stderr, and ALSO to a rotating file when
     settings.log_file is set. Env-gated so bare `uvicorn main:app` (stdout not captured durably) can
     still keep a real log file. Idempotent — safe if called more than once."""
-    fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+    # Every record is stamped with the bound request id and tenant at creation, whichever
+    # handler formats it later, so no log line can miss the two fields.
+    if logging.getLogRecordFactory() is not _record_with_context:
+        logging.setLogRecordFactory(_record_with_context)
+    fmt = build_formatter()
     root = logging.getLogger()
     root.setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
 
@@ -52,8 +108,11 @@ def setup_logging() -> None:
     if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler)
                for h in root.handlers):
         sh = logging.StreamHandler()
-        sh.setFormatter(fmt)
         root.addHandler(sh)
+    # Re-applied on every call, so a changed log_output takes effect without duplicate handlers.
+    for h in root.handlers:
+        if type(h) is logging.StreamHandler or isinstance(h, RotatingFileHandler):
+            h.setFormatter(fmt)
 
     # optional rotating file handler
     if settings.log_file:

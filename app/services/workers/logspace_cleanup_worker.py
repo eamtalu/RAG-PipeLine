@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app import log_context
 from app.settings import settings
 from app.config.database import async_session
 from app.persistence.models.customer import Customer, LogSpaceKind
@@ -43,8 +44,9 @@ async def run_logspace_cleanup_once() -> tuple[int, int]:
             ).scalars().all()
         )
         for code in due:
-            if await purge_logspace(session, code):
-                purged += 1
+            with log_context.bind(tenant=code, request_id=log_context.new_request_id()):
+                if await purge_logspace(session, code):
+                    purged += 1
 
         presence_cutoff = now - timedelta(seconds=settings.logspace_presence_ttl_seconds)
         swept = await LogspacePresenceRepository(session).sweep(presence_cutoff)
