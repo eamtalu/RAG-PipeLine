@@ -58,6 +58,7 @@ curl -s -X POST http://localhost:8000/api/v1/analytics/agent/ask -H "X-Customer-
 
 ## What holds the answer to the data (in code, not in the prompt)
 
+- The whole run, topic gate included, has a deadline (`analytics_agent_run_timeout_seconds`, 120 s by default); a provider that never answers is cancelled and the answer is a fixed sentence with `stop_reason: timeout`.
 - An answer with figures is withheld unless at least one data tool returned a result without an error.
 - Every figure in the answer must appear in a tool result (or in the question, or be a percentage); any other figure is named and the answer withheld.
 - For a "top N" question the ranked table is rendered from the tool's own rows in the server's order, and the model's own table is dropped.

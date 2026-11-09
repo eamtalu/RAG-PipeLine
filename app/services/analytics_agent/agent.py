@@ -166,9 +166,11 @@ class AnalyticsAgent(GroundedAgent):
     DECLINE = DECLINE
 
     def __init__(self, customer_code: str, *, session_factory: SessionFactory = async_session,
-                 model: BaseChatModel | None = None, gate: TopicGate | None = None):
+                 model: BaseChatModel | None = None, gate: TopicGate | None = None,
+                 run_timeout_seconds: float | None = None):
         self.session_factory = session_factory
-        super().__init__(customer_code, model=model, gate=gate)
+        super().__init__(customer_code, model=model, gate=gate,
+                         run_timeout_seconds=run_timeout_seconds)
 
     def make_model(self) -> BaseChatModel:
         return make_model()

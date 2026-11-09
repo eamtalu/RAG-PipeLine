@@ -106,7 +106,7 @@ async def _amain() -> None:
         record_exchange=_record_exchange, customer_ready=_customer_ready,
         concurrency=settings.teams_consumer_concurrency,
         visibility_seconds=settings.teams_sqs_visibility_seconds, wait_seconds=settings.teams_sqs_wait_seconds,
-        run_command=run_command)
+        run_command=run_command, run_timeout_seconds=settings.analytics_agent_run_timeout_seconds)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

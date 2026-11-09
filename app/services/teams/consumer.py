@@ -141,11 +141,17 @@ class TeamsQuestionConsumer:
                  load_history: HistoryLoader, record_exchange: ExchangeRecorder,
                  customer_ready: CustomerCheck, concurrency: int, visibility_seconds: int,
                  wait_seconds: int = 20, heartbeat_seconds: float | None = None,
-                 clock: Callable[[], float] = time.monotonic, run_command: CommandRunner | None = None):
+                 clock: Callable[[], float] = time.monotonic, run_command: CommandRunner | None = None,
+                 run_timeout_seconds: float | None = None):
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
         if visibility_seconds < 30:
             raise ValueError("visibility_seconds must be >= 30 (the heartbeat runs at a third of it)")
+        # A run that can outlive the message's visibility would be handed to a second consumer
+        # while the first is still answering it, so the deadline must sit inside the window.
+        if run_timeout_seconds is not None and run_timeout_seconds >= visibility_seconds:
+            raise ValueError(f"run_timeout_seconds ({run_timeout_seconds}) must be below "
+                             f"visibility_seconds ({visibility_seconds})")
         self._sqs, self._queue_url, self._poster = sqs, queue_url, poster
         self._run_agent, self._load_history, self._record = run_agent, load_history, record_exchange
         self._customer_ready = customer_ready

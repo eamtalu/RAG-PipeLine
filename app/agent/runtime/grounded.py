@@ -13,6 +13,7 @@ share this and nothing else.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -141,9 +142,12 @@ class GroundedAgent:
     #: the fixed reply to an off-topic question or a manipulation attempt
     DECLINE: str = ""
     MANIPULATION_PREFIX = "I can't change how I work, show my instructions or read another logspace. "
+    #: the answer when the run reaches its deadline; the slot is freed and the person can retry
+    TIMED_OUT = ("That took too long to answer, so I stopped. Ask again more narrowly, for example "
+                 "a shorter time window or one delivery, picker or item.")
 
     def __init__(self, customer_code: str, *, model: BaseChatModel | None = None,
-                 gate: TopicGate | None = None):
+                 gate: TopicGate | None = None, run_timeout_seconds: float | None = None):
         # No database session lives here: a run spends most of its time waiting on the model, and a
         # session held across that wait pins a pooled connection (step 3 of the execution plan).
         self.customer_code = customer_code  # every tool is hard-scoped to this tenant
@@ -153,6 +157,8 @@ class GroundedAgent:
         # In real use the gate always runs. A test that injects a scripted model counts its calls,
         # so it gets the gate only when it passes one.
         self.gate = gate if gate is not None else (None if injected else TopicGate(self.model, self.DOMAIN))
+        self.run_timeout_seconds = (run_timeout_seconds
+                                    or settings.analytics_agent_run_timeout_seconds)
 
     # ---- hooks -------------------------------------------------------------------------------------
     def make_model(self) -> BaseChatModel:
@@ -180,7 +186,23 @@ class GroundedAgent:
 
     # ---- the run -----------------------------------------------------------------------------------
     async def ask(self, question: str, history: list[dict] | None = None) -> dict:
-        """Answer one question. Returns the final text plus a trace of the tool calls made.
+        """Answer one question under the run deadline: the text plus a trace of the tool calls made.
+
+        (question) -> {"answer", "stop_reason": "end_turn", "tool_calls", ...} ; a provider that
+        never answers -> {"answer": TIMED_OUT, "stop_reason": "timeout", "tool_calls": []}
+        """
+        # The deadline wraps the gate and the loop together, so that a provider that hangs can
+        # never hold a consumer slot or a request for longer than the queue's visibility window.
+        try:
+            return await asyncio.wait_for(self._ask(question, history),
+                                          timeout=self.run_timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning("agent run timed out after %ss for %s: %s", self.run_timeout_seconds,
+                           self.customer_code, question[:200])
+            return self._timed_out()
+
+    async def _ask(self, question: str, history: list[dict] | None = None) -> dict:
+        """The run itself, with no deadline of its own.
 
         `history` is optional prior turns of the same conversation, oldest first, as
         {"role": "user"|"assistant", "content": str}. Only plain text is replayed, without figures.
@@ -230,6 +252,11 @@ class GroundedAgent:
 
     def _declined(self, why: str, answer: str) -> dict:
         return {"answer": answer, "stop_reason": "declined", "declined": why, "tool_calls": [],
+                "iterations": 0, "retries": 0, "model": self.model_name, "evidence": None,
+                "evidence_data": None, "withheld_figures": []}
+
+    def _timed_out(self) -> dict:
+        return {"answer": self.TIMED_OUT, "stop_reason": "timeout", "tool_calls": [],
                 "iterations": 0, "retries": 0, "model": self.model_name, "evidence": None,
                 "evidence_data": None, "withheld_figures": []}
 

@@ -127,10 +127,12 @@ class LogspaceAgent(GroundedAgent):
 
     def __init__(self, customer_code: str, *, scope: FeedScope, tz_name: str, today: date_type,
                  session_factory: SessionFactory = async_session,
-                 model: BaseChatModel | None = None, gate: TopicGate | None = None):
+                 model: BaseChatModel | None = None, gate: TopicGate | None = None,
+                 run_timeout_seconds: float | None = None):
         self.scope, self.tz_name, self.today = scope, tz_name, today
         self.session_factory = session_factory
-        super().__init__(customer_code, model=model, gate=gate)
+        super().__init__(customer_code, model=model, gate=gate,
+                         run_timeout_seconds=run_timeout_seconds)
 
     def make_model(self) -> BaseChatModel:
         return make_model()

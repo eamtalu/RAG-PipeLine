@@ -445,6 +445,9 @@ class Settings(BaseSettings):
     # (the consumer's EnvironmentFile), never from .env. London keeps the data in the UK region.
     bedrock_region: str = "eu-west-2"
     analytics_agent_max_iterations: int = 10      # tool-call rounds before the agent must answer
+    # The whole run, topic gate included, is cancelled at this point and answers with a fixed
+    # sentence. Keep it below teams_sqs_visibility_seconds: the consumer refuses to start otherwise.
+    analytics_agent_run_timeout_seconds: float = 120.0
     analytics_agent_max_tokens: int = 4000
     # Ollama only. Qwen3 "thinks" for a thousand tokens before every reply unless told not to, which
     # turns a two-second tool call into a minute; off by default. The context must hold twelve tool
