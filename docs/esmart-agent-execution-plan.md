@@ -18,8 +18,10 @@ Decision: the separation is a package boundary inside this repo first (`app/agen
 - Tests need the local Postgres from `docker compose up -d postgres` (pgvector image, port 5432).
 - No formatter or linter is configured in this repo.
 - Agent code lives in `app/services/agent_core`, `analytics_agent`, `logspace_agent`, `log_agent`; the Teams consumer in `app/services/teams` and `app/teams_consumer.py`.
-- Coupling that must be respected when moving: `app/services/teams/home_shape.py` and `home_snapshot.py` import `aggregate_releases` and `list_releases` from `app/services/analytics_agent/tools.py`.
-  Those two functions are analytics reads used by the snapshot writer, so they move to an analytics module, not into the agent package.
+- Coupling that must be respected when the tool modules move (query model stage, not step 2): `app/services/teams/home_shape.py` and `home_snapshot.py` import `aggregate_releases` and `list_releases` from `app/services/analytics_agent/tools.py`.
+  Those two functions are analytics reads used by the snapshot writer; when the tools leave `app/services`, these two go to an analytics module, not into the agent package.
+- Every tool module (`analytics_agent/tools.py`, `at_risk_tools.py`, `logspace_agent/tools.py`, `log_agent/tools.py`, `log_agent/analytics_tools.py`) imports `app.persistence` models or repositories directly, and `log_agent/agent.py` imports `app.api.deps`.
+  They are the data access layer today and stay outside `app/agent` until the query model replaces those reads.
 - `agent_core/grounded.py` imports `analytics_agent.evidence`, and `guards.py` imports `notifications.redact`; both edges are inside what moves or are leaf utilities.
 
 ## Stage A: separate and close the door
@@ -27,7 +29,7 @@ Decision: the separation is a package boundary inside this repo first (`app/agen
 | # | Step | Done when |
 |---|---|---|
 | 1 | Create `app/agent/` with a layout test: nothing under it imports `app.persistence`, `app.api`, `app.background` or `app.worker`; the analytics and Teams snapshot code never imports `app.agent` | the test passes on the empty package and fails on a planted bad import |
-| 2 | Move the loop into the package with `git mv` and import rewrites only: `agent_core/grounded.py`, `guards.py` to `app/agent/runtime/`; `analytics_agent/evidence.py` and `logspace_agent/evidence.py` to `app/agent/presentation/`; agents and tool modules to `app/agent/profiles_legacy/` for now; `aggregate_releases` and `list_releases` to an analytics module first | every existing agent test passes unchanged; the layout test passes |
+| 2 | Move the loop into the package with `git mv` and import rewrites only: `agent_core/grounded.py` and `guards.py` to `app/agent/runtime/`; `analytics_agent/evidence.py` and `logspace_agent/evidence.py` to `app/agent/presentation/`. The agent classes and every tool module stay in `app/services` for now, because the tools read the database through `app.persistence` directly and may not enter the package until the query model exists; the layout test lists them as transitional importers of `app.agent`, a list that must only shrink | every existing agent test passes unchanged; the layout test passes with the transitional list |
 | 3 | A session per tool call: tools open a short session the way `services/teams/commands.py` does; the `db` constructor argument leaves `AnalyticsAgent` and `LogspaceAgent`; callers in `teams_consumer.py`, `api/v1/analytics_agent.py` and `api/v1/logs.py` updated | a run holds no session between model calls; a test runs 20 agent calls in parallel on the default pool |
 | 4 | Run deadline: `asyncio.wait_for` around the whole run, shorter than the SQS visibility window; a typed timeout result and sentence | a fake provider that hangs yields the timeout answer and frees the slot |
 | 5 | `agent_runs` table and a claim before the run; a finished run re-posts its stored result on redelivery | a duplicate SQS delivery never runs the model twice |
