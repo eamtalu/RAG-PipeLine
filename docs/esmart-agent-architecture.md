@@ -1,6 +1,6 @@
 # eSmart Agent: architecture for a multi-tenant agentic framework
 
-Date: 2026-11-09, revised for clarity after an independent review and a second pass against the writing rules.
+Date: 2026-11-09, revised after two independent reviews and a pass against the writing rules.
 Scope: architecture only; no code is started by this document.
 Visual: `docs/esmart-agent-architecture.html` in this repo (open in a browser), also published at https://claude.ai/artifact/MTUEwpW7iVVaDH3QqkT12h.
 Related: the Teams edge repo `teams-agent-edge` (the Lambda in section 12) and the answer-blocks plan of 7 November (stage 7).
@@ -67,6 +67,16 @@ The gateway answers four questions before any model runs.
   This was chosen over Entra group claims because it needs no setup inside each customer's tenant and keeps the audit in one place; a group-claim sync can feed the same table later.
 - May they, and have they already: per-tenant and per-user counters for in-flight runs, hourly questions and daily cost; and an `agent_runs(tenant, request_id)` row claimed before the run.
   The row is what makes redelivery safe: a second delivery that finds the row `running` leaves the message alone, and one that finds it `done` re-posts the stored result instead of paying for the model again.
+
+The gateway's last act is to build one immutable `ExecutionContext` and hand it to the runtime.
+It holds the request id, the trace id, the tenant context, the principal, the profile, the conversation id and type, the loaded preferences and the deadline.
+It is a frozen object, built once and nowhere else, and it is the first argument of every runtime service, every repository method and every tool executor.
+The model never sees it: tool arguments produced by the model are validated on their own and joined to the context inside the executor, so which tenant a query runs for is never a model decision, and no connector result can change the tenant or the user.
+Logging binds the request id, tenant and user hash to a context variable for the run so every line carries them; that variable serves observability only and is never read for authorisation.
+
+Counters for admission live in a shared store and change by one atomic operation, never in a worker's memory, because five workers each counting locally cannot enforce one tenant-wide limit.
+On the backend that is a `quota_windows(tenant_id, user_id, window_start)` row updated with `INSERT ... ON CONFLICT DO UPDATE SET used = used + 1 RETURNING used`; on the edge it is the DynamoDB `ADD` it already performs per tenant, extended with a per-user key.
+In-flight counts use the same row, incremented when the run row is claimed, decremented when it ends, and swept by deadline so a crashed worker cannot pin a tenant at its limit.
 
 For Teams the refusal must happen before the edge enqueues, or the user polls for an answer that will never come.
 So the tenant and user quotas are mirrored into the edge's DynamoDB the way bindings already are, and the edge gains a per-user hourly limit beside its per-tenant one.
@@ -177,11 +187,33 @@ Memory is explicit in version one, because inferred memory about employees is a 
 
 A request without a `Principal` gets no memory at all.
 
+Preferences are keyed by tenant and user, not by conversation or channel: a setting made in Teams applies in the web app, because the web app maps its OIDC subject to the same Entra object id.
+History is keyed by conversation, and Teams and the web app use different conversation ids, so their histories never mix.
+Two runs for the same user at the same time both append history under their own sequence numbers; a preference written by both is last-write-wins by `updated_at`, acceptable for an explicit setting the person just confirmed.
+
+### What is stored, and how it is isolated
+
+Every agent-store table has a primary key that starts with the tenant, every index leads with the tenant, and every repository method takes the execution context rather than raw ids, so a query cannot be written with the user and without the tenant.
+
+| Table | Key | Purpose |
+|---|---|---|
+| conversation_messages | tenant_id, user_id, conversation_id, seq | history per conversation |
+| user_preferences | tenant_id, user_id, key | explicit preferences |
+| tenant_knowledge | tenant_id, key | glossary, sites, shifts |
+| agent_runs | tenant_id, request_id | idempotency, status, stored result |
+| agent_traces | tenant_id, trace_id | audit and troubleshooting |
+| quota_windows | tenant_id, user_id, window_start | atomic admission counters |
+| connector_configs | tenant_id, connector_id | a tenant's data sources |
+
+The database enforces the same rule as a second line: row-level security on every agent-store table, with each transaction setting `app.tenant_id` from the execution context and the application role forbidden to bypass it, so a query that forgets the tenant filter returns nothing rather than everything.
+
 ## 8. Tenancy and scale
 
 The harness is shared.
 Every tenant runs through the same workers and the same code; what differs is the `TenantContext` built once per request: allowed namespaces, enabled sources, credentials, quotas, model policy.
 No code reads global settings inside a run.
+Concurrent runs cannot share mutable state because each run owns its execution context and its trace, the LangChain graph is built per run, and the only process-wide objects are stateless clients, connection pools and caches whose keys start with the tenant and whose values are never changed after insertion.
+The layout test adds one check: no module in `app/agent` defines a mutable module-level container other than the registries, which are filled at import and then frozen.
 A tenant that needs guaranteed capacity gets a dedicated worker pool started with a tenant filter, same code, different processes.
 
 Hundreds of concurrent users is a few dozen questions in flight.
@@ -189,7 +221,7 @@ A worker runs several async slots behind a plain semaphore; the pool scales by a
 Fairness is enforced at admission, before enqueue, not by bouncing queue messages between workers, because every bounce counts toward the dead-letter limit.
 The real ceiling is the provider quota, which is why the capacity table in section 6 matters more than worker count.
 
-Database rules: no session held across model calls; a session per tool call; explicit statement timeouts; and row-level security on the agent-store tables as a backstop, so a query that forgets the tenant filter returns nothing rather than everything.
+Database rules: no session held across model calls; a session per tool call; explicit statement timeouts; and the row-level security described in section 7.
 Caches are keyed by tenant, profile version, catalogue hash and arguments.
 
 ## 9. Resilience

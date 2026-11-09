@@ -123,7 +123,7 @@
     <p class="muted">A framework for the agent side of eSmart Eye: a stateless runtime that every tenant shares, typed tools over a single query model, a model router that pins a provider per run, explicit-only memory, and the controls that let hundreds of people use it at once without reading each other's data. Nothing here is built yet; this is the design the roadmap implements.</p>
     <nav>
       <a href="#glance">At a glance</a><a href="#diagram">Diagram</a><a href="#layers">Layers</a><a href="#lifecycle">One request</a><a href="#query">Query model</a><a href="#sources">Data sources</a><a href="#router">Model router</a>
-      <a href="#memory">Memory</a><a href="#tenancy">Tenancy and scale</a><a href="#security">Security</a><a href="#today">What exists today</a><a href="#roadmap">Roadmap</a><a href="#decisions">Decisions</a>
+      <a href="#memory">Memory</a><a href="#tenancy">Tenancy and scale</a><a href="#context">Context and storage</a><a href="#security">Security</a><a href="#today">What exists today</a><a href="#roadmap">Roadmap</a><a href="#decisions">Decisions</a>
     </nav>
   </header>
 
@@ -379,6 +379,38 @@ capacity:  default Bedrock quotas + p95 60 s assumed → ~10-20 concurrent runs;
       <div class="card"><div class="t">Caches keyed by tenant</div><div class="d">(tenant, profile version, catalogue hash, args). Never an answer cache.</div></div>
       <div class="card"><div class="t">Later, on request</div><div class="d">Dedicated worker pools per tenant, data-region routing, per-tenant dashboards. Same code, different process set.</div></div>
     </div>
+  </section>
+
+  <section id="context">
+    <div class="eyebrow">Execution context and storage</div>
+    <h2>One shared runtime, many isolated execution contexts, separately scoped memory</h2>
+<pre class="code">gateway:  authenticate → tenant → principal → admission (atomic, shared store) → claim run row
+          → ExecutionContext(frozen)            built once, here, nowhere else
+runtime:  run(ctx)                               ctx is the first argument everywhere
+          router.choose(ctx.model_policy, ctx.budget)
+          memory.load(ctx.tenant_id, ctx.user_id, ctx.conversation_id)
+          registry.for_context(ctx)              tools bound to ctx at build time
+          policy.may_run(ctx.principal, tool)
+          observability.bind(ctx.request_id, ctx.trace_id)
+tools:    executor.run(ctx, DataQuery)           the model supplies DataQuery only; never the tenant</pre>
+    <div class="grid">
+      <div class="card ok"><div class="t">Immutable after the gateway</div><div class="d">A frozen object: request id, trace id, tenant, principal, profile, conversation, preferences, deadline. No model output or connector result has a path to it.</div></div>
+      <div class="card ok"><div class="t">No shared mutable state</div><div class="d">Each run owns its context and trace; the graph is built per run; process-wide objects are stateless clients, pools and tenant-keyed caches with immutable values. A layout test forbids other module-level mutables.</div></div>
+      <div class="card ok"><div class="t">Quotas are shared and atomic</div><div class="d">Counters live in <code>quota_windows</code> and change by one <code>INSERT … ON CONFLICT … RETURNING</code>; the edge uses its DynamoDB <code>ADD</code>. Five workers see one number. In-flight counts are swept by deadline.</div></div>
+      <div class="card ok"><div class="t">Memory across channels</div><div class="d">Preferences by tenant + user: set in Teams, applies on the web. History by conversation: Teams and web never mix. Two runs at once both append; preferences last-write-wins.</div></div>
+    </div>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Table</th><th>Key (tenant first, always)</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">conversation_messages</td><td class="mono">tenant_id, user_id, conversation_id, seq</td><td>history per conversation</td></tr>
+        <tr><td class="mono">user_preferences</td><td class="mono">tenant_id, user_id, key</td><td>explicit preferences</td></tr>
+        <tr><td class="mono">tenant_knowledge</td><td class="mono">tenant_id, key</td><td>glossary, sites, shifts</td></tr>
+        <tr><td class="mono">agent_runs</td><td class="mono">tenant_id, request_id</td><td>idempotency, status, stored result</td></tr>
+        <tr><td class="mono">agent_traces</td><td class="mono">tenant_id, trace_id</td><td>audit and troubleshooting</td></tr>
+        <tr><td class="mono">quota_windows</td><td class="mono">tenant_id, user_id, window_start</td><td>atomic admission counters</td></tr>
+        <tr><td class="mono">connector_configs</td><td class="mono">tenant_id, connector_id</td><td>a tenant's data sources</td></tr>
+      </tbody></table></div>
+    <p class="muted">Repositories take the context, not raw ids, so a query cannot be written with the user and without the tenant. Row-level security on every table, with the transaction setting <code>app.tenant_id</code> from the context, makes a forgotten filter return nothing rather than everything.</p>
   </section>
 
   <section id="security">
