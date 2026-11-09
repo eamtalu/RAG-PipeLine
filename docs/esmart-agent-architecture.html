@@ -135,9 +135,9 @@
       <div class="cross">⇅ typed tool calls, typed results</div>
       <div class="layer caps"><div class="lname">registry</div><div class="ldesc"><div class="title">Tool Registry: the tools this tenant and profile may use right now</div><div class="chips"><span class="chip">built per request</span><span class="chip">profile namespaces ∩ tenant's enabled sources ∩ healthy</span></div></div></div>
       <div class="services" style="margin-top:2px">
-        <div class="svc" style="border-style:solid"><span class="t">Structured retrieval</span><span class="d">SQL · HTTP API · NoSQL · the analytics service. One <code>DataQuery</code> language, one executor per kind. Orders, stock, metrics, transactions.</span></div>
-        <div class="svc" style="border-style:solid"><span class="t">Knowledge retrieval</span><span class="d">RAG over document chunks and vectors, tenant-partitioned, with citations. Manuals, procedures, documents.</span></div>
-        <div class="svc" style="border-style:solid"><span class="t">Actions</span><span class="d">Commands and forms with side effects: role-gated, confirmed, audited. Mark a delivery checked, submit a form.</span></div>
+        <div class="svc" style="border-style:solid"><span class="t">Structured query</span><span class="d">One tool, <code>data.query(DataQuery)</code>, for read-oriented retrieval over sources that can honour it: the analytics service, customer SQL, reporting databases, NoSQL later.</span></div>
+        <div class="svc" style="border-style:solid"><span class="t">Business operations</span><span class="d">One typed tool per operation, owned by the connector of that system: <code>stock.get_availability(item, warehouse)</code>, <code>inventory.move(…)</code>. Reads or writes; writes are role-gated, confirmed, audited.</span></div>
+        <div class="svc" style="border-style:solid"><span class="t">Knowledge retrieval</span><span class="d"><code>documents.search(query, filters, k)</code> over tenant-partitioned chunks, with citations. Manuals, procedures, documents.</span></div>
       </div>
       <div class="services">
         <div class="svc"><span class="t">Customer databases and APIs</span><span class="d">per-tenant credentials, read-only, allow-listed</span></div>
@@ -261,7 +261,8 @@ flowchart LR
   <section id="query">
     <div class="eyebrow">Query model</div>
     <h2>One data language, many executors</h2>
-    <p class="muted">The agent never learns a source's API. It speaks <code>DataQuery</code>; each connector executes as much of it as its source allows and says so in its catalogue. Tools, evidence, grounding and charts are written once against <code>DataResult</code>.</p>
+    <p class="muted"><b>Boundary.</b> The Universal Query Model provides a common contract for structured, read-oriented data retrieval across compatible sources. Each connector translates this contract into its native query mechanism. It is not intended to represent every possible API operation or business action. Sources requiring domain-specific operations expose typed business tools through the same Tool Registry and execution framework.</p>
+    <p class="muted">Within that boundary, tools, evidence, grounding and charts are written once against <code>DataResult</code>. The <code>source</code> field is not free text: the registry generates it into the tool schema per request as the tenant's enabled query instances, and the executor checks it again against the execution context. Tenant identity never comes from a model argument.</p>
 <pre class="code">DataQuery  { source: "analytics" | "sql:&lt;id&gt;" | "http:&lt;id&gt;",
              entity, measures: [{field, agg}], filters: [{field, op, value}],
              group_by: [field | {field, bucket: hour|day|week|month}],
@@ -276,7 +277,7 @@ documents.search(query, filters, k) → chunks with citations   (retrieval is it
       <tbody>
         <tr><td>Analytics service</td><td>stage 1a in-process over today's functions; stage 1b <code>POST /analytics/query</code> + <code>/catalog</code></td><td>API grows only for new analytics; catalogue per run</td></tr>
         <tr><td>Customer SQL</td><td>DataQuery compiled to parameterised SQL over allow-listed tables; read-only user</td><td>never free-form SQL; statement timeout; row and byte caps; breaker within the run</td></tr>
-        <tr><td>Customer HTTP API</td><td>DataQuery mapped to allow-listed endpoints the catalogue declares</td><td>pinned response schemas; free text → untrusted flag</td></tr>
+        <tr><td>Customer APIs (M3, WMS, carriers)</td><td>operation connector: one typed tool per operation, the system's own parameters and rules; not DataQuery</td><td>writes are side-effecting tools: role, confirmation, audit; free text → untrusted flag</td></tr>
         <tr><td>Documents (RAG)</td><td>chunk, embed, index per tenant; hybrid search; citations</td><td>tenant column not null; chunks are untrusted quotes; pgvector bug fixed first</td></tr>
         <tr><td>NoSQL</td><td>later, on the first customer that has one</td><td>same caps and timeouts</td></tr>
       </tbody></table></div>
@@ -292,13 +293,13 @@ documents.search(query, filters, k) → chunks with citations   (retrieval is it
 flowchart TB
   P[Profile YAML<br/>tool namespaces, guards, model policy] --> REG
   TC[TenantContext<br/>enabled connector instances] --> REG
-  REG[Tool Registry<br/>for_tenant - profile namespaces, tenant instances, healthy] --> OFFER[Offered tools for this run<br/>analytics.query - sql:wms.query - http:carrier.track - documents.search - actions.*]
+  REG[Tool Registry<br/>for_tenant - profile namespaces, tenant instances, healthy] --> OFFER[Offered tools for this run<br/>data.query with source in the tenant's instances - m3.stock_get_availability - inventory.move - documents.search]
   subgraph kinds[Connector kinds - code, one package per source type]
-    K1[analytics/]
-    K2[sql/]
-    K3[http_api/]
-    K4[documents/]
-    K5[nosql/ later]
+    K1[analytics/ - query]
+    K2[sql/ - query]
+    K3[m3/ and other customer APIs - operations]
+    K4[documents/ - knowledge]
+    K5[nosql/ later - query]
   end
   subgraph inst[Connector instances - configuration, one row per tenant per source]
     I1[(connector_configs<br/>id - kind - allow_list - secret_ref - status)]
@@ -308,10 +309,11 @@ flowchart TB
   end
   kinds --> REG
   inst --> REG
-  subgraph contract[Every kind ships the same five files]
+  subgraph contract[Every kind ships client, catalogue, tools, health - plus its family's file]
     C1[client.py<br/>connections, auth, pooling, breaker]
-    C2[catalogue.py<br/>introspect or declare entities and fields]
-    C3[executor.py<br/>DataQuery to DataResult with caps and timeouts]
+    C2[catalogue.py<br/>introspect or declare entities, fields, operations]
+    C3[executor.py - query kinds<br/>DataQuery to DataResult with caps and timeouts]
+    C6[operations.py - operation kinds<br/>one typed definition per business operation]
     C4[tools.py<br/>typed tools the model sees]
     C5[health.py]
   end
@@ -334,7 +336,7 @@ flowchart TB
       <tbody>
         <tr><td class="mono">analytics</td><td>served by <code>GET /analytics/catalog</code></td><td>HTTP to <code>POST /analytics/query</code> (stage 1b); in-process before that</td><td>system of record for history; named views as extra tools</td></tr>
         <tr><td class="mono">sql</td><td>introspects allow-listed tables and columns</td><td>compiles to parameterised SQL; read-only user; statement timeout</td><td>EXPLAIN cost guard on big tables; sampling over the row cap</td></tr>
-        <tr><td class="mono">http_api</td><td>declared per connector (which clauses each endpoint supports)</td><td>maps DataQuery to allow-listed endpoints; validates responses</td><td>free-text bodies set the untrusted flag</td></tr>
+        <tr><td class="mono">m3, wms, carrier (operations)</td><td>declares each operation: parameters, rules, whether it writes</td><td>no DataQuery executor; <code>operations.py</code> defines typed tools the registry offers</td><td>writes gated by role, confirmation and audit; free-text bodies set the untrusted flag</td></tr>
         <tr><td class="mono">documents</td><td>collections and metadata fields</td><td><code>documents.search</code>: hybrid retrieval with citations</td><td>ingestion side: chunk, embed, index per tenant</td></tr>
         <tr><td class="mono">nosql (later)</td><td>collections and projections</td><td>filters and projections per collection</td><td>no aggregations beyond count unless the store supports them</td></tr>
       </tbody></table></div>

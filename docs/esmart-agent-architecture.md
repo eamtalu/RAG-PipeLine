@@ -111,15 +111,30 @@ A tool is a `ToolSpec`: name, typed arguments, typed result, whether it has side
 The registry holds every spec at import and builds the offered set per request: the profile's namespaces, filtered by the tenant's enabled sources, filtered again by health.
 A source that fails its health check simply stops being offered, so the model is never handed a broken tool.
 
+Tools come in three families that share one registry, one execution context, one authorisation path, one trace and the same timeouts and caps.
+
+- Structured query: one tool, `data.query(DataQuery)`, for read-oriented retrieval over sources that can honour the query language: the analytics service, customer SQL and reporting databases, NoSQL later.
+- Business operations: one typed tool per operation, declared by the connector that owns the system, such as `stock.get_availability(item, warehouse)` or `inventory.move(item, from_location, to_location, quantity)`.
+  They may read or write; a write carries `side_effects=True`, which is what the role gate, the confirmation step and the audit row key on.
+  Our own commands, such as the at-risk check, are operations of this family.
+- Knowledge retrieval: `documents.search(query, filters, k)` over document chunks, returning citations.
+
+The boundary matters because an M3 stock lookup or a stock move has its own parameters, business rules and pagination; forcing it through filters and measures would grow `DataQuery` with exceptions until it explained nothing.
+
 Two things are easy to confuse and must stay separate.
-A connector kind is code: one package per source type (`analytics`, `sql`, `http_api`, `documents`; `nosql` later), each shipping the same five files: `client.py`, `catalogue.py`, `executor.py`, `tools.py`, `health.py`.
+A connector kind is code: one package per source type (`analytics`, `sql`, `documents`, and operation connectors such as `m3`; `nosql` later).
+Every kind ships `client.py`, `catalogue.py`, `tools.py` and `health.py`; a query connector adds `executor.py` for `DataQuery`, an operation connector adds `operations.py` with one typed definition per operation, and a kind may have both.
 A connector instance is configuration: one row per tenant per source in `connector_configs` with its kind, its allow-list and a reference to its encrypted credential.
 A customer adds a source through an admin endpoint with a test action that connects, introspects the catalogue and lets the admin prune the allow-list; nothing is deployed.
 
 ### One query model
 
-Every structured source speaks one language, defined once in the contracts.
-Tools, evidence, grounding and charts are written once against it, so a new source adds an executor and never a renderer.
+The Universal Query Model provides a common contract for structured, read-oriented data retrieval across compatible sources.
+Each connector translates this contract into its native query mechanism.
+It is not intended to represent every possible API operation or business action.
+Sources requiring domain-specific operations expose typed business tools through the same Tool Registry and execution framework.
+
+Within that boundary, tools, evidence, grounding and charts are written once against `DataResult`, so a new query source adds an executor and never a renderer.
 
 ```
 DataQuery  { source, entity, measures: [{field, agg}], filters: [{field, op, value}],
@@ -140,7 +155,9 @@ DataQuery { source: "analytics", entity: "releases",
             limit: 3, window: {start: "2026-11-02", end: "2026-11-08"} }
 ```
 
-The analytics executor sends it to `POST /analytics/query`; a SQL executor would compile the same object to a parameterised statement over allow-listed tables; an HTTP executor maps it to an allow-listed endpoint.
+The analytics executor sends it to `POST /analytics/query`; a SQL executor compiles the same object to a parameterised statement over allow-listed tables; a reporting database gets its own executor.
+The `source` field is not free text: the registry generates it into the tool's schema per request as the list of the tenant's enabled query instances, and the executor checks it again against the execution context before running.
+The model can name a source only from that list, and tenant identity never comes from a model argument.
 A connector that cannot express a clause says so in its catalogue, and the runtime rejects the query before the call instead of failing on it.
 The catalogue is fetched per run with a sixty-second cache, so a field removed from a source disappears from what the model is offered within a minute.
 
@@ -152,8 +169,7 @@ The existing document search is reused only after its tenant column and its brok
 
 The rule for a customer's own source: live state is a connector; anything to trend or forecast is ingested into the analytics service and reached through the analytics connector, because history and aggregation are what that service is for.
 
-Actions are tools with side effects.
-They are gated by role, confirmed by a form or a second message when the run has seen untrusted text, and written to the audit table.
+Side-effecting operations are gated by role, confirmed by a form or a second message when the run has seen untrusted text, and written to the audit table.
 
 ## 6. Model router
 
