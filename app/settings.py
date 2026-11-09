@@ -473,6 +473,14 @@ class Settings(BaseSettings):
     teams_binding_mirror_sweep_seconds: float = 60.0  # how often the consumer re-pushes stale bindings
     teams_home_snapshot_seconds: float = 60.0     # how often the consumer rewrites the Teams tab's Home snapshot
 
+    # --- HTTP API callers (app/api/service_auth.py). Every route under /api/v1 needs a bearer token
+    # from this list, `name=token,name=token`; the name says which system is calling. Names listed
+    # in api_admin_callers may use the admin routes. api_auth_required=false is the rollout mode: a
+    # call without a token passes with a warning (api.auth.anonymous); a wrong token never passes.
+    api_service_tokens: str = ""
+    api_admin_callers: str = ""
+    api_auth_required: bool = False
+
     # --- Notifications (rules → in-process bus → channels: Teams/Slack/WhatsApp) ---
     # Background worker: evaluates rules over recently-finalized transactions, publishes events to
     # the in-process bus, and the dispatcher fans them out to each customer's enabled channels.

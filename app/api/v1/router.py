@@ -1,4 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from app.api.service_auth import require_service_caller
 
 from app.api.v1.upload import router as upload_router
 from app.api.v1.search import router as search_router
@@ -13,7 +15,8 @@ from app.api.v1.analytics_agent import router as analytics_agent_router
 from app.api.v1.analytics_forecast import router as analytics_forecast_router
 from app.api.v1.analytics_at_risk import router as analytics_at_risk_router
 
-api_router = APIRouter(prefix="/api/v1")
+# Every route under /api/v1 resolves its caller first; /health is on the app itself and stays open.
+api_router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_service_caller)])
 api_router.include_router(upload_router)
 api_router.include_router(search_router)
 api_router.include_router(logs_router)

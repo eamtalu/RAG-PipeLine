@@ -17,6 +17,8 @@ import re
 
 from fastapi import Depends, Header, HTTPException
 
+from app.api.service_auth import require_admin_caller
+
 from app.persistence.repositories.customer_repository import CustomerRepository, get_customer_repository
 from app.services.mnp_log_ingestion.timefmt import set_display_timezone
 
@@ -32,14 +34,11 @@ def normalize_customer_code(value: str | None) -> str | None:
 
 
 async def require_admin() -> None:
-    """Guard for admin-only log-space operations (permanent create/edit and any hard delete).
+    """Guard for admin-only operations: the request's service token must be named an admin.
 
-    There is no authentication system yet, so this is a single, centralized permit-all placeholder: the
-    admin-only routes already depend on it, so when real auth lands only this function changes and the
-    whole Manage surface is gated at once. Raise HTTPException(403) here to enforce.
+    (caller ops, in API_ADMIN_CALLERS) -> None ; (caller web) -> 403 ; see app/api/service_auth.py
     """
-    # TODO(auth): resolve the caller and reject non-admins once authentication exists.
-    return
+    require_admin_caller()
 
 
 async def get_current_customer(
