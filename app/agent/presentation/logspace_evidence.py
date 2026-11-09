@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import re
 
-from app.services.analytics_agent.evidence import _cell
+from app.agent.presentation.evidence import _cell
 
 MAX_ROWS = 15
 _TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$", re.M)

@@ -19,6 +19,15 @@ AGENT_MAY_NOT_IMPORT = ("app.persistence", "app.api", "app.background", "app.wor
 CHANNEL_FILES = {"app/teams_consumer.py"}
 CHANNEL_DIRS = ("app/api/",)
 
+# The legacy agent modules still outside the package (their tools read the database directly,
+# so they wait for the query model). They import the loop and the guards from app.agent for now.
+# This list must only ever shrink; a new entry is a design error.
+TRANSITIONAL_IMPORTER_DIRS = (
+    "app/services/analytics_agent/",
+    "app/services/logspace_agent/",
+    "app/services/log_agent/",
+)
+
 
 def _imports(path: Path) -> set[str]:
     """Every `app...` module a file imports, by `from` or `import`.
@@ -61,6 +70,10 @@ def test_only_channels_import_the_agent_package():
         and any(m == "app.agent" or m.startswith("app.agent.") for m in _imports(p))
     }
     not_channels = {
-        f for f in importers if f not in CHANNEL_FILES and not f.startswith(CHANNEL_DIRS)
+        f
+        for f in importers
+        if f not in CHANNEL_FILES
+        and not f.startswith(CHANNEL_DIRS)
+        and not f.startswith(TRANSITIONAL_IMPORTER_DIRS)
     }
     assert not_channels == set()

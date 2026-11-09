@@ -17,11 +17,11 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.agent_core import grounded
-from app.services.agent_core.grounded import GroundedAgent
-from app.services.agent_core.guards import TopicGate
+from app.agent.runtime import grounded
+from app.agent.runtime.grounded import GroundedAgent
+from app.agent.runtime.guards import TopicGate
 from app.services.log_feed.scope import FeedScope, describe
-from app.services.logspace_agent import evidence
+from app.agent.presentation import logspace_evidence
 from app.services.logspace_agent.tools import LOGSPACE_TOOLS, build_tools
 from app.settings import settings
 
@@ -144,7 +144,7 @@ class LogspaceAgent(GroundedAgent):
                 f"{describe(self.scope, today=self.today)}.)\n\n{question}")
 
     def render_evidence(self, trace: list[dict]) -> str | None:
-        return evidence.render(trace)
+        return logspace_evidence.render(trace)
 
     def without_own_tables(self, answer: str) -> str:
-        return evidence.strip_own_tables(answer)
+        return logspace_evidence.strip_own_tables(answer)

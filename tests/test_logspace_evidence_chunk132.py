@@ -2,7 +2,7 @@
 
 import json
 
-from app.services.logspace_agent.evidence import render
+from app.agent.presentation.logspace_evidence import render
 
 
 def _agg(rows, group_by=("user",)):

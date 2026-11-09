@@ -13,7 +13,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from app.config.database import async_session
-from app.services.agent_core.guards import (IN_SCOPE, META, OUT_OF_SCOPE, TopicGate, looks_like_manipulation,
+from app.agent.runtime.guards import (IN_SCOPE, META, OUT_OF_SCOPE, TopicGate, looks_like_manipulation,
                                             parse_verdict, wrap_tool)
 from app.services.analytics_agent import agent as agent_module
 from app.services.analytics_agent.agent import AnalyticsAgent
@@ -144,7 +144,7 @@ def test_the_gate_leans_towards_the_warehouse():
     """A live run declined "what's short right now?", "how is BCHAM doing?" and "is the server ok?".
     The gate now declines only what is clearly about something else; scripts/eval_topic_gate.py
     checks this against the real model (32/32)."""
-    from app.services.agent_core.guards import _GATE_PROMPT
+    from app.agent.runtime.guards import _GATE_PROMPT
     assert "When in doubt, reply in_scope." in _GATE_PROMPT
     assert "only a message that is clearly about something else" in _GATE_PROMPT
     for word in ("shorts", "zero-picks", "picker named", "server and logs", "summary for a meeting"):

@@ -10,7 +10,7 @@ Live result on 2026-09-30 with Bedrock Qwen3 235B: 32/32 for both agents, twice.
 
 import asyncio
 
-from app.services.agent_core.guards import OUT_OF_SCOPE, TopicGate
+from app.agent.runtime.guards import OUT_OF_SCOPE, TopicGate
 from app.services.analytics_agent.agent import DOMAIN as ANALYTICS_DOMAIN
 from app.services.logspace_agent.agent import DOMAIN as LOGSPACE_DOMAIN, make_model
 

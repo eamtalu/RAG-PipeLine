@@ -26,8 +26,8 @@ from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.agent_core.guards import OUT_OF_SCOPE, TopicGate, looks_like_manipulation
-from app.services.analytics_agent import evidence
+from app.agent.runtime.guards import OUT_OF_SCOPE, TopicGate, looks_like_manipulation
+from app.agent.presentation import evidence
 from app.services.notifications.redact import redact_secrets
 from app.settings import settings
 

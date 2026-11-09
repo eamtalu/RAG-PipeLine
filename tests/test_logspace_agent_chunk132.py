@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage
 from app.config.database import async_session
 from app.persistence.models.job import Job
 from app.persistence.models.log_transaction import LogTransaction
-from app.services.agent_core.guards import TopicGate
+from app.agent.runtime.guards import TopicGate
 from app.services.log_feed.scope import FeedScope
 from app.services.logspace_agent import agent as agent_module
 from app.services.logspace_agent.agent import LogspaceAgent

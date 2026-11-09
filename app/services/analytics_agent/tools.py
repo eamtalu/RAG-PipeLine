@@ -30,7 +30,7 @@ from app.persistence.repositories.customer_repository import get_customer_timezo
 from app.services.analytics import lookup_store
 from app.services.analytics import settle_query
 from app.services.analytics import settle_reads
-from app.services.agent_core.guards import wrap_tool
+from app.agent.runtime.guards import wrap_tool
 from app.services.analytics_agent import at_risk_tools
 from app.services.log_agent import tools as log_tools
 

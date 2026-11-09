@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
-from app.services.agent_core.guards import wrap_tool
+from app.agent.runtime.guards import wrap_tool
 from app.services.log_agent import tools as log_tools
 from app.services.log_feed.scope import FeedScope, day_conditions, describe, scope_conditions
 from app.services.mnp_log_ingestion.pipeline import assignments, time_bounds

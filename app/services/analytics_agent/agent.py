@@ -20,9 +20,9 @@ from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
-from app.services.agent_core import grounded
-from app.services.agent_core.grounded import GroundedAgent
-from app.services.analytics_agent import evidence
+from app.agent.runtime import grounded
+from app.agent.runtime.grounded import GroundedAgent
+from app.agent.presentation import evidence
 from app.services.analytics_agent import at_risk_tools
 from app.services.analytics_agent.tools import RECIPES, RELEASE_TOOLS, build_tools
 from app.settings import settings

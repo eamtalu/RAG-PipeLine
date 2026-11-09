@@ -62,7 +62,7 @@ curl -s -X POST http://localhost:8000/api/v1/analytics/agent/ask -H "X-Customer-
 - Every figure in the answer must appear in a tool result (or in the question, or be a percentage); any other figure is named and the answer withheld.
 - For a "top N" question the ranked table is rendered from the tool's own rows in the server's order, and the model's own table is dropped.
 - The full tool trace is logged per question, so any answer can be audited from the consumer or web log.
-These live in `app/services/analytics_agent/evidence.py` and `agent.py`, and they apply to every provider.
+These live in `app/agent/presentation/evidence.py` and `app/services/analytics_agent/agent.py`, and they apply to every provider.
 
 ## Rules the agent is held to
 

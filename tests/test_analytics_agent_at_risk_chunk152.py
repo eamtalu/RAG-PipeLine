@@ -17,7 +17,7 @@ import pytest
 from app.config.database import async_session
 from app.services.analytics_agent import agent as agent_module
 from app.services.analytics_agent import at_risk_tools as t
-from app.services.analytics_agent import evidence
+from app.agent.presentation import evidence
 from app.services.analytics_agent.tools import TOOL_NAMES, build_tools
 from app.services.analytics_at_risk import RULE_VERSION, check_store, delivery_store, model
 from tests import at_risk_fixtures as fx
