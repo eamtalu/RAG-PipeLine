@@ -54,6 +54,7 @@ from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
 from app.persistence.models.analytics_quality_issue import AnalyticsQualityIssue
 from app.persistence.models.teams_binding import TeamsTenantBinding
 from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
+from app.persistence.models.agent_run import AgentRun
 
 __all__ = [
     "Base",
@@ -116,4 +117,5 @@ __all__ = [
     # --- Teams bot (tenant binding + conversation memory) ---
     "TeamsTenantBinding",
     "TeamsConversationTurn",
+    "AgentRun",
 ]

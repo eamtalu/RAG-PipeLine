@@ -9,18 +9,22 @@ coordinate. Scale by starting another instance.
 import asyncio
 import logging
 import signal
+from datetime import datetime, timedelta, timezone
 
 import boto3
 
 from app.background import setup_logging
 from app.config.database import async_session, engine
 from app.persistence.repositories.customer_repository import CustomerRepository
+from app.services.agent_runs import claims
+from app.services.agent_runs.claims import Claim
 from app.services.analytics_agent.agent import AnalyticsAgent
 from app.services.log_agent.agent import LogDebugAgent
 from app.services.teams.binding_mirror import build_mirror_from_settings
 from app.services.teams.binding_sweep import sweep_once
 from app.services.teams.commands import run_command
 from app.services.teams.consumer import HttpAnswerPoster, TeamsQuestionConsumer
+from app.services.teams.contracts import AnswerPayload, QuestionJob
 from app.services.teams.home_snapshot import build_writer_from_settings
 from app.services.teams.home_snapshot import sweep_once as snapshot_sweep_once
 from app.services.teams.memory import ConversationMemory
@@ -50,6 +54,27 @@ async def _record_exchange(conversation_id: str, customer_code: str, question: s
     async with async_session() as db:
         await ConversationMemory(db, max_turns=settings.teams_history_turns).record(
             conversation_id, customer_code, question=question, answer=answer, job_id=job_id)
+
+
+async def _claim_run(job: QuestionJob) -> Claim:
+    """Claim the job's run in the ledger; a claim older than the visibility window counts as dead.
+
+    (new job) -> Claim("claimed") ; (same job again while running) -> Claim("running")
+    """
+    async with async_session() as db:
+        claim = await claims.try_claim(
+            db, request_id=job.job_id, customer_code=job.customer_code, channel="teams",
+            now=datetime.now(timezone.utc),
+            stale_after=timedelta(seconds=settings.teams_sqs_visibility_seconds))
+        await db.commit()
+        return claim
+
+
+async def _finish_run(job: QuestionJob, payload: AnswerPayload) -> None:
+    async with async_session() as db:
+        await claims.finish(db, request_id=job.job_id, result=payload.model_dump(mode="json"),
+                            now=datetime.now(timezone.utc))
+        await db.commit()
 
 
 async def _customer_ready(customer_code: str) -> bool:
@@ -106,7 +131,8 @@ async def _amain() -> None:
         record_exchange=_record_exchange, customer_ready=_customer_ready,
         concurrency=settings.teams_consumer_concurrency,
         visibility_seconds=settings.teams_sqs_visibility_seconds, wait_seconds=settings.teams_sqs_wait_seconds,
-        run_command=run_command, run_timeout_seconds=settings.analytics_agent_run_timeout_seconds)
+        run_command=run_command, run_timeout_seconds=settings.analytics_agent_run_timeout_seconds,
+        claim_run=_claim_run, finish_run=_finish_run)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

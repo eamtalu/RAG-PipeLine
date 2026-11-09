@@ -63,7 +63,7 @@ class FakePoster:
 
 class Harness:
     def __init__(self, bodies, *, agent=None, poster=None, ready=True, concurrency=2, visibility=30,
-                 heartbeat=None):
+                 heartbeat=None, claims=None):
         self.sqs = FakeSqs(bodies)
         self.poster = poster or FakePoster()
         self.history_calls: list[tuple[str, str]] = []
@@ -95,7 +95,8 @@ class Harness:
         self.consumer = c.TeamsQuestionConsumer(
             sqs=self.sqs, queue_url=Q, poster=self.poster, run_agent=run_agent, load_history=load_history,
             record_exchange=record, customer_ready=customer_ready, concurrency=concurrency,
-            visibility_seconds=visibility, wait_seconds=0, heartbeat_seconds=heartbeat)
+            visibility_seconds=visibility, wait_seconds=0, heartbeat_seconds=heartbeat,
+            claim_run=claims.claim if claims else None, finish_run=claims.finish if claims else None)
 
     @staticmethod
     async def default_agent(code, question, history):

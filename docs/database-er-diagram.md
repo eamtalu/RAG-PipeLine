@@ -83,6 +83,7 @@ erDiagram
     customers ||--o{ logspace_presence : "FK (enforced)"
     customers ||--o{ teams_tenant_bindings : "FK (enforced)"
     customers ||..o{ teams_conversation_turns : "soft"
+    customers ||..o{ agent_runs : "soft"
 
     customers ||..o{ jobs : "tenant key (soft)"
     customers ||..o{ log_entries : "tenant key (soft)"
@@ -1349,6 +1350,8 @@ Postgres is the source of truth; the bot edge on AWS reads a mirrored DynamoDB c
 `teams_conversation_turns` keeps the last questions and answers per Teams conversation so a follow-up question carries context.
 The binding's `customer_code` is an enforced foreign key: a binding to a missing log space must fail at write time.
 The turns carry the soft tenant key like the log tables, so a tenant purge can remove them and a turn can never be replayed into another tenant's question.
+`agent_runs` is the run ledger: the consumer inserts one row per edge job id before it runs the model, and the unique `request_id` decides who wins a redelivery.
+A row still `running` means another consumer has the question (unless `claimed_at` is older than the queue's visibility window, when the claim is taken over); a row that is `done` carries the posted answer in `result`, replayed as it is.
 
 ```mermaid
 erDiagram
@@ -1379,8 +1382,21 @@ erDiagram
         datetime created_at
     }
 
+    agent_runs {
+        uuid id PK
+        string request_id UK "the edge job id; one run per request"
+        string customer_code "soft tenant key; indexed with claimed_at"
+        string channel "teams"
+        string status "running | done"
+        datetime claimed_at "older than the visibility window while running = dead consumer"
+        datetime finished_at
+        int attempts "1 plus one per takeover of a stale claim"
+        jsonb result "the AnswerPayload as posted, replayed on redelivery"
+    }
+
     customers ||--o{ teams_tenant_bindings : "is answered from"
     customers ||..o{ teams_conversation_turns : "tenant of"
+    customers ||..o{ agent_runs : "tenant of"
 ```
 
 ## Full relationship reference
@@ -1411,7 +1427,7 @@ The nine `analytics_*` tables add **no rows to this table**. They have no enforc
 
 | Logical parent | Referencing column | Meaning |
 | --- | --- | --- |
-| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, the notification tables, and every `analytics_*` table including the ML and forecast ones | tenant partition key |
+| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, agent_runs, the notification tables, and every `analytics_*` table including the ML and forecast ones | tenant partition key |
 | `analytics_metrics.id` | `definition_id` on the three rollup tables | which definition a rollup row belongs to; no FK because a FK from a partitioned child made the log partitions undroppable once already |
 | `analytics_feature_sets.id` | `analytics_predictions.feature_set_id` | which training set the model behind a prediction was built from; nullable |
 | `analytics_forecast_runs.id` | `analytics_predictions.run_id`, `analytics_forecast_series.last_run_id` | which forecast pass wrote the row; nullable, no FK |

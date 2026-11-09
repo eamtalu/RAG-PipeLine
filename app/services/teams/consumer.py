@@ -25,6 +25,7 @@ import anthropic
 import httpx
 from pydantic import ValidationError
 
+from app.services.agent_runs.claims import Claim
 from app.services.teams.contracts import AnswerPayload, QuestionJob
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,12 @@ CustomerCheck = Callable[[str], Awaitable[bool]]
 """customer_code -> True when the log space exists and is active."""
 
 CommandRunner = Callable[[QuestionJob], Awaitable[str]]
+
+#: Claims the run for a job before the model runs: whether to run, wait, or replay a stored answer.
+RunClaimer = Callable[[QuestionJob], Awaitable[Claim]]
+
+#: Stores the answer for a job before it is posted, so a redelivery can replay it.
+RunFinisher = Callable[[QuestionJob, AnswerPayload], Awaitable[None]]
 """A job carrying a `command` -> the one-line confirmation to show. Raises on a refused command."""
 
 
@@ -142,7 +149,8 @@ class TeamsQuestionConsumer:
                  customer_ready: CustomerCheck, concurrency: int, visibility_seconds: int,
                  wait_seconds: int = 20, heartbeat_seconds: float | None = None,
                  clock: Callable[[], float] = time.monotonic, run_command: CommandRunner | None = None,
-                 run_timeout_seconds: float | None = None):
+                 run_timeout_seconds: float | None = None, claim_run: RunClaimer | None = None,
+                 finish_run: RunFinisher | None = None):
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
         if visibility_seconds < 30:
@@ -156,6 +164,7 @@ class TeamsQuestionConsumer:
         self._run_agent, self._load_history, self._record = run_agent, load_history, record_exchange
         self._customer_ready = customer_ready
         self._run_command = run_command
+        self._claim_run, self._finish_run = claim_run, finish_run
         self._semaphore = asyncio.Semaphore(concurrency)
         self._concurrency = concurrency
         self._visibility, self._wait, self._clock = visibility_seconds, wait_seconds, clock
@@ -213,6 +222,11 @@ class TeamsQuestionConsumer:
                                  message.get("MessageId"))
 
     async def process_message(self, message: dict) -> None:
+        """Answer one queued question exactly once; delete its message once the answer is delivered.
+
+        (new job) -> runs, stores, posts, deletes ; (job done) -> re-posts the stored answer ;
+        (job running elsewhere) -> leaves the message ; (edge unreachable) -> leaves the message
+        """
         receipt = message["ReceiptHandle"]
         try:
             job = QuestionJob.model_validate_json(message.get("Body") or "")
@@ -225,8 +239,25 @@ class TeamsQuestionConsumer:
         heartbeat = asyncio.create_task(self._heartbeat(receipt))
         started = self._clock()
         try:
+            # Step 1: Claim the run before anything else, so that a redelivered message is never
+            # answered twice: a claim another consumer holds is left for the queue to show again,
+            # and a finished one is replayed from the ledger without asking the model.
+            claim = await self._claim_run(job) if self._claim_run is not None else None
+            if claim is not None and claim.outcome == "running":
+                logger.info("Teams job %s is being answered by another consumer; leaving it",
+                            job.job_id)
+                return
+            if claim is not None and claim.outcome == "done":
+                await self._poster.post(AnswerPayload.model_validate(claim.stored))
+                await self._delete(receipt)
+                logger.info("Teams job %s re-posted from the run ledger", job.job_id)
+                return
+            # Step 2: Run, then store the answer before posting it, so that a post the edge never
+            # received is replayed from the ledger on redelivery instead of being computed again.
             payload = await self._answer(job)
             payload.duration_seconds = round(self._clock() - started, 1)
+            if self._finish_run is not None:
+                await self._finish_run(job, payload)
             await self._poster.post(payload)  # raises -> message stays visible for a retry
             await self._delete(receipt)
             logger.info("Teams job %s answered for %s in %.1fs (%s)", job.job_id, job.customer_code,

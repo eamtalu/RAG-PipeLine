@@ -19,11 +19,13 @@ Design and decisions: `docs/plan/2026-09-21_11-34_teams-bot-edge-and-agent-queue
 ## One question, end to end
 
 1. The edge validates Microsoft's token, maps the Entra tenant id to a `customer_code` from its DynamoDB copy of `teams_tenant_bindings`, and publishes a `QuestionJob`.
-2. The consumer receives it, starts a heartbeat that keeps extending the SQS visibility timeout, and checks the customer exists and is active.
+2. The consumer receives it, starts a heartbeat that keeps extending the SQS visibility timeout, and claims the run in `agent_runs` by the job id.
+   A redelivered message whose run is still in flight on another consumer is left alone; one whose run already finished is answered from the stored result without running the model.
+   Then it checks the customer exists and is active.
 3. It loads the last `teams_history_turns` turns of that Teams conversation and runs `LogDebugAgent.ask(question, history=...)`.
-4. It records the question and answer as two `teams_conversation_turns` rows, then POSTs an `AnswerPayload` to the edge with the shared secret.
+4. It records the question and answer as two `teams_conversation_turns` rows, stores the answer on the `agent_runs` row, then POSTs an `AnswerPayload` to the edge with the shared secret.
 5. On success it deletes the SQS message.
-   If the edge cannot be reached the message is left in place; SQS makes it visible again and the queue's redrive policy dead-letters it after a few attempts.
+   If the edge cannot be reached the message is left in place; SQS makes it visible again, the stored answer is re-posted without running the model, and the queue's redrive policy dead-letters it after a few attempts.
 6. Any failure inside the agent still produces an answer with `status=error`, so the person in Teams is never left waiting.
 
 ## Onboarding a customer tenant
