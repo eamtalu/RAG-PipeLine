@@ -86,5 +86,5 @@ async def test_the_consumer_posts_the_timeout_answer_and_frees_the_slot():
 def test_the_consumer_refuses_a_deadline_that_outlives_the_visibility_window():
     with pytest.raises(ValueError, match="visibility"):
         c.TeamsQuestionConsumer(sqs=FakeSqs([]), queue_url=Q, poster=FakePoster(), run_agent=None,
-                                load_history=None, record_exchange=None, customer_ready=None,
+                                load_history=None, record_exchange=None, resolve_customer=None,
                                 concurrency=1, visibility_seconds=60, run_timeout_seconds=60)

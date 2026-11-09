@@ -196,6 +196,7 @@ def _job(**command) -> str:
     base = dict(kind="at_risk_check", delivery_number="risk", by="Amin Talukder")
     base.update(command)
     return QuestionJob(job_id="job-9", tenant_id="t", customer_code=CC, conversation_id="conv-9", question="mark checked",
+                       sender_object_id="u-9",
                        sender_name="Amin Talukder", source="tab", command=Command(**base)).model_dump_json()
 
 
@@ -216,11 +217,11 @@ class _Harness:
         async def record(*a):
             self.recorded.append(a)
 
-        async def ready(code):
-            return True
+        async def resolve(tenant_id):
+            return CC
 
         self.consumer = c.TeamsQuestionConsumer(sqs=self.sqs, queue_url="q", poster=self.poster, run_agent=run_agent,
-                                                load_history=load_history, record_exchange=record, customer_ready=ready,
+                                                load_history=load_history, record_exchange=record, resolve_customer=resolve,
                                                 concurrency=1, visibility_seconds=30, wait_seconds=0, run_command=run_command)
 
     async def drain(self):

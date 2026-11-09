@@ -139,7 +139,7 @@ async def test_the_answer_is_stored_before_it_is_posted_so_a_failed_post_is_repl
 async def test_the_consumer_process_claims_and_finishes_through_postgres():
     await _wipe()
     q = QuestionJob(job_id=_request_id(), tenant_id="t", customer_code=CC, conversation_id="c",
-                    question="why?")
+                    question="why?", sender_object_id="u-1")
     assert (await teams_consumer._claim_run(q)).outcome == "claimed"
     assert (await teams_consumer._claim_run(q)).outcome == "running"
     await teams_consumer._finish_run(q, AnswerPayload(job_id=q.job_id, conversation_id="c", answer="ok"))

@@ -34,7 +34,7 @@ class Command(BaseModel):
 class QuestionJob(BaseModel):
     """One question from Teams, published by the edge to SQS and consumed by the backend worker."""
 
-    schema_version: int = 1
+    schema_version: int = 2
     job_id: str = Field(..., description="Edge-generated UUID; the worker echoes it in the answer.")
     tenant_id: str = Field(..., description="Entra tenant id of the customer, from Microsoft.")
     customer_code: str = Field(
@@ -46,8 +46,10 @@ class QuestionJob(BaseModel):
         "conversation memory is keyed by it.",
     )
     activity_id: str | None = Field(default=None, description="Teams activity id of the question.")
-    sender_object_id: str | None = Field(
-        default=None, description="Entra object id of the sender, " "for audit only."
+    sender_object_id: str = Field(
+        ..., min_length=1,
+        description="Entra object id of the sender. Required since contract v2: the per-user "
+        "limits and roles key on it, so a job that cannot say who asked is malformed.",
     )
     sender_name: str | None = None
     question: str = Field(..., min_length=1)
@@ -59,7 +61,7 @@ class QuestionJob(BaseModel):
     )
     command: Command | None = Field(
         default=None,
-        description="Set when the job is an action, not a question. Optional so schema_version stays 1.",
+        description="Set when the job is an action, not a question; absent for a question.",
     )
 
 

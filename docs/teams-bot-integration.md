@@ -21,7 +21,8 @@ Design and decisions: `docs/plan/2026-09-21_11-34_teams-bot-edge-and-agent-queue
 1. The edge validates Microsoft's token, maps the Entra tenant id to a `customer_code` from its DynamoDB copy of `teams_tenant_bindings`, and publishes a `QuestionJob`.
 2. The consumer receives it, starts a heartbeat that keeps extending the SQS visibility timeout, and claims the run in `agent_runs` by the job id.
    A redelivered message whose run is still in flight on another consumer is left alone; one whose run already finished is answered from the stored result without running the model.
-   Then it checks the customer exists and is active.
+   Then it resolves the customer from the job's tenant id through `teams_tenant_bindings` in Postgres and refuses the job with an error answer when that customer is missing, inactive, or not the one the job names; the job's own `customer_code` is never trusted.
+   Since contract v2 a job must carry `sender_object_id`; one without it is malformed and dropped.
 3. It loads the last `teams_history_turns` turns of that Teams conversation and runs `LogDebugAgent.ask(question, history=...)`.
 4. It records the question and answer as two `teams_conversation_turns` rows, stores the answer on the `agent_runs` row, then POSTs an `AnswerPayload` to the edge with the shared secret.
 5. On success it deletes the SQS message.

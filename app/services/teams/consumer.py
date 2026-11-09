@@ -37,6 +37,9 @@ CUSTOMER_NOT_READY = ("Your organisation's log space is not active on our side y
 MODEL_UNAVAILABLE = ("The assistant's language model is not available right now (the AI service refused our "
                      "credentials or account). Your question has been logged; the team has been alerted.")
 MODEL_BUSY = ("The AI service is busy or unreachable at the moment. Please try again in a minute.")
+CUSTOMER_MISMATCH = ("This question was sent to a log space that is not your organisation's, so "
+                     "it was not answered. Please try again in a minute; if it keeps happening, "
+                     "contact your account manager.")
 COMMAND_UNSUPPORTED = "This consumer cannot record actions yet; the check was not saved."
 
 
@@ -82,7 +85,9 @@ HistoryLoader = Callable[[str, str], Awaitable[list[dict]]]
 ExchangeRecorder = Callable[[str, str, str, str, str], Awaitable[None]]
 """(conversation_id, customer_code, question, answer, job_id) -> None."""
 
-CustomerCheck = Callable[[str], Awaitable[bool]]
+#: The customer a Teams tenant id is bound to in Postgres, or None when the tenant is unbound,
+#: the binding is disabled or the customer is inactive. The job's own customer_code is not trusted.
+CustomerResolver = Callable[[str], Awaitable[str | None]]
 """customer_code -> True when the log space exists and is active."""
 
 CommandRunner = Callable[[QuestionJob], Awaitable[str]]
@@ -146,7 +151,7 @@ def cited_transaction_ids(result: dict) -> list[str]:
 class TeamsQuestionConsumer:
     def __init__(self, *, sqs: SqsClient, queue_url: str, poster: AnswerPoster, run_agent: AgentRunner,
                  load_history: HistoryLoader, record_exchange: ExchangeRecorder,
-                 customer_ready: CustomerCheck, concurrency: int, visibility_seconds: int,
+                 resolve_customer: CustomerResolver, concurrency: int, visibility_seconds: int,
                  wait_seconds: int = 20, heartbeat_seconds: float | None = None,
                  clock: Callable[[], float] = time.monotonic, run_command: CommandRunner | None = None,
                  run_timeout_seconds: float | None = None, claim_run: RunClaimer | None = None,
@@ -162,7 +167,7 @@ class TeamsQuestionConsumer:
                              f"visibility_seconds ({visibility_seconds})")
         self._sqs, self._queue_url, self._poster = sqs, queue_url, poster
         self._run_agent, self._load_history, self._record = run_agent, load_history, record_exchange
-        self._customer_ready = customer_ready
+        self._resolve_customer = resolve_customer
         self._run_command = run_command
         self._claim_run, self._finish_run = claim_run, finish_run
         self._semaphore = asyncio.Semaphore(concurrency)
@@ -268,9 +273,17 @@ class TeamsQuestionConsumer:
     async def _answer(self, job: QuestionJob) -> AnswerPayload:
         base = dict(job_id=job.job_id, conversation_id=job.conversation_id)
         try:
-            if not await self._customer_ready(job.customer_code):
-                logger.warning("Teams job %s: customer %s missing or inactive", job.job_id, job.customer_code)
+            # Step 1: Resolve the customer from the tenant binding in Postgres, not from the job,
+            # because the edge's copy can be stale and a forged job could name any log space.
+            bound = await self._resolve_customer(job.tenant_id)
+            if bound is None:
+                logger.warning("Teams job %s: tenant %s unbound, disabled or its customer inactive",
+                               job.job_id, job.tenant_id)
                 return AnswerPayload(**base, status="error", answer=CUSTOMER_NOT_READY)
+            if bound != job.customer_code:
+                logger.warning("Teams job %s refused: tenant %s is bound to %s, the job names %s",
+                               job.job_id, job.tenant_id, bound, job.customer_code)
+                return AnswerPayload(**base, status="error", answer=CUSTOMER_MISMATCH)
             if job.command is not None:
                 # An action, not a question: the agent never runs, and nothing is recorded as a turn.
                 if self._run_command is None:

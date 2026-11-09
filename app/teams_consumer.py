@@ -16,6 +16,7 @@ import boto3
 from app.background import setup_logging
 from app.config.database import async_session, engine
 from app.persistence.repositories.customer_repository import CustomerRepository
+from app.persistence.repositories.teams_repository import TeamsBindingRepository
 from app.services.agent_runs import claims
 from app.services.agent_runs.claims import Claim
 from app.services.analytics_agent.agent import AnalyticsAgent
@@ -77,9 +78,18 @@ async def _finish_run(job: QuestionJob, payload: AnswerPayload) -> None:
         await db.commit()
 
 
-async def _customer_ready(customer_code: str) -> bool:
+async def _resolve_customer(tenant_id: str) -> str | None:
+    """The active customer this Teams tenant is bound to in Postgres, or None.
+
+    (bound, enabled, customer active) -> "acme" ; (unbound | disabled | customer inactive) -> None
+    """
     async with async_session() as db:
-        return await CustomerRepository(db).exists(customer_code, must_be_active=True)
+        binding = await TeamsBindingRepository(db).get_by_tenant(tenant_id)
+        if binding is None or not binding.enabled:
+            return None
+        if not await CustomerRepository(db).exists(binding.customer_code, must_be_active=True):
+            return None
+        return binding.customer_code
 
 
 async def _sweep_loop(stop: asyncio.Event) -> None:
@@ -128,7 +138,7 @@ async def _amain() -> None:
                        endpoint_url=settings.teams_aws_endpoint_url or None)
     consumer = TeamsQuestionConsumer(
         sqs=sqs, queue_url=queue_url, poster=poster, run_agent=_run_agent, load_history=_load_history,
-        record_exchange=_record_exchange, customer_ready=_customer_ready,
+        record_exchange=_record_exchange, resolve_customer=_resolve_customer,
         concurrency=settings.teams_consumer_concurrency,
         visibility_seconds=settings.teams_sqs_visibility_seconds, wait_seconds=settings.teams_sqs_wait_seconds,
         run_command=run_command, run_timeout_seconds=settings.analytics_agent_run_timeout_seconds,

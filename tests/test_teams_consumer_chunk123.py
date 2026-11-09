@@ -63,7 +63,7 @@ class FakePoster:
 
 class Harness:
     def __init__(self, bodies, *, agent=None, poster=None, ready=True, concurrency=2, visibility=30,
-                 heartbeat=None, claims=None):
+                 heartbeat=None, claims=None, resolve=None):
         self.sqs = FakeSqs(bodies)
         self.poster = poster or FakePoster()
         self.history_calls: list[tuple[str, str]] = []
@@ -89,12 +89,15 @@ class Harness:
             finally:
                 self.in_flight -= 1
 
-        async def customer_ready(code):
-            return ready
+        async def resolve_customer(tenant_id):
+            # the job() helper names customer "acme"; a test with its own mapping passes `resolve`
+            if resolve is not None:
+                return await resolve(tenant_id)
+            return "acme" if ready else None
 
         self.consumer = c.TeamsQuestionConsumer(
             sqs=self.sqs, queue_url=Q, poster=self.poster, run_agent=run_agent, load_history=load_history,
-            record_exchange=record, customer_ready=customer_ready, concurrency=concurrency,
+            record_exchange=record, resolve_customer=resolve_customer, concurrency=concurrency,
             visibility_seconds=visibility, wait_seconds=0, heartbeat_seconds=heartbeat,
             claim_run=claims.claim if claims else None, finish_run=claims.finish if claims else None)
 
@@ -117,7 +120,7 @@ class Harness:
 
 def job(**kw) -> str:
     base = dict(job_id="job-1", tenant_id="tenant-1", customer_code="acme", conversation_id="conv-1",
-                question="why did it fail?", sender_name="Jo")
+                question="why did it fail?", sender_name="Jo", sender_object_id="u-1")
     base.update(kw)
     return QuestionJob(**base).model_dump_json()
 
@@ -194,11 +197,11 @@ async def test_concurrency_is_capped():
 def test_constructor_guards():
     with pytest.raises(ValueError):
         c.TeamsQuestionConsumer(sqs=FakeSqs([]), queue_url=Q, poster=FakePoster(), run_agent=None,
-                                load_history=None, record_exchange=None, customer_ready=None,
+                                load_history=None, record_exchange=None, resolve_customer=None,
                                 concurrency=0, visibility_seconds=60)
     with pytest.raises(ValueError):
         c.TeamsQuestionConsumer(sqs=FakeSqs([]), queue_url=Q, poster=FakePoster(), run_agent=None,
-                                load_history=None, record_exchange=None, customer_ready=None,
+                                load_history=None, record_exchange=None, resolve_customer=None,
                                 concurrency=1, visibility_seconds=5)
 
 
