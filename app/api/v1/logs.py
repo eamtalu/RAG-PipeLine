@@ -1158,8 +1158,13 @@ async def debug_ask(
     """
     tz_name = active_timezone_name()
     today = local_today(tz_name)
+    # Step 1: End the transaction the tenant lookup and the pending gate began on the request
+    # session, so that its pooled connection is free for the whole model wait.
+    await db.commit()
+    # Step 2: Run the agent over the feed's scope; the tools open their own short sessions.
     try:
-        agent = LogspaceAgent(db, customer, scope=scope_from(body.scope, today), tz_name=tz_name, today=today)
+        agent = LogspaceAgent(customer, scope=scope_from(body.scope, today), tz_name=tz_name,
+                              today=today)
         result = await agent.ask(body.question, history=[t.model_dump() for t in body.history])
     except Exception as exc:  # noqa: BLE001 - the model or its provider is down, throttled or misconfigured
         logger.exception("ask eSmart Eye failed for %s", customer)

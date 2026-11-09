@@ -23,6 +23,7 @@ from langchain_core.tools import BaseTool
 from sqlalchemy import Numeric, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config.database import SessionFactory, async_session
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.agent.runtime.guards import wrap_tool
@@ -592,10 +593,17 @@ async def run_logspace_tool(name: str, args: dict, db: AsyncSession, customer_co
         return _json({"error": f"{type(exc).__name__}: {exc}"})
 
 
-def build_tools(db: AsyncSession, customer_code: str, scope: FeedScope, tz_name: str,
-                today: date_type) -> list[BaseTool]:
-    """Every tool the logspace agent may call, bound to this request's session, tenant and scope."""
+def build_tools(customer_code: str, scope: FeedScope, tz_name: str, today: date_type, *,
+                session_factory: SessionFactory = async_session) -> list[BaseTool]:
+    """Every logspace tool, bound to this tenant and scope; a session is held only while it reads.
+
+    ("acme", scope=today, tz_name="Europe/London", today=date) -> 6 tools on the app pool
+    """
+    # The session is opened per call, not per run, so that no pooled connection is held while
+    # the model thinks; otherwise 15 concurrent runs exhaust the pool.
     async def run(name: str, args: dict) -> str:
-        return await run_logspace_tool(name, args, db, customer_code, scope=scope, tz_name=tz_name, today=today)
+        async with session_factory() as db:
+            return await run_logspace_tool(name, args, db, customer_code, scope=scope,
+                                           tz_name=tz_name, today=today)
 
     return [wrap_tool(spec, run) for spec in LOGSPACE_TOOLS]

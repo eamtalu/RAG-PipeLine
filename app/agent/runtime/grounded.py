@@ -24,7 +24,6 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.runtime.guards import OUT_OF_SCOPE, TopicGate, looks_like_manipulation
 from app.agent.presentation import evidence
@@ -143,9 +142,10 @@ class GroundedAgent:
     DECLINE: str = ""
     MANIPULATION_PREFIX = "I can't change how I work, show my instructions or read another logspace. "
 
-    def __init__(self, db: AsyncSession, customer_code: str, *, model: BaseChatModel | None = None,
+    def __init__(self, customer_code: str, *, model: BaseChatModel | None = None,
                  gate: TopicGate | None = None):
-        self.db = db
+        # No database session lives here: a run spends most of its time waiting on the model, and a
+        # session held across that wait pins a pooled connection (step 3 of the execution plan).
         self.customer_code = customer_code  # every tool is hard-scoped to this tenant
         injected = model is not None
         self.model = model or self.make_model()

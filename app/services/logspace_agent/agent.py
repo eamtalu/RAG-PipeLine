@@ -15,11 +15,11 @@ from datetime import date as date_type
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.runtime import grounded
 from app.agent.runtime.grounded import GroundedAgent
 from app.agent.runtime.guards import TopicGate
+from app.config.database import SessionFactory, async_session
 from app.services.log_feed.scope import FeedScope, describe
 from app.agent.presentation import logspace_evidence
 from app.services.logspace_agent.tools import LOGSPACE_TOOLS, build_tools
@@ -125,16 +125,19 @@ class LogspaceAgent(GroundedAgent):
     DOMAIN = DOMAIN
     DECLINE = DECLINE
 
-    def __init__(self, db: AsyncSession, customer_code: str, *, scope: FeedScope, tz_name: str, today: date_type,
+    def __init__(self, customer_code: str, *, scope: FeedScope, tz_name: str, today: date_type,
+                 session_factory: SessionFactory = async_session,
                  model: BaseChatModel | None = None, gate: TopicGate | None = None):
         self.scope, self.tz_name, self.today = scope, tz_name, today
-        super().__init__(db, customer_code, model=model, gate=gate)
+        self.session_factory = session_factory
+        super().__init__(customer_code, model=model, gate=gate)
 
     def make_model(self) -> BaseChatModel:
         return make_model()
 
     def tools(self) -> list[BaseTool]:
-        return build_tools(self.db, self.customer_code, self.scope, self.tz_name, self.today)
+        return build_tools(self.customer_code, self.scope, self.tz_name, self.today,
+                           session_factory=self.session_factory)
 
     def tool_text(self) -> str:
         return _TOOL_TEXT

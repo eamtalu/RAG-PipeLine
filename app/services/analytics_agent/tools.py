@@ -1,4 +1,4 @@
-"""The agent's tools, bound to one request's database session and tenant. Chunk 124.
+"""The agent's tools, bound to one tenant; each call opens its own short session. Chunk 124.
 
 Two families, one list:
 
@@ -25,6 +25,7 @@ from langchain_core.tools import BaseTool
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config.database import SessionFactory, async_session
 from app.persistence.models.analytics_settlement import AnalyticsSettledRow
 from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.services.analytics import lookup_store
@@ -430,16 +431,25 @@ async def run_release_tool(name: str, args: dict, db: AsyncSession, customer_cod
 _wrap = wrap_tool
 
 
-def build_tools(db: AsyncSession, customer_code: str) -> list[BaseTool]:
-    """Every tool the agent may call, bound to this request's session and tenant."""
+def build_tools(customer_code: str, *,
+                session_factory: SessionFactory = async_session) -> list[BaseTool]:
+    """Every tool the agent may call, bound to this tenant; a session is held only while it reads.
+
+    ("acme") -> 17 tools on the app pool ; ("acme", session_factory=spy) -> the same on spy sessions
+    """
+    # A session is opened inside each runner, not around the run, so that the pooled connection
+    # is back in the pool while the model thinks; otherwise 15 concurrent runs exhaust the pool.
     async def run_log(name: str, args: dict) -> str:
-        return await log_tools.execute_tool(name, args, db, customer_code)
+        async with session_factory() as db:
+            return await log_tools.execute_tool(name, args, db, customer_code)
 
     async def run_release(name: str, args: dict) -> str:
-        return await run_release_tool(name, args, db, customer_code)
+        async with session_factory() as db:
+            return await run_release_tool(name, args, db, customer_code)
 
     async def run_at_risk(name: str, args: dict) -> str:
-        return await at_risk_tools.run_at_risk_tool(name, args, db, customer_code)
+        async with session_factory() as db:
+            return await at_risk_tools.run_at_risk_tool(name, args, db, customer_code)
 
     return ([_wrap(spec, run_log) for spec in log_tools.TOOLS]
             + [_wrap(spec, run_release) for spec in RELEASE_TOOLS]

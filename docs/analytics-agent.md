@@ -5,9 +5,9 @@ The model is a setting; nothing else changes when it does.
 
 ## What it is
 
-- `app/services/analytics_agent/agent.py`: `AnalyticsAgent(db, customer_code).ask(question, history)`.
+- `app/services/analytics_agent/agent.py`: `AnalyticsAgent(customer_code).ask(question, history)`.
   A LangGraph graph built by `langchain.agents.create_agent`: model, tool calls, tool results, repeat, answer.
-- `app/services/analytics_agent/tools.py`: twelve tools bound to the request's session and tenant.
+- `app/services/analytics_agent/tools.py`: twelve tools bound to the tenant; each call opens its own short database session and closes it before the model is asked again.
   Eight are the debugging agent's own (`search_transactions` … `explain_freshness`), wrapped unchanged.
   Four are new and read the pick-release settlement: `describe_releases`, `aggregate_releases`, `list_releases`, `explain_release`.
 - `app/services/analytics/settle_reads.py`: the settlement reads as service functions.

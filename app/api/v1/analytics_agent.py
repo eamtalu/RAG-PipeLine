@@ -32,8 +32,12 @@ class AskRequest(BaseModel):
 @router.post("/ask")
 async def ask(body: AskRequest, customer: str = Depends(get_current_customer),
               db: AsyncSession = Depends(get_session)):
+    # Step 1: End the transaction the tenant lookup began on the request session, so that its
+    # pooled connection is free for the whole model wait; the tools open their own short sessions.
+    await db.commit()
+    # Step 2: Run the agent and turn a provider failure into a clear 503 rather than a bare 500.
     try:
-        result = await AnalyticsAgent(db, customer).ask(
+        result = await AnalyticsAgent(customer).ask(
             body.question, history=[t.model_dump() for t in body.history])
     except Exception as exc:  # noqa: BLE001 - the provider is down or misconfigured
         raise HTTPException(503, detail=f"the analytics agent could not run ({settings.analytics_agent_model}): {exc}")

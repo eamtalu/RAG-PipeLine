@@ -22,6 +22,8 @@ from langchain_core.tools import BaseTool
 
 from app.agent.runtime import grounded
 from app.agent.runtime.grounded import GroundedAgent
+from app.agent.runtime.guards import TopicGate
+from app.config.database import SessionFactory, async_session
 from app.agent.presentation import evidence
 from app.services.analytics_agent import at_risk_tools
 from app.services.analytics_agent.tools import RECIPES, RELEASE_TOOLS, build_tools
@@ -163,11 +165,16 @@ class AnalyticsAgent(GroundedAgent):
     DOMAIN = DOMAIN
     DECLINE = DECLINE
 
+    def __init__(self, customer_code: str, *, session_factory: SessionFactory = async_session,
+                 model: BaseChatModel | None = None, gate: TopicGate | None = None):
+        self.session_factory = session_factory
+        super().__init__(customer_code, model=model, gate=gate)
+
     def make_model(self) -> BaseChatModel:
         return make_model()
 
     def tools(self) -> list[BaseTool]:
-        return build_tools(self.db, self.customer_code)
+        return build_tools(self.customer_code, session_factory=self.session_factory)
 
     def tool_text(self) -> str:
         return _TOOL_TEXT

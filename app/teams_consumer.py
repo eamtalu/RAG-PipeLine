@@ -32,10 +32,11 @@ logger = logging.getLogger(__name__)
 async def _run_agent(customer_code: str, question: str, history: list[dict]) -> dict:
     """Which agent answers is one setting: the LangGraph one runs on any provider (Ollama, Claude,
     OpenAI, Bedrock); the Claude one needs an Anthropic key. Same signature, same result shape."""
-    async with async_session() as db:
-        if settings.teams_agent == "claude":
+    if settings.teams_agent == "claude":
+        # The Claude agent still holds one session for its run; it changes with the query model.
+        async with async_session() as db:
             return await LogDebugAgent(db, customer_code).ask(question, history=history)
-        return await AnalyticsAgent(db, customer_code).ask(question, history=history)
+    return await AnalyticsAgent(customer_code).ask(question, history=history)
 
 
 async def _load_history(conversation_id: str, customer_code: str) -> list[dict]:

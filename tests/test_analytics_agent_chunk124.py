@@ -165,8 +165,7 @@ async def test_a_problem_is_returned_to_the_model_as_the_result():
 
 
 async def test_the_bound_tools_carry_no_tenant_argument():
-    async with async_session() as db:
-        tools = agent_tools.build_tools(db, CC)
+    tools = agent_tools.build_tools(CC)
     names = [t.name for t in tools]
     assert names[-9:-5] == ["describe_releases", "aggregate_releases", "list_releases", "explain_release"]
     assert names[-5:] == ["describe_at_risk", "at_risk_history", "at_risk_board", "at_risk_vans", "explain_at_risk_delivery"]
@@ -209,8 +208,7 @@ async def test_the_agent_calls_a_tool_then_answers_and_records_the_trace():
                                            "args": {"group_by": ["item_number"], "where": ["shortfall<0"], **_window()}}]),
         AIMessage(content="Across 4 releases, two items were short: 100230 by 10 units, 104568 by 1."),
     )
-    async with async_session() as db:
-        result = await AnalyticsAgent(db, CC, model=model).ask("which products were short?")
+    result = await AnalyticsAgent(CC, model=model).ask("which products were short?")
     assert result["answer"].startswith("Across 4 releases")
     assert result["tool_calls"] == [{"tool": "aggregate_releases",
                                      "input": {"group_by": ["item_number"], "where": ["shortfall<0"], **_window()}}]
@@ -224,18 +222,16 @@ async def test_a_mistyped_field_reaches_the_model_as_text_and_the_loop_goes_on()
         AIMessage(content="", tool_calls=[{"id": "c2", "name": "aggregate_releases", "args": {"where": ["shortfall<0"], **_window()}}]),
         AIMessage(content="Three releases were short."),
     )
-    async with async_session() as db:
-        agent = AnalyticsAgent(db, CC, model=model)
-        result = await agent.ask("how many short?")
+    agent = AnalyticsAgent(CC, model=model)
+    result = await agent.ask("how many short?")
     assert result["answer"] == "Three releases were short." and result["iterations"] == 2
 
 
 async def test_history_is_replayed_as_plain_text_only():
     await _plant()
     model = _scripted(AIMessage(content="Still 3."))
-    async with async_session() as db:
-        await AnalyticsAgent(db, CC, model=model).ask("and now?", history=[
-            {"role": "user", "content": "how many short?"}, {"role": "assistant", "content": "Three."}])
+    await AnalyticsAgent(CC, model=model).ask("and now?", history=[
+        {"role": "user", "content": "how many short?"}, {"role": "assistant", "content": "Three."}])
     assert model.seen[0][:4] == ["SystemMessage", "HumanMessage", "AIMessage", "HumanMessage"]
 
 
@@ -327,8 +323,7 @@ async def test_running_out_of_tool_rounds_ends_with_a_plain_sentence_not_an_erro
     monkeypatch.setattr(settings, "analytics_agent_max_iterations", 2)
     call = AIMessage(content="", tool_calls=[{"id": "c", "name": "describe_releases", "args": {}}])
     model = _scripted(*[AIMessage(content="", tool_calls=[{"id": f"c{i}", "name": "describe_releases", "args": {}}]) for i in range(6)])
-    async with async_session() as db:
-        result = await AnalyticsAgent(db, CC, model=model).ask("loop forever")
+    result = await AnalyticsAgent(CC, model=model).ask("loop forever")
     assert result["stop_reason"] == "max_iterations" and result["iterations"] >= 2
     assert result["answer"].startswith("I could not settle on an answer")
     del call
@@ -362,8 +357,7 @@ async def test_figures_with_no_successful_data_call_are_withheld(monkeypatch):
         AIMessage(content="Top customers: Customer A -1,200 units, Customer B -950 units."),
     ]
     model = _scripted(*invented, *invented)  # chunk 126: the draft earns one retry; this model repeats itself
-    async with async_session() as db:
-        result = await AnalyticsAgent(db, CC, model=model).ask("top customers by units short")
+    result = await AnalyticsAgent(CC, model=model).ask("top customers by units short")
     assert result["stop_reason"] == "withheld" and result["retries"] == 1
     assert result["answer"].startswith("I could not get the data") and "customer_number" in result["answer"]
     assert "Customer A" not in result["answer"]
@@ -376,8 +370,7 @@ async def test_a_real_answer_after_a_corrected_call_is_kept():
         AIMessage(content="", tool_calls=[{"id": "c2", "name": "aggregate_releases", "args": {"where": ["shortfall<0"], **_window()}}]),
         AIMessage(content="Across 3 releases, 11 units were short."),
     )
-    async with async_session() as db:
-        result = await AnalyticsAgent(db, CC, model=model).ask("how many units short?")
+    result = await AnalyticsAgent(CC, model=model).ask("how many units short?")
     assert result["stop_reason"] == "end_turn" and result["answer"] == "Across 3 releases, 11 units were short."
 
 
@@ -385,8 +378,7 @@ async def test_a_plain_sentence_without_figures_is_never_withheld():
     await _plant()
     model = _scripted(AIMessage(content="", tool_calls=[{"id": "c1", "name": "describe_releases", "args": {}}]),
                       AIMessage(content="I can answer questions about releases, pickers, customers and items."))
-    async with async_session() as db:
-        result = await AnalyticsAgent(db, CC, model=model).ask("what can you do?")
+    result = await AnalyticsAgent(CC, model=model).ask("what can you do?")
     assert result["stop_reason"] == "end_turn"
 
 
@@ -399,8 +391,7 @@ async def test_a_figure_no_tool_returned_is_withheld_by_name():
         AIMessage(content="Two items were short, 100230 by 10 units and 104568 by 1; overall 2,000 units were short."),
     ]
     model = _scripted(*padded, *padded)  # chunk 126: one retry, same invented total again
-    async with async_session() as db:
-        result = await AnalyticsAgent(db, CC, model=model).ask("which products were short?")
+    result = await AnalyticsAgent(CC, model=model).ask("which products were short?")
     assert result["stop_reason"] == "withheld" and result["withheld_figures"] == ["2,000"] and result["retries"] == 1
     assert result["answer"].startswith("I could not verify these figures") and "2,000" in result["answer"]
 
@@ -412,8 +403,7 @@ async def test_a_top_n_answer_carries_the_table_from_the_rows_not_the_models_own
                                            "args": {"group_by": ["item_number"], "where": ["shortfall<0"], "sort": "shortfall", "dir": "asc", **_window()}}]),
         AIMessage(content="The most short items:\n\n| item | short |\n|---|---|\n| 104568 | 1 |\n| 100230 | 10 |\n\nAcross 3 releases."),
     )
-    async with async_session() as db:
-        result = await AnalyticsAgent(db, CC, model=model).ask("top 2 shorted items")
+    result = await AnalyticsAgent(CC, model=model).ask("top 2 shorted items")
     assert result["stop_reason"] == "end_turn"
     assert "| item | short |" not in result["answer"]             # the model's table, in the wrong order, is gone
     assert result["evidence"].startswith("From the data: 2 of 2 group(s), sorted by shortfall asc")
@@ -443,8 +433,7 @@ async def test_the_result_carries_the_evidence_as_data_with_the_page_link(monkey
                                            "args": {"group_by": ["item_number"], "where": ["shortfall<0"], "sort": "units_short", "limit": 5, **_window()}}]),
         AIMessage(content="Two items were short."),
     )
-    async with async_session() as db:
-        result = await AnalyticsAgent(db, CC, model=model).ask("top 5 shorted items")
+    result = await AnalyticsAgent(CC, model=model).ask("top 5 shorted items")
     data = result["evidence_data"]
     assert data["rows"] == [["100230", "2", "10"], ["104568", "1", "1"]] and data["link"] == "https://eye.example/matrix/releases"
     assert data["columns"][-1] == {"name": "units short", "align": "right"}

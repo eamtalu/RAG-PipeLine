@@ -9,6 +9,9 @@ import keyword
 #   - Exposes get_session() as an async generator (designed to be a FastAPI dependency)
 
 
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
+
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 
@@ -22,6 +25,10 @@ if settings.db_statement_timeout_ms and settings.db_statement_timeout_ms > 0:
     _connect_args["server_settings"] = {"statement_timeout": str(settings.db_statement_timeout_ms)}
 engine = create_async_engine(settings.database_url, echo=settings.debug, connect_args=_connect_args)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+#: What code needs to open one short session of its own: `async with factory() as db:`.
+#: `async_session` is one; a test may pass a factory that counts or shares sessions.
+SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
 
 class Base(DeclarativeBase):
