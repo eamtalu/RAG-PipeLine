@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eSmart Agent Architecture</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Layout: one reading column; layer diagram and tables run full width inside it. */
+  :root {
+    --bg: #f6f7f4; --surface: #ffffff; --fg: #1d2420; --muted: #5d685f; --line: #d7dcd3;
+    --accent: #7a9a10; --accent-soft: #e9f0cf;
+    --teams: #4b53bc; --teams-soft: #e4e6f7;
+    --aws: #b35c00; --aws-soft: #fbe9d6;
+    --backend: #3a6e8f; --backend-soft: #dfecf3;
+    --risk: #a0432b; --risk-soft: #f9e3dc;
+    --display: "Sora", "Avenir Next", "Segoe UI", sans-serif;
+    --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #171a17; --surface: #20241f; --fg: #e8ebe4; --muted: #a2aa9d; --line: #353b33;
+      --accent: #b7d64a; --accent-soft: #2d3516; --teams: #9ea4ee; --teams-soft: #262a4a;
+      --aws: #f0a050; --aws-soft: #3d2a14; --backend: #86b7d6; --backend-soft: #1e2f3a;
+      --risk: #f0917a; --risk-soft: #3d2019; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #171a17; --surface: #20241f; --fg: #e8ebe4; --muted: #a2aa9d; --line: #353b33;
+    --accent: #b7d64a; --accent-soft: #2d3516; --teams: #9ea4ee; --teams-soft: #262a4a;
+    --aws: #f0a050; --aws-soft: #3d2a14; --backend: #86b7d6; --backend-soft: #1e2f3a;
+    --risk: #f0917a; --risk-soft: #3d2019; color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.5;
+    padding-block: 32px 64px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  main { max-width: 1000px; margin: 0 auto; display: grid; gap: 48px; }
+  h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+  h1 { font-size: 28px; font-weight: 700; line-height: 1.15; }
+  h2 { font-size: 20px; font-weight: 600; }
+  h3 { font-size: 14px; font-weight: 600; }
+  p { margin: 0; max-width: 72ch; }
+  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  section { display: grid; gap: 14px; }
+  code { font-family: var(--mono); font-size: 13px; background: var(--accent-soft); padding: 1px 5px; border-radius: 3px; }
+  .muted { color: var(--muted); }
+  nav { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+  nav a { color: var(--muted); text-decoration: none; border-bottom: 1px solid var(--line); }
+  nav a:hover { color: var(--accent); }
+
+  /* layer stack */
+  .stack { display: grid; gap: 6px; }
+  .layer { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 10px 12px; display: grid; grid-template-columns: 130px 1fr; gap: 10px; align-items: start; }
+  .layer .lname { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; padding-top: 3px; }
+  .layer .ldesc { display: grid; gap: 6px; min-width: 0; }
+  .layer .ldesc .title { font-family: var(--display); font-size: 14px; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font-family: var(--mono); font-size: 12px; border: 1px solid var(--line); border-radius: 3px; padding: 2px 7px; background: var(--bg); }
+  .layer.channels { border-left: 4px solid var(--teams); } .layer.channels .lname { color: var(--teams); }
+  .layer.gateway { border-left: 4px solid var(--risk); } .layer.gateway .lname { color: var(--risk); }
+  .layer.runtime { border-left: 4px solid var(--accent); } .layer.runtime .lname { color: var(--accent); }
+  .layer.caps { border-left: 4px solid var(--backend); } .layer.caps .lname { color: var(--backend); }
+  .layer.data { border-left: 4px solid var(--aws); } .layer.data .lname { color: var(--aws); }
+  .cross { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: center; padding: 4px 0; }
+  .services { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+  .svc { border: 1px dashed var(--line); border-radius: 6px; padding: 8px 10px; display: grid; gap: 3px; }
+  .svc .t { font-family: var(--display); font-size: 13px; font-weight: 600; }
+  .svc .d { font-size: 12px; color: var(--muted); }
+
+  /* steps */
+  .steps { display: grid; gap: 0; }
+  .step { display: grid; grid-template-columns: 36px 1fr; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+  .step:last-child { border-bottom: 1px solid var(--line); }
+  .num { font-family: var(--display); font-size: 18px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .step-body { display: grid; gap: 3px; min-width: 0; }
+  .step-body .head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+  .who { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; padding: 1px 6px; border-radius: 3px; }
+  .who.gateway { background: var(--risk-soft); color: var(--risk); }
+  .who.runtime { background: var(--accent-soft); color: var(--accent); }
+  .who.caps { background: var(--backend-soft); color: var(--backend); }
+  .who.channel { background: var(--teams-soft); color: var(--teams); }
+
+  /* tables */
+  .table-scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 14px; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+  td.mono { font-family: var(--mono); font-size: 13px; }
+
+  /* cards grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 12px; display: grid; gap: 6px; min-width: 0; }
+  .card .t { font-family: var(--display); font-size: 14px; font-weight: 600; }
+  .card .d { font-size: 13px; color: var(--muted); }
+  .card.risk { border-left: 4px solid var(--risk); }
+  .card.ok { border-left: 4px solid var(--accent); }
+  pre.code { font-family: var(--mono); font-size: 12.5px; line-height: 1.5; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; overflow-x: auto; margin: 0; }
+
+  /* router tree */
+  .tree { font-family: var(--mono); font-size: 13px; line-height: 1.6; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; overflow-x: auto; white-space: pre; margin: 0; }
+  .tree b { color: var(--accent); font-weight: 600; }
+  .tree i { color: var(--muted); font-style: normal; }
+
+  /* roadmap */
+  .road { display: grid; gap: 8px; }
+  .stage { display: grid; grid-template-columns: 44px 1fr; gap: 12px; align-items: start; }
+  .stage .n { font-family: var(--display); font-size: 16px; font-weight: 700; color: var(--accent); background: var(--accent-soft); border-radius: 6px; text-align: center; padding: 6px 0; }
+  .stage .b { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; display: grid; gap: 4px; min-width: 0; }
+  .stage .b .t { font-family: var(--display); font-size: 14px; font-weight: 600; }
+  .stage .b .done { font-size: 12px; color: var(--muted); }
+  .stage.first .n { background: var(--risk-soft); color: var(--risk); }
+
+  @media (max-width: 640px) { .layer { grid-template-columns: 1fr; } h1 { font-size: 24px; } }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main>
+  <header style="display:grid; gap:10px">
+    <div class="eyebrow">eSmart Eye · architecture, approved 9 November 2026</div>
+    <h1>eSmart Agent: one shared runtime, many tenants, many sources</h1>
+    <p class="muted">A framework for the agent side of eSmart Eye: a stateless runtime that every tenant shares, typed tools over a single query model, a model router that pins a provider per run, explicit-only memory, and the controls that let hundreds of people use it at once without reading each other's data. Nothing here is built yet; this is the design the roadmap implements.</p>
+    <nav>
+      <a href="#glance">At a glance</a><a href="#diagram">Diagram</a><a href="#layers">Layers</a><a href="#lifecycle">One request</a><a href="#query">Query model</a><a href="#sources">Data sources</a><a href="#router">Model router</a>
+      <a href="#memory">Memory</a><a href="#tenancy">Tenancy and scale</a><a href="#security">Security</a><a href="#today">What exists today</a><a href="#roadmap">Roadmap</a><a href="#decisions">Decisions</a>
+    </nav>
+  </header>
+
+  <section id="glance">
+    <div class="eyebrow">At a glance</div>
+    <h2>Runtime, registry, three ways to reach the world</h2>
+    <div class="stack">
+      <div class="layer runtime"><div class="lname">runtime</div><div class="ldesc"><div class="title">eSmart Agent Runtime</div><div class="chips"><span class="chip">LLM via model router</span><span class="chip">tool loop and guards</span><span class="chip">memory</span><span class="chip">presentation</span></div></div></div>
+      <div class="cross">⇅ typed tool calls, typed results</div>
+      <div class="layer caps"><div class="lname">registry</div><div class="ldesc"><div class="title">Tool Registry: the tools this tenant and profile may use right now</div><div class="chips"><span class="chip">built per request</span><span class="chip">profile namespaces ∩ tenant's enabled sources ∩ healthy</span></div></div></div>
+      <div class="services" style="margin-top:2px">
+        <div class="svc" style="border-style:solid"><span class="t">Structured retrieval</span><span class="d">SQL · HTTP API · NoSQL · the analytics service. One <code>DataQuery</code> language, one executor per kind. Orders, stock, metrics, transactions.</span></div>
+        <div class="svc" style="border-style:solid"><span class="t">Knowledge retrieval</span><span class="d">RAG over document chunks and vectors, tenant-partitioned, with citations. Manuals, procedures, documents.</span></div>
+        <div class="svc" style="border-style:solid"><span class="t">Actions</span><span class="d">Commands and forms with side effects: role-gated, confirmed, audited. Mark a delivery checked, submit a form.</span></div>
+      </div>
+      <div class="services">
+        <div class="svc"><span class="t">Customer databases and APIs</span><span class="d">per-tenant credentials, read-only, allow-listed</span></div>
+        <div class="svc"><span class="t">Vector / search index</span><span class="d">document_chunks with a tenant column</span></div>
+        <div class="svc"><span class="t">Analytics service and agent store</span><span class="d">history, forecasts; runs, memory, audit</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="diagram">
+    <div class="eyebrow">Architecture diagram</div>
+    <h2>Components and how they talk</h2>
+    <p class="muted">Solid arrows are synchronous calls; dashed arrows go through a queue or a store. Everything inside the agent service is one deployable. The edge and the analytics service exist today.</p>
+    <div class="table-scroll">
+<pre class="mermaid">
+flowchart LR
+  subgraph clients[People and systems]
+    T[Teams tab]
+    W[Web app]
+    R[REST client / jobs]
+  end
+  subgraph edge[teams-agent-edge on AWS Lambda - exists]
+    E[tab API + token check]
+    Q[(SQS questions)]
+    D[(DynamoDB: jobs, bindings, quota mirror)]
+  end
+  subgraph agent[esmart-agent - shared runtime, per-tenant policy]
+    direction TB
+    CH[Channels<br/>teams_consumer - ask_api - jobs_api]
+    GW[Gateway<br/>authn - tenant - Principal - quotas - agent_runs]
+    RT[Runtime<br/>profiles - guards - tool loop - trace - budgets]
+    MR[Model router<br/>pinned per run - breakers - accounting]
+    MEM[Memory<br/>conversation - explicit prefs - tenant knowledge]
+    POL[Policy<br/>allow-lists - roles - untrusted-text flag]
+    PR[Presentation<br/>evidence - blocks - citations - grounding]
+    CAP[Capabilities<br/>ToolRegistry - connectors - actions]
+    CH --> GW --> RT
+    RT --- MR
+    RT --- MEM
+    RT --- POL
+    RT --- PR
+    RT --> CAP
+  end
+  subgraph data[Data planes]
+    AN[Analytics service<br/>POST /analytics/query - /catalog<br/>Postgres - exists]
+    SQL[(Customer SQL, read-only)]
+    HTTP[Customer HTTP APIs]
+    DOC[(Document chunks + vectors, tenant column)]
+    AS[(Agent store: runs, memory, audit, usage)]
+  end
+  subgraph models[Model providers]
+    BR[Bedrock eu-west-2<br/>Qwen - Claude]
+    AP[Anthropic]
+    OL[Ollama on-prem]
+    OA[OpenAI embeddings]
+  end
+  T --> E
+  E -.-> Q
+  E -.-> D
+  Q -.-> CH
+  CH -. POST /internal/answers .-> E
+  W --> CH
+  R --> CH
+  CAP --> AN
+  CAP --> SQL
+  CAP --> HTTP
+  CAP --> DOC
+  MR --> BR
+  MR --> AP
+  MR --> OL
+  MR --> OA
+  GW -.-> AS
+  MEM -.-> AS
+  RT -. trace, audit .-> AS
+  AN -. HOME snapshot .-> D
+</pre>
+    </div>
+  </section>
+
+  <section id="layers">
+    <div class="eyebrow">Layers</div>
+    <h2>Dependencies point down; cross-cutting services are injected</h2>
+    <div class="stack">
+      <div class="layer channels"><div class="lname">channels</div><div class="ldesc"><div class="title">Translate in and out, nothing else</div>
+        <div class="chips"><span class="chip">teams_consumer (SQS)</span><span class="chip">ask_api (HTTP)</span><span class="chip">jobs_api (async)</span><span class="chip">scheduler</span><span class="chip">later: Slack, email</span></div>
+        <p class="muted" style="font-size:13px">Build <code>AgentRequest</code>, render <code>AgentResult</code>. History comes from the store, never from the client.</p></div></div>
+      <div class="layer gateway"><div class="lname">gateway</div><div class="ldesc"><div class="title">Who, which tenant, may they, have they already</div>
+        <div class="chips"><span class="chip">service token / OIDC</span><span class="chip">tenant from the credential, never a header</span><span class="chip">Principal (Entra object id + roles)</span><span class="chip">quota per tenant and per user</span><span class="chip">agent_runs claim row</span><span class="chip">request id</span></div></div></div>
+      <div class="layer runtime"><div class="lname">runtime</div><div class="ldesc"><div class="title">AgentRuntime.run(request) → AgentResult, under a deadline</div>
+        <div class="chips"><span class="chip">profiles (YAML, git-versioned)</span><span class="chip">guards before / after</span><span class="chip">tool loop (LangChain create_agent)</span><span class="chip">trace = the truth</span><span class="chip">budgets: iterations, tokens, tool failures, wall clock</span></div>
+        <div class="services">
+          <div class="svc"><span class="t">Model router</span><span class="d">policy → provider, pinned per run; failover = rerun once</span></div>
+          <div class="svc"><span class="t">Memory</span><span class="d">conversation, explicit user prefs, tenant knowledge</span></div>
+          <div class="svc"><span class="t">Policy</span><span class="d">allow-lists, roles, untrusted-text flag</span></div>
+          <div class="svc"><span class="t">Presentation</span><span class="d">evidence, blocks, citations, grounding, redaction</span></div>
+        </div></div></div>
+      <div class="layer caps"><div class="lname">capabilities</div><div class="ldesc"><div class="title">ToolRegistry: namespace.tool, typed in and out, cost, side effects</div>
+        <div class="chips"><span class="chip">connector: analytics</span><span class="chip">connector: sql</span><span class="chip">connector: http_api</span><span class="chip">connector: documents (RAG)</span><span class="chip">later: nosql</span><span class="chip">actions: commands, forms</span></div>
+        <p class="muted" style="font-size:13px">Each connector: <code>client · catalogue · tools · health</code>, per-tenant credentials, a session per tool call, never per run.</p></div></div>
+      <div class="layer data"><div class="lname">data planes</div><div class="ldesc"><div class="title">Where the numbers live</div>
+        <div class="chips"><span class="chip">analytics service (Postgres)</span><span class="chip">customer SQL</span><span class="chip">customer HTTP APIs</span><span class="chip">document chunks + vectors (tenant column)</span><span class="chip">agent store: runs, memory, audit, usage</span></div></div></div>
+    </div>
+    <div class="cross">cross-cutting: identity and tenancy · observability · secrets · contracts (verbatim copies, optional fields)</div>
+  </section>
+
+  <section id="lifecycle">
+    <div class="eyebrow">One request</div>
+    <h2>What happens to a question, in order</h2>
+    <div class="steps">
+      <div class="step"><div class="num">1</div><div class="step-body"><div class="head"><span class="who channel">channel</span><h3>A Teams question arrives on SQS, or a web question on HTTP</h3></div><p class="muted">The adapter builds <code>AgentRequest{request_id, tenant, principal, profile, text, conversation_id, conversation_type, action?, deadline}</code>.</p></div></div>
+      <div class="step"><div class="num">2</div><div class="step-body"><div class="head"><span class="who gateway">gateway</span><h3>Authenticate, resolve the tenant from the credential, build the Principal</h3></div><p class="muted">For SQS: re-resolve customer from the Entra tenant id in the backend's own binding table; refuse a mismatch. Object id required.</p></div></div>
+      <div class="step"><div class="num">3</div><div class="step-body"><div class="head"><span class="who gateway">gateway</span><h3>Admission and idempotency</h3></div><p class="muted">Per-tenant and per-user counters. Claim <code>agent_runs(tenant, request_id)</code>: running → leave it; done → re-post the stored result; new → proceed.</p></div></div>
+      <div class="step"><div class="num">4</div><div class="step-body"><div class="head"><span class="who runtime">runtime</span><h3>Load the profile, assemble context</h3></div><p class="muted">History from the store; explicit preferences only in personal conversations; a catalogue excerpt (60 s cache). Provider pinned by the router.</p></div></div>
+      <div class="step"><div class="num">5</div><div class="step-body"><div class="head"><span class="who runtime">runtime</span><h3>Guards before, then the tool loop under budgets</h3></div><p class="muted">Manipulation and topic checks. Loop until answer or budget: iterations, tokens, two tool failures, wall clock shorter than the queue's visibility window.</p></div></div>
+      <div class="step"><div class="num">6</div><div class="step-body"><div class="head"><span class="who caps">capabilities</span><h3>Each tool call runs a DataQuery through a connector</h3></div><p class="muted">Allow-listed, parameterised, timed out, breakered; results in a capped envelope; free text sets the untrusted flag, after which no side effect runs without confirmation.</p></div></div>
+      <div class="step"><div class="num">7</div><div class="step-body"><div class="head"><span class="who runtime">runtime</span><h3>Guards after, then presentation over the trace</h3></div><p class="muted">Evidence, blocks, citations; grounding (every figure in the answer or a chart came from a tool result); redaction; URL and phone stripping.</p></div></div>
+      <div class="step"><div class="num">8</div><div class="step-body"><div class="head"><span class="who gateway">gateway</span><span class="who channel">channel</span><h3>Persist and deliver</h3></div><p class="muted">Redacted trace, turns, usage, audit row; run marked done with the stored result; the channel posts it (the edge's <code>/internal/answers</code>, or the HTTP reply).</p></div></div>
+    </div>
+  </section>
+
+  <section id="query">
+    <div class="eyebrow">Query model</div>
+    <h2>One data language, many executors</h2>
+    <p class="muted">The agent never learns a source's API. It speaks <code>DataQuery</code>; each connector executes as much of it as its source allows and says so in its catalogue. Tools, evidence, grounding and charts are written once against <code>DataResult</code>.</p>
+<pre class="code">DataQuery  { source: "analytics" | "sql:&lt;id&gt;" | "http:&lt;id&gt;",
+             entity, measures: [{field, agg}], filters: [{field, op, value}],
+             group_by: [field | {field, bucket: hour|day|week|month}],
+             sort, limit, window: {start, end} }
+DataResult { columns: [{name, type, unit}], rows, totals, grain, truncated,
+             provenance: {source, catalogue_version, executed_at, cost_ms} }
+Catalogue  { source, entities: [{name, fields: [{name, type, unit, filterable,
+             groupable, description}], measures, time_field}] }
+documents.search(query, filters, k) → chunks with citations   (retrieval is its own operation)</pre>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Source kind</th><th>Executor</th><th>Hard rules</th></tr></thead>
+      <tbody>
+        <tr><td>Analytics service</td><td>stage 1a in-process over today's functions; stage 1b <code>POST /analytics/query</code> + <code>/catalog</code></td><td>API grows only for new analytics; catalogue per run</td></tr>
+        <tr><td>Customer SQL</td><td>DataQuery compiled to parameterised SQL over allow-listed tables; read-only user</td><td>never free-form SQL; statement timeout; row and byte caps; breaker within the run</td></tr>
+        <tr><td>Customer HTTP API</td><td>DataQuery mapped to allow-listed endpoints the catalogue declares</td><td>pinned response schemas; free text → untrusted flag</td></tr>
+        <tr><td>Documents (RAG)</td><td>chunk, embed, index per tenant; hybrid search; citations</td><td>tenant column not null; chunks are untrusted quotes; pgvector bug fixed first</td></tr>
+        <tr><td>NoSQL</td><td>later, on the first customer that has one</td><td>same caps and timeouts</td></tr>
+      </tbody></table></div>
+    <p class="muted">Rule for a customer's own source: live state → connector; history, trends, forecasts → ingest into analytics and reach it through the analytics connector.</p>
+  </section>
+
+  <section id="sources">
+    <div class="eyebrow">Capabilities in detail</div>
+    <h2>How data sources are managed: kinds are code, instances are configuration</h2>
+    <p class="muted">A connector <b>kind</b> is a package, one per source type, shipped with the product. A connector <b>instance</b> is one row per tenant per source, created by an admin without a deploy. The registry builds the offered tool set from the tenant's enabled, healthy instances on every request.</p>
+    <div class="table-scroll">
+<pre class="mermaid">
+flowchart TB
+  P[Profile YAML<br/>tool namespaces, guards, model policy] --> REG
+  TC[TenantContext<br/>enabled connector instances] --> REG
+  REG[Tool Registry<br/>for_tenant - profile namespaces, tenant instances, healthy] --> OFFER[Offered tools for this run<br/>analytics.query - sql:wms.query - http:carrier.track - documents.search - actions.*]
+  subgraph kinds[Connector kinds - code, one package per source type]
+    K1[analytics/]
+    K2[sql/]
+    K3[http_api/]
+    K4[documents/]
+    K5[nosql/ later]
+  end
+  subgraph inst[Connector instances - configuration, one row per tenant per source]
+    I1[(connector_configs<br/>id - kind - allow_list - secret_ref - status)]
+    I2[(secrets store<br/>per tenant and instance, envelope-encrypted)]
+    I3[(catalogue cache 60 s<br/>entities, fields, measures per instance)]
+    I4[health per instance<br/>reachable - schema still matches]
+  end
+  kinds --> REG
+  inst --> REG
+  subgraph contract[Every kind ships the same five files]
+    C1[client.py<br/>connections, auth, pooling, breaker]
+    C2[catalogue.py<br/>introspect or declare entities and fields]
+    C3[executor.py<br/>DataQuery to DataResult with caps and timeouts]
+    C4[tools.py<br/>typed tools the model sees]
+    C5[health.py]
+  end
+  kinds -.-> contract
+  OFFER --> EX[Executor of the called instance<br/>compiles DataQuery against the catalogue: allow-listed fields only]
+  EX --> S1[(customer SQL)]
+  EX --> S2[customer HTTP API]
+  EX --> S3[analytics service]
+  EX --> S4[(document chunks + vectors)]
+  EX --> DR[DataResult into the trace<br/>evidence, grounding, charts read it]
+</pre>
+    </div>
+    <div class="grid">
+      <div class="card ok"><div class="t">Adding a source (admin, no deploy)</div><div class="d">1. <code>POST /tenants/{t}/connectors</code> with kind and credentials.<br/>2. The secrets store encrypts the credential; the row is <code>testing</code>.<br/>3. The test action runs <code>health.py</code> and <code>catalogue.py</code> introspection.<br/>4. The admin prunes the allow-list (tables, columns, endpoints); status <code>enabled</code>.</div></div>
+      <div class="card ok"><div class="t">Using a source (every run)</div><div class="d">1. The gateway loads the tenant's enabled instances.<br/>2. The registry builds the offered set and generates each tool's description from that instance's catalogue.<br/>3. The model calls <code>sql:wms.query(DataQuery)</code>.<br/>4. The executor compiles it: parameterised, allow-listed, timed out, capped, breakered per instance.<br/>5. The <code>DataResult</code> enters the trace; renderers read it.</div></div>
+      <div class="card risk"><div class="t">Removing or breaking a source</div><div class="d">Disabling the row, a failed health check or a rotated credential drops the instance from the offered set on the next request. Nothing restarts; the model simply stops seeing the tool, and the catalogue cache expires within a minute.</div></div>
+    </div>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Kind</th><th>catalogue.py</th><th>executor.py</th><th>what is different</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">analytics</td><td>served by <code>GET /analytics/catalog</code></td><td>HTTP to <code>POST /analytics/query</code> (stage 1b); in-process before that</td><td>system of record for history; named views as extra tools</td></tr>
+        <tr><td class="mono">sql</td><td>introspects allow-listed tables and columns</td><td>compiles to parameterised SQL; read-only user; statement timeout</td><td>EXPLAIN cost guard on big tables; sampling over the row cap</td></tr>
+        <tr><td class="mono">http_api</td><td>declared per connector (which clauses each endpoint supports)</td><td>maps DataQuery to allow-listed endpoints; validates responses</td><td>free-text bodies set the untrusted flag</td></tr>
+        <tr><td class="mono">documents</td><td>collections and metadata fields</td><td><code>documents.search</code>: hybrid retrieval with citations</td><td>ingestion side: chunk, embed, index per tenant</td></tr>
+        <tr><td class="mono">nosql (later)</td><td>collections and projections</td><td>filters and projections per collection</td><td>no aggregations beyond count unless the store supports them</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="router">
+    <div class="eyebrow">Model router</div>
+    <h2>Profiles state needs; the router picks and pins a provider</h2>
+<pre class="tree"><b>ModelPolicy</b> {primary, fallbacks[], cheap, embeddings}   <i>per profile, overridable per tenant</i>
+  │
+  ├─ capability match      <i>needs tool calling? context size? → ineligible providers drop out</i>
+  ├─ breaker closed?       <i>open after N failures in M s; half-open probes</i>
+  ├─ bulkhead has a slot?  <i>max in-flight per provider</i>
+  ├─ budget ok?            <i>per-tenant tokens and cost for the day</i>
+  └─ <b>pin for this run</b>    <i>mid-run failure → rerun the whole run once on the next fallback</i>
+
+providers: Bedrock eu-west-2 (Qwen, Claude) · Anthropic · Ollama on-prem · OpenAI (embeddings)
+per call:  timeout · retry with jitter on throttling only · tokens in/out/cached · cost · latency
+caches:    catalogue per tenant (60 s) · tool results per tenant+args (30-60 s) · <b>no answer cache</b>
+capacity:  default Bedrock quotas + p95 60 s assumed → ~10-20 concurrent runs; quota increase in stage 2</pre>
+  </section>
+
+  <section id="memory">
+    <div class="eyebrow">Memory</div>
+    <h2>Explicit only in v1</h2>
+    <div class="grid">
+      <div class="card ok"><div class="t">Conversation</div><div class="d">Last N turns per conversation id, plus the user in group chats. 30 days. Replayed with tables stripped, as today.</div></div>
+      <div class="card ok"><div class="t">User preferences</div><div class="d">Keyed by (customer, Entra object id). Enum keys only: units, home site, default window, chart preference. Written by a <code>preferences.set</code> tool after the page confirms. Read only in personal conversations. Listed and clearable from the tab. Tenant toggle, off by default.</div></div>
+      <div class="card ok"><div class="t">Tenant knowledge</div><div class="d">Glossary, site names, shift times. Written by admins only; the model never writes it.</div></div>
+      <div class="card risk"><div class="t">Not in v1</div><div class="d">Inferred preferences, topic profiles, episodic summaries. They are behavioural profiles of employees and need a lawful basis, a notice and a tenant switch first.</div></div>
+    </div>
+  </section>
+
+  <section id="tenancy">
+    <div class="eyebrow">Tenancy and scale</div>
+    <h2>Shared harness, per-tenant everything else</h2>
+    <div class="grid">
+      <div class="card"><div class="t">One runtime for all</div><div class="d">Stateless workers; <code>TenantContext</code> and <code>Principal</code> built once per request and passed explicitly. No globals read inside a run.</div></div>
+      <div class="card"><div class="t">Fairness at admission</div><div class="d">Per-tenant and per-user limits at the edge (before enqueue) and the gateway. Workers use a plain semaphore; SQS messages are never bounced for fairness.</div></div>
+      <div class="card"><div class="t">Hundreds of users</div><div class="d">Is a few dozen questions in flight. Horizontal consumer processes; the ceiling is the provider quota, so the capacity table decides when to raise it.</div></div>
+      <div class="card"><div class="t">Database discipline</div><div class="d">No session across model calls; explicit statement timeouts; row-level security with <code>SET LOCAL app.tenant</code> on agent-store tables as a backstop.</div></div>
+      <div class="card"><div class="t">Caches keyed by tenant</div><div class="d">(tenant, profile version, catalogue hash, args). Never an answer cache.</div></div>
+      <div class="card"><div class="t">Later, on request</div><div class="d">Dedicated worker pools per tenant, data-region routing, per-tenant dashboards. Same code, different process set.</div></div>
+    </div>
+  </section>
+
+  <section id="security">
+    <div class="eyebrow">Security</div>
+    <h2>Controls, each tied to a concrete attack it closes</h2>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Threat</th><th>Control</th></tr></thead>
+      <tbody>
+        <tr><td>Anyone on the network picks any tenant (API has no auth today)</td><td>Service tokens and OIDC; tenant from the credential; <code>X-Customer-Code</code> dropped on authenticated routes</td></tr>
+        <tr><td>Queue message names a customer it does not own</td><td>Backend re-resolves customer from the Entra tenant id in its own binding table</td></tr>
+        <tr><td>Prompt injection through log text, documents, HTTP bodies</td><td>Untrusted-text flag blocks side effects for the rest of the run; capped envelopes; URL and phone stripping; enum-keyed preferences; admin-written tenant knowledge</td></tr>
+        <tr><td>A user runs an action they should not</td><td>Roles table (viewer, operator, admin); actor is the object id, name looked up; confirmation form; audit row</td></tr>
+        <tr><td>Credential exposure</td><td>Per-tenant envelope-encrypted secrets, fetched at use, never in prompts, logs, traces or queues; webhook URLs moved in</td></tr>
+        <tr><td>Cross-tenant leakage via caches or vectors</td><td>Tenant-keyed caches; vector table with a not-null tenant column and a tenant-led index</td></tr>
+        <tr><td>One user burns a tenant's budget</td><td>Per-user limits at the edge and gateway; per-tenant daily token and cost budgets</td></tr>
+        <tr><td>Sensitive data in traces</td><td>Redaction before persistence; argument hashes for sensitive tools; result text capped; ids and hashes only in audit</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section id="today">
+    <div class="eyebrow">What exists today</div>
+    <h2>The design builds on a real codebase; these are the gaps it closes</h2>
+    <div class="grid">
+      <div class="card ok"><div class="t">Keep</div><div class="d">LangChain tool loop, guards (manipulation, topic, grounding, secret redaction), evidence from the trace, SQS consumer with heartbeat, tenant-scoped analytics reads, conversation turns, customer registry.</div></div>
+      <div class="card risk"><div class="t">Fix first (stage 0)</div><div class="d">No API authentication; consumer trusts the message's customer; no run deadline; one DB session held across model calls on a 5+10 pool; no idempotency; per-tenant-only rate limit; secrets in plain JSONB; no request ids or JSON logs.</div></div>
+      <div class="card risk"><div class="t">Rework</div><div class="d">Three agent subclasses → profiles; tools over a single query model; pgvector table without a tenant column and a broken search path; free-text actor on actions; client-supplied history on the web route.</div></div>
+    </div>
+  </section>
+
+  <section id="roadmap">
+    <div class="eyebrow">Roadmap</div>
+    <h2>Each stage ships on its own</h2>
+    <div class="road">
+      <div class="stage first"><div class="n">0</div><div class="b"><div class="t">Close the door</div><div class="d">Auth on the API and the consumer binding check · secrets store · request ids, JSON logs · run deadline · tool-scoped DB sessions · agent_runs claim row · per-user edge limit</div><div class="done">done when: no unauthenticated call succeeds; a hung provider frees its slot; a duplicate delivery never runs twice</div></div></div>
+      <div class="stage"><div class="n">1a</div><div class="b"><div class="t">Runtime in-process</div><div class="d">Profiles as YAML, registry, AgentRequest/Result, Principal, guard pipeline, trace redaction; existing tools registered unchanged</div><div class="done">done when: layout test passes; Teams answers unchanged; golden questions green</div></div></div>
+      <div class="stage"><div class="n">2</div><div class="b"><div class="t">Router and resilience</div><div class="d">Pinned provider, rerun-on-fallback, breakers, bulkheads, accounting, capacity table, quota increase filed, provider-aware failure sentences, fake-provider tests</div><div class="done">done when: chaos tests pass; cost per tenant visible; measured capacity known</div></div></div>
+      <div class="stage"><div class="n">1b</div><div class="b"><div class="t">Query model</div><div class="d">DataQuery / DataResult / Catalogue in the contracts; POST /analytics/query; HTTP executor; renderers rewritten once; agent no longer imports persistence</div><div class="done">done when: golden questions green over HTTP; a SQL executor needs no renderer change</div></div></div>
+      <div class="stage"><div class="n">3</div><div class="b"><div class="t">Memory and tenancy</div><div class="d">Explicit preferences with confirmation, tenant knowledge, roles table, per-user admission, quota mirror to the edge</div><div class="done">done when: a busy user cannot starve a tenant; a user can view and clear memory; group chats carry no preferences</div></div></div>
+      <div class="stage"><div class="n">4</div><div class="b"><div class="t">First customer source</div><div class="d">The kind the first customer actually has (SQL or HTTP): connector_configs, test action, catalogue; documents and the pgvector fix when first needed</div><div class="done">done when: a source is added by configuration plus one connector package</div></div></div>
+      <div class="stage"><div class="n">5</div><div class="b"><div class="t">Presentation</div><div class="d">Charts and forms as typed blocks, grounding over chart numbers (the earlier blocks plan)</div><div class="done">done when: the tab renders agent-chosen charts and forms</div></div></div>
+      <div class="stage"><div class="n">6</div><div class="b"><div class="t">Scale-out</div><div class="d">Containers, autoscaled consumers on queue depth, dashboards and alerts; dedicated pools and regions on request; repo extraction only if a second consumer exists</div><div class="done">done when: a load test with hundreds of concurrent users stays within the agreed p95</div></div></div>
+    </div>
+  </section>
+
+  <section id="decisions">
+    <div class="eyebrow">Decisions</div>
+    <h2>Settled on 9 November</h2>
+    <div class="grid">
+      <div class="card"><div class="t">1 · Shared runtime</div><div class="d">Per-tenant policy; dedicated pools later and on request.</div></div>
+      <div class="card"><div class="t">2 · Analytics is the record</div><div class="d">History lives there; connectors are for live state.</div></div>
+      <div class="card"><div class="t">3 · No free-form SQL or code</div><div class="d">Catalogue-bounded query builders only.</div></div>
+      <div class="card"><div class="t">4 · Router owns the provider</div><div class="d">Profiles name needs; pinned per run.</div></div>
+      <div class="card"><div class="t">5 · Memory explicit-first</div><div class="d">Personal conversations only, enum keys, confirmed, clearable, off by default per tenant.</div></div>
+      <div class="card"><div class="t">6 · Stage 0 before any source</div><div class="d">Authentication and secrets come first.</div></div>
+      <div class="card"><div class="t">7 · Stay one repo for now</div><div class="d">Agent is a package with a layout test; extraction when a second consumer exists.</div></div>
+      <div class="card"><div class="t">8 · One query model</div><div class="d">DataQuery for every source; renderers written once; analytics implements it first.</div></div>
+      <div class="card"><div class="t">9 · Identity</div><div class="d">Entra object id plus a backend roles table; group-claim sync later.</div></div>
+      <div class="card"><div class="t">10 · Capacity</div><div class="d">Default Bedrock quotas and a 60 s p95 assumed until measured.</div></div>
+    </div>
+  </section>
+</main>
+<script>
+  // The claude.ai viewer draws the diagram itself. Opened as a plain file, nothing does, so after
+  // a moment load Mermaid from the CDN and draw it (needs internet access).
+  setTimeout(function () {
+    var pres = Array.prototype.filter.call(document.querySelectorAll('pre.mermaid'), function (p) { return !p.querySelector('svg'); });
+    if (!pres.length) { return; }
+    var s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js';
+    s.onload = function () {
+      var dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
+        (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      window.mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default' });
+      window.mermaid.run({ nodes: pres });
+    };
+    document.head.appendChild(s);
+  }, 1500);
+</script>
+
+</body>
+</html>
