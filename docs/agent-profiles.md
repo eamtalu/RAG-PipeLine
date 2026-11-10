@@ -4,7 +4,7 @@ Since 10 November 2026 (step 12 of `docs/esmart-agent-execution-plan.md`) an age
 The two profiles are `analytics.yaml` (picking releases, deliveries at risk, log calls; Teams and `/analytics/agent/ask`) and `logspace.yaml` (the ask box over the feed's records; `/logs/debug/ask`).
 There is one runtime, `GroundedAgent(customer, profile=..., registry=...)`; the former `AnalyticsAgent`, `LogspaceAgent` and the Claude-only `LogDebugAgent` are gone.
 
-## The ten keys
+## The eleven keys
 
 | key | what it is |
 | --- | --- |
@@ -13,6 +13,7 @@ There is one runtime, `GroundedAgent(customer, profile=..., registry=...)`; the 
 | `decline` | the fixed reply to an off-topic question or a manipulation attempt |
 | `schema_tools` | tools that describe the schema rather than read data; figures resting only on them were made up |
 | `namespaces` | the registry namespaces whose tools the profile may use, in order (`[logs, analytics]`, `[logspace]`; see `docs/agent-tool-registry.md`) |
+| `guards` | the guard pipeline in run order (`[manipulation, topic_gate, fabrication, ungrounded]` for both; see `docs/agent-guards-and-traces.md`) |
 | `presentation` | how answers are finished: `analytics` (table and card with links) or `logspace` (table only) |
 | `question_frame` | the text around the question, with `{today}`, `{scope_description}` and `{question}` |
 | `retry_nudge` | appended to the question when a draft had figures with no data call |
@@ -20,7 +21,8 @@ There is one runtime, `GroundedAgent(customer, profile=..., registry=...)`; the 
 | `system_prompt` | the instructions, verbatim |
 
 The loader (`app/agent/profiles/__init__.py`) refuses an unknown or missing key, a blank value, a name that differs from the file, a frame without `{question}`, a nudge without `{figures}`, and a presentation that does not exist.
-A later step that needs a new key (guards, model policy, limits, memory) adds it to the loader on purpose.
+An unknown namespace or guard name is refused when the runtime is built, not at the first question.
+A later step that needs a new key (model policy, limits, memory) adds it to the loader on purpose.
 
 ## Writing the text
 
@@ -38,7 +40,7 @@ A prompt edit must update the snapshot in the same commit, so every change to wh
 
 `Profile.version` is the sha256 of the file (12 hex); `code_version()` is `git rev-parse --short HEAD`, read once per process, `unknown` without git.
 Both are on every `AgentResult` (`profile_version`, `code_version`; not in the legacy dict the channels return) and on the gateway's `agent.run` log line.
-Until step 14 stores traces, that line plus the result is the trace of a run; step 14 copies the two fields into the `agent_traces` row.
+Since step 14 both are also on the `agent_traces` row of every run, so an answer can always be tied to the prompt that produced it.
 
 ## Namespaces and the registry
 

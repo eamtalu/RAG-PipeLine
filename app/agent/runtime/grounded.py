@@ -1,10 +1,12 @@
 """The grounded tool-loop every profile runs on (chunk 132; the logic came from chunk 124-126).
 
 A LangGraph loop (model, tool calls, tool results, repeat) with the guards that keep an answer to
-the data: history replayed without its figures; a draft whose figures no data call produced, or
-that no tool returned, is retried once with a nudge and then withheld; the table is drawn from the
-rows; the answer and every tool result are redacted. Before any of that, manipulation is declined
-in code and the topic gate declines what is not about the agent's data.
+the data, run as the pipeline the profile lists (app/agent/runtime/pipeline.py): before the model,
+manipulation is declined in code and the topic gate declines what is not about the agent's data;
+after it, a draft whose figures no data call produced, or that no tool returned, is retried once
+with a nudge and then withheld. History is replayed without its figures; the table is drawn from
+the rows; the answer and every tool result are redacted whatever the profile lists. Every run
+collects a trace (app/agent/runtime/trace.py) that the gateway stores.
 
 An agent is a `Profile` (app/agent/profiles, the prompts and names as data) on the tool
 registry (app/agent/capabilities, the profile's namespaces bound per run); `GroundedAgent`
@@ -18,6 +20,7 @@ import asyncio
 import json
 import logging
 import re
+from dataclasses import replace
 from datetime import date
 from typing import Any, Sequence
 
@@ -35,7 +38,15 @@ from app.agent.profiles import Profile
 from app.agent.profiles.version import code_version
 from app.agent.capabilities.registry import ToolRegistry
 from app.agent.capabilities.spec import ToolSet
-from app.agent.runtime.guards import OUT_OF_SCOPE, TopicGate, looks_like_manipulation
+from app.agent.runtime.guards import TopicGate
+from app.agent.runtime.pipeline import (  # noqa: F401 - looks_fabricated kept importable here
+    MANIPULATION_PREFIX,
+    Draft,
+    build_pipeline,
+    looks_fabricated,
+    unknown_guards,
+)
+from app.agent.runtime.trace import RunTrace
 from app.agent.presentation import evidence
 from app.services.notifications.redact import redact_secrets
 
@@ -126,41 +137,10 @@ def short(value: Any, n: int = 200) -> str:
     return text if len(text) <= n else text[:n] + "…"
 
 
-def _failed(t: dict) -> bool:
-    return t.get("result", t["result_preview"]).lstrip().startswith('{"error"')
-
-
-def looks_fabricated(answer: str, trace: list[dict], *, given: list[str], schema_tools: frozenset[str]) -> str | None:
-    """A guard the model cannot talk its way past. On the first live Teams run an 8B model was
-    refused for a field that does not exist, and instead of retrying with the lookup it answered
-    with "Customer A … Customer J" and round numbers, every one invented. An answer that carries
-    figures while no data tool returned a result without an error is replaced by an honest one.
-
-    Dates, times, percentages and small counts are not data figures, nor is a number the
-    instructions themselves contain: `given` (the instructions and tool text) and the schema tools'
-    results are the only pool."""
-    pool = list(given) + [t.get("result", t["result_preview"]) for t in trace
-                          if t["tool"] in schema_tools and not _failed(t)]
-    if not evidence.ungrounded(answer, pool):
-        return None
-    if any(t["tool"] not in schema_tools and not _failed(t) for t in trace):
-        return None
-    problems = [t.get("result", t["result_preview"]) for t in trace if _failed(t)]
-    why = ""
-    if problems:
-        try:
-            last = json.loads(problems[-1])
-            why = " " + "; ".join(last.get("problems") or [last.get("error", "")])
-        except Exception:  # noqa: BLE001 - the preview may be cut mid-JSON
-            why = ""
-    return ("I could not get the data for that question, so I have no figures to give." + why +
-            " Ask again naming the field or window, or ask me to describe what is available.")
-
-
 class GroundedAgent:
     """One question in, one checked answer out: a profile's prompts on a tool set's tools."""
 
-    MANIPULATION_PREFIX = "I can't change how I work, show my instructions or read another logspace. "
+    MANIPULATION_PREFIX = MANIPULATION_PREFIX
     #: the answer when the run reaches its deadline; the slot is freed and the person can retry
     TIMED_OUT = ("That took too long to answer, so I stopped. Ask again more narrowly, for example "
                  "a shorter time window or one delivery, picker or item.")
@@ -176,6 +156,11 @@ class GroundedAgent:
         if missing:
             raise ValueError(f"profile {profile.name!r} names schema tools that are not offered: "
                              f"{sorted(missing)}")
+        # Step 2: Resolve the guard names too, so that a profile typo cannot run with one guard
+        # fewer; the pipeline itself is built per run because the topic gate needs the model.
+        bad = unknown_guards(profile.guards)
+        if bad:
+            raise ValueError(f"profile {profile.name!r} names guards that do not exist: {bad}")
         self.customer_code = customer_code  # every tool is hard-scoped to this tenant
         self.profile = profile
         self.registry = registry
@@ -214,22 +199,25 @@ class GroundedAgent:
             raise ValueError(f"runtime for tenant {self.customer_code!r} given a context for "
                              f"{context.tenant!r}")
         model, gate, model_name = self.resolve_model(context)
-        # Step 2: The deadline wraps the gate and the loop together, so that a provider that hangs
+        # Step 2: The trace is created outside the deadline, so that a run that times out still
+        # carries every tool call and verdict it collected before it was stopped.
+        trace = RunTrace()
+        # Step 3: The deadline wraps the gate and the loop together, so that a provider that hangs
         # can never hold a consumer slot or a request past the queue's visibility window.
         try:
             return await asyncio.wait_for(
                 self._run(context, request, prior_turns, model=model, gate=gate,
-                          model_name=model_name),
+                          model_name=model_name, trace=trace),
                 timeout=context.seconds_left())
         except asyncio.TimeoutError:
             logger.warning("agent run timed out after %.0fs for %s: %s",
                            context.budgets.run_timeout_seconds, self.customer_code,
                            request.text[:200])
-            return self._timed_out(context, model_name)
+            return self._timed_out(context, request, model_name, trace)
 
     async def _run(self, context: ExecutionContext, request: AgentRequest,
                    prior_turns: Sequence[dict], *, model: BaseChatModel, gate: TopicGate | None,
-                   model_name: str) -> AgentResult:
+                   model_name: str, trace: RunTrace) -> AgentResult:
         """The run itself, with no deadline of its own.
 
         `prior_turns` are the conversation's earlier turns, oldest first, as
@@ -238,16 +226,19 @@ class GroundedAgent:
         with a nudge; a second such draft is withheld."""
         question = request.text
         history = list(prior_turns)
-        if looks_like_manipulation(question):
-            logger.warning("agent declined a manipulation attempt for %s: %s", self.customer_code, question[:200])
-            return self._declined(context, model_name, "manipulation",
-                                  self.MANIPULATION_PREFIX + self.profile.decline)
-        if gate is not None and await gate.classify(question, history) == OUT_OF_SCOPE:
-            logger.info("agent declined an off-topic question for %s: %s", self.customer_code, question[:200])
-            return self._declined(context, model_name, "off_topic", self.profile.decline)
+        # Step 1: Run the profile's pre-guards in its order, because the first decline wins and
+        # a declined question must never reach the model or open a session.
+        pipeline = build_pipeline(self.profile.guards, profile=self.profile, gate=gate)
+        decline = await pipeline.before(question, history, trace)
+        if decline is not None:
+            logger.log(logging.WARNING if decline.reason == "manipulation" else logging.INFO,
+                       "agent declined (%s) for %s: %s", decline.reason, self.customer_code,
+                       question[:200])
+            return self._declined(context, request, model_name, decline.reason, decline.answer,
+                                  trace)
 
-        # The tools are built after the gate, so a declined question never opens a session.
-        tools: ToolSet = self.registry.bind(context, request, self.profile.namespaces)
+        # Step 2: Bind the tools after the pre-guards, recording every call on the trace.
+        tools: ToolSet = self.registry.bind(context, request, self.profile.namespaces, trace=trace)
         graph = create_agent(model, list(tools.tools), system_prompt=self.profile.system_prompt)
         prior = history_as_messages(history)
         asked = frame_question(self.profile, question, today=context.today,
@@ -255,15 +246,17 @@ class GroundedAgent:
         max_iterations = context.budgets.max_iterations
         retries = 0
         draft = await self._draft(graph, prior + [HumanMessage(content=asked)], question,
-                                  max_iterations=max_iterations, tools=tools)
+                                  max_iterations=max_iterations, tools=tools, trace=trace,
+                                  pipeline=pipeline)
         if draft["problem"]:
             retries = 1
             nudge = (self.profile.ungrounded_nudge.format(figures=", ".join(draft["ungrounded"]))
                      if draft["problem"] == "ungrounded" else self.profile.retry_nudge)
             # the nudge follows the question after a blank line, as the old constants carried it
             draft = await self._draft(graph, prior + [HumanMessage(content=asked + "\n\n" + nudge)],
-                                      question, max_iterations=max_iterations, tools=tools)
-        answer, stop_reason, trace = draft["answer"], draft["stop_reason"], draft["trace"]
+                                      question, max_iterations=max_iterations, tools=tools,
+                                      trace=trace, pipeline=pipeline)
+        answer, stop_reason, calls = draft["answer"], draft["stop_reason"], draft["trace"]
         withheld_figures: list[str] = []
         table: str | None = None
         data: dict | None = None
@@ -279,31 +272,37 @@ class GroundedAgent:
                       + ", ".join(withheld_figures) + ". Ask again more narrowly, or ask me to show the rows.")
             stop_reason = "withheld"
         if draft["problem"] != "fabricated":
-            table = self.presentation.render(trace)
+            table = self.presentation.render(calls)
             if table:
                 answer = (self.presentation.strip(answer) + "\n\n" + table).strip()
-                data = self.presentation.structured(trace, context.public_base_url)
-        return AgentResult(
+                data = self.presentation.structured(calls, context.public_base_url)
+        result = AgentResult(
             answer=redact_secrets(answer), stop_reason=stop_reason, model=model_name,
-            tool_calls=tuple(ToolCall(t["tool"], t["input"]) for t in trace),
-            iterations=len(trace), retries=retries, evidence=table, evidence_data=data,
-            withheld_figures=tuple(withheld_figures),
+            tool_calls=tuple(ToolCall(t["tool"], t["input"]) for t in calls),
+            iterations=len(calls), retries=retries, evidence=table, evidence_data=data,
+            withheld_figures=tuple(withheld_figures), usage=trace.usage,
             request_id=context.request_id, trace_id=context.trace_id,
             profile_version=self.profile.version, code_version=code_version())
+        # Step 3: Finish the trace from the result, so the stored record and the answer agree.
+        return replace(result, trace=trace.finish(context, request, result))
 
-    def _declined(self, context: ExecutionContext, model_name: str, why: str,
-                  answer: str) -> AgentResult:
-        return AgentResult(answer=answer, stop_reason="declined", model=model_name, declined=why,
-                           request_id=context.request_id, trace_id=context.trace_id,
-                           profile_version=self.profile.version, code_version=code_version())
+    def _declined(self, context: ExecutionContext, request: AgentRequest, model_name: str,
+                  why: str, answer: str, trace: RunTrace) -> AgentResult:
+        result = AgentResult(answer=answer, stop_reason="declined", model=model_name, declined=why,
+                             request_id=context.request_id, trace_id=context.trace_id,
+                             profile_version=self.profile.version, code_version=code_version())
+        return replace(result, trace=trace.finish(context, request, result))
 
-    def _timed_out(self, context: ExecutionContext, model_name: str) -> AgentResult:
-        return AgentResult(answer=self.TIMED_OUT, stop_reason="timeout", model=model_name,
-                           request_id=context.request_id, trace_id=context.trace_id,
-                           profile_version=self.profile.version, code_version=code_version())
+    def _timed_out(self, context: ExecutionContext, request: AgentRequest, model_name: str,
+                   trace: RunTrace) -> AgentResult:
+        result = AgentResult(answer=self.TIMED_OUT, stop_reason="timeout", model=model_name,
+                             usage=trace.usage, request_id=context.request_id,
+                             trace_id=context.trace_id, profile_version=self.profile.version,
+                             code_version=code_version())
+        return replace(result, trace=trace.finish(context, request, result))
 
     async def _draft(self, graph, messages: list[BaseMessage], question: str, *,
-                     max_iterations: int, tools: ToolSet) -> dict:
+                     max_iterations: int, tools: ToolSet, trace: RunTrace, pipeline) -> dict:
         """One run of the tool loop, checked: the answer, its trace, and what is wrong with it
         ("fabricated" = figures with no successful data call, "ungrounded" = a figure no tool
         returned, None = fine)."""
@@ -317,23 +316,26 @@ class GroundedAgent:
                 seen = step["messages"]
         except GraphRecursionError:
             stop_reason = "max_iterations"
+        # Every model call of this draft, with the tokens the provider reported, onto the trace.
+        for m in seen[len(messages):]:
+            if isinstance(m, AIMessage):
+                trace.record_model_call(getattr(m, "usage_metadata", None))
         final = next((m for m in reversed(seen) if isinstance(m, AIMessage) and not m.tool_calls), None)
         answer = text_of(final) if final is not None else ""
         if stop_reason == "max_iterations" and not answer:
             answer = ("I could not settle on an answer within the allowed number of tool calls. "
                       "Ask a narrower question, or name the field or window you want.")
-        trace = tool_trace(seen)
-        for t in trace:
+        calls = tool_trace(seen)
+        for t in calls:
             logger.info("agent tool %s %s -> %s", t["tool"], short(t["input"]), t["result_preview"][:160])
-        given = [self.profile.system_prompt, tools.tool_text]
-        fallback = looks_fabricated(answer, trace, given=given,
-                                    schema_tools=self.profile.schema_tools)
-        if fallback:
-            return {"answer": answer, "stop_reason": stop_reason, "trace": trace, "problem": "fabricated",
-                    "fallback": fallback, "ungrounded": []}
-        # Chunk 125: every figure must be in a tool result; a ranked table comes from the rows.
-        # With no result at all (a description of what is available) the instructions are the pool.
-        results = [t["result"] for t in trace if not t["result"].lstrip().startswith('{"error"')]
-        ungrounded = evidence.ungrounded(answer, results or given, question)
-        return {"answer": answer, "stop_reason": stop_reason, "trace": trace,
-                "problem": "ungrounded" if ungrounded else None, "fallback": None, "ungrounded": ungrounded}
+        # The profile's post-guards, in its order: a fabricated draft (chunk 124) or a figure no
+        # tool returned (chunk 125) is a problem the caller answers with one nudge.
+        problem = pipeline.after(
+            Draft(answer=answer, trace=tuple(calls), question=question,
+                  given=(self.profile.system_prompt, tools.tool_text),
+                  schema_tools=self.profile.schema_tools),
+            trace)
+        return {"answer": answer, "stop_reason": stop_reason, "trace": calls,
+                "problem": problem.kind if problem else None,
+                "fallback": problem.fallback if problem else None,
+                "ungrounded": list(problem.figures) if problem else []}

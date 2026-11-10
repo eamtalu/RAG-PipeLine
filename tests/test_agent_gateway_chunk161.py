@@ -137,7 +137,8 @@ def test_snapshot_settings_mirrors_the_settings(monkeypatch):
 
 def test_the_context_carries_the_request_and_a_deadline_from_the_budget():
     context = build_context(_request(), RUN, now=NOW)
-    assert (context.request_id, context.trace_id, context.tenant) == ("req-1", "req-1", "acme")
+    assert (context.request_id, context.tenant) == ("req-1", "acme")
+    assert context.trace_id != "req-1" and len(context.trace_id) == 32  # fresh per run (step 14)
     assert context.principal.object_id == "u-1" and context.profile == "analytics"
     assert context.conversation_id == "conv-1" and context.conversation_type == "personal"
     assert context.deadline_at == NOW + timedelta(seconds=120)
@@ -323,8 +324,9 @@ def _job(**over) -> QuestionJob:
 async def test_the_consumer_adapter_builds_the_request_from_the_job(monkeypatch):
     seen = {}
 
-    async def spy(request, *, runtime, prior_turns=(), run_settings=None):
+    async def spy(request, *, runtime, prior_turns=(), run_settings=None, trace_store=None):
         seen.update(request=request, runtime=runtime, prior_turns=prior_turns)
+        assert trace_store is not None  # the consumer passes its trace store (step 14)
         return AgentResult(answer="ok", stop_reason="end_turn", model="m")
 
     monkeypatch.setattr(teams_consumer, "run_request", spy)
@@ -368,8 +370,9 @@ async def test_the_web_adapters_build_a_service_principal_with_the_bound_request
 ):
     seen = []
 
-    async def spy(request, *, runtime, prior_turns=(), run_settings=None):
+    async def spy(request, *, runtime, prior_turns=(), run_settings=None, trace_store=None):
         seen.append(request)
+        assert trace_store is not None  # both endpoints pass the trace store (step 14)
         return AgentResult(answer="ok", stop_reason="end_turn", model="m")
 
     monkeypatch.setattr(agent_api, "run_request", spy)

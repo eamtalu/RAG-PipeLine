@@ -1,10 +1,11 @@
 """A profile is a file: what an agent is, as data, loaded and validated once with a version.
 
 `app/agent/profiles/<name>.yaml` holds the system prompt, the two nudges, the domain and decline
-sentences, the schema tool names, which tool set and which presentation the runtime uses, and the
-question frame. The loader is strict (exactly the keys below) so a later step adds its keys on
-purpose. `tests/profile_snapshots/` holds the prompt text byte for byte; a prompt edit must change
-the snapshot in the same commit, which is the reviewed change the architecture asks for.
+sentences, the schema tool names, the namespaces, the guards in run order, which presentation the
+runtime uses, and the question frame. The loader is strict (exactly the keys below) so a later
+step adds its keys on purpose. `tests/profile_snapshots/` holds the prompt text byte for byte; a
+prompt edit must change the snapshot in the same commit, which is the reviewed change the
+architecture asks for.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ REQUIRED_KEYS = (
     "decline",
     "schema_tools",
     "namespaces",
+    "guards",
     "presentation",
     "question_frame",
     "retry_nudge",
@@ -45,6 +47,7 @@ class Profile:
     ungrounded_nudge: str
     schema_tools: frozenset[str]
     namespaces: tuple[str, ...]
+    guards: tuple[str, ...]  # the pipeline, in run order (app/agent/runtime/pipeline.py)
     presentation: str
     question_frame: str
     version: str
@@ -103,6 +106,14 @@ def read_profile(path: Path) -> Profile:
         or len(set(namespaces)) != len(namespaces)
     ):
         raise ValueError(f"{where}: namespaces must be a non-empty list of unique names")
+    guards = raw["guards"]
+    if (
+        not isinstance(guards, list)
+        or not guards
+        or not all(isinstance(g, str) and g.strip() for g in guards)
+        or len(set(guards)) != len(guards)
+    ):
+        raise ValueError(f"{where}: guards must be a non-empty list of unique names")
     presentation_for(raw["presentation"])  # raises for an unknown presentation
     return Profile(
         name=raw["name"],
@@ -113,6 +124,7 @@ def read_profile(path: Path) -> Profile:
         ungrounded_nudge=raw["ungrounded_nudge"],
         schema_tools=frozenset(tools),
         namespaces=tuple(raw["namespaces"]),
+        guards=tuple(guards),
         presentation=raw["presentation"],
         question_frame=raw["question_frame"],
         version=file_version(data),

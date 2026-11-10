@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import date, datetime, timedelta, timezone
 
 from app.agent.contracts import (
@@ -45,18 +46,18 @@ def build_context(
     >>> req = AgentRequest("r1", "acme", Principal("acme", "u1"), "analytics", "how many?", None)
     >>> rs = RunSettings(ModelSettings("m", "", False, 1, "", 1), RunBudgets(10, 120.0), "")
     >>> ctx = build_context(req, rs, now=datetime(2026, 1, 1, tzinfo=timezone.utc))
-    >>> (ctx.trace_id, ctx.deadline_at.isoformat())
-    ('r1', '2026-01-01T00:02:00+00:00')
+    >>> (ctx.trace_id != ctx.request_id, len(ctx.trace_id), ctx.deadline_at.isoformat())
+    (True, 32, '2026-01-01T00:02:00+00:00')
     """
     started_at = now or datetime.now(timezone.utc)
     # Step 1: The deadline is absolute and fixed here, because the runtime measures its wait
     # from the context and must never reach for a setting mid-run.
     seconds = request.deadline_seconds or run_settings.budgets.run_timeout_seconds
-    # Step 2: The trace id is the request id until traces are stored (step 14), so a log line
-    # and a stored trace will name the same run.
+    # Step 2: The trace id is fresh per run, because a stale-claim takeover reruns the same
+    # request id and both runs must be kept; the stored row carries the request id beside it.
     return ExecutionContext(
         request_id=request.request_id,
-        trace_id=request.request_id,
+        trace_id=uuid.uuid4().hex,
         tenant=request.tenant,
         principal=request.principal,
         profile=request.profile,

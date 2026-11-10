@@ -84,6 +84,7 @@ erDiagram
     customers ||--o{ teams_tenant_bindings : "FK (enforced)"
     customers ||..o{ teams_conversation_turns : "soft"
     customers ||..o{ agent_runs : "soft"
+    customers ||..o{ agent_traces : "soft"
     customers ||..o{ tenant_secrets : "soft"
 
     customers ||..o{ jobs : "tenant key (soft)"
@@ -1353,6 +1354,9 @@ The binding's `customer_code` is an enforced foreign key: a binding to a missing
 The turns carry the soft tenant key like the log tables, so a tenant purge can remove them and a turn can never be replayed into another tenant's question.
 `agent_runs` is the run ledger: the consumer inserts one row per edge job id before it runs the model, and the unique `request_id` decides who wins a redelivery.
 A row still `running` means another consumer has the question (unless `claimed_at` is older than the queue's visibility window, when the claim is taken over); a row that is `done` carries the posted answer in `result`, replayed as it is.
+`agent_traces` is what each run did, for audit and troubleshooting: the gateway stores one row per run from every channel (Teams and both web ask endpoints) after the answer exists.
+It holds the question and answer, every tool call with arguments, result, timing and outcome, every guard verdict, the model usage, the profile and code versions, and the error when the run raised; secrets are redacted and results capped before the row is built.
+A run retried after a stale claim gets its own `trace_id`; `request_id` ties the attempts together.
 
 ```mermaid
 erDiagram
@@ -1395,9 +1399,40 @@ erDiagram
         jsonb result "the AnswerPayload as posted, replayed on redelivery"
     }
 
+    agent_traces {
+        uuid id PK
+        string trace_id UK "fresh per run; a retried request gets a new one"
+        string request_id "the channel's request id; indexed with customer_code"
+        string customer_code "soft tenant key; indexed with started_at"
+        string principal_id "Entra object id or service:<name>"
+        string principal_kind "user | service"
+        string profile "analytics | logspace"
+        string profile_version "sha256 of the profile file, 12 hex"
+        string code_version "short git hash of the running code"
+        string model
+        string conversation_id
+        string conversation_type "personal | group | channel"
+        string status "ok | declined | timeout | error"
+        string stop_reason
+        string declined "manipulation | off_topic"
+        datetime started_at
+        datetime finished_at
+        int duration_ms
+        int iterations "tool calls made"
+        int retries "0 or 1: one nudged redraft"
+        text question "redacted"
+        text answer "redacted"
+        jsonb guards "verdicts in run order: name, stage, verdict, detail, ms"
+        jsonb tool_calls "namespace, name, args (hashed when sensitive), result (capped), ms, ok"
+        jsonb withheld_figures
+        jsonb usage "model_calls, input_tokens, output_tokens"
+        text error "Type: message when the run raised"
+    }
+
     customers ||--o{ teams_tenant_bindings : "is answered from"
     customers ||..o{ teams_conversation_turns : "tenant of"
     customers ||..o{ agent_runs : "tenant of"
+    customers ||..o{ agent_traces : "tenant of"
 ```
 
 ## Subsystem 10: Tenant secrets
@@ -1457,7 +1492,7 @@ The nine `analytics_*` tables add **no rows to this table**. They have no enforc
 
 | Logical parent | Referencing column | Meaning |
 | --- | --- | --- |
-| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, agent_runs, tenant_secrets, the notification tables, and every `analytics_*` table including the ML and forecast ones | tenant partition key |
+| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, agent_runs, agent_traces, tenant_secrets, the notification tables, and every `analytics_*` table including the ML and forecast ones | tenant partition key |
 | `analytics_metrics.id` | `definition_id` on the three rollup tables | which definition a rollup row belongs to; no FK because a FK from a partitioned child made the log partitions undroppable once already |
 | `analytics_feature_sets.id` | `analytics_predictions.feature_set_id` | which training set the model behind a prediction was built from; nullable |
 | `analytics_forecast_runs.id` | `analytics_predictions.run_id`, `analytics_forecast_series.last_run_id` | which forecast pass wrote the row; nullable, no FK |

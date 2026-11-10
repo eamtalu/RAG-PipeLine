@@ -18,6 +18,7 @@ decline: >-
 
 schema_tools: [describe_at_risk, describe_releases, explain_freshness, list_metrics]
 namespaces: [logs, analytics]
+guards: [manipulation, topic_gate, fabrication, ungrounded]
 presentation: analytics
 question_frame: "(Today is {today}.)\n\n{question}"
 retry_nudge: >-

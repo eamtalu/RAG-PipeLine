@@ -24,6 +24,7 @@ from app.persistence.repositories.customer_repository import CustomerRepository
 from app.persistence.repositories.teams_repository import TeamsBindingRepository
 from app.services.agent_runs import claims
 from app.services.agent_runs.claims import Claim
+from app.services.agent_traces.store import PostgresTraceStore
 from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
 from app.services.logspace_agent.namespaces import logspace_namespace
 from app.services.teams.binding_mirror import build_mirror_from_settings
@@ -42,6 +43,8 @@ logger = logging.getLogger(__name__)
 # This process's registry: every namespace, so the profile's list and the clash rule mean the
 # same here as in the API; the runners open their own sessions on the app pool.
 _REGISTRY = ToolRegistry([logs_namespace(), analytics_namespace(), logspace_namespace()])
+# Where the gateway stores each run's redacted trace (agent_traces), in its own short session.
+_TRACES = PostgresTraceStore(async_session)
 
 
 def _conversation_type(source: str) -> ConversationType:
@@ -69,7 +72,8 @@ async def _run_agent(job: QuestionJob, history: list[dict]) -> dict:
     # Step 2: Name the profile; it lists its namespaces, and the registry binds their tools.
     runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),
                             registry=_REGISTRY)
-    result = await run_request(request, runtime=runtime, prior_turns=tuple(history))
+    result = await run_request(request, runtime=runtime, prior_turns=tuple(history),
+                               trace_store=_TRACES)
     return result.to_legacy_dict()
 
 

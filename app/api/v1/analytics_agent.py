@@ -15,7 +15,7 @@ from app.agent.contracts import AgentRequest, Principal
 from app.agent.gateway import run_request, snapshot_settings
 from app.agent.profiles import load_profile
 from app.agent.runtime.grounded import GroundedAgent
-from app.api.deps import get_current_customer, tool_registry
+from app.api.deps import get_current_customer, tool_registry, trace_store
 from app.api.service_auth import ANONYMOUS, current_caller
 from app.config.database import get_session
 
@@ -82,6 +82,7 @@ async def ask(
             runtime=_runtime(customer),
             prior_turns=tuple(t.model_dump() for t in body.history),
             run_settings=run_settings,
+            trace_store=trace_store(),
         )
     except Exception as exc:  # noqa: BLE001 - the provider is down or misconfigured
         raise HTTPException(

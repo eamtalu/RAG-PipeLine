@@ -23,6 +23,8 @@ from app.agent.capabilities.registry import ToolRegistry
 from app.api.service_auth import require_admin_caller
 
 from app.persistence.repositories.customer_repository import CustomerRepository, get_customer_repository
+from app.config.database import async_session
+from app.services.agent_traces.store import PostgresTraceStore
 from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
 from app.services.logspace_agent.namespaces import logspace_namespace
 from app.services.mnp_log_ingestion.timefmt import set_display_timezone
@@ -32,6 +34,12 @@ from app.services.mnp_log_ingestion.timefmt import set_display_timezone
 def tool_registry() -> ToolRegistry:
     """The API process's tool registry: every namespace, built once; profiles pick from it."""
     return ToolRegistry([logs_namespace(), analytics_namespace(), logspace_namespace()])
+
+
+@cache
+def trace_store() -> PostgresTraceStore:
+    """Where the gateway stores each run's redacted trace; one per process, own sessions."""
+    return PostgresTraceStore(async_session)
 
 # customer codes are slugs: lowercase letters, digits, hyphen/underscore, 1–64 chars.
 _CUSTOMER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")

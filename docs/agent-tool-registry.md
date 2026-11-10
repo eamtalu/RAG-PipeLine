@@ -38,6 +38,7 @@ The namespace builders live beside the tools because the tools read Postgres and
 
 Every bound tool is wrapped once: the runner is called with the context, a `timeout_seconds` on the spec caps the call and turns a timeout into a tool error result the fabrication guard already treats as a failed call, and one line is written per call: `agent.tool ns=<namespace> name=<tool> ms=<duration> ok=<bool>`.
 `ok` is false on an exception, a timeout, or a result that starts with `{"error"`.
+When `bind` is given the run's `RunTrace` the executor also records each call on it (namespace, name, arguments, raw result, ms, ok), and the record built at the end of the run redacts and caps it; see `docs/agent-guards-and-traces.md`.
 No tool sets a timeout today.
 
 ## Who composes the registry

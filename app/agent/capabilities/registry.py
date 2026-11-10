@@ -11,6 +11,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from app.agent.capabilities.spec import Namespace, ToolSet, ToolSpec
 from app.agent.contracts import AgentRequest, ExecutionContext
 from app.agent.runtime.guards import wrap_tool
+from app.agent.runtime.trace import RunTrace
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +74,17 @@ class ToolRegistry:
         )
 
     def bind(
-        self, context: ExecutionContext, request: AgentRequest, selected: Sequence[str]
+        self,
+        context: ExecutionContext,
+        request: AgentRequest,
+        selected: Sequence[str],
+        *,
+        trace: RunTrace | None = None,
     ) -> ToolSet:
         """The tools for one run, each wrapped with the executor, plus the text and the description.
 
-        (context for acme, request, ("logs", "analytics")) -> ToolSet(17 tools, the text, None)
+        (context for acme, request, ("logs", "analytics")) -> ToolSet(17 tools, the text, None) ;
+        with trace= -> every call is recorded on it
         """
         specs = self.offered(selected)
         # The first namespace that can describe its records does, before any model call, so a
@@ -91,7 +98,7 @@ class ToolRegistry:
         tools = tuple(
             wrap_tool(
                 spec.as_dict(),
-                self._executor(self._namespaces[spec.namespace], spec, context, request),
+                self._executor(self._namespaces[spec.namespace], spec, context, request, trace),
             )
             for spec in specs
         )
@@ -101,13 +108,19 @@ class ToolRegistry:
 
     @staticmethod
     def _executor(
-        namespace: Namespace, spec: ToolSpec, context: ExecutionContext, request: AgentRequest
+        namespace: Namespace,
+        spec: ToolSpec,
+        context: ExecutionContext,
+        request: AgentRequest,
+        trace: RunTrace | None,
     ):
-        """The runner `wrap_tool` calls: tenant from the context, the spec's cap, one log line."""
+        """The runner `wrap_tool` calls: tenant from the context, the spec's cap, one log line,
+        one entry on the run's trace."""
 
         async def run(name: str, args: Mapping[str, Any]) -> str:
             started = time.monotonic()
             ok = False
+            result = ""
             try:
                 # Step 1: Join the tenant from the context, never from the arguments, so that
                 # which tenant a tool reads for is never a model decision.
@@ -128,15 +141,25 @@ class ToolRegistry:
                     result = await call
                 ok = not result.lstrip().startswith('{"error"')
                 return result
+            except Exception as exc:  # noqa: BLE001 - recorded, then left to the loop
+                result = json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+                raise
             finally:
                 # Step 3: One line per call with its timing, so a slow or failing tool is visible
                 # per tenant and per request without reading the whole trace.
-                logger.info(
-                    "agent.tool ns=%s name=%s ms=%d ok=%s",
-                    namespace.name,
-                    name,
-                    int((time.monotonic() - started) * 1000),
-                    ok,
-                )
+                ms = int((time.monotonic() - started) * 1000)
+                logger.info("agent.tool ns=%s name=%s ms=%d ok=%s", namespace.name, name, ms, ok)
+                # Step 4: Record the raw call on the run's trace, because the record is redacted
+                # and capped once, when the run finishes, not here.
+                if trace is not None:
+                    trace.record_tool(
+                        namespace=namespace.name,
+                        name=name,
+                        args=args,
+                        result=result,
+                        ms=ms,
+                        ok=ok,
+                        sensitive_args=spec.sensitive_args,
+                    )
 
         return run

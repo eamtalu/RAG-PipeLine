@@ -8,6 +8,7 @@ build, kept as they are so the channels' payloads do not change.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Literal, Mapping
@@ -129,6 +130,50 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class TraceRecord:
+    """One run as stored: redacted and capped by `RunTrace.finish`, nothing else builds one."""
+
+    trace_id: str
+    request_id: str
+    tenant: str
+    principal_id: str
+    principal_kind: str
+    profile: str
+    profile_version: str
+    code_version: str
+    model: str
+    conversation_id: str | None
+    conversation_type: str
+    status: str  # ok | declined | timeout | error
+    stop_reason: str
+    declined: str | None
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
+    iterations: int
+    retries: int
+    question: str
+    answer: str
+    guards: tuple[Mapping[str, Any], ...]
+    tool_calls: tuple[Mapping[str, Any], ...]
+    withheld_figures: tuple[str, ...]
+    usage: Mapping[str, int] | None
+    error: str | None
+
+    def as_row(self) -> dict[str, Any]:
+        """The row a store writes: every field by name, the tuples as lists.
+
+        (a record with two guards) -> {"trace_id": ..., "guards": [{...}, {...}], ...}
+        """
+        row = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+        row["guards"] = [dict(g) for g in self.guards]
+        row["tool_calls"] = [dict(t) for t in self.tool_calls]
+        row["withheld_figures"] = list(self.withheld_figures)
+        row["usage"] = dict(self.usage) if self.usage is not None else None
+        return row
+
+
+@dataclass(frozen=True, slots=True)
 class AgentResult:
     """What a run produced; `to_legacy_dict` is the shape the channels have always read."""
 
@@ -148,6 +193,7 @@ class AgentResult:
     usage: Mapping[str, int] | None = None
     profile_version: str = ""  # hash of the profile file the run used
     code_version: str = ""  # short git hash of the running code
+    trace: TraceRecord | None = None  # what the run did, redacted; the gateway stores it
 
     @property
     def status(self) -> Status:
