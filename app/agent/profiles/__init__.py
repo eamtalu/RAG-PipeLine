@@ -24,7 +24,7 @@ REQUIRED_KEYS = (
     "domain",
     "decline",
     "schema_tools",
-    "tool_set",
+    "namespaces",
     "presentation",
     "question_frame",
     "retry_nudge",
@@ -44,7 +44,7 @@ class Profile:
     retry_nudge: str
     ungrounded_nudge: str
     schema_tools: frozenset[str]
-    tool_set: str
+    namespaces: tuple[str, ...]
     presentation: str
     question_frame: str
     version: str
@@ -53,7 +53,7 @@ class Profile:
 def read_profile(path: Path) -> Profile:
     """The profile in one YAML file, refused with a named reason when anything is off.
 
-    (profiles/analytics.yaml) -> Profile(name="analytics", tool_set="analytics", ...) ;
+    (profiles/analytics.yaml) -> Profile(name="analytics", namespaces=("logs", "analytics"), ...) ;
     (a file with an extra key) -> ValueError naming the file and the key
     """
     data = path.read_bytes()
@@ -76,7 +76,6 @@ def read_profile(path: Path) -> Profile:
         "system_prompt",
         "retry_nudge",
         "ungrounded_nudge",
-        "tool_set",
         "presentation",
         "question_frame",
     )
@@ -96,6 +95,14 @@ def read_profile(path: Path) -> Profile:
         or len(set(tools)) != len(tools)
     ):
         raise ValueError(f"{where}: schema_tools must be a list of unique tool names")
+    namespaces = raw["namespaces"]
+    if (
+        not isinstance(namespaces, list)
+        or not namespaces
+        or not all(isinstance(n, str) and n.strip() for n in namespaces)
+        or len(set(namespaces)) != len(namespaces)
+    ):
+        raise ValueError(f"{where}: namespaces must be a non-empty list of unique names")
     presentation_for(raw["presentation"])  # raises for an unknown presentation
     return Profile(
         name=raw["name"],
@@ -105,7 +112,7 @@ def read_profile(path: Path) -> Profile:
         retry_nudge=raw["retry_nudge"],
         ungrounded_nudge=raw["ungrounded_nudge"],
         schema_tools=frozenset(tools),
-        tool_set=raw["tool_set"],
+        namespaces=tuple(raw["namespaces"]),
         presentation=raw["presentation"],
         question_frame=raw["question_frame"],
         version=file_version(data),

@@ -17,7 +17,7 @@ decline: >-
   week".
 
 schema_tools: [describe_at_risk, describe_releases, explain_freshness, list_metrics]
-tool_set: analytics
+namespaces: [logs, analytics]
 presentation: analytics
 question_frame: "(Today is {today}.)\n\n{question}"
 retry_nudge: >-

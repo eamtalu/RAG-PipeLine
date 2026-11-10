@@ -34,8 +34,8 @@ A test replaces the settings object in every agent module with one that raises o
 ## Transitional, by design
 
 - The web sends its own earlier turns because it has no conversation store and no sign-in yet; the field is documented as transitional and goes when the web gets a store.
-- Each channel names the profile and its tool set in one line (`GroundedAgent(customer, profile=load_profile(...), tool_set=...)`), because the tools read the database and may not be imported by the agent package; step 13's registry takes that over. See `docs/agent-profiles.md`.
+- Each channel names only the profile (`GroundedAgent(customer, profile=load_profile(...), registry=...)`) over the registry it composed at start; the profile lists its namespaces. See `docs/agent-profiles.md` and `docs/agent-tool-registry.md`.
 
 ## What the next steps add
 
-The tool registry (step 13), the guards as a pipeline with stored traces (14), golden questions (15), admission and quotas in the gateway (16), the model router (17).
+the guards as a pipeline with stored traces (14), golden questions (15), admission and quotas in the gateway (16), the model router (17).

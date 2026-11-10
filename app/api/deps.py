@@ -17,10 +17,21 @@ import re
 
 from fastapi import Depends, Header, HTTPException
 
+from functools import cache
+
+from app.agent.capabilities.registry import ToolRegistry
 from app.api.service_auth import require_admin_caller
 
 from app.persistence.repositories.customer_repository import CustomerRepository, get_customer_repository
+from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
+from app.services.logspace_agent.namespaces import logspace_namespace
 from app.services.mnp_log_ingestion.timefmt import set_display_timezone
+
+
+@cache
+def tool_registry() -> ToolRegistry:
+    """The API process's tool registry: every namespace, built once; profiles pick from it."""
+    return ToolRegistry([logs_namespace(), analytics_namespace(), logspace_namespace()])
 
 # customer codes are slugs: lowercase letters, digits, hyphen/underscore, 1–64 chars.
 _CUSTOMER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")

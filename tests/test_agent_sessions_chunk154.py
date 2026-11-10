@@ -20,8 +20,9 @@ from app.api.v1 import analytics_agent as agent_api
 from app.api.v1 import logs as logs_api
 from app.config.database import async_session, engine
 from app.agent.runtime import grounded
-from app.services.analytics_agent.tool_set import AnalyticsToolSet
-from app.services.logspace_agent.tool_set import LogspaceToolSet
+from app.agent.capabilities.registry import ToolRegistry
+from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
+from app.services.logspace_agent.namespaces import logspace_namespace
 from tests.agent_helpers import analytics_runtime, ask, logspace_runtime
 from tests.test_analytics_agent_chunk124 import CC, ScriptedModel, _plant, clean  # noqa: F401
 from tests.test_logspace_agent_chunk132 import TODAY, cc  # noqa: F401 - fixture
@@ -76,8 +77,9 @@ def _watching(*script: AIMessage, spy: SessionSpy | None = None) -> WatchingMode
 # ==================================================== 1. the agents take no session
 
 def test_no_agent_constructor_takes_a_session():
-    for cls in (GroundedAgent, AnalyticsToolSet, LogspaceToolSet):
-        assert "db" not in inspect.signature(cls.__init__).parameters, cls.__name__
+    for fn in (GroundedAgent.__init__, ToolRegistry.__init__, logs_namespace, analytics_namespace,
+               logspace_namespace):
+        assert "db" not in inspect.signature(fn).parameters, fn.__qualname__
 
 
 # ==================================================== 2. a run holds no session between model calls

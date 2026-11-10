@@ -15,10 +15,9 @@ from app.agent.contracts import AgentRequest, Principal
 from app.agent.gateway import run_request, snapshot_settings
 from app.agent.profiles import load_profile
 from app.agent.runtime.grounded import GroundedAgent
-from app.api.deps import get_current_customer
+from app.api.deps import get_current_customer, tool_registry
 from app.api.service_auth import ANONYMOUS, current_caller
 from app.config.database import get_session
-from app.services.analytics_agent.tool_set import AnalyticsToolSet
 
 router = APIRouter(prefix="/analytics/agent", tags=["analytics-agent"])
 
@@ -40,12 +39,9 @@ class AskRequest(BaseModel):
     )
 
 
-_ANALYTICS_TOOLS = AnalyticsToolSet()  # stateless: holds the app's session factory
-
-
 def _runtime(customer: str) -> GroundedAgent:
-    """The analytics profile on its tool set; the channel names both until step 13's registry."""
-    return GroundedAgent(customer, profile=load_profile("analytics"), tool_set=_ANALYTICS_TOOLS)
+    """The analytics profile on this process's registry; the profile lists its namespaces."""
+    return GroundedAgent(customer, profile=load_profile("analytics"), registry=tool_registry())
 
 
 def _principal(customer: str) -> Principal:

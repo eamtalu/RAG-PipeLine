@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session, get_session
 from app.settings import settings
-from app.api.deps import get_current_customer, get_active_customer
+from app.api.deps import get_current_customer, get_active_customer, tool_registry
 from app.persistence.models.job import Job
 from app.persistence.models.log_entry import LogEntry, LogEntryType
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
@@ -49,7 +49,6 @@ from app.agent.gateway import run_request
 from app.agent.profiles import load_profile
 from app.agent.runtime.grounded import GroundedAgent
 from app.api.service_auth import ANONYMOUS, current_caller
-from app.services.logspace_agent.tool_set import LogspaceToolSet
 
 router = APIRouter(prefix="/logs", tags=["logs"])
 
@@ -1146,9 +1145,6 @@ class DebugAskRequest(BaseModel):
                                    description="Earlier turns of the same conversation, oldest first.")
 
 
-_LOGSPACE_TOOLS = LogspaceToolSet()  # stateless: holds the app's session factory
-
-
 @router.post("/debug/ask")
 async def debug_ask(
     body: DebugAskRequest,
@@ -1180,11 +1176,11 @@ async def debug_ask(
         principal=Principal.for_service(customer, caller.name if caller else ANONYMOUS),
         profile="logspace", text=body.question, conversation_id=None,
         scope=body.scope, tz_name=tz_name, today=today)
-    # Step 3: Run through the gateway; the channel names the profile and its tool set until
-    # step 13's registry, and the tools open their own short sessions.
+    # Step 3: Run through the gateway; the profile lists its namespaces and the registry binds
+    # their tools, which open their own short sessions.
     try:
         runtime = GroundedAgent(customer, profile=load_profile("logspace"),
-                                tool_set=_LOGSPACE_TOOLS)
+                                registry=tool_registry())
         result = await run_request(request, runtime=runtime,
                                    prior_turns=tuple(t.model_dump() for t in body.history))
     except Exception as exc:  # noqa: BLE001 - the model or its provider is down, throttled or misconfigured

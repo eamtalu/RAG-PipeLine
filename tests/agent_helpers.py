@@ -13,23 +13,35 @@ from app import log_context
 from app.agent.contracts import AgentRequest, ExecutionContext, Principal
 from app.agent.gateway import build_context, run_request, snapshot_settings
 from app.agent.profiles import load_profile
+from app.agent.capabilities.registry import ToolRegistry
 from app.agent.runtime.grounded import GroundedAgent
 from app.config.database import async_session
-from app.services.analytics_agent.tool_set import AnalyticsToolSet
-from app.services.logspace_agent.tool_set import LogspaceToolSet
+from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
+from app.services.logspace_agent.namespaces import logspace_namespace
 
 TZ = "Europe/London"
 TODAY = date(2026, 9, 30)
 
 
+def tool_registry(session_factory=async_session) -> ToolRegistry:
+    """Every namespace on the given session factory, as a channel composes it."""
+    return ToolRegistry(
+        [
+            logs_namespace(session_factory),
+            analytics_namespace(session_factory),
+            logspace_namespace(session_factory),
+        ]
+    )
+
+
 def analytics_runtime(
     cc: str, *, session_factory=async_session, model=None, gate=None
 ) -> GroundedAgent:
-    """The analytics profile on its tool set, with the usual test overrides."""
+    """The analytics profile on a registry over the given session factory, with overrides."""
     return GroundedAgent(
         cc,
         profile=load_profile("analytics"),
-        tool_set=AnalyticsToolSet(session_factory=session_factory),
+        registry=tool_registry(session_factory),
         model=model,
         gate=gate,
     )
@@ -38,11 +50,11 @@ def analytics_runtime(
 def logspace_runtime(
     cc: str, *, session_factory=async_session, model=None, gate=None
 ) -> GroundedAgent:
-    """The logspace profile on its tool set, with the usual test overrides."""
+    """The logspace profile on a registry over the given session factory, with overrides."""
     return GroundedAgent(
         cc,
         profile=load_profile("logspace"),
-        tool_set=LogspaceToolSet(session_factory=session_factory),
+        registry=tool_registry(session_factory),
         model=model,
         gate=gate,
     )

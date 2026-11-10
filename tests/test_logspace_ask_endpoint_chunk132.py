@@ -50,7 +50,8 @@ async def test_no_scope_means_today(seen):
     )
     assert seen.request.scope is None and seen.request.today == date_type(2026, 9, 30)
     assert seen.request.tz_name and seen.request.tenant == "tmp-live"
-    assert seen.runtime.profile.name == "logspace" and seen.runtime.tool_set.name == "logspace"
+    assert seen.runtime.profile.name == "logspace"
+    assert seen.runtime.profile.namespaces == ("logspace",)
     assert seen.request.text == "what failed?" and seen.prior_turns == []
     assert (
         out["answer"] == "ok" and out["refs"] == [] and out["pending_regroup"] == {"pending": False}

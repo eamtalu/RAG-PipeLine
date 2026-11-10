@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import boto3
 
 from app.agent.contracts import AgentRequest, ConversationType, Principal
+from app.agent.capabilities.registry import ToolRegistry
 from app.agent.gateway import run_request
 from app.agent.profiles import load_profile
 from app.agent.runtime.grounded import GroundedAgent
@@ -23,7 +24,8 @@ from app.persistence.repositories.customer_repository import CustomerRepository
 from app.persistence.repositories.teams_repository import TeamsBindingRepository
 from app.services.agent_runs import claims
 from app.services.agent_runs.claims import Claim
-from app.services.analytics_agent.tool_set import AnalyticsToolSet
+from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
+from app.services.logspace_agent.namespaces import logspace_namespace
 from app.services.teams.binding_mirror import build_mirror_from_settings
 from app.services.teams.binding_sweep import sweep_once
 from app.services.teams.commands import run_command
@@ -37,7 +39,9 @@ from app.settings import settings
 logger = logging.getLogger(__name__)
 
 
-_ANALYTICS_TOOLS = AnalyticsToolSet()  # stateless: holds the app's session factory
+# This process's registry: every namespace, so the profile's list and the clash rule mean the
+# same here as in the API; the runners open their own sessions on the app pool.
+_REGISTRY = ToolRegistry([logs_namespace(), analytics_namespace(), logspace_namespace()])
 
 
 def _conversation_type(source: str) -> ConversationType:
@@ -62,10 +66,9 @@ async def _run_agent(job: QuestionJob, history: list[dict]) -> dict:
                             display_name=job.sender_name),
         profile="analytics", text=job.question, conversation_id=job.conversation_id,
         conversation_type=_conversation_type(job.source))
-    # Step 2: Name the profile and its tool set here, in the channel, because the tools read
-    # the database and may not be imported by the agent package; step 13's registry takes over.
+    # Step 2: Name the profile; it lists its namespaces, and the registry binds their tools.
     runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),
-                            tool_set=_ANALYTICS_TOOLS)
+                            registry=_REGISTRY)
     result = await run_request(request, runtime=runtime, prior_turns=tuple(history))
     return result.to_legacy_dict()
 

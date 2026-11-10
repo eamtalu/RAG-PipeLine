@@ -15,7 +15,7 @@ decline: >-
   <number> been picked?".
 
 schema_tools: [overview]
-tool_set: logspace
+namespaces: [logspace]
 presentation: logspace
 question_frame: "(Today is {today}. The records fetched: {scope_description}.)\n\n{question}"
 retry_nudge: >-

@@ -165,16 +165,6 @@ async def test_a_problem_is_returned_to_the_model_as_the_result():
     assert "is_short==1" in shape["problems"][0]
 
 
-async def test_the_bound_tools_carry_no_tenant_argument():
-    tools = agent_tools.build_tools(CC)
-    names = [t.name for t in tools]
-    assert names[-9:-5] == ["describe_releases", "aggregate_releases", "list_releases", "explain_release"]
-    assert names[-5:] == ["describe_at_risk", "at_risk_history", "at_risk_board", "at_risk_vans", "explain_at_risk_delivery"]
-    assert "search_transactions" in names and "query_metric" in names
-    for t in tools:
-        assert "customer_code" not in t.args and "customer" not in t.args, t.name
-
-
 # ==================================================== 2. the loop with a scripted model
 
 class ScriptedModel(BaseChatModel):

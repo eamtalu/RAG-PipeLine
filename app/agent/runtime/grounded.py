@@ -6,9 +6,10 @@ that no tool returned, is retried once with a nudge and then withheld; the table
 rows; the answer and every tool result are redacted. Before any of that, manipulation is declined
 in code and the topic gate declines what is not about the agent's data.
 
-An agent is a `Profile` (app/agent/profiles, the prompts and names as data) on a `ToolSetBuilder`
-(the tools, built per run outside this package); `GroundedAgent` holds the two and nothing else
-varies (step 12). The analytics and logspace agents are the two profiles.
+An agent is a `Profile` (app/agent/profiles, the prompts and names as data) on the tool
+registry (app/agent/capabilities, the profile's namespaces bound per run); `GroundedAgent`
+holds the two and nothing else varies (steps 12 and 13). The analytics and logspace agents
+are the two profiles.
 """
 
 from __future__ import annotations
@@ -32,7 +33,8 @@ from app.agent.contracts import (AgentRequest, AgentResult, ExecutionContext, Mo
 from app.agent.presentation import presentation_for
 from app.agent.profiles import Profile
 from app.agent.profiles.version import code_version
-from app.agent.runtime.tool_set import ToolSet, ToolSetBuilder
+from app.agent.capabilities.registry import ToolRegistry
+from app.agent.capabilities.spec import ToolSet
 from app.agent.runtime.guards import OUT_OF_SCOPE, TopicGate, looks_like_manipulation
 from app.agent.presentation import evidence
 from app.services.notifications.redact import redact_secrets
@@ -163,16 +165,20 @@ class GroundedAgent:
     TIMED_OUT = ("That took too long to answer, so I stopped. Ask again more narrowly, for example "
                  "a shorter time window or one delivery, picker or item.")
 
-    def __init__(self, customer_code: str, *, profile: Profile, tool_set: ToolSetBuilder,
+    def __init__(self, customer_code: str, *, profile: Profile, registry: ToolRegistry,
                  model: BaseChatModel | None = None, gate: TopicGate | None = None):
         # No database session and no settings live here: a run gets everything from the context
         # the gateway builds (step 11); the model and gate arguments are overrides for tests.
-        if tool_set.name != profile.tool_set:
-            raise ValueError(f"profile {profile.name!r} runs on tool set {profile.tool_set!r}, "
-                             f"not {tool_set.name!r}")
+        # Step 1: Resolve the profile's namespaces now, so that an unknown namespace or a name
+        # clash fails where the runtime is built, not at the first question.
+        offered = {spec.name for spec in registry.offered(profile.namespaces)}
+        missing = profile.schema_tools - offered
+        if missing:
+            raise ValueError(f"profile {profile.name!r} names schema tools that are not offered: "
+                             f"{sorted(missing)}")
         self.customer_code = customer_code  # every tool is hard-scoped to this tenant
         self.profile = profile
-        self.tool_set = tool_set
+        self.registry = registry
         self.presentation = presentation_for(profile.presentation)
         self._model_override = model
         self._gate_override = gate
@@ -241,7 +247,7 @@ class GroundedAgent:
             return self._declined(context, model_name, "off_topic", self.profile.decline)
 
         # The tools are built after the gate, so a declined question never opens a session.
-        tools: ToolSet = self.tool_set.build(context, request)
+        tools: ToolSet = self.registry.bind(context, request, self.profile.namespaces)
         graph = create_agent(model, list(tools.tools), system_prompt=self.profile.system_prompt)
         prior = history_as_messages(history)
         asked = frame_question(self.profile, question, today=context.today,

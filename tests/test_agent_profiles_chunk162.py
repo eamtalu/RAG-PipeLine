@@ -21,9 +21,6 @@ from app.agent.gateway import run_request
 from app.agent.profiles import REQUIRED_KEYS, load_profile, profile_names, read_profile
 from app.agent.profiles.version import code_version, file_version
 from app.agent.runtime.grounded import GroundedAgent, frame_question
-from app.services.analytics_agent.tool_set import AnalyticsToolSet
-from app.services.log_feed.scope import describe, scope_from
-from app.services.logspace_agent.tool_set import LogspaceToolSet
 from app.settings import settings
 from tests.agent_helpers import TODAY, TZ, analytics_runtime, ask, context_for, request_for
 from tests.test_analytics_agent_chunk124 import CC, _scripted, clean  # noqa: F401
@@ -46,7 +43,9 @@ def test_both_profiles_load_with_exactly_the_required_keys():
         raw = yaml.safe_load((PROFILES / f"{name}.yaml").read_text())
         assert set(raw) == set(REQUIRED_KEYS)
         profile = load_profile(name)
-        assert profile.name == name and profile.tool_set == name and profile.presentation == name
+        assert profile.name == name and profile.presentation == name
+        expected = {"analytics": ("logs", "analytics"), "logspace": ("logspace",)}
+        assert profile.namespaces == expected[name]
 
 
 # ==================================================== 2. the prompts are byte for byte unchanged
@@ -164,34 +163,7 @@ async def test_a_result_carries_both_versions_and_the_log_line_names_them(caplog
     )
 
 
-# ==================================================== 6. the two tool sets
-
-
-def test_the_analytics_tool_set_has_the_seventeen_tools_and_their_text():
-    tool_set = AnalyticsToolSet().build(context_for(CC), request_for(CC))
-    assert len(tool_set.tools) == 17 and tool_set.scope_description is None
-    assert "at_risk_history" in tool_set.tool_text and "aggregate_releases" in tool_set.tool_text
-
-
-def test_the_logspace_tool_set_builds_the_scope_from_the_raw_filters():
-    filters = {"date": "2026-09-29", "user": "PEVANS", "orderNumber": "O1", "limit": 300}
-    request = request_for("x", profile="logspace", scope=filters)
-    tool_set = LogspaceToolSet().build(context_for("x", profile="logspace"), request)
-    assert len(tool_set.tools) == 6
-    assert tool_set.scope_description == describe(scope_from(filters, TODAY), today=TODAY)
-    assert "PEVANS" in tool_set.scope_description and "2026-09-29" in tool_set.scope_description
-
-
-def test_the_logspace_tool_set_needs_a_timezone_on_the_context():
-    with pytest.raises(ValueError, match="tz_name"):
-        LogspaceToolSet().build(
-            context_for("x", profile="logspace", tz_name=None), request_for("x", profile="logspace")
-        )
-
-
-def test_a_runtime_refuses_a_tool_set_of_another_profile():
-    with pytest.raises(ValueError, match="tool set"):
-        GroundedAgent(CC, profile=load_profile("analytics"), tool_set=LogspaceToolSet())
+# (section 6, the tool sets, moved to tests/test_agent_tool_registry_chunk163.py in step 13)
 
 
 # ==================================================== 7. the question frame

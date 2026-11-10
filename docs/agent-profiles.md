@@ -1,8 +1,8 @@
 # Agent profiles
 
-Since 10 November 2026 (step 12 of `docs/esmart-agent-execution-plan.md`) an agent is a profile, a YAML file under `app/agent/profiles/`, on a tool set.
+Since 10 November 2026 (step 12 of `docs/esmart-agent-execution-plan.md`) an agent is a profile, a YAML file under `app/agent/profiles/`, on the tool registry.
 The two profiles are `analytics.yaml` (picking releases, deliveries at risk, log calls; Teams and `/analytics/agent/ask`) and `logspace.yaml` (the ask box over the feed's records; `/logs/debug/ask`).
-There is one runtime, `GroundedAgent(customer, profile=..., tool_set=...)`; the former `AnalyticsAgent`, `LogspaceAgent` and the Claude-only `LogDebugAgent` are gone.
+There is one runtime, `GroundedAgent(customer, profile=..., registry=...)`; the former `AnalyticsAgent`, `LogspaceAgent` and the Claude-only `LogDebugAgent` are gone.
 
 ## The ten keys
 
@@ -12,7 +12,7 @@ There is one runtime, `GroundedAgent(customer, profile=..., tool_set=...)`; the 
 | `domain` | one sentence for the topic gate: what the agent is for |
 | `decline` | the fixed reply to an off-topic question or a manipulation attempt |
 | `schema_tools` | tools that describe the schema rather than read data; figures resting only on them were made up |
-| `tool_set` | the tool set builder the channel must hand the runtime (`analytics`, `logspace`) |
+| `namespaces` | the registry namespaces whose tools the profile may use, in order (`[logs, analytics]`, `[logspace]`; see `docs/agent-tool-registry.md`) |
 | `presentation` | how answers are finished: `analytics` (table and card with links) or `logspace` (table only) |
 | `question_frame` | the text around the question, with `{today}`, `{scope_description}` and `{question}` |
 | `retry_nudge` | appended to the question when a draft had figures with no data call |
@@ -40,12 +40,12 @@ A prompt edit must update the snapshot in the same commit, so every change to wh
 Both are on every `AgentResult` (`profile_version`, `code_version`; not in the legacy dict the channels return) and on the gateway's `agent.run` log line.
 Until step 14 stores traces, that line plus the result is the trace of a run; step 14 copies the two fields into the `agent_traces` row.
 
-## The tool set seam
+## Namespaces and the registry
 
-The tools read Postgres, so they stay outside `app/agent`: `app/agent/runtime/tool_set.py` names the role (`ToolSetBuilder.build(context, request) -> ToolSet(tools, tool_text, scope_description)`), and `app/services/analytics_agent/tool_set.py` and `app/services/logspace_agent/tool_set.py` implement it.
-The logspace builder makes the `FeedScope` from the raw filter dict on the request and the day on the context, and describes it for the question frame.
-Each channel names the profile and its tool set in one line; step 13's registry takes that over.
+The tools read Postgres, so they stay outside `app/agent`: `app/services/analytics_agent/namespaces.py` and `app/services/logspace_agent/namespaces.py` build the `logs`, `analytics` and `logspace` namespaces, and the channel that composes the registry registers them.
+The runtime binds the profile's namespaces per run; the logspace namespace makes the `FeedScope` from the raw filter dict on the request and the day on the context, and describes it for the question frame.
+`docs/agent-tool-registry.md` has the rules.
 
 ## Adding a profile
 
-Write `app/agent/profiles/<name>.yaml` with the ten keys, a tool set builder with `name == <name>` where the tools live, a snapshot file, and a channel that hands the runtime to the gateway.
+Write `app/agent/profiles/<name>.yaml` with the ten keys, naming existing namespaces or a new one built where its tools live, a snapshot file, and a channel that hands the runtime to the gateway.

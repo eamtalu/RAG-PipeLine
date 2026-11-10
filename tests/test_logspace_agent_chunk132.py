@@ -18,9 +18,8 @@ from app.agent.runtime.guards import TopicGate
 from app.config.database import async_session
 from app.persistence.models.job import Job
 from app.persistence.models.log_transaction import LogTransaction
-from app.services.logspace_agent.tool_set import LogspaceToolSet
 from app.settings import settings
-from tests.agent_helpers import ask, context_for, logspace_runtime, request_for
+from tests.agent_helpers import ask, context_for, logspace_runtime, request_for, tool_registry
 from tests.test_analytics_agent_chunk124 import ScriptedModel, _scripted
 from tests.test_logspace_tools_chunk132 import TODAY, TZ, _seed
 
@@ -44,9 +43,8 @@ async def cc():
 
 
 def _tools(code, scope=None):
-    return LogspaceToolSet().build(
-        context_for(code, profile="logspace"), request_for(code, profile="logspace", scope=scope)
-    )
+    return tool_registry().bind(context_for(code, profile="logspace"),
+                                request_for(code, profile="logspace", scope=scope), ("logspace",))
 
 
 def test_it_reads_logs_only():
