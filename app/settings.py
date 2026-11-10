@@ -436,14 +436,10 @@ class Settings(BaseSettings):
     ssh_poll_reconcile_seconds: float = 30.0      # how often the poller supervisor re-scans customers
     ssh_auto_disable_after_failures: int = 10     # consecutive failed poller fetches before auto-disable (0 = off)
 
-    # --- Log debugging agent (Phase 2) ---
+    # --- Anthropic: the key an "anthropic:…" ANALYTICS_AGENT_MODEL string needs (read from the
+    # environment by the provider client). The Claude log agent that owned it went in step 12.
     anthropic_api_key: str = ""
-    log_agent_model: str = "claude-opus-4-8"
-    log_agent_max_tokens: int = 8000
-    log_agent_max_iterations: int = 12  # safety cap on the tool-use loop
-    # Retries the Anthropic client performs itself on 429/5xx/connection errors (exponential backoff).
     # Several Teams questions run concurrently and share one rate limit, so this is not optional.
-    log_agent_max_retries: int = 4
 
     # --- Analytics agent on LangGraph (chunk 124): provider-neutral, one string picks the model ---
     # "ollama:qwen3:8b" for local testing (Ollama on a laptop, reached through an SSH tunnel to
@@ -463,8 +459,6 @@ class Settings(BaseSettings):
     # schemas plus a grouped read, so it is raised from Ollama's 4k default.
     analytics_agent_think: bool = False
     analytics_agent_context_tokens: int = 16384
-    # Which agent answers Teams questions: the LangGraph one (any provider) or the Claude one.
-    teams_agent: Literal["langgraph", "claude"] = "langgraph"
 
     # --- Microsoft Teams bot (edge on AWS -> SQS -> consumer here -> HTTP answer back to the edge) ---
     # The consumer is its OWN process (`python -m app.teams_consumer`), not one of the singleton

@@ -1,7 +1,7 @@
-"""The loop and its guards: GroundedAgent (grounded.py) and the before/after checks (guards.py).
+"""The loop and its guards: GroundedAgent (grounded.py), the checks (guards.py), the tool set port.
 
-Since step 11 a run is `GroundedAgent.run(context, request, prior_turns)`: the context comes
-from the gateway and carries the model settings, the budgets and the deadline, so nothing in here
-reads settings. The profile and registry layering of docs/esmart-agent-architecture.md section 4
-is built on top in the following steps.
+A runtime is `GroundedAgent(customer, profile=load_profile(name), tool_set=<builder>)`: the
+profile is data (app/agent/profiles), the tool set builder lives outside the package because the
+tools read the database (tool_set.py names the role). A run is `run(context, request,
+prior_turns)` under the context the gateway built, so nothing in here reads settings.
 """

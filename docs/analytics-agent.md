@@ -5,7 +5,7 @@ The model is a setting; nothing else changes when it does.
 
 ## What it is
 
-- `app/services/analytics_agent/agent.py`: `AnalyticsAgent(customer_code).ask(question, history)`.
+- `app/agent/profiles/analytics.yaml`: the profile (prompt, nudges, domain, schema tools), run by `GroundedAgent` in `app/agent/runtime/grounded.py` through the gateway (`docs/agent-profiles.md`, `docs/agent-gateway.md`).
   A LangGraph graph built by `langchain.agents.create_agent`: model, tool calls, tool results, repeat, answer.
 - `app/services/analytics_agent/tools.py`: twelve tools bound to the tenant; each call opens its own short database session and closes it before the model is asked again.
   Eight are the debugging agent's own (`search_transactions` … `explain_freshness`), wrapped unchanged.
@@ -13,7 +13,7 @@ The model is a setting; nothing else changes when it does.
 - `app/services/analytics/settle_reads.py`: the settlement reads as service functions.
   The HTTP endpoints `/settlements/{name}/rows`, `/list` and `/preview` call them, and so do the tools, so there is one implementation.
 - `POST /api/v1/analytics/agent/ask` with `{"question": "...", "history": [...]}` returns `{answer, tool_calls, iterations, model}`.
-- The Teams consumer uses this agent when `TEAMS_AGENT=langgraph` (the default) and the Claude agent when `TEAMS_AGENT=claude`.
+- The Teams consumer runs this profile for every question; the Claude-only agent and the `TEAMS_AGENT` switch were retired in step 12.
 
 ## Choosing the model
 

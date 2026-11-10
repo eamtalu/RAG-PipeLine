@@ -8,8 +8,8 @@ build, kept as they are so the channels' payloads do not change.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from typing import Any, Literal, Mapping
 
 ConversationType = Literal["personal", "group", "channel"]
@@ -37,15 +37,15 @@ class Principal:
         """
         return cls(tenant=tenant, object_id=f"service:{caller_name}", kind="service")
 
-    @classmethod
-    def anonymous(cls, tenant: str) -> Principal:
-        """The caller of the transitional `ask()` entry, which has no person to name."""
-        return cls(tenant=tenant, object_id="anonymous", kind="service")
 
 
 @dataclass(frozen=True, slots=True)
 class AgentRequest:
-    """One question as a channel hands it over; it never carries history, the channel does."""
+    """One question as a channel hands it over; it never carries history, the channel does.
+
+    `scope` is the raw feed filter dict of a logspace question (shallow-frozen like evidence);
+    `tz_name` and `today` are the channel's view of the day the question is about.
+    """
 
     request_id: str
     tenant: str
@@ -56,6 +56,9 @@ class AgentRequest:
     conversation_type: ConversationType = "personal"
     action: str | None = None
     deadline_seconds: float | None = None
+    scope: Mapping[str, Any] | None = None
+    tz_name: str | None = None
+    today: date | None = None
 
     def __post_init__(self) -> None:
         # An adapter bug must fail here, before any model is paid for, not as an empty question.
@@ -107,6 +110,8 @@ class ExecutionContext:
     model: ModelSettings
     budgets: RunBudgets
     public_base_url: str
+    tz_name: str | None = None
+    today: date = date.today()  # the builder always sets it; the default keeps the field optional
 
     def seconds_left(self, now: datetime | None = None) -> float:
         """How long the run may still take, never negative.
@@ -141,6 +146,8 @@ class AgentResult:
     trace_id: str = ""
     citations: tuple = ()
     usage: Mapping[str, int] | None = None
+    profile_version: str = ""  # hash of the profile file the run used
+    code_version: str = ""  # short git hash of the running code
 
     @property
     def status(self) -> Status:

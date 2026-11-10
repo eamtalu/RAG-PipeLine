@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from app.agent.contracts import (
     AgentRequest,
@@ -67,4 +67,8 @@ def build_context(
         model=run_settings.model,
         budgets=run_settings.budgets,
         public_base_url=run_settings.public_base_url,
+        # The server's date unless the channel said which day the question is about: the
+        # analytics frame has always used the server date, and the logspace channel passes its own.
+        tz_name=request.tz_name,
+        today=request.today or date.today(),
     )

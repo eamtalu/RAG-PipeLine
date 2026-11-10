@@ -15,7 +15,8 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from app.config.database import async_session
-from app.services.analytics_agent import agent as agent_module
+from app.agent.profiles import load_profile
+from app.services.analytics_agent import tool_set as analytics_tool_set
 from app.services.analytics_agent import at_risk_tools as t
 from app.agent.presentation import evidence
 from app.services.analytics_agent.tools import TOOL_NAMES, build_tools
@@ -207,9 +208,11 @@ async def test_explaining_a_delivery_carries_its_clocks_tier_story_and_checks():
 async def test_the_agent_carries_the_tools_the_vocabulary_and_draws_the_shaped_table():
     assert {"describe_at_risk", "at_risk_history", "at_risk_board", "at_risk_vans", "explain_at_risk_delivery"} <= set(TOOL_NAMES)
     names = {tool.name for tool in build_tools(CC)}
-    assert "at_risk_history" in names and "describe_at_risk" in agent_module.SCHEMA_TOOLS
-    assert "DELIVERIES AT RISK" in agent_module.SYSTEM_PROMPT and "held the van" in agent_module.SYSTEM_PROMPT
-    assert "deliveries at risk" in agent_module.DOMAIN and "at_risk_history" in agent_module._TOOL_TEXT
+    profile = load_profile("analytics")
+    assert "at_risk_history" in names and "describe_at_risk" in profile.schema_tools
+    assert "DELIVERIES AT RISK" in profile.system_prompt and "held the van" in profile.system_prompt
+    assert "deliveries at risk" in profile.domain
+    assert "at_risk_history" in analytics_tool_set.TOOL_TEXT
     await _plant_week()
     result = await _run("at_risk_vans", day=DAY.isoformat())
     trace = [{"tool": "describe_at_risk", "input": {}, "result": "{}"}, {"tool": "at_risk_vans", "input": {"day": "2026-10-01"}, "result": json.dumps(result)}]

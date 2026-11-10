@@ -38,7 +38,7 @@ from app.services.mnp_log_ingestion.pipeline.derive_transactions import (
 )
 from app.services.mnp_log_ingestion.render import render_transaction
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc, active_timezone_name
-from app.services.log_feed.scope import FeedScope, day_conditions, local_today, scope_conditions, scope_from
+from app.services.log_feed.scope import FeedScope, day_conditions, local_today, scope_conditions
 from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_detail
 
 import logging
@@ -46,8 +46,10 @@ logger = logging.getLogger(__name__)
 from app import log_context
 from app.agent.contracts import AgentRequest, Principal
 from app.agent.gateway import run_request
+from app.agent.profiles import load_profile
+from app.agent.runtime.grounded import GroundedAgent
 from app.api.service_auth import ANONYMOUS, current_caller
-from app.services.logspace_agent.agent import LogspaceAgent
+from app.services.logspace_agent.tool_set import LogspaceToolSet
 
 router = APIRouter(prefix="/logs", tags=["logs"])
 
@@ -1144,6 +1146,9 @@ class DebugAskRequest(BaseModel):
                                    description="Earlier turns of the same conversation, oldest first.")
 
 
+_LOGSPACE_TOOLS = LogspaceToolSet()  # stateless: holds the app's session factory
+
+
 @router.post("/debug/ask")
 async def debug_ask(
     body: DebugAskRequest,
@@ -1166,19 +1171,21 @@ async def debug_ask(
     # session, so that its pooled connection is free for the whole model wait.
     await db.commit()
     # Step 2: Build the request with the bound request id and the service caller as principal,
-    # because the web has no signed-in person yet; the scope stays a constructor argument of the
-    # logspace agent until step 12 moves it onto the request.
+    # because the web has no signed-in person yet; the feed's filters travel as the raw dict and
+    # the logspace tool set builds the scope from them.
     caller = current_caller.get()
     request = AgentRequest(
         request_id=log_context.request_id_var.get() or log_context.new_request_id(),
         tenant=customer,
         principal=Principal.for_service(customer, caller.name if caller else ANONYMOUS),
-        profile="logspace", text=body.question, conversation_id=None)
-    # Step 3: Run through the gateway over the feed's scope; tools open their own short sessions.
+        profile="logspace", text=body.question, conversation_id=None,
+        scope=body.scope, tz_name=tz_name, today=today)
+    # Step 3: Run through the gateway; the channel names the profile and its tool set until
+    # step 13's registry, and the tools open their own short sessions.
     try:
-        agent = LogspaceAgent(customer, scope=scope_from(body.scope, today), tz_name=tz_name,
-                              today=today)
-        result = await run_request(request, runtime=agent,
+        runtime = GroundedAgent(customer, profile=load_profile("logspace"),
+                                tool_set=_LOGSPACE_TOOLS)
+        result = await run_request(request, runtime=runtime,
                                    prior_turns=tuple(t.model_dump() for t in body.history))
     except Exception as exc:  # noqa: BLE001 - the model or its provider is down, throttled or misconfigured
         logger.exception("ask eSmart Eye failed for %s", customer)

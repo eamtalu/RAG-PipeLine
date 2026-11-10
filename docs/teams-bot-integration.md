@@ -23,7 +23,7 @@ Design and decisions: `docs/plan/2026-09-21_11-34_teams-bot-edge-and-agent-queue
    A redelivered message whose run is still in flight on another consumer is left alone; one whose run already finished is answered from the stored result without running the model.
    Then it resolves the customer from the job's tenant id through `teams_tenant_bindings` in Postgres and refuses the job with an error answer when that customer is missing, inactive, or not the one the job names; the job's own `customer_code` is never trusted.
    Since contract v2 a job must carry `sender_object_id`; one without it is malformed and dropped.
-3. It loads the last `teams_history_turns` turns of that Teams conversation and runs `LogDebugAgent.ask(question, history=...)`.
+3. It loads the last `teams_history_turns` turns of that Teams conversation and runs the `analytics` profile through the agent gateway (`docs/agent-gateway.md`).
 4. It records the question and answer as two `teams_conversation_turns` rows, stores the answer on the `agent_runs` row, then POSTs an `AnswerPayload` to the edge with the shared secret.
 5. On success it deletes the SQS message.
    If the edge cannot be reached the message is left in place; SQS makes it visible again, the stored answer is re-posted without running the model, and the queue's redrive policy dead-letters it after a few attempts.
@@ -46,7 +46,7 @@ It is a separate systemd unit, `deploy/fastapirag-teams-consumer.service`, not o
 Run more than one copy to scale; SQS gives each copy different messages and the edge makes answer delivery idempotent.
 Settings are the `TEAMS_*` variables in `.env.example`.
 AWS credentials go in `/etc/fastapirag/teams-consumer.env`, read by the unit's `EnvironmentFile`, never in `.env`, whose loader rejects unknown keys.
-Concurrency per process is `teams_consumer_concurrency`; the Anthropic client retries on rate limits with `log_agent_max_retries`.
+Concurrency per process is `teams_consumer_concurrency`.
 
 ## The evidence on the card
 

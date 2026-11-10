@@ -13,10 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import log_context
 from app.agent.contracts import AgentRequest, Principal
 from app.agent.gateway import run_request, snapshot_settings
+from app.agent.profiles import load_profile
+from app.agent.runtime.grounded import GroundedAgent
 from app.api.deps import get_current_customer
 from app.api.service_auth import ANONYMOUS, current_caller
 from app.config.database import get_session
-from app.services.analytics_agent.agent import AnalyticsAgent
+from app.services.analytics_agent.tool_set import AnalyticsToolSet
 
 router = APIRouter(prefix="/analytics/agent", tags=["analytics-agent"])
 
@@ -36,6 +38,14 @@ class AskRequest(BaseModel):
         "they are replayed as plain text without figures. Removed when the web gets a "
         "store.",
     )
+
+
+_ANALYTICS_TOOLS = AnalyticsToolSet()  # stateless: holds the app's session factory
+
+
+def _runtime(customer: str) -> GroundedAgent:
+    """The analytics profile on its tool set; the channel names both until step 13's registry."""
+    return GroundedAgent(customer, profile=load_profile("analytics"), tool_set=_ANALYTICS_TOOLS)
 
 
 def _principal(customer: str) -> Principal:
@@ -73,7 +83,7 @@ async def ask(
     try:
         result = await run_request(
             request,
-            runtime=AnalyticsAgent(customer),
+            runtime=_runtime(customer),
             prior_turns=tuple(t.model_dump() for t in body.history),
             run_settings=run_settings,
         )

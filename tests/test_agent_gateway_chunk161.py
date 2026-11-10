@@ -207,8 +207,9 @@ async def test_the_gateway_snapshots_settings_when_the_channel_did_not(monkeypat
 # ==================================================== 4. the runtime under a context
 
 from app.agent.runtime.guards import TopicGate  # noqa: E402
-from app.services.analytics_agent import agent as analytics_module  # noqa: E402
-from app.services.analytics_agent.agent import AnalyticsAgent  # noqa: E402
+from app.agent.runtime import grounded  # noqa: E402
+from app.agent.runtime.grounded import GroundedAgent  # noqa: E402
+from tests.agent_helpers import analytics_runtime, logspace_runtime  # noqa: E402
 from tests.test_analytics_agent_chunk124 import (
     CC,
     ScriptedModel,
@@ -225,31 +226,20 @@ def _describe(call_id: str = "c1") -> AIMessage:
 
 
 async def test_a_runtime_built_for_one_tenant_refuses_another_tenants_context():
-    agent = AnalyticsAgent("other", model=_scripted())
+    agent = analytics_runtime("other", model=_scripted())
     context = build_context(_request(tenant=CC), RUN, now=NOW)
     with pytest.raises(ValueError, match="tenant"):
         await agent.run(context, _request(tenant=CC))
 
 
-async def test_run_and_the_transitional_ask_give_the_same_legacy_dict():
-    await _plant()
-    script = [_describe(), AIMessage(content="There are releases.")]
-    via_run = await run_request(
-        _request(tenant=CC), runtime=AnalyticsAgent(CC, model=_scripted(*script))
-    )
-    via_ask = await AnalyticsAgent(CC, model=_scripted(*script)).ask("how many?")
-    assert via_run.to_legacy_dict() == via_ask
-    assert via_run.request_id == "req-1" and via_run.stop_reason == "end_turn"
-
-
 def test_resolve_model_gives_a_gate_only_when_no_model_was_injected(monkeypatch):
     context = build_context(_request(tenant=CC), RUN, now=NOW)
-    model, gate, name = AnalyticsAgent(CC, model=_scripted()).resolve_model(context)
+    model, gate, name = analytics_runtime(CC, model=_scripted()).resolve_model(context)
     assert gate is None and name == "ollama:qwen3:8b"
     monkeypatch.setattr(
-        analytics_module, "init_chat_model", lambda name, **kw: ScriptedModel(script=[], seen=[])
+        grounded, "init_chat_model", lambda name, **kw: ScriptedModel(script=[], seen=[])
     )
-    model, gate, name = AnalyticsAgent(CC).resolve_model(context)
+    model, gate, name = analytics_runtime(CC).resolve_model(context)
     assert isinstance(gate, TopicGate)
 
 
@@ -279,7 +269,7 @@ async def test_the_analytics_runtime_reads_no_settings_inside_a_run(monkeypatch)
     script = [_describe(), AIMessage(content="There are releases.")]
     result = await run_request(
         _request(tenant=CC),
-        runtime=AnalyticsAgent(CC, model=_scripted(*script)),
+        runtime=analytics_runtime(CC, model=_scripted(*script)),
         run_settings=run_settings,
     )
     assert result.stop_reason == "end_turn" and len(result.tool_calls) == 1
@@ -293,10 +283,8 @@ from app import teams_consumer  # noqa: E402
 from app.api.v1 import analytics_agent as agent_api  # noqa: E402
 from app.api.v1 import logs as logs_api  # noqa: E402
 from app.config.database import async_session  # noqa: E402
-from app.services.logspace_agent import agent as logspace_module  # noqa: E402
-from app.services.logspace_agent.agent import LogspaceAgent  # noqa: E402
 from app.services.teams.contracts import QuestionJob  # noqa: E402
-from tests.test_logspace_agent_chunk132 import SCOPE, TODAY, TZ, cc  # noqa: E402,F401
+from tests.test_logspace_agent_chunk132 import TODAY, TZ, cc  # noqa: E402,F401
 
 
 def _trace_d1() -> AIMessage:
@@ -311,16 +299,9 @@ def _trace_d1() -> AIMessage:
 async def test_the_logspace_runtime_reads_no_settings_inside_a_run(monkeypatch, cc):
     run_settings = snapshot_settings()
     _poison(monkeypatch)
-    agent = LogspaceAgent(
-        cc,
-        scope=SCOPE,
-        tz_name=TZ,
-        today=TODAY,
-        model=_scripted(_trace_d1(), AIMessage(content="D1 was picked.")),
-    )
-    result = await run_request(
-        _request(tenant=cc, profile="logspace"), runtime=agent, run_settings=run_settings
-    )
+    agent = logspace_runtime(cc, model=_scripted(_trace_d1(), AIMessage(content="D1 was picked.")))
+    result = await run_request(_request(tenant=cc, profile="logspace", tz_name=TZ, today=TODAY),
+                               runtime=agent, run_settings=run_settings)
     assert result.stop_reason == "end_turn" and [t.tool for t in result.tool_calls] == ["trace"]
 
 
@@ -352,7 +333,9 @@ async def test_the_consumer_adapter_builds_the_request_from_the_job(monkeypatch)
     assert (request.request_id, request.tenant, request.profile) == ("job-7", CC, "analytics")
     assert request.principal == Principal(tenant=CC, object_id="u-7", display_name="Jo")
     assert request.conversation_id == "conv-7" and request.conversation_type == "personal"
-    assert isinstance(seen["runtime"], AnalyticsAgent) and seen["prior_turns"] == (
+    assert isinstance(seen["runtime"], GroundedAgent)
+    assert seen["runtime"].profile.name == "analytics"
+    assert seen["prior_turns"] == (
         {"role": "user", "content": "earlier"},
     )
     assert out == {
@@ -373,9 +356,8 @@ async def test_the_consumer_adapter_reads_no_settings_inside_the_run(monkeypatch
     # no model is injected, so the real gate runs first and answers from the script too
     script = [AIMessage(content="in_scope"), _describe(), AIMessage(content="There are releases.")]
     monkeypatch.setattr(
-        AnalyticsAgent, "make_model", lambda self, model_settings: _scripted(*script)
+        grounded, "make_model", lambda model_settings: _scripted(*script)
     )
-    monkeypatch.setattr(settings, "teams_agent", "langgraph")
     _poison(monkeypatch)
     out = await teams_consumer._run_agent(_job(), [])
     assert out["stop_reason"] == "end_turn" and len(out["tool_calls"]) == 1
@@ -425,30 +407,19 @@ async def test_the_web_adapters_build_a_service_principal_with_the_bound_request
 
 async def test_the_web_adapters_read_no_settings_inside_the_run(monkeypatch, cc):
     await _plant()
-    monkeypatch.setattr(
-        analytics_module,
-        "init_chat_model",
-        lambda name, **kw: _scripted(
-            AIMessage(content="in_scope"), _describe(), AIMessage(content="Done.")
-        ),
-    )
-    monkeypatch.setattr(
-        logspace_module,
-        "init_chat_model",
-        lambda name, **kw: _scripted(
-            AIMessage(content="in_scope"), _trace_d1(), AIMessage(content="Picked.")
-        ),
-    )
+    # one model factory for both endpoints: the first run is the analytics one, the second logspace
+    scripts = [
+        [AIMessage(content="in_scope"), _describe(), AIMessage(content="Done.")],
+        [AIMessage(content="in_scope"), _trace_d1(), AIMessage(content="Picked.")],
+    ]
+    monkeypatch.setattr(grounded, "init_chat_model", lambda name, **kw: _scripted(*scripts.pop(0)))
     monkeypatch.setattr(logs_api, "local_today", lambda tz: TODAY)
     _poison(monkeypatch)
     async with async_session() as db:
-        out = await agent_api.ask(
-            agent_api.AskRequest(question="what is there?"), customer=CC, db=db
-        )
+        out = await agent_api.ask(agent_api.AskRequest(question="what is there?"), customer=CC,
+                                  db=db)
         out2 = await logs_api.debug_ask(
             logs_api.DebugAskRequest(question="has D1 been picked?"),
-            customer=cc,
-            db=db,
-            pending={"pending": False},
+            customer=cc, db=db, pending={"pending": False},
         )
     assert out["answer"] == "Done." and out2["answer"].startswith("Picked.")

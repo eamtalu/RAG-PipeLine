@@ -37,8 +37,11 @@ async def run_request(
     with log_context.bind(request_id=context.request_id, tenant=context.tenant):
         result = await runtime.run(context, request, prior_turns)
         logger.info(
-            "agent.run profile=%s status=%s stop_reason=%s iterations=%d seconds=%.1f",
+            "agent.run profile=%s profile_version=%s code_version=%s status=%s "
+            "stop_reason=%s iterations=%d seconds=%.1f",
             context.profile,
+            result.profile_version,
+            result.code_version,
             result.status,
             result.stop_reason,
             result.iterations,

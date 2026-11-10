@@ -9,8 +9,9 @@ is retried once with a nudge, and an answer whose only digits are dates is not t
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.services.analytics_agent import agent as agent_module
-from app.services.analytics_agent.agent import AnalyticsAgent
+from app.agent.profiles import load_profile
+from app.agent.runtime import grounded
+from tests.agent_helpers import analytics_runtime, ask
 from tests.test_analytics_agent_chunk124 import CC, _plant, _scripted, _window, clean  # noqa: F401 - autouse fixture
 
 PRIOR = ("Here's the picking status for today (2026-09-28):\n\n"
@@ -21,7 +22,7 @@ PRIOR = ("Here's the picking status for today (2026-09-28):\n\n"
 # ==================================================== 1. history carries no figures to copy
 
 def test_assistant_history_is_replayed_without_tables_and_data_lines():
-    replayed = agent_module._history_as_messages([{"role": "user", "content": "picking status today"},
+    replayed = grounded.history_as_messages([{"role": "user", "content": "picking status today"},
                                                   {"role": "assistant", "content": PRIOR}])
     assert isinstance(replayed[1], AIMessage)
     assert replayed[1].content == "Here's the picking status for today (2026-09-28):"
@@ -29,7 +30,8 @@ def test_assistant_history_is_replayed_without_tables_and_data_lines():
 
 
 def test_a_user_turn_and_an_empty_assistant_turn_are_kept_and_dropped_respectively():
-    replayed = agent_module._history_as_messages([{"role": "user", "content": "hi"}, {"role": "assistant", "content": "|---|"}])
+    replayed = grounded.history_as_messages([{"role": "user", "content": "hi"},
+                                             {"role": "assistant", "content": "|---|"}])
     assert [type(m) for m in replayed] == [HumanMessage]
 
 
@@ -43,7 +45,7 @@ async def test_a_draft_with_figures_and_no_data_call_is_retried_once_with_a_nudg
                                            "args": {"group_by": ["user_name"], **_window()}}]),
         AIMessage(content="Across 4 releases, DBOBOC picked 3 of them."),
     )
-    result = await AnalyticsAgent(CC, model=model).ask("give me a round up about today",
+    result = await ask(analytics_runtime(CC, model=model), "give me a round up about today",
                                                            history=[{"role": "assistant", "content": PRIOR}])
     assert result["stop_reason"] == "end_turn" and result["retries"] == 1
     assert result["answer"].startswith("Across 4 releases")
@@ -54,7 +56,7 @@ async def test_a_draft_with_figures_and_no_data_call_is_retried_once_with_a_nudg
 async def test_a_second_draft_without_a_data_call_is_withheld():
     await _plant()
     model = _scripted(AIMessage(content="556 releases today."), AIMessage(content="Still 556 releases today."))
-    result = await AnalyticsAgent(CC, model=model).ask("round up today")
+    result = await ask(analytics_runtime(CC, model=model), "round up today")
     assert result["stop_reason"] == "withheld" and result["retries"] == 1
     assert "no figures to give" in result["answer"]
 
@@ -62,8 +64,8 @@ async def test_a_second_draft_without_a_data_call_is_withheld():
 async def test_the_nudge_names_what_went_wrong_and_what_to_do():
     await _plant()
     model = _scripted(AIMessage(content="556 releases today."), AIMessage(content="I cannot say without data."))
-    result = await AnalyticsAgent(CC, model=model).ask("round up today")
-    nudge = agent_module.RETRY_NUDGE
+    result = await ask(analytics_runtime(CC, model=model), "round up today")
+    nudge = "\n\n" + load_profile("analytics").retry_nudge
     assert "without calling a data tool" in nudge and "aggregate_releases" in nudge
     assert result["stop_reason"] == "end_turn" and result["retries"] == 1
 
@@ -76,7 +78,7 @@ async def test_a_describe_only_answer_whose_digits_are_dates_is_not_withheld():
         AIMessage(content="", tool_calls=[{"id": "d1", "name": "describe_releases", "args": {}}]),
         AIMessage(content="One row per release since 2026-09-01: expected, picked, shortfall, duration_s."),
     )
-    result = await AnalyticsAgent(CC, model=model).ask("what is available")
+    result = await ask(analytics_runtime(CC, model=model), "what is available")
     assert result["stop_reason"] == "end_turn" and result["retries"] == 0
     assert result["answer"].startswith("One row per release")
 
@@ -87,16 +89,16 @@ async def test_an_ungrounded_draft_is_retried_with_the_figures_named_and_a_groun
                                               "args": {"group_by": ["item_number"], "where": ["shortfall<0"], **_window()}}])
     model = _scripted(call, AIMessage(content="Two items short; overall 2,000 units were short."),
                       call, AIMessage(content="Two items were short: 100230 by 10 units and 104568 by 1."))
-    result = await AnalyticsAgent(CC, model=model).ask("which products were short?")
+    result = await ask(analytics_runtime(CC, model=model), "which products were short?")
     assert result["stop_reason"] == "end_turn" and result["retries"] == 1 and result["withheld_figures"] == []
     assert result["answer"].startswith("Two items were short: 100230")
-    assert "2,000" in agent_module.UNGROUNDED_NUDGE.format(figures="2,000")
+    assert "2,000" in load_profile("analytics").ungrounded_nudge.format(figures="2,000")
 
 
 async def test_a_description_with_small_counts_and_no_tool_call_is_not_treated_as_figures():
     await _plant()
     model = _scripted(AIMessage(content="One row per release; 12 tools cover the last 24 hours by default."))
-    result = await AnalyticsAgent(CC, model=model).ask("what is available")
+    result = await ask(analytics_runtime(CC, model=model), "what is available")
     assert result["stop_reason"] == "end_turn" and result["retries"] == 0
 
 
@@ -104,8 +106,8 @@ async def test_a_number_the_instructions_contain_is_not_an_invented_figure():
     """"filter duration_s>300" quotes the tool description; "556 releases" quotes nothing."""
     await _plant()
     model = _scripted(AIMessage(content="You can filter slow picks with duration_s>300 or shorts with shortfall<0."))
-    result = await AnalyticsAgent(CC, model=model).ask("what is available")
+    result = await ask(analytics_runtime(CC, model=model), "what is available")
     assert result["stop_reason"] == "end_turn" and result["retries"] == 0
     model = _scripted(AIMessage(content="556 releases today."), AIMessage(content="556 releases today."))
-    result = await AnalyticsAgent(CC, model=model).ask("round up")
+    result = await ask(analytics_runtime(CC, model=model), "round up")
     assert result["stop_reason"] == "withheld"

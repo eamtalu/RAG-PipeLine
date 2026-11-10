@@ -1,8 +1,8 @@
 # Log Analysis — How to Run It
 
 A practical, copy-paste guide to start the app and analyze Infor M3 WMS server logs: ingest logs →
-let them become queryable transactions → query them over REST → ask the Claude debugging agent in
-plain English.
+let them become queryable transactions → query them over REST → ask the logspace agent in
+plain English (since step 12 of the agent plan it runs on `ANALYTICS_AGENT_MODEL`, any provider).
 
 > For the full design/rationale see `transaction-log-ingestion-design.md`. This file is just the
 > "how do I use it" runbook.
@@ -45,16 +45,16 @@ plain English.
    pip install -r requirements.txt
    ```
 
-3. **`.env`** (in the repo root). The log feature needs the database URL and — only for the Claude
-   agent — an Anthropic API key:
+3. **`.env`** (in the repo root). The log feature needs the database URL and — only for the ask
+   box — a model the agent can reach:
    ```ini
    DATABASE_URL=postgresql+asyncpg://rag:rag@localhost:5432/rag
 
-   # Required ONLY to use the debugging agent (POST /logs/debug/ask).
-   # Must be an Anthropic API key (sk-ant-...), NOT a Claude.ai login.
-   ANTHROPIC_API_KEY=sk-ant-...
+   # Only for POST /logs/debug/ask: the provider string of the model (Ollama locally,
+   # Bedrock in production; an anthropic:… string needs ANTHROPIC_API_KEY as well).
+   ANALYTICS_AGENT_MODEL=ollama:qwen3:8b
    ```
-   > Ingestion, grouping, and all REST queries work **without** an Anthropic key. The key is only
+   > Ingestion, grouping, and all REST queries work **without** a model. The model is only
    > needed for the natural-language agent endpoint.
 
 4. **Run database migrations** (creates the `log_entries` / `log_transactions` tables):
@@ -148,7 +148,7 @@ curl "http://localhost:8000/api/v1/logs/entries?q=Index%20was%20out%20of%20range
 
 ---
 
-## 5. Analyze — ask the Claude agent in plain English (needs `ANTHROPIC_API_KEY`)
+## 5. Analyze — ask the logspace agent in plain English (needs a reachable `ANALYTICS_AGENT_MODEL`)
 
 `POST /logs/debug/ask` — the agent picks the right read-only SQL tools, runs them, and answers with
 **cited transaction ids**.
@@ -175,7 +175,7 @@ Response:
 - "Is there a transaction failing with 'Index was out of range'? Which API and user?"
 - "Did any pick confirmations fail for delivery 15936? Why?"
 
-> If you get **503 "anthropic_api_key is not configured"**, set `ANTHROPIC_API_KEY` in `.env` and restart.
+> If you get **503 "eSmart Eye could not answer right now"**, the model named by `ANALYTICS_AGENT_MODEL` is not reachable; fix the provider settings in `.env` and restart.
 
 ---
 
@@ -200,7 +200,7 @@ variable to use the "explain a specific transaction" requests.
 | `log_entries` has rows but `log_transactions` is empty | Stage 2 hasn't run yet. Wait a few seconds for the grouping worker, or `POST /logs/regroup`. |
 | Scan reports `inserted_new: 0` on re-run | Correct — dedup working. Nothing new in those files. |
 | `alembic` → `ModuleNotFoundError: No module named 'app'` | Prefix the command with `PYTHONPATH=.` |
-| `/logs/debug/ask` → 503 | `ANTHROPIC_API_KEY` not set in `.env`. Add it and restart. |
+| `/logs/debug/ask` → 503 | the model in `ANALYTICS_AGENT_MODEL` is not reachable (Ollama down, wrong provider settings). Fix `.env` and restart. |
 | Agent answer seems thin | It only uses what's in the DB. Make sure you've scanned + regrouped the relevant logs first. |
 | A transaction shows `incomplete` | Its REQUEST was seen but the RESPONSE wasn't ingested yet (e.g. split across a not-yet-scanned rotated file). Scan the rest, then regroup. |
 

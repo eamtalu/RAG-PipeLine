@@ -418,7 +418,7 @@ app/services/log_agent/           # Phase 2
     view §6), `search_entries` (line-level). All SELECT-only; every result carries transaction ids so
     answers can cite them. Filters reuse the promoted columns (same vocabulary as the REST API);
     results are compact JSON (null fields dropped) to save tokens.
-  - `app/services/log_agent/agent.py::LogDebugAgent` — manual async agentic loop on `AsyncAnthropic`
+  - `app/services/log_agent/agent.py::LogDebugAgent` — manual async agentic loop on `AsyncAnthropic` (retired in step 12 of the agent plan, 10 Nov 2026; the `logspace` profile replaced it)
     (model `claude-opus-4-8`, `thinking: adaptive`, per claude-api skill defaults). System prompt
     teaches the M3 log model + status semantics (soft ≠ error). Manual loop keeps the request-scoped
     `AsyncSession` explicit per tool call; iteration cap = `log_agent_max_iterations` (default 12) with
@@ -592,7 +592,7 @@ Nothing in Phase 3 requires schema churn on existing tables — the hook was des
   `regroup_all` / `regroup_incremental` / `regroup_window` / `finalize_pending` / `run_finalize_tracked`).
 - Models: `app/persistence/models/log_entry.py`, `log_transaction.py` (`flow_id` hook here),
   `log_regroup_pending.py` (dirty windows), `log_regroup_run.py` (async finalize status).
-- Agent: `app/services/log_agent/tools.py` (5 read-only tools), `agent.py` (`LogDebugAgent`).
+- Agent: `app/services/log_agent/tools.py` (5 read-only tools); `agent.py` (`LogDebugAgent`) was retired in step 12, the tools now serve the profiles in `app/agent/profiles/`.
 - API: `app/api/v1/logs.py` (`require_regrouped` read guard + `/regroup/finalize` + `/regroup/runs/{id}`).
   Settings: `app/settings.py` (`log_regroup_pad_seconds`; `log_grouping_worker_enabled` has since
   been removed with the worker). Workers: `app/background.py`;

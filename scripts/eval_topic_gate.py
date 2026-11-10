@@ -11,8 +11,8 @@ Live result on 2026-09-30 with Bedrock Qwen3 235B: 32/32 for both agents, twice.
 import asyncio
 
 from app.agent.runtime.guards import OUT_OF_SCOPE, TopicGate
-from app.services.analytics_agent.agent import DOMAIN as ANALYTICS_DOMAIN
-from app.services.logspace_agent.agent import DOMAIN as LOGSPACE_DOMAIN, make_model
+from app.agent.profiles import load_profile
+from app.agent.runtime.grounded import make_model
 
 MUST_PASS = [
     "what's short right now?", "which deliveries leave incomplete today?", "who picked request 5581590?",
@@ -33,7 +33,9 @@ MUST_DECLINE = [
 async def main() -> None:
     from app.agent.gateway import snapshot_settings
     model = make_model(snapshot_settings().model)
-    for name, domain in (("logspace", LOGSPACE_DOMAIN), ("analytics", ANALYTICS_DOMAIN)):
+    domains = (("logspace", load_profile("logspace").domain),
+               ("analytics", load_profile("analytics").domain))
+    for name, domain in domains:
         gate = TopicGate(model, domain)
         wrong = []
         for question in MUST_PASS + MUST_DECLINE:

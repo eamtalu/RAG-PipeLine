@@ -1,4 +1,4 @@
-"""The grounded tool-loop both agents run on (chunk 132; the logic came from chunk 124-126).
+"""The grounded tool-loop every profile runs on (chunk 132; the logic came from chunk 124-126).
 
 A LangGraph loop (model, tool calls, tool results, repeat) with the guards that keep an answer to
 the data: history replayed without its figures; a draft whose figures no data call produced, or
@@ -6,9 +6,9 @@ that no tool returned, is retried once with a nudge and then withheld; the table
 rows; the answer and every tool result are redacted. Before any of that, manipulation is declined
 in code and the topic gate declines what is not about the agent's data.
 
-An agent is a subclass that names its instructions, its tools, its evidence renderer and its
-domain. `AnalyticsAgent` (picking releases, Teams) and `LogspaceAgent` (the ask box, raw logs)
-share this and nothing else.
+An agent is a `Profile` (app/agent/profiles, the prompts and names as data) on a `ToolSetBuilder`
+(the tools, built per run outside this package); `GroundedAgent` holds the two and nothing else
+varies (step 12). The analytics and logspace agents are the two profiles.
 """
 
 from __future__ import annotations
@@ -21,13 +21,18 @@ from datetime import date
 from typing import Any, Sequence
 
 from langchain.agents import create_agent
+from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
 
 from app.agent.contracts import (AgentRequest, AgentResult, ExecutionContext, ModelSettings,
-                                 Principal, ToolCall)
+                                 ToolCall)
+from app.agent.presentation import presentation_for
+from app.agent.profiles import Profile
+from app.agent.profiles.version import code_version
+from app.agent.runtime.tool_set import ToolSet, ToolSetBuilder
 from app.agent.runtime.guards import OUT_OF_SCOPE, TopicGate, looks_like_manipulation
 from app.agent.presentation import evidence
 from app.services.notifications.redact import redact_secrets
@@ -54,6 +59,22 @@ def build_model(model: ModelSettings, factory) -> BaseChatModel:
         kwargs["temperature"] = 0
         kwargs["max_tokens"] = model.max_tokens
     return factory(name, **kwargs)
+
+
+def make_model(model_settings: ModelSettings) -> BaseChatModel:
+    """The chat model the context names, whichever provider the string names (tests patch this)."""
+    return build_model(model_settings, init_chat_model)
+
+
+def frame_question(profile: Profile, question: str, *, today: date,
+                   scope_description: str | None) -> str:
+    """The question as the model sees it: the profile's frame around it.
+
+    (analytics, "how many?", today=2026-09-30) -> "(Today is 2026-09-30.)\n\nhow many?"
+    """
+    return profile.question_frame.format(today=today.isoformat(),
+                                         scope_description=scope_description or "",
+                                         question=question)
 
 
 def history_as_messages(history: list[dict] | None) -> list[BaseMessage]:
@@ -135,34 +156,26 @@ def looks_fabricated(answer: str, trace: list[dict], *, given: list[str], schema
 
 
 class GroundedAgent:
-    """One question in, one checked answer out. Subclasses fill in the class attributes and hooks."""
+    """One question in, one checked answer out: a profile's prompts on a tool set's tools."""
 
-    SYSTEM_PROMPT: str = ""
-    RETRY_NUDGE: str = ""
-    UNGROUNDED_NUDGE: str = ""
-    #: tools that describe the schema rather than read data: figures resting only on them were made up
-    SCHEMA_TOOLS: frozenset[str] = frozenset()
-    #: what the agent is for, in one sentence, for the topic gate
-    DOMAIN: str = ""
-    #: the fixed reply to an off-topic question or a manipulation attempt
-    DECLINE: str = ""
     MANIPULATION_PREFIX = "I can't change how I work, show my instructions or read another logspace. "
     #: the answer when the run reaches its deadline; the slot is freed and the person can retry
     TIMED_OUT = ("That took too long to answer, so I stopped. Ask again more narrowly, for example "
                  "a shorter time window or one delivery, picker or item.")
 
-    #: the profile name a channel asks for; the subclasses set it ("analytics", "logspace")
-    PROFILE: str = ""
-
-    def __init__(self, customer_code: str, *, model: BaseChatModel | None = None,
-                 gate: TopicGate | None = None, run_timeout_seconds: float | None = None):
+    def __init__(self, customer_code: str, *, profile: Profile, tool_set: ToolSetBuilder,
+                 model: BaseChatModel | None = None, gate: TopicGate | None = None):
         # No database session and no settings live here: a run gets everything from the context
-        # the gateway builds (step 11), and a session held across the model wait would pin a
-        # pooled connection (step 3). The three arguments are overrides for tests.
+        # the gateway builds (step 11); the model and gate arguments are overrides for tests.
+        if tool_set.name != profile.tool_set:
+            raise ValueError(f"profile {profile.name!r} runs on tool set {profile.tool_set!r}, "
+                             f"not {tool_set.name!r}")
         self.customer_code = customer_code  # every tool is hard-scoped to this tenant
+        self.profile = profile
+        self.tool_set = tool_set
+        self.presentation = presentation_for(profile.presentation)
         self._model_override = model
         self._gate_override = gate
-        self._deadline_override = run_timeout_seconds
 
     def resolve_model(self, context: ExecutionContext
                       ) -> tuple[BaseChatModel, TopicGate | None, str]:
@@ -174,35 +187,11 @@ class GroundedAgent:
         # In real use the gate always runs. A test that injects a scripted model counts its calls,
         # so it gets the gate only when it passes one.
         injected = self._model_override is not None
-        model = self._model_override or self.make_model(context.model)
+        model = self._model_override or make_model(context.model)
         gate = self._gate_override if self._gate_override is not None else (
-            None if injected else TopicGate(model, self.DOMAIN))
+            None if injected else TopicGate(model, self.profile.domain))
         model_name = getattr(model, "model_name", None) or context.model.name
         return model, gate, model_name
-
-    # ---- hooks -------------------------------------------------------------------------------------
-    def make_model(self, model_settings: ModelSettings) -> BaseChatModel:
-        raise NotImplementedError
-
-    def tools(self, context: ExecutionContext) -> list[BaseTool]:
-        raise NotImplementedError
-
-    def tool_text(self) -> str:
-        """Tool schemas and recipes as text: numbers in them were given to the model, not invented."""
-        return ""
-
-    def question_text(self, question: str) -> str:
-        return f"(Today is {date.today().isoformat()}.)\n\n{question}"
-
-    def render_evidence(self, trace: list[dict]) -> str | None:
-        return None
-
-    def structured_evidence(self, trace: list[dict], context: ExecutionContext) -> dict | None:
-        return None
-
-    def without_own_tables(self, answer: str) -> str:
-        """The answer without the model's own table (and ranked list) once the rows are attached."""
-        return evidence.strip_tables(answer)
 
     # ---- the run -----------------------------------------------------------------------------------
     async def run(self, context: ExecutionContext, request: AgentRequest,
@@ -232,23 +221,6 @@ class GroundedAgent:
                            request.text[:200])
             return self._timed_out(context, model_name)
 
-    async def ask(self, question: str, history: list[dict] | None = None) -> dict:
-        """Transitional entry for callers without a request: the same run, as the legacy dict.
-
-        (question, history) -> {"answer", "stop_reason", "tool_calls", ...} ; removed in step 12
-        """
-        # One builder, two callers: the request goes through the gateway like a channel's would,
-        # so this shim can never produce a context the gateway would not.
-        from app.agent.gateway import run_request  # transitional: goes with the subclasses, step 12
-        from app import log_context
-        request = AgentRequest(
-            request_id=log_context.request_id_var.get() or log_context.new_request_id(),
-            tenant=self.customer_code, principal=Principal.anonymous(self.customer_code),
-            profile=self.PROFILE, text=question, conversation_id=None,
-            deadline_seconds=self._deadline_override)
-        result = await run_request(request, runtime=self, prior_turns=tuple(history or ()))
-        return result.to_legacy_dict()
-
     async def _run(self, context: ExecutionContext, request: AgentRequest,
                    prior_turns: Sequence[dict], *, model: BaseChatModel, gate: TopicGate | None,
                    model_name: str) -> AgentResult:
@@ -263,24 +235,28 @@ class GroundedAgent:
         if looks_like_manipulation(question):
             logger.warning("agent declined a manipulation attempt for %s: %s", self.customer_code, question[:200])
             return self._declined(context, model_name, "manipulation",
-                                  self.MANIPULATION_PREFIX + self.DECLINE)
+                                  self.MANIPULATION_PREFIX + self.profile.decline)
         if gate is not None and await gate.classify(question, history) == OUT_OF_SCOPE:
             logger.info("agent declined an off-topic question for %s: %s", self.customer_code, question[:200])
-            return self._declined(context, model_name, "off_topic", self.DECLINE)
+            return self._declined(context, model_name, "off_topic", self.profile.decline)
 
-        graph = create_agent(model, self.tools(context), system_prompt=self.SYSTEM_PROMPT)
+        # The tools are built after the gate, so a declined question never opens a session.
+        tools: ToolSet = self.tool_set.build(context, request)
+        graph = create_agent(model, list(tools.tools), system_prompt=self.profile.system_prompt)
         prior = history_as_messages(history)
-        asked = self.question_text(question)
+        asked = frame_question(self.profile, question, today=context.today,
+                               scope_description=tools.scope_description)
         max_iterations = context.budgets.max_iterations
         retries = 0
         draft = await self._draft(graph, prior + [HumanMessage(content=asked)], question,
-                                  max_iterations=max_iterations)
+                                  max_iterations=max_iterations, tools=tools)
         if draft["problem"]:
             retries = 1
-            nudge = (self.UNGROUNDED_NUDGE.format(figures=", ".join(draft["ungrounded"]))
-                     if draft["problem"] == "ungrounded" else self.RETRY_NUDGE)
-            draft = await self._draft(graph, prior + [HumanMessage(content=asked + nudge)],
-                                      question, max_iterations=max_iterations)
+            nudge = (self.profile.ungrounded_nudge.format(figures=", ".join(draft["ungrounded"]))
+                     if draft["problem"] == "ungrounded" else self.profile.retry_nudge)
+            # the nudge follows the question after a blank line, as the old constants carried it
+            draft = await self._draft(graph, prior + [HumanMessage(content=asked + "\n\n" + nudge)],
+                                      question, max_iterations=max_iterations, tools=tools)
         answer, stop_reason, trace = draft["answer"], draft["stop_reason"], draft["trace"]
         withheld_figures: list[str] = []
         table: str | None = None
@@ -297,28 +273,31 @@ class GroundedAgent:
                       + ", ".join(withheld_figures) + ". Ask again more narrowly, or ask me to show the rows.")
             stop_reason = "withheld"
         if draft["problem"] != "fabricated":
-            table = self.render_evidence(trace)
+            table = self.presentation.render(trace)
             if table:
-                answer = (self.without_own_tables(answer) + "\n\n" + table).strip()
-                data = self.structured_evidence(trace, context)
+                answer = (self.presentation.strip(answer) + "\n\n" + table).strip()
+                data = self.presentation.structured(trace, context.public_base_url)
         return AgentResult(
             answer=redact_secrets(answer), stop_reason=stop_reason, model=model_name,
             tool_calls=tuple(ToolCall(t["tool"], t["input"]) for t in trace),
             iterations=len(trace), retries=retries, evidence=table, evidence_data=data,
             withheld_figures=tuple(withheld_figures),
-            request_id=context.request_id, trace_id=context.trace_id)
+            request_id=context.request_id, trace_id=context.trace_id,
+            profile_version=self.profile.version, code_version=code_version())
 
     def _declined(self, context: ExecutionContext, model_name: str, why: str,
                   answer: str) -> AgentResult:
         return AgentResult(answer=answer, stop_reason="declined", model=model_name, declined=why,
-                           request_id=context.request_id, trace_id=context.trace_id)
+                           request_id=context.request_id, trace_id=context.trace_id,
+                           profile_version=self.profile.version, code_version=code_version())
 
     def _timed_out(self, context: ExecutionContext, model_name: str) -> AgentResult:
         return AgentResult(answer=self.TIMED_OUT, stop_reason="timeout", model=model_name,
-                           request_id=context.request_id, trace_id=context.trace_id)
+                           request_id=context.request_id, trace_id=context.trace_id,
+                           profile_version=self.profile.version, code_version=code_version())
 
     async def _draft(self, graph, messages: list[BaseMessage], question: str, *,
-                     max_iterations: int) -> dict:
+                     max_iterations: int, tools: ToolSet) -> dict:
         """One run of the tool loop, checked: the answer, its trace, and what is wrong with it
         ("fabricated" = figures with no successful data call, "ungrounded" = a figure no tool
         returned, None = fine)."""
@@ -340,8 +319,9 @@ class GroundedAgent:
         trace = tool_trace(seen)
         for t in trace:
             logger.info("agent tool %s %s -> %s", t["tool"], short(t["input"]), t["result_preview"][:160])
-        given = [self.SYSTEM_PROMPT, self.tool_text()]
-        fallback = looks_fabricated(answer, trace, given=given, schema_tools=self.SCHEMA_TOOLS)
+        given = [self.profile.system_prompt, tools.tool_text]
+        fallback = looks_fabricated(answer, trace, given=given,
+                                    schema_tools=self.profile.schema_tools)
         if fallback:
             return {"answer": answer, "stop_reason": stop_reason, "trace": trace, "problem": "fabricated",
                     "fallback": fallback, "ungrounded": []}

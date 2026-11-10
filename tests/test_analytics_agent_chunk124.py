@@ -26,8 +26,9 @@ from app.persistence.models.analytics_lookup import AnalyticsLookup, AnalyticsLo
 from app.persistence.models.analytics_settlement import AnalyticsSettledRow, AnalyticsSettlement
 from app.persistence.models.customer import Customer
 from app.services.analytics_agent import tools as agent_tools
-from app.services.analytics_agent import agent as agent_module
-from app.services.analytics_agent.agent import AnalyticsAgent, tool_trace
+from app.agent.runtime import grounded
+from app.agent.runtime.grounded import GroundedAgent, tool_trace
+from tests.agent_helpers import analytics_runtime, ask
 from app.settings import settings
 
 CC = "test_chunk124"
@@ -208,7 +209,7 @@ async def test_the_agent_calls_a_tool_then_answers_and_records_the_trace():
                                            "args": {"group_by": ["item_number"], "where": ["shortfall<0"], **_window()}}]),
         AIMessage(content="Across 4 releases, two items were short: 100230 by 10 units, 104568 by 1."),
     )
-    result = await AnalyticsAgent(CC, model=model).ask("which products were short?")
+    result = await ask(analytics_runtime(CC, model=model), "which products were short?")
     assert result["answer"].startswith("Across 4 releases")
     assert result["tool_calls"] == [{"tool": "aggregate_releases",
                                      "input": {"group_by": ["item_number"], "where": ["shortfall<0"], **_window()}}]
@@ -222,15 +223,15 @@ async def test_a_mistyped_field_reaches_the_model_as_text_and_the_loop_goes_on()
         AIMessage(content="", tool_calls=[{"id": "c2", "name": "aggregate_releases", "args": {"where": ["shortfall<0"], **_window()}}]),
         AIMessage(content="Three releases were short."),
     )
-    agent = AnalyticsAgent(CC, model=model)
-    result = await agent.ask("how many short?")
+    agent = analytics_runtime(CC, model=model)
+    result = await ask(agent, "how many short?")
     assert result["answer"] == "Three releases were short." and result["iterations"] == 2
 
 
 async def test_history_is_replayed_as_plain_text_only():
     await _plant()
     model = _scripted(AIMessage(content="Still 3."))
-    await AnalyticsAgent(CC, model=model).ask("and now?", history=[
+    await ask(analytics_runtime(CC, model=model), "and now?", history=[
         {"role": "user", "content": "how many short?"}, {"role": "assistant", "content": "Three."}])
     assert model.seen[0][:4] == ["SystemMessage", "HumanMessage", "AIMessage", "HumanMessage"]
 
@@ -246,7 +247,7 @@ def test_the_trace_pairs_each_call_with_a_preview_of_its_result():
 
 async def test_the_endpoint_returns_the_agent_result_shape(monkeypatch):
     await _plant()
-    monkeypatch.setattr(AnalyticsAgent, "run", lambda self, context, request, prior_turns=():
+    monkeypatch.setattr(GroundedAgent, "run", lambda self, context, request, prior_turns=():
                         _answer(request.text, prior_turns))
     async with async_session() as db:
         out = await agent_api.ask(agent_api.AskRequest(question="how many?", history=[
@@ -260,32 +261,21 @@ async def _answer(question, history):
                        stop_reason="end_turn", model="scripted")
 
 
-async def test_teams_uses_the_langgraph_agent_unless_told_otherwise(monkeypatch):
+async def test_the_consumer_runs_the_analytics_profile_through_the_gateway(monkeypatch):
     from app import teams_consumer
-    calls = []
     from app.agent.contracts import AgentResult
     from app.services.teams.contracts import QuestionJob
+    calls = []
 
-    async def langgraph(self, context, request, prior_turns=()):
-        calls.append(("langgraph", request.text))
+    async def run(self, context, request, prior_turns=()):
+        calls.append((self.profile.name, request.text))
         return AgentResult(answer="", stop_reason="end_turn", model="m")
 
-    def job(q):
-        return QuestionJob(job_id="j", tenant_id="t", customer_code=CC, conversation_id="c",
-                           question=q, sender_object_id="u-1")
-
-    monkeypatch.setattr(AnalyticsAgent, "run", langgraph)
-    monkeypatch.setattr(teams_consumer.LogDebugAgent, "ask", lambda self, q, history=None: _record(calls, "claude", q))
-    monkeypatch.setattr(settings, "teams_agent", "langgraph")
-    await teams_consumer._run_agent(job("q1"), [])
-    monkeypatch.setattr(settings, "teams_agent", "claude")
-    await teams_consumer._run_agent(job("q2"), [])
-    assert calls == [("langgraph", "q1"), ("claude", "q2")]
-
-
-async def _record(calls, which, q):
-    calls.append((which, q))
-    return {"answer": "", "tool_calls": []}
+    monkeypatch.setattr(GroundedAgent, "run", run)
+    job = QuestionJob(job_id="j", tenant_id="t", customer_code=CC, conversation_id="c",
+                      question="q1", sender_object_id="u-1")
+    out = await teams_consumer._run_agent(job, [])
+    assert calls == [("analytics", "q1")] and out["stop_reason"] == "end_turn"
 
 
 # ==================================================== 4. the model is one setting
@@ -299,26 +289,28 @@ def _model_named(name: str):
 
 def test_an_ollama_model_gets_the_base_url_thinking_off_and_a_wide_context(monkeypatch):
     seen = {}
-    monkeypatch.setattr(agent_module, "init_chat_model", lambda name, **kw: seen.update(name=name, **kw) or object())
+    monkeypatch.setattr(grounded, "init_chat_model",
+                        lambda name, **kw: seen.update(name=name, **kw) or object())
     monkeypatch.setattr(settings, "ollama_base_url", "http://127.0.0.1:11434")
-    agent_module.make_model(_model_named("ollama:qwen3:8b"))
+    grounded.make_model(_model_named("ollama:qwen3:8b"))
     assert seen == {"name": "ollama:qwen3:8b", "base_url": "http://127.0.0.1:11434", "reasoning": False, "num_ctx": 16384,
                     "temperature": 0}
     seen.clear()
-    agent_module.make_model(_model_named("anthropic:claude-sonnet-5"))
+    grounded.make_model(_model_named("anthropic:claude-sonnet-5"))
     assert seen == {"name": "anthropic:claude-sonnet-5"}
 
 
 def test_a_bedrock_model_gets_the_region_zero_temperature_and_the_output_cap(monkeypatch):
     seen = {}
-    monkeypatch.setattr(agent_module, "init_chat_model", lambda name, **kw: seen.update(name=name, **kw) or object())
+    monkeypatch.setattr(grounded, "init_chat_model",
+                        lambda name, **kw: seen.update(name=name, **kw) or object())
     monkeypatch.setattr(settings, "bedrock_region", "eu-west-2")
     monkeypatch.setattr(settings, "analytics_agent_max_tokens", 4000)
-    agent_module.make_model(_model_named("bedrock_converse:qwen.qwen3-235b-a22b-2507-v1:0"))
+    grounded.make_model(_model_named("bedrock_converse:qwen.qwen3-235b-a22b-2507-v1:0"))
     assert seen == {"name": "bedrock_converse:qwen.qwen3-235b-a22b-2507-v1:0", "region_name": "eu-west-2",
                     "temperature": 0, "max_tokens": 4000}
     seen.clear()
-    agent_module.make_model(_model_named("bedrock:qwen.qwen3-32b-v1:0"))
+    grounded.make_model(_model_named("bedrock:qwen.qwen3-32b-v1:0"))
     assert seen["region_name"] == "eu-west-2" and seen["temperature"] == 0
 
 
@@ -344,7 +336,7 @@ async def test_running_out_of_tool_rounds_ends_with_a_plain_sentence_not_an_erro
     monkeypatch.setattr(settings, "analytics_agent_max_iterations", 2)
     call = AIMessage(content="", tool_calls=[{"id": "c", "name": "describe_releases", "args": {}}])
     model = _scripted(*[AIMessage(content="", tool_calls=[{"id": f"c{i}", "name": "describe_releases", "args": {}}]) for i in range(6)])
-    result = await AnalyticsAgent(CC, model=model).ask("loop forever")
+    result = await ask(analytics_runtime(CC, model=model), "loop forever")
     assert result["stop_reason"] == "max_iterations" and result["iterations"] >= 2
     assert result["answer"].startswith("I could not settle on an answer")
     del call
@@ -378,7 +370,7 @@ async def test_figures_with_no_successful_data_call_are_withheld(monkeypatch):
         AIMessage(content="Top customers: Customer A -1,200 units, Customer B -950 units."),
     ]
     model = _scripted(*invented, *invented)  # chunk 126: the draft earns one retry; this model repeats itself
-    result = await AnalyticsAgent(CC, model=model).ask("top customers by units short")
+    result = await ask(analytics_runtime(CC, model=model), "top customers by units short")
     assert result["stop_reason"] == "withheld" and result["retries"] == 1
     assert result["answer"].startswith("I could not get the data") and "customer_number" in result["answer"]
     assert "Customer A" not in result["answer"]
@@ -391,7 +383,7 @@ async def test_a_real_answer_after_a_corrected_call_is_kept():
         AIMessage(content="", tool_calls=[{"id": "c2", "name": "aggregate_releases", "args": {"where": ["shortfall<0"], **_window()}}]),
         AIMessage(content="Across 3 releases, 11 units were short."),
     )
-    result = await AnalyticsAgent(CC, model=model).ask("how many units short?")
+    result = await ask(analytics_runtime(CC, model=model), "how many units short?")
     assert result["stop_reason"] == "end_turn" and result["answer"] == "Across 3 releases, 11 units were short."
 
 
@@ -399,7 +391,7 @@ async def test_a_plain_sentence_without_figures_is_never_withheld():
     await _plant()
     model = _scripted(AIMessage(content="", tool_calls=[{"id": "c1", "name": "describe_releases", "args": {}}]),
                       AIMessage(content="I can answer questions about releases, pickers, customers and items."))
-    result = await AnalyticsAgent(CC, model=model).ask("what can you do?")
+    result = await ask(analytics_runtime(CC, model=model), "what can you do?")
     assert result["stop_reason"] == "end_turn"
 
 
@@ -412,7 +404,7 @@ async def test_a_figure_no_tool_returned_is_withheld_by_name():
         AIMessage(content="Two items were short, 100230 by 10 units and 104568 by 1; overall 2,000 units were short."),
     ]
     model = _scripted(*padded, *padded)  # chunk 126: one retry, same invented total again
-    result = await AnalyticsAgent(CC, model=model).ask("which products were short?")
+    result = await ask(analytics_runtime(CC, model=model), "which products were short?")
     assert result["stop_reason"] == "withheld" and result["withheld_figures"] == ["2,000"] and result["retries"] == 1
     assert result["answer"].startswith("I could not verify these figures") and "2,000" in result["answer"]
 
@@ -424,7 +416,7 @@ async def test_a_top_n_answer_carries_the_table_from_the_rows_not_the_models_own
                                            "args": {"group_by": ["item_number"], "where": ["shortfall<0"], "sort": "shortfall", "dir": "asc", **_window()}}]),
         AIMessage(content="The most short items:\n\n| item | short |\n|---|---|\n| 104568 | 1 |\n| 100230 | 10 |\n\nAcross 3 releases."),
     )
-    result = await AnalyticsAgent(CC, model=model).ask("top 2 shorted items")
+    result = await ask(analytics_runtime(CC, model=model), "top 2 shorted items")
     assert result["stop_reason"] == "end_turn"
     assert "| item | short |" not in result["answer"]             # the model's table, in the wrong order, is gone
     assert result["evidence"].startswith("From the data: 2 of 2 group(s), sorted by shortfall asc")
@@ -454,7 +446,7 @@ async def test_the_result_carries_the_evidence_as_data_with_the_page_link(monkey
                                            "args": {"group_by": ["item_number"], "where": ["shortfall<0"], "sort": "units_short", "limit": 5, **_window()}}]),
         AIMessage(content="Two items were short."),
     )
-    result = await AnalyticsAgent(CC, model=model).ask("top 5 shorted items")
+    result = await ask(analytics_runtime(CC, model=model), "top 5 shorted items")
     data = result["evidence_data"]
     assert data["rows"] == [["100230", "2", "10"], ["104568", "1", "1"]] and data["link"] == "https://eye.example/matrix/releases"
     assert data["columns"][-1] == {"name": "units short", "align": "right"}

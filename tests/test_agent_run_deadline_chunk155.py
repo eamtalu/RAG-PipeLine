@@ -13,7 +13,8 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from app.agent.runtime.guards import TopicGate
-from app.services.analytics_agent.agent import AnalyticsAgent
+from app.agent.runtime.grounded import GroundedAgent
+from tests.agent_helpers import analytics_runtime, ask
 from app.services.teams import consumer as c
 from app.settings import settings
 from tests.test_analytics_agent_chunk124 import CC, ScriptedModel, _scripted, clean  # noqa: F401
@@ -42,23 +43,23 @@ def _hanging() -> HangingModel:
 async def test_a_hanging_provider_yields_the_timeout_answer_and_is_cancelled():
     model = _hanging()
     started = time.monotonic()
-    result = await AnalyticsAgent(CC, model=model, run_timeout_seconds=0.2).ask("what is there?")
+    result = await ask(analytics_runtime(CC, model=model), "what is there?", deadline_seconds=0.2)
     assert time.monotonic() - started < 2
-    assert result["stop_reason"] == "timeout" and result["answer"] == AnalyticsAgent.TIMED_OUT
+    assert result["stop_reason"] == "timeout" and result["answer"] == GroundedAgent.TIMED_OUT
     assert result["tool_calls"] == [] and result["evidence"] is None
     assert model.was_cancelled, "the hanging model call must be cancelled, not left running"
 
 
 async def test_the_deadline_covers_the_topic_gate_too():
     model = _hanging()
-    agent = AnalyticsAgent(CC, model=model, gate=TopicGate(model, "x"), run_timeout_seconds=0.2)
-    result = await agent.ask("hi")
+    agent = analytics_runtime(CC, model=model, gate=TopicGate(model, "x"))
+    result = await ask(agent, "hi", deadline_seconds=0.2)
     assert result["stop_reason"] == "timeout" and model.was_cancelled
 
 
 async def test_a_run_inside_the_deadline_is_unchanged():
-    result = await AnalyticsAgent(CC, model=_scripted(AIMessage(content="Fine.")),
-                                  run_timeout_seconds=5).ask("hi")
+    result = await ask(analytics_runtime(CC, model=_scripted(AIMessage(content="Fine."))), "hi",
+                       deadline_seconds=5)
     assert result["stop_reason"] == "end_turn" and result["answer"] == "Fine."
 
 
@@ -73,12 +74,12 @@ def test_the_deadline_defaults_to_the_setting_and_sits_below_the_visibility_wind
 
 async def test_the_consumer_posts_the_timeout_answer_and_frees_the_slot():
     async def hanging_agent(code, question, history):
-        return await AnalyticsAgent(code, model=_hanging(), run_timeout_seconds=0.1).ask(question)
+        return await ask(analytics_runtime(code, model=_hanging()), question, deadline_seconds=0.1)
 
     h = Harness([job(job_id="j1"), job(job_id="j2", conversation_id="c2")], agent=hanging_agent,
                 concurrency=1)
     await h.drain()
-    assert [p.answer for p in h.poster.posted] == [AnalyticsAgent.TIMED_OUT] * 2
+    assert [p.answer for p in h.poster.posted] == [GroundedAgent.TIMED_OUT] * 2
     assert [p.status for p in h.poster.posted] == ["ok", "ok"]
     assert len(h.sqs.deleted) == 2 and h.consumer.in_flight == 0
 

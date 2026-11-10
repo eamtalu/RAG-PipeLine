@@ -1,7 +1,8 @@
-"""Chunk 132: `POST /logs/debug/ask` runs the logspace agent over the feed's scope.
+"""Chunk 132: `POST /logs/debug/ask` runs the logspace profile over the feed's scope.
 
-The frontend sends the feed's current filters as `scope`; none means today. A model or provider
-failure (for example an exhausted account) is a clear 503, never a bare 500.
+The frontend sends the feed's current filters as `scope`; none means today. Since step 12 the
+route is an adapter: it puts the raw filters, the day and the zone on the request and hands the
+logspace runtime to the gateway. A model or provider failure is a clear 503, never a bare 500.
 """
 
 from datetime import date as date_type
@@ -9,9 +10,8 @@ from datetime import date as date_type
 import pytest
 from fastapi import HTTPException
 
+from app.agent.contracts import AgentResult
 from app.api.v1 import logs as logs_api
-from app.services.log_feed.scope import FeedScope
-from app.services.logspace_agent.agent import LogspaceAgent
 
 
 class _ReleasedSession:
@@ -23,60 +23,70 @@ class _ReleasedSession:
 
 class _Seen:
     def __init__(self):
-        self.kwargs = None
-        self.asked = None
+        self.request = None
+        self.runtime = None
+        self.prior_turns = None
 
 
 @pytest.fixture
 def seen(monkeypatch):
     s = _Seen()
 
-    def fake_init(self, customer_code, *, scope, tz_name, today, session_factory=None, model=None, gate=None):
-        s.kwargs = dict(customer=customer_code, scope=scope, tz_name=tz_name, today=today)
-
-    async def fake_run(self, context, request, prior_turns=()):
-        from app.agent.contracts import AgentResult
-        s.asked = (request.text, list(prior_turns))
+    async def spy(request, *, runtime, prior_turns=(), run_settings=None):
+        s.request, s.runtime, s.prior_turns = request, runtime, list(prior_turns)
         return AgentResult(answer="ok", stop_reason="end_turn", model="m")
 
-    monkeypatch.setattr(LogspaceAgent, "__init__", fake_init)
-    monkeypatch.setattr(LogspaceAgent, "run", fake_run)
+    monkeypatch.setattr(logs_api, "run_request", spy)
     monkeypatch.setattr(logs_api, "local_today", lambda tz: date_type(2026, 9, 30))
     return s
 
 
 async def test_no_scope_means_today(seen):
-    out = await logs_api.debug_ask(logs_api.DebugAskRequest(question="what failed?"), customer="tmp-live",
-                                   db=_ReleasedSession(), pending={"pending": False})
-    assert seen.kwargs["scope"] == FeedScope(day=date_type(2026, 9, 30), explicit=False)
-    assert seen.kwargs["customer"] == "tmp-live" and seen.asked == ("what failed?", [])
-    assert out["answer"] == "ok" and out["refs"] == [] and out["pending_regroup"] == {"pending": False}
+    out = await logs_api.debug_ask(
+        logs_api.DebugAskRequest(question="what failed?"),
+        customer="tmp-live",
+        db=_ReleasedSession(),
+        pending={"pending": False},
+    )
+    assert seen.request.scope is None and seen.request.today == date_type(2026, 9, 30)
+    assert seen.request.tz_name and seen.request.tenant == "tmp-live"
+    assert seen.runtime.profile.name == "logspace" and seen.runtime.tool_set.name == "logspace"
+    assert seen.request.text == "what failed?" and seen.prior_turns == []
+    assert (
+        out["answer"] == "ok" and out["refs"] == [] and out["pending_regroup"] == {"pending": False}
+    )
 
 
-async def test_the_feed_filters_become_the_scope(seen):
-    body = logs_api.DebugAskRequest(question="has D1 been picked?",
-                                    scope={"date": "2026-09-29", "user": "PEVANS", "orderNumber": "O1", "limit": 300})
+async def test_the_feed_filters_travel_as_the_raw_scope(seen):
+    filters = {"date": "2026-09-29", "user": "PEVANS", "orderNumber": "O1", "limit": 300}
+    body = logs_api.DebugAskRequest(question="has D1 been picked?", scope=filters)
     await logs_api.debug_ask(body, customer="tmp-live", db=_ReleasedSession(), pending={})
-    assert seen.kwargs["scope"] == FeedScope(day=date_type(2026, 9, 29), user="PEVANS", order_number="O1", explicit=True)
+    assert seen.request.scope == filters
 
 
 async def test_history_is_passed_through(seen):
-    body = logs_api.DebugAskRequest(question="and why?", history=[{"role": "user", "content": "D1?"},
-                                                                  {"role": "assistant", "content": "Picked."}])
+    body = logs_api.DebugAskRequest(
+        question="and why?",
+        history=[{"role": "user", "content": "D1?"}, {"role": "assistant", "content": "Picked."}],
+    )
     await logs_api.debug_ask(body, customer="tmp-live", db=_ReleasedSession(), pending={})
-    assert seen.asked[1] == [{"role": "user", "content": "D1?"}, {"role": "assistant", "content": "Picked."}]
+    assert seen.prior_turns == [
+        {"role": "user", "content": "D1?"},
+        {"role": "assistant", "content": "Picked."},
+    ]
 
 
 async def test_a_provider_failure_is_a_clear_503(monkeypatch):
-    def fake_init(self, *a, **kw):
-        pass
-
-    async def broken(self, context, request, prior_turns=()):
+    async def broken(request, *, runtime, prior_turns=(), run_settings=None):
         raise RuntimeError("Error code: 400 - Your credit balance is too low")
 
-    monkeypatch.setattr(LogspaceAgent, "__init__", fake_init)
-    monkeypatch.setattr(LogspaceAgent, "run", broken)
+    monkeypatch.setattr(logs_api, "run_request", broken)
     with pytest.raises(HTTPException) as exc:
-        await logs_api.debug_ask(logs_api.DebugAskRequest(question="x"), customer="tmp-live", db=_ReleasedSession(), pending={})
+        await logs_api.debug_ask(
+            logs_api.DebugAskRequest(question="x"),
+            customer="tmp-live",
+            db=_ReleasedSession(),
+            pending={},
+        )
     assert exc.value.status_code == 503
     assert "could not answer right now" in exc.value.detail and "credit balance" in exc.value.detail

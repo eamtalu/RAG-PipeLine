@@ -56,6 +56,11 @@ An operator call needs the `ops` token: `-H "Authorization: Bearer <ops token>"`
 In `/etc/systemd/system/fastapirag.service` change `--bind 0.0.0.0:8000` to `--bind 127.0.0.1:8000`; set `NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000` in the web app's `.env.production`; `sudo systemctl daemon-reload && sudo systemctl restart fastapirag`; rebuild and restart the web app.
 Then the API is unreachable from the LAN and the token is the second lock.
 
+## Stage B deploys
+
+Step 12 removed the `TEAMS_AGENT` and `LOG_AGENT_*` settings; the settings class refuses unknown dotenv keys, so before the restart check `grep -nE '^(TEAMS_AGENT|LOG_AGENT_)' /opt/RAG-Pipeline/RAG-PipeLine/.env` prints nothing and delete any line it prints.
+`ANTHROPIC_API_KEY` may stay.
+
 ## Rollback
 
 `git checkout <previous sha>` in the backend directory and `./deploy.sh` again; the migrations are additive (two new tables) and can stay.

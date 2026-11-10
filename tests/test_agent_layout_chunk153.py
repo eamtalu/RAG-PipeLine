@@ -25,7 +25,6 @@ CHANNEL_DIRS = ("app/api/",)
 TRANSITIONAL_IMPORTER_DIRS = (
     "app/services/analytics_agent/",
     "app/services/logspace_agent/",
-    "app/services/log_agent/",
 )
 
 

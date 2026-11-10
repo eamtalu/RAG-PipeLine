@@ -15,14 +15,15 @@ import boto3
 
 from app.agent.contracts import AgentRequest, ConversationType, Principal
 from app.agent.gateway import run_request
+from app.agent.profiles import load_profile
+from app.agent.runtime.grounded import GroundedAgent
 from app.background import setup_logging
 from app.config.database import async_session, engine
 from app.persistence.repositories.customer_repository import CustomerRepository
 from app.persistence.repositories.teams_repository import TeamsBindingRepository
 from app.services.agent_runs import claims
 from app.services.agent_runs.claims import Claim
-from app.services.analytics_agent.agent import AnalyticsAgent
-from app.services.log_agent.agent import LogDebugAgent
+from app.services.analytics_agent.tool_set import AnalyticsToolSet
 from app.services.teams.binding_mirror import build_mirror_from_settings
 from app.services.teams.binding_sweep import sweep_once
 from app.services.teams.commands import run_command
@@ -34,6 +35,9 @@ from app.services.teams.memory import ConversationMemory
 from app.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+_ANALYTICS_TOOLS = AnalyticsToolSet()  # stateless: holds the app's session factory
 
 
 def _conversation_type(source: str) -> ConversationType:
@@ -50,13 +54,7 @@ async def _run_agent(job: QuestionJob, history: list[dict]) -> dict:
 
     (job for acme by u-7, earlier turns) -> {"answer", "stop_reason", "tool_calls", ...}
     """
-    # Step 1: The legacy Claude agent is not a runtime: it keeps one session and reads its own
-    # settings; it stays selectable until step 12 retires it, otherwise TEAMS_AGENT would
-    # silently change meaning.
-    if settings.teams_agent == "claude":
-        async with async_session() as db:
-            return await LogDebugAgent(db, job.customer_code).ask(job.question, history=history)
-    # Step 2: Build the request from the job, so that who asked and where is fixed before any
+    # Step 1: Build the request from the job, so that who asked and where is fixed before any
     # model runs; the gateway builds the context and the runtime never reads settings.
     request = AgentRequest(
         request_id=job.job_id, tenant=job.customer_code,
@@ -64,8 +62,11 @@ async def _run_agent(job: QuestionJob, history: list[dict]) -> dict:
                             display_name=job.sender_name),
         profile="analytics", text=job.question, conversation_id=job.conversation_id,
         conversation_type=_conversation_type(job.source))
-    result = await run_request(request, runtime=AnalyticsAgent(job.customer_code),
-                               prior_turns=tuple(history))
+    # Step 2: Name the profile and its tool set here, in the channel, because the tools read
+    # the database and may not be imported by the agent package; step 13's registry takes over.
+    runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),
+                            tool_set=_ANALYTICS_TOOLS)
+    result = await run_request(request, runtime=runtime, prior_turns=tuple(history))
     return result.to_legacy_dict()
 
 
