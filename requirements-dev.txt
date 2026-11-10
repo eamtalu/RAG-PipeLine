@@ -1,0 +1,5 @@
+# Test tools the suite needs beyond the app, pinned to the versions in the developer .venv so the
+# Mac and CI (.github/workflows/tests.yml) run the same tools.
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
