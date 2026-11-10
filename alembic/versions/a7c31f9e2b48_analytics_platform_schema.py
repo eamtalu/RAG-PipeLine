@@ -297,8 +297,10 @@ def upgrade() -> None:
     # Then the dated runway, at each table's own grain, via the same helpers the worker uses.
     today = date.today()
     days = pt.days_between(today - timedelta(days=_RUNWAY_DAYS), today + timedelta(days=_RUNWAY_DAYS))
+    # Only the tables this migration created: `PARTITIONED` has since grown analytics_record_facts,
+    # which a later migration creates, and a fresh database must replay history as it was.
     for t in pt.PARTITIONED:
-        if not t.table.startswith("analytics_"):
+        if t.table not in _TABLES:
             continue
         for start in sorted({pt.period_start(t.grain, d) for d in days}):
             op.execute(pt.create_partition_sql(t.table, start))

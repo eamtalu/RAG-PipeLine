@@ -69,6 +69,15 @@ down_revision = "f04b7c29ae13"
 branch_labels = None
 depends_on = None
 
+# The three tables this migration partitions, pinned here rather than read from the live
+# `partitioning.PARTITIONED`: that list has since grown the analytics tables, which do not exist
+# yet at this point of the chain, and a fresh database (CI) must replay history as it was.
+_LOG_TABLES = (
+    ("log_entries", "timestamp"),
+    ("log_transactions", "started_at"),
+    ("log_entry_assignment", "entry_ts"),
+)
+
 
 # Rebuilt verbatim after the copy. Held here as explicit DDL rather than reflected from the live
 # catalogue so the migration is reviewable and reproducible on any database, not only this one.
@@ -181,8 +190,8 @@ def _partition(conn, table: str, key: str) -> None:
 
 def upgrade() -> None:
     conn = op.get_bind()
-    for t in pt.PARTITIONED:
-        _partition(conn, t.table, t.key)
+    for table, key in _LOG_TABLES:
+        _partition(conn, table, key)
 
 
 def _unpartition(conn, table: str, key: str) -> None:
@@ -207,8 +216,8 @@ def _unpartition(conn, table: str, key: str) -> None:
 
 def downgrade() -> None:
     conn = op.get_bind()
-    for t in pt.PARTITIONED:
-        _unpartition(conn, t.table, t.key)
+    for table, key in _LOG_TABLES:
+        _unpartition(conn, table, key)
 
     op.execute("ALTER TABLE log_entries ADD CONSTRAINT log_entries_pkey PRIMARY KEY (id)")
     op.execute("ALTER TABLE log_entries ADD CONSTRAINT uq_log_entries_customer_hash"
