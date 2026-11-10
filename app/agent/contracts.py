@@ -78,6 +78,8 @@ class ModelSettings:
     context_tokens: int
     bedrock_region: str
     max_tokens: int
+    fallback_models: tuple[str, ...] = ()  # tried in order when the pinned provider fails
+    gate_model: str = ""  # a cheaper model for the topic gate; empty = the pinned model
 
 
 @dataclass(frozen=True, slots=True)

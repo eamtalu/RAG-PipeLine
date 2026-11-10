@@ -28,6 +28,10 @@ def snapshot_settings() -> RunSettings:
             context_tokens=settings.analytics_agent_context_tokens,
             bedrock_region=settings.bedrock_region,
             max_tokens=settings.analytics_agent_max_tokens,
+            fallback_models=tuple(
+                m.strip() for m in settings.analytics_agent_fallback_models.split(",") if m.strip()
+            ),
+            gate_model=settings.analytics_agent_gate_model.strip(),
         ),
         budgets=RunBudgets(
             max_iterations=settings.analytics_agent_max_iterations,

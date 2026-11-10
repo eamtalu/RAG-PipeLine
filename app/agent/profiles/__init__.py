@@ -1,11 +1,11 @@
 """A profile is a file: what an agent is, as data, loaded and validated once with a version.
 
 `app/agent/profiles/<name>.yaml` holds the system prompt, the two nudges, the domain and decline
-sentences, the schema tool names, the namespaces, the guards in run order, which presentation the
-runtime uses, and the question frame. The loader is strict (exactly the keys below) so a later
-step adds its keys on purpose. `tests/profile_snapshots/` holds the prompt text byte for byte; a
-prompt edit must change the snapshot in the same commit, which is the reviewed change the
-architecture asks for.
+sentences, the schema tool names, the namespaces, the guards in run order, what the profile
+needs of a model, which presentation the runtime uses, and the question frame. The loader is
+strict (exactly the keys below) so a later step adds its keys on purpose.
+`tests/profile_snapshots/` holds the prompt text byte for byte; a prompt edit must change the
+snapshot in the same commit, which is the reviewed change the architecture asks for.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import yaml
 
 from app.agent.presentation import presentation_for
 from app.agent.profiles.version import file_version
+from app.agent.router.policy import ModelPolicy
 
 PROFILES_DIR = Path(__file__).parent
 REQUIRED_KEYS = (
@@ -27,6 +28,7 @@ REQUIRED_KEYS = (
     "schema_tools",
     "namespaces",
     "guards",
+    "model",
     "presentation",
     "question_frame",
     "retry_nudge",
@@ -48,6 +50,7 @@ class Profile:
     schema_tools: frozenset[str]
     namespaces: tuple[str, ...]
     guards: tuple[str, ...]  # the pipeline, in run order (app/agent/runtime/pipeline.py)
+    model: ModelPolicy  # what the profile needs of a model; the router picks (app/agent/router)
     presentation: str
     question_frame: str
     version: str
@@ -114,6 +117,7 @@ def read_profile(path: Path) -> Profile:
         or len(set(guards)) != len(guards)
     ):
         raise ValueError(f"{where}: guards must be a non-empty list of unique names")
+    model = ModelPolicy.from_dict(raw["model"], where)
     presentation_for(raw["presentation"])  # raises for an unknown presentation
     return Profile(
         name=raw["name"],
@@ -125,6 +129,7 @@ def read_profile(path: Path) -> Profile:
         schema_tools=frozenset(tools),
         namespaces=tuple(raw["namespaces"]),
         guards=tuple(guards),
+        model=model,
         presentation=raw["presentation"],
         question_frame=raw["question_frame"],
         version=file_version(data),

@@ -459,6 +459,10 @@ class Settings(BaseSettings):
     # schemas plus a grouped read, so it is raised from Ollama's 4k default.
     analytics_agent_think: bool = False
     analytics_agent_context_tokens: int = 16384
+    # The router (step 17): fallbacks tried in order when the pinned provider fails mid-run, and
+    # a cheaper model for the topic gate when a profile allows one. Empty = none / the primary.
+    analytics_agent_fallback_models: str = ""      # comma-separated model strings
+    analytics_agent_gate_model: str = ""
 
     # --- Microsoft Teams bot (edge on AWS -> SQS -> consumer here -> HTTP answer back to the edge) ---
     # The consumer is its OWN process (`python -m app.teams_consumer`), not one of the singleton

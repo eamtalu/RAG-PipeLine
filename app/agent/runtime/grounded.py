@@ -47,6 +47,8 @@ from app.agent.runtime.pipeline import (  # noqa: F401 - looks_fabricated kept i
     unknown_guards,
 )
 from app.agent.runtime.trace import RunTrace
+from app.agent.router.providers import adapter_for
+from app.agent.router.router import ModelRouter
 from app.agent.presentation import evidence
 from app.services.notifications.redact import redact_secrets
 
@@ -60,18 +62,11 @@ def build_model(model: ModelSettings, factory) -> BaseChatModel:
 
     (ModelSettings(name="ollama:qwen3:8b", ...)) -> factory("ollama:qwen3:8b", base_url=..., ...)
     """
-    kwargs: dict[str, Any] = {}
-    name = model.name
-    if name.startswith("ollama:"):
-        kwargs["base_url"] = model.ollama_base_url
-        kwargs["reasoning"] = model.think
-        kwargs["num_ctx"] = model.context_tokens
-        kwargs["temperature"] = 0  # a small model invents less at zero, and a run can be repeated
-    elif name.startswith(("bedrock:", "bedrock_converse:")):
-        kwargs["region_name"] = model.bedrock_region
-        kwargs["temperature"] = 0
-        kwargs["max_tokens"] = model.max_tokens
-    return factory(name, **kwargs)
+    # The provider's arguments live with its adapter (app/agent/router/providers.py); a prefix no
+    # adapter knows is built bare, as it always was, though the router never pins one.
+    adapter = adapter_for(model.name)
+    kwargs: dict[str, Any] = adapter.arguments(model) if adapter is not None else {}
+    return factory(model.name, **kwargs)
 
 
 def make_model(model_settings: ModelSettings) -> BaseChatModel:
@@ -146,7 +141,8 @@ class GroundedAgent:
                  "a shorter time window or one delivery, picker or item.")
 
     def __init__(self, customer_code: str, *, profile: Profile, registry: ToolRegistry,
-                 model: BaseChatModel | None = None, gate: TopicGate | None = None):
+                 model: BaseChatModel | None = None, gate: TopicGate | None = None,
+                 router: ModelRouter | None = None):
         # No database session and no settings live here: a run gets everything from the context
         # the gateway builds (step 11); the model and gate arguments are overrides for tests.
         # Step 1: Resolve the profile's namespaces now, so that an unknown namespace or a name
@@ -167,21 +163,27 @@ class GroundedAgent:
         self.presentation = presentation_for(profile.presentation)
         self._model_override = model
         self._gate_override = gate
+        self.router = router or ModelRouter()  # stateless today; breakers make it shared later
 
     def resolve_model(self, context: ExecutionContext
                       ) -> tuple[BaseChatModel, TopicGate | None, str]:
-        """The model, the gate and the model's name for this run, from the context or the overrides.
+        """The pinned model, the gate and the model's name, from the router or the overrides.
 
-        (context, no overrides) -> (built model, TopicGate, context.model.name) ;
+        (context, no overrides) -> (the pinned candidate built, TopicGate on it, its name) ;
         (context, injected scripted model) -> (that model, None, its model_name or the context's)
         """
         # In real use the gate always runs. A test that injects a scripted model counts its calls,
-        # so it gets the gate only when it passes one.
+        # so it gets the gate only when it passes one. The run itself goes through `_attempts`,
+        # which also builds the cheap gate model and reruns on a fallback.
         injected = self._model_override is not None
-        model = self._model_override or make_model(context.model)
+        if injected:
+            model, name = self._model_override, context.model.name
+        else:
+            choice = self.router.pick(self.profile.model, context.model)
+            model, name = make_model(replace(context.model, name=choice.model)), choice.model
         gate = self._gate_override if self._gate_override is not None else (
             None if injected else TopicGate(model, self.profile.domain))
-        model_name = getattr(model, "model_name", None) or context.model.name
+        model_name = getattr(model, "model_name", None) or name
         return model, gate, model_name
 
     # ---- the run -----------------------------------------------------------------------------------
@@ -198,22 +200,62 @@ class GroundedAgent:
         if context.tenant != self.customer_code:
             raise ValueError(f"runtime for tenant {self.customer_code!r} given a context for "
                              f"{context.tenant!r}")
-        model, gate, model_name = self.resolve_model(context)
         # Step 2: The trace is created outside the deadline, so that a run that times out still
-        # carries every tool call and verdict it collected before it was stopped.
+        # carries every tool call and verdict it collected before it was stopped; `current` names
+        # the model of the attempt in progress for the timeout answer.
         trace = RunTrace()
+        current = {"model": context.model.name}
         # Step 3: The deadline wraps the gate and the loop together, so that a provider that hangs
         # can never hold a consumer slot or a request past the queue's visibility window.
         try:
             return await asyncio.wait_for(
-                self._run(context, request, prior_turns, model=model, gate=gate,
-                          model_name=model_name, trace=trace),
+                self._attempts(context, request, prior_turns, trace=trace, current=current),
                 timeout=context.seconds_left())
         except asyncio.TimeoutError:
             logger.warning("agent run timed out after %.0fs for %s: %s",
                            context.budgets.run_timeout_seconds, self.customer_code,
                            request.text[:200])
-            return self._timed_out(context, request, model_name, trace)
+            return self._timed_out(context, request, current["model"], trace)
+
+    async def _attempts(self, context: ExecutionContext, request: AgentRequest,
+                        prior_turns: Sequence[dict], *, trace: RunTrace,
+                        current: dict) -> AgentResult:
+        """The run on the pinned model, then once more on the next fallback when its provider fails.
+
+        (primary answers) -> its result ; (primary raises, fallback answers) -> the fallback's
+        result after one agent.fallback line ; (both raise) -> the second error
+        """
+        # Step 1: An injected model (tests) bypasses the router: one attempt, as always.
+        if self._model_override is not None:
+            model, gate, name = self.resolve_model(context)
+            current["model"] = name
+            return await self._run(context, request, prior_turns, model=model, gate=gate,
+                                   model_name=name, trace=trace)
+        # Step 2: Pin the first candidate that serves the profile; the gate's model is built once
+        # and shared by every attempt, so a fallback does not change who screens the question.
+        choice = self.router.pick(self.profile.model, context.model)
+        candidates = (choice.model, *choice.fallbacks)
+        gate_model = (None if choice.gate_model == choice.model
+                      else make_model(replace(context.model, name=choice.gate_model)))
+        for i, name in enumerate(candidates):
+            model = make_model(replace(context.model, name=name))
+            gate = (self._gate_override if self._gate_override is not None
+                    else TopicGate(gate_model or model, self.profile.domain))
+            current["model"] = name
+            try:
+                return await self._run(context, request, prior_turns, model=model, gate=gate,
+                                       model_name=getattr(model, "model_name", None) or name,
+                                       trace=trace)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                raise
+            except Exception as exc:  # noqa: BLE001 - provider failed; the next one gets one try
+                # Step 3: Rerun from the start on the next fallback, never mid-run, because
+                # switching providers inside a run would mix tool-call ids; only with time left.
+                if i == len(candidates) - 1 or context.seconds_left() <= 0:
+                    raise
+                logger.warning("agent.fallback from=%s to=%s error=%s: %s", name,
+                               candidates[i + 1], type(exc).__name__, str(exc)[:200])
+        raise AssertionError("unreachable: every candidate returned or raised")
 
     async def _run(self, context: ExecutionContext, request: AgentRequest,
                    prior_turns: Sequence[dict], *, model: BaseChatModel, gate: TopicGate | None,
