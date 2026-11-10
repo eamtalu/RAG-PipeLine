@@ -35,6 +35,7 @@ A later step that needs a new key (model policy, limits, memory) adds it to the 
 
 `tests/profile_snapshots/<name>.json` holds the five prose fields byte for byte as they were when the profile was created, and `tests/test_agent_profiles_chunk162.py` asserts equality.
 A prompt edit must update the snapshot in the same commit, so every change to what the model is told is a named, reviewed diff of two files.
+The golden questions (`tests/golden/<name>.yaml`, `docs/ci-and-golden-questions.md`) are the second layer: what the agent does per question, run in CI with the scripted model and nightly against the real model.
 
 ## Versions on the trace
 

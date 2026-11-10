@@ -8,96 +8,47 @@ readable problem rather than a crash.
 """
 
 import json
-import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from sqlalchemy import delete
 
-from app.api.v1 import analytics as api
 from app.api.v1 import analytics_agent as agent_api
 from app.config.database import async_session
-from app.persistence.models.analytics_fact import AnalyticsFact
-from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
-from app.persistence.models.analytics_lookup import AnalyticsLookup, AnalyticsLookupValue
-from app.persistence.models.analytics_settlement import AnalyticsSettledRow, AnalyticsSettlement
 from app.persistence.models.customer import Customer
 from app.services.analytics_agent import tools as agent_tools
 from app.agent.runtime import grounded
 from app.agent.runtime.grounded import GroundedAgent, tool_trace
 from tests.agent_helpers import analytics_runtime, ask
+from tests.golden import plant
 from app.settings import settings
 
 CC = "test_chunk124"
-T0 = datetime(2026, 9, 18, 5, 44, 42, tzinfo=timezone.utc)
-
-BODY = {
-    "name": "pick_release", "description": "one row per release", "reads": ["ConfirmPickLine"], "key": ["attr:ReportingNumber"],
-    "carry": ["delivery_number", "item_number", "attr:OrderLine", "user_name", "transaction_name"],
-    "values": [
-        {"name": "expected", "rule": "first", "field": "attr:ExpectedQuantity"},
-        {"name": "picked", "rule": "sum", "field": "attr:QuantityPicked", "statuses": ["success"]},
-        {"name": "calls", "rule": "count"},
-        {"name": "refused", "rule": "count", "statuses": ["error"]},
-        {"name": "shortfall", "rule": "difference", "left": "picked", "right": "expected"},
-        {"name": "is_short", "rule": "flag", "left": "shortfall", "op": "<", "right_value": "0"},
-    ],
-}
+T0 = plant.T0
+BODY = plant.BODY
 
 
 async def _wipe():
-    async with async_session() as db:
-        for model in (AnalyticsSettledRow, AnalyticsSettlement, AnalyticsLookupValue, AnalyticsLookup,
-                      AnalyticsFieldRegistry, AnalyticsFact):
-            await db.execute(delete(model).where(model.customer_code == CC))
-        await db.execute(delete(Customer).where(Customer.customer_code == CC))
-        await db.commit()
+    await plant.wipe_analytics(CC)
 
 
 @pytest.fixture(autouse=True)
 async def clean():
-    await _wipe()
-    async with async_session() as db:
-        db.add(Customer(customer_code=CC, name="agent probe", timezone="Europe/London"))
-        for f in ("ReportingNumber", "ExpectedQuantity", "QuantityPicked", "OrderLine"):
-            db.add(AnalyticsFieldRegistry(customer_code=CC, method="ConfirmPickLine", source="request", field=f, captured=True,
-                                          seen_count=9))
-        await db.commit()
+    await plant.wipe_analytics(CC)
+    await plant.register_analytics_tenant(CC)
     yield
-    await _wipe()
-
-
-def _fact(minutes, expected, picked, *, rep="540551", status="success", delivery="27907", item="104568",
-          user="FNACHONLEO"):
-    when = T0 + timedelta(minutes=minutes)
-    return AnalyticsFact(
-        id=uuid.uuid4(), customer_code=CC, source_transaction_id=uuid.uuid4(), source_started_at=when,
-        source_version_hash=uuid.uuid4().hex[:8], revision=1, event_time=when, business_date=when.date(),
-        transaction_name="JIT and Shorts Pick (Brighton)", method="ConfirmPickLine", status=status,
-        quantity_classification="pick" if picked > 0 else "attempt",
-        warehouse="BRI", delivery_number=delivery, item_number=item, lot_number="2609161191", user_name=user,
-        attributes={"ReportingNumber": rep, "ExpectedQuantity": str(expected), "QuantityPicked": str(picked),
-                    "OrderLine": "21"}, created_at=when)
+    await plant.wipe_analytics(CC)
 
 
 async def _plant():
     """Release 540551 (nine calls, one accepted), a clean release, and two short ones on another item."""
-    facts = [_fact(0, 10, 9)] + [_fact(7 + i, 1, 1, status="error") for i in range(8)]
-    facts += [_fact(30, 4, 4, rep="A1", item="100606", user="DBOBOC"),
-              _fact(40, 7, 4, rep="B1", delivery="25810", item="100230", user="DBOBOC"),
-              _fact(50, 7, 0, rep="B2", delivery="25810", item="100230", user="DBOBOC")]
-    async with async_session() as db:
-        for f in facts:
-            db.add(f)
-        await db.commit()
-        await api.create_settlement(body=BODY, backfill=True, customer=CC, db=db)
+    await plant.plant_analytics_facts(CC)
 
 
 def _window():
-    return {"start": (T0 - timedelta(hours=1)).isoformat(), "end": (T0 + timedelta(hours=2)).isoformat()}
+    return plant.window()
 
 
 # ==================================================== 1. the release tools
