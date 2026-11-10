@@ -35,7 +35,7 @@ def tool_registry(session_factory=async_session) -> ToolRegistry:
 
 
 def analytics_runtime(
-    cc: str, *, session_factory=async_session, model=None, gate=None
+    cc: str, *, session_factory=async_session, model=None, gate=None, router=None
 ) -> GroundedAgent:
     """The analytics profile on a registry over the given session factory, with overrides."""
     return GroundedAgent(
@@ -44,11 +44,12 @@ def analytics_runtime(
         registry=tool_registry(session_factory),
         model=model,
         gate=gate,
+        router=router,
     )
 
 
 def logspace_runtime(
-    cc: str, *, session_factory=async_session, model=None, gate=None
+    cc: str, *, session_factory=async_session, model=None, gate=None, router=None
 ) -> GroundedAgent:
     """The logspace profile on a registry over the given session factory, with overrides."""
     return GroundedAgent(
@@ -57,6 +58,7 @@ def logspace_runtime(
         registry=tool_registry(session_factory),
         model=model,
         gate=gate,
+        router=router,
     )
 
 

@@ -45,10 +45,28 @@ The gate's model is built once per run and shared by every attempt, so a fallbac
 
 A test model injected into `GroundedAgent(model=...)` bypasses the router, as every existing test relies on.
 
+## The provider guards (step 18)
+
+Since step 18 every model call of a run, the gate's and the loop's, goes through a guard owned per provider (`ollama`, `bedrock`, `anthropic`, `openai`) and shared by every run of the process: the router is one object per process (`app/teams_consumer.py` `_ROUTER`, `app/api/deps.py` `model_router()`) and holds the guards in its `ProviderHealth`.
+The wrap is `GuardedChatModel` (`app/agent/router/guarded.py`): LangChain's agent loop requires a `BaseChatModel` and calls `bind_tools` then `ainvoke`, so the bound runnable is wrapped too; the sync path delegates unguarded because the agent only runs async.
+
+| guard | rule | setting (default) |
+| --- | --- | --- |
+| call timeout | each call runs under `asyncio.wait_for`; a call that hangs is cancelled and raises `ModelCallTimeout`, a plain exception the step 17 rerun treats as a provider failure while the run deadline still bounds the whole run | `ANALYTICS_AGENT_CALL_TIMEOUT_SECONDS` (60, under the 120 s run deadline) |
+| retry | only a throttled call (HTTP 429, Bedrock `ThrottlingException`, a `RateLimit...` error) is tried once more, after half a second plus a jitter of up to one second; a server error, a timeout and anything else go straight to the rerun on the next candidate | none |
+| breaker | every failed call counts and a success resets; after the threshold of consecutive failures the provider is open for the cool-down and `pick` skips it (`agent.router.skipped why=breaker open`); after the cool-down one call probes it, a success closes the breaker and a failure reopens it | `ANALYTICS_AGENT_BREAKER_FAILURES` (3), `ANALYTICS_AGENT_BREAKER_COOLDOWN_SECONDS` (30) |
+| bulkhead | calls in flight per provider per process; a full bulkhead skips the provider at pick (`why=bulkhead full`) and makes a call already pinned wait for a slot within its call timeout | `ANALYTICS_AGENT_PROVIDER_BULKHEAD` (8) |
+
+The numbers travel in the snapshot (`RunBudgets.call_timeout_seconds`, `RunSettings.resilience`), never in a settings read inside a run.
+The guard is a counter rather than an `asyncio.Semaphore`, because a semaphore binds to the first event loop that uses it and the test suite runs one loop per test; the loop is single-threaded, so a counter changed between awaits is race-free.
+`classify` (`app/agent/router/failures.py`) reads the HTTP status on the exception or its response, botocore's error code, and failing those the class name.
+Log lines: `agent.model.retry provider= wait=`, `agent.model.failed provider= kind= error=`, `agent.breaker provider= state=`.
+`tests/test_agent_provider_resilience_chunk168.py` holds the documented result of a timeout, a 429 and a 500 with fake providers and an injected clock.
+
 ## Fake-provider tests
 
 `tests/test_agent_model_router_chunk167.py`: the primary raises a server error and the fallback answers; a failure after a tool call reruns from the start; both failing propagates the second error; no fallback propagates the first; a hanging primary gives the timeout answer; the gate runs on the cheap model and the loop on the primary.
 
 ## What later steps add
 
-Retry on throttling, breakers and bulkheads per provider (18); per-attempt accounting and provider-aware failure sentences (19); per-model context sizes and an embeddings model in the policy when something embeds.
+Per-attempt accounting and provider-aware failure sentences (19); the capacity table (20); per-model context sizes and an embeddings model in the policy when something embeds; breakers on the connectors' side.

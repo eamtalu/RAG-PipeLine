@@ -179,7 +179,7 @@ class GroundedAgent:
         if injected:
             model, name = self._model_override, context.model.name
         else:
-            choice = self.router.pick(self.profile.model, context.model)
+            choice = self.router.pick(self.profile.model, context.model, context.resilience)
             model, name = make_model(replace(context.model, name=choice.model)), choice.model
         gate = self._gate_override if self._gate_override is not None else (
             None if injected else TopicGate(model, self.profile.domain))
@@ -233,19 +233,22 @@ class GroundedAgent:
                                    model_name=name, trace=trace)
         # Step 2: Pin the first candidate that serves the profile; the gate's model is built once
         # and shared by every attempt, so a fallback does not change who screens the question.
-        choice = self.router.pick(self.profile.model, context.model)
+        choice = self.router.pick(self.profile.model, context.model, context.resilience)
         candidates = (choice.model, *choice.fallbacks)
         gate_model = (None if choice.gate_model == choice.model
-                      else make_model(replace(context.model, name=choice.gate_model)))
+                      else self._guarded(make_model(replace(context.model, name=choice.gate_model)),
+                                         choice.gate_model, context))
         for i, name in enumerate(candidates):
-            model = make_model(replace(context.model, name=name))
+            built = make_model(replace(context.model, name=name))
+            model_name = getattr(built, "model_name", None) or name
+            # every call of the run, the gate's and the loop's, goes through the provider's guard
+            model = self._guarded(built, name, context)
             gate = (self._gate_override if self._gate_override is not None
                     else TopicGate(gate_model or model, self.profile.domain))
             current["model"] = name
             try:
                 return await self._run(context, request, prior_turns, model=model, gate=gate,
-                                       model_name=getattr(model, "model_name", None) or name,
-                                       trace=trace)
+                                       model_name=model_name, trace=trace)
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 raise
             except Exception as exc:  # noqa: BLE001 - provider failed; the next one gets one try
@@ -256,6 +259,10 @@ class GroundedAgent:
                 logger.warning("agent.fallback from=%s to=%s error=%s: %s", name,
                                candidates[i + 1], type(exc).__name__, str(exc)[:200])
         raise AssertionError("unreachable: every candidate returned or raised")
+
+    def _guarded(self, model: BaseChatModel, name: str, context: ExecutionContext) -> BaseChatModel:
+        return self.router.guarded(model, name, resilience=context.resilience,
+                                   timeout_seconds=context.budgets.call_timeout_seconds)
 
     async def _run(self, context: ExecutionContext, request: AgentRequest,
                    prior_turns: Sequence[dict], *, model: BaseChatModel, gate: TopicGate | None,

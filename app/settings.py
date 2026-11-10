@@ -463,6 +463,12 @@ class Settings(BaseSettings):
     # a cheaper model for the topic gate when a profile allows one. Empty = none / the primary.
     analytics_agent_fallback_models: str = ""      # comma-separated model strings
     analytics_agent_gate_model: str = ""
+    # The provider guards (step 18): one model call's timeout, calls in flight per provider per
+    # process, consecutive failures that open the breaker, and how long it stays open.
+    analytics_agent_call_timeout_seconds: float = 60.0
+    analytics_agent_provider_bulkhead: int = 8
+    analytics_agent_breaker_failures: int = 3
+    analytics_agent_breaker_cooldown_seconds: float = 30.0
 
     # --- Microsoft Teams bot (edge on AWS -> SQS -> consumer here -> HTTP answer back to the edge) ---
     # The consumer is its OWN process (`python -m app.teams_consumer`), not one of the singleton

@@ -9,6 +9,7 @@ from app.agent.contracts import (
     AgentRequest,
     ExecutionContext,
     ModelSettings,
+    ResilienceSettings,
     RunBudgets,
     RunSettings,
 )
@@ -36,8 +37,14 @@ def snapshot_settings() -> RunSettings:
         budgets=RunBudgets(
             max_iterations=settings.analytics_agent_max_iterations,
             run_timeout_seconds=float(settings.analytics_agent_run_timeout_seconds),
+            call_timeout_seconds=float(settings.analytics_agent_call_timeout_seconds),
         ),
         public_base_url=(settings.app_public_base_url or "").rstrip("/"),
+        resilience=ResilienceSettings(
+            bulkhead=settings.analytics_agent_provider_bulkhead,
+            breaker_failures=settings.analytics_agent_breaker_failures,
+            breaker_cooldown_seconds=float(settings.analytics_agent_breaker_cooldown_seconds),
+        ),
     )
 
 
@@ -76,4 +83,5 @@ def build_context(
         # analytics frame has always used the server date, and the logspace channel passes its own.
         tz_name=request.tz_name,
         today=request.today or date.today(),
+        resilience=run_settings.resilience,
     )

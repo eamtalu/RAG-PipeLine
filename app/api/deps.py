@@ -20,6 +20,7 @@ from fastapi import Depends, Header, HTTPException
 from functools import cache
 
 from app.agent.capabilities.registry import ToolRegistry
+from app.agent.router.router import ModelRouter
 from app.api.service_auth import require_admin_caller
 
 from app.persistence.repositories.customer_repository import CustomerRepository, get_customer_repository
@@ -35,6 +36,12 @@ from app.services.mnp_log_ingestion.timefmt import set_display_timezone
 def tool_registry() -> ToolRegistry:
     """The API process's tool registry: every namespace, built once; profiles pick from it."""
     return ToolRegistry([logs_namespace(), analytics_namespace(), logspace_namespace()])
+
+
+@cache
+def model_router() -> ModelRouter:
+    """The API process's router: the providers' breakers and bulkheads, shared by every run."""
+    return ModelRouter()
 
 
 @cache

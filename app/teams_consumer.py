@@ -17,6 +17,7 @@ from app.agent.contracts import AgentRequest, ConversationType, Principal
 from app.agent.capabilities.registry import ToolRegistry
 from app.agent.gateway import run_request
 from app.agent.profiles import load_profile
+from app.agent.router.router import ModelRouter
 from app.agent.runtime.grounded import GroundedAgent
 from app.background import setup_logging
 from app.config.database import async_session, engine
@@ -48,6 +49,8 @@ _REGISTRY = ToolRegistry([logs_namespace(), analytics_namespace(), logspace_name
 _TRACES = PostgresTraceStore(async_session)
 # Admission before any model call: shared counters every consumer and web process changes.
 _ADMISSION = PostgresAdmission(async_session, QuotaLimits.from_settings())
+# One router per process: it holds the providers' breakers and bulkheads for every run here.
+_ROUTER = ModelRouter()
 
 
 def _conversation_type(source: str) -> ConversationType:
@@ -74,7 +77,7 @@ async def _run_agent(job: QuestionJob, history: list[dict]) -> dict:
         conversation_type=_conversation_type(job.source))
     # Step 2: Name the profile; it lists its namespaces, and the registry binds their tools.
     runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),
-                            registry=_REGISTRY)
+                            registry=_REGISTRY, router=_ROUTER)
     result = await run_request(request, runtime=runtime, prior_turns=tuple(history),
                                trace_store=_TRACES, admission=_ADMISSION)
     return result.to_legacy_dict()

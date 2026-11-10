@@ -15,7 +15,13 @@ from app.agent.contracts import AgentRequest, Principal
 from app.agent.gateway import run_request, snapshot_settings
 from app.agent.profiles import load_profile
 from app.agent.runtime.grounded import GroundedAgent
-from app.api.deps import admission, get_current_customer, tool_registry, trace_store
+from app.api.deps import (
+    admission,
+    get_current_customer,
+    model_router,
+    tool_registry,
+    trace_store,
+)
 from app.api.service_auth import ANONYMOUS, current_caller
 from app.config.database import get_session
 
@@ -41,7 +47,9 @@ class AskRequest(BaseModel):
 
 def _runtime(customer: str) -> GroundedAgent:
     """The analytics profile on this process's registry; the profile lists its namespaces."""
-    return GroundedAgent(customer, profile=load_profile("analytics"), registry=tool_registry())
+    return GroundedAgent(
+        customer, profile=load_profile("analytics"), registry=tool_registry(), router=model_router()
+    )
 
 
 def _principal(customer: str) -> Principal:

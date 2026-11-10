@@ -86,6 +86,16 @@ class ModelSettings:
 class RunBudgets:
     max_iterations: int
     run_timeout_seconds: float
+    call_timeout_seconds: float = 60.0  # one model call; the run deadline covers them all
+
+
+@dataclass(frozen=True, slots=True)
+class ResilienceSettings:
+    """The numbers of a provider's guard: calls in flight, failures to open, cool-down."""
+
+    bulkhead: int = 8
+    breaker_failures: int = 3
+    breaker_cooldown_seconds: float = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +105,7 @@ class RunSettings:
     model: ModelSettings
     budgets: RunBudgets
     public_base_url: str
+    resilience: ResilienceSettings = ResilienceSettings()
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +126,7 @@ class ExecutionContext:
     public_base_url: str
     tz_name: str | None = None
     today: date = date.today()  # the builder always sets it; the default keeps the field optional
+    resilience: ResilienceSettings = ResilienceSettings()
 
     def seconds_left(self, now: datetime | None = None) -> float:
         """How long the run may still take, never negative.

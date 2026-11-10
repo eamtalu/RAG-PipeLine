@@ -13,7 +13,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from app.agent.contracts import ModelSettings
+from langchain_core.language_models import BaseChatModel
+
+from app.agent.contracts import ModelSettings, ResilienceSettings
+from app.agent.router.guarded import GuardedChatModel
+from app.agent.router.health import ProviderHealth
 from app.agent.router.policy import ModelNeeds, ModelPolicy
 from app.agent.router.providers import adapter_for
 
@@ -30,9 +34,18 @@ class ModelChoice:
 
 
 class ModelRouter:
-    """Stateless today; breakers and bulkheads make it a process-wide object later."""
+    """One per process: it owns the providers' guards (breakers, bulkheads), so every run of
+    the process sees the same health."""
 
-    def pick(self, policy: ModelPolicy, settings: ModelSettings) -> ModelChoice:
+    def __init__(self, health: ProviderHealth | None = None):
+        self.health = health or ProviderHealth()
+
+    def pick(
+        self,
+        policy: ModelPolicy,
+        settings: ModelSettings,
+        resilience: ResilienceSettings | None = None,
+    ) -> ModelChoice:
         """The choice for one run, or a ValueError naming the needs no candidate can serve.
 
         (needs tools+16000, primary ollama with num_ctx 16384, fallback bedrock)
@@ -40,9 +53,11 @@ class ModelRouter:
         (primary "nope:x") -> the fallback pinned, one skipped line
         """
         candidates = (settings.name, *settings.fallback_models)
-        # Step 1: Keep only the candidates that can serve the profile, because a model that
-        # cannot call tools or hold the schemas fails at the first question, not at pick time.
-        usable = [c for c in candidates if self._serves(c, policy.needs, settings)]
+        resilience = resilience or ResilienceSettings()
+        # Step 1: Keep only the candidates that can serve the profile and are healthy, because
+        # a model that cannot call tools, is behind an open breaker or has no slot free would
+        # fail or wait at the first question, not at pick time.
+        usable = [c for c in candidates if self._serves(c, policy.needs, settings, resilience)]
         if not usable:
             raise ValueError(
                 f"no model can serve the profile's needs {policy.needs}; "
@@ -57,8 +72,27 @@ class ModelRouter:
         )
         return ModelChoice(model=usable[0], fallbacks=tuple(usable[1:]), gate_model=gate_model)
 
-    @staticmethod
-    def _serves(candidate: str, needs: ModelNeeds, settings: ModelSettings) -> bool:
+    def guarded(
+        self,
+        model: BaseChatModel,
+        name: str,
+        *,
+        timeout_seconds: float,
+        resilience: ResilienceSettings,
+    ) -> GuardedChatModel:
+        """The built model behind its provider's guard, for every call of the run."""
+        adapter = adapter_for(name)
+        provider = adapter.name if adapter is not None else name.partition(":")[0]
+        guard = self.health.guard_for(provider, resilience)
+        return GuardedChatModel(inner=model, guard=guard, timeout_seconds=timeout_seconds)
+
+    def _serves(
+        self,
+        candidate: str,
+        needs: ModelNeeds,
+        settings: ModelSettings,
+        resilience: ResilienceSettings,
+    ) -> bool:
         adapter = adapter_for(candidate)
         why = None
         if adapter is None:
@@ -70,6 +104,8 @@ class ModelRouter:
                 f"its context of {adapter.context_tokens(settings)} tokens is below the "
                 f"{needs.context_tokens} the profile needs"
             )
+        else:
+            why = self.health.guard_for(adapter.name, resilience).availability()
         if why is not None:
             logger.warning("agent.router.skipped model=%s why=%s", candidate, why)
             return False
