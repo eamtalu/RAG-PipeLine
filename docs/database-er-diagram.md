@@ -85,6 +85,8 @@ erDiagram
     customers ||..o{ teams_conversation_turns : "soft"
     customers ||..o{ agent_runs : "soft"
     customers ||..o{ agent_traces : "soft"
+    customers ||..o{ quota_windows : "soft"
+    customers ||..o{ agent_in_flight : "soft"
     customers ||..o{ tenant_secrets : "soft"
 
     customers ||..o{ jobs : "tenant key (soft)"
@@ -1357,6 +1359,8 @@ A row still `running` means another consumer has the question (unless `claimed_a
 `agent_traces` is what each run did, for audit and troubleshooting: the gateway stores one row per run from every channel (Teams and both web ask endpoints) after the answer exists.
 It holds the question and answer, every tool call with arguments, result, timing and outcome, every guard verdict, the model usage, the profile and code versions, and the error when the run raised; secrets are redacted and results capped before the row is built.
 A run retried after a stale claim gets its own `trace_id`; `request_id` ties the attempts together.
+`quota_windows` and `agent_in_flight` are the gateway's admission counters, shared by every consumer and web process: one `quota_windows` row per tenant and hour (`user_id` empty) and one per person and hour, and one `agent_in_flight` row per admitted run until it is released.
+Every admission for a tenant runs under one Postgres advisory lock, sweeps the tenant's expired in-flight rows (by `deadline_at`) and day-old hourly rows, then decides; a refusal writes nothing.
 
 ```mermaid
 erDiagram
@@ -1429,10 +1433,25 @@ erDiagram
         text error "Type: message when the run raised"
     }
 
+    quota_windows {
+        string customer_code PK "soft tenant key"
+        string user_id PK "empty = the whole tenant; else the person"
+        datetime window_start PK "the hour, UTC"
+        int used "runs admitted in the hour"
+    }
+
+    agent_in_flight {
+        string trace_id PK
+        string customer_code "soft tenant key; indexed with deadline_at"
+        datetime deadline_at "the run's deadline; swept once passed"
+    }
+
     customers ||--o{ teams_tenant_bindings : "is answered from"
     customers ||..o{ teams_conversation_turns : "tenant of"
     customers ||..o{ agent_runs : "tenant of"
     customers ||..o{ agent_traces : "tenant of"
+    customers ||..o{ quota_windows : "tenant of"
+    customers ||..o{ agent_in_flight : "tenant of"
 ```
 
 ## Subsystem 10: Tenant secrets
@@ -1492,7 +1511,7 @@ The nine `analytics_*` tables add **no rows to this table**. They have no enforc
 
 | Logical parent | Referencing column | Meaning |
 | --- | --- | --- |
-| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, agent_runs, agent_traces, tenant_secrets, the notification tables, and every `analytics_*` table including the ML and forecast ones | tenant partition key |
+| `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, agent_runs, agent_traces, quota_windows, agent_in_flight, tenant_secrets, the notification tables, and every `analytics_*` table including the ML and forecast ones | tenant partition key |
 | `analytics_metrics.id` | `definition_id` on the three rollup tables | which definition a rollup row belongs to; no FK because a FK from a partitioned child made the log partitions undroppable once already |
 | `analytics_feature_sets.id` | `analytics_predictions.feature_set_id` | which training set the model behind a prediction was built from; nullable |
 | `analytics_forecast_runs.id` | `analytics_predictions.run_id`, `analytics_forecast_series.last_run_id` | which forecast pass wrote the row; nullable, no FK |

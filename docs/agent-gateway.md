@@ -22,6 +22,7 @@ Nothing a person sees changed in this step.
 `run_request` snapshots when the channel did not, builds the context, binds the request id and tenant into the log context, runs the runtime, writes one `agent.run` line (request id, trace id, both versions, status, tokens, seconds) and hands the run's redacted trace row to the `TraceStore` the channel passed, if any.
 The trace id is fresh per run (`uuid4().hex`), not the request id, because a request retried after a stale claim must keep both runs; the row carries the request id beside it.
 A store that fails is logged as `agent.trace_store_failed` and never changes the answer; a runtime that raises leaves an error row and the error reaches the channel as before.
+Before the runtime runs, `run_request` admits the run through the `Admission` port when the channel passed one (`docs/agent-quotas.md`): a refusal is a declined result with a plain sentence and a trace row, and an admitted run releases its slot in a `finally`.
 
 The runtime (`GroundedAgent.run`) refuses a context for another tenant, resolves the model and the topic gate from the context, keeps the deadline with `asyncio.wait_for` from `context.seconds_left()`, and returns an `AgentResult`.
 A test replaces the settings object in every agent module with one that raises on any read and runs a question through both agents and all three adapters: nothing inside a run reads settings.
@@ -41,4 +42,4 @@ A test replaces the settings object in every agent module with one that raises o
 
 ## What the next steps add
 
-golden questions (15), admission and quotas in the gateway (16), the model router (17).
+the model router (17), then stage C's resilience steps.

@@ -473,6 +473,12 @@ class Settings(BaseSettings):
     teams_sqs_visibility_seconds: int = 600       # must exceed the slowest agent run; extended while running
     teams_sqs_wait_seconds: int = 20              # long-poll wait (SQS max)
     teams_history_turns: int = 6                  # prior turns replayed to the agent (3 exchanges)
+    # --- Agent admission (step 16): shared counters in Postgres, enforced by the gateway for every
+    # channel. The hourly numbers equal the Teams edge's, which refuses first for Teams; the web
+    # has only these. Per-tenant overrides come with the tenant knowledge table.
+    agent_quota_tenant_per_hour: int = 60         # questions per tenant per hour
+    agent_quota_user_per_hour: int = 20           # questions per person per hour
+    agent_quota_tenant_in_flight: int = 8         # runs live at once per tenant, all processes
     teams_binding_mirror_sweep_seconds: float = 60.0  # how often the consumer re-pushes stale bindings
     teams_home_snapshot_seconds: float = 60.0     # how often the consumer rewrites the Teams tab's Home snapshot
 

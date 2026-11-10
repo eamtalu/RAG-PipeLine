@@ -56,6 +56,8 @@ from app.persistence.models.teams_binding import TeamsTenantBinding
 from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
 from app.persistence.models.agent_run import AgentRun
 from app.persistence.models.agent_trace import AgentTrace
+from app.persistence.models.agent_in_flight import AgentInFlight
+from app.persistence.models.quota_window import QuotaWindow
 from app.persistence.models.tenant_secret import TenantSecret
 
 __all__ = [
@@ -121,5 +123,7 @@ __all__ = [
     "TeamsConversationTurn",
     "AgentRun",
     "AgentTrace",
+    "AgentInFlight",
+    "QuotaWindow",
     "TenantSecret",
 ]

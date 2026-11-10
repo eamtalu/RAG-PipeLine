@@ -7,7 +7,14 @@ store join here in later steps of docs/esmart-agent-execution-plan.md.
 """
 
 from app.agent.gateway.context import build_context, snapshot_settings
-from app.agent.gateway.ports import AgentRuntime, TraceStore
+from app.agent.gateway.ports import Admission, AgentRuntime, TraceStore
 from app.agent.gateway.run import run_request
 
-__all__ = ["AgentRuntime", "TraceStore", "build_context", "run_request", "snapshot_settings"]
+__all__ = [
+    "Admission",
+    "AgentRuntime",
+    "TraceStore",
+    "build_context",
+    "run_request",
+    "snapshot_settings",
+]

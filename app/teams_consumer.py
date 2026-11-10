@@ -24,6 +24,7 @@ from app.persistence.repositories.customer_repository import CustomerRepository
 from app.persistence.repositories.teams_repository import TeamsBindingRepository
 from app.services.agent_runs import claims
 from app.services.agent_runs.claims import Claim
+from app.services.agent_quotas.admission import PostgresAdmission, QuotaLimits
 from app.services.agent_traces.store import PostgresTraceStore
 from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
 from app.services.logspace_agent.namespaces import logspace_namespace
@@ -45,6 +46,8 @@ logger = logging.getLogger(__name__)
 _REGISTRY = ToolRegistry([logs_namespace(), analytics_namespace(), logspace_namespace()])
 # Where the gateway stores each run's redacted trace (agent_traces), in its own short session.
 _TRACES = PostgresTraceStore(async_session)
+# Admission before any model call: shared counters every consumer and web process changes.
+_ADMISSION = PostgresAdmission(async_session, QuotaLimits.from_settings())
 
 
 def _conversation_type(source: str) -> ConversationType:
@@ -73,7 +76,7 @@ async def _run_agent(job: QuestionJob, history: list[dict]) -> dict:
     runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),
                             registry=_REGISTRY)
     result = await run_request(request, runtime=runtime, prior_turns=tuple(history),
-                               trace_store=_TRACES)
+                               trace_store=_TRACES, admission=_ADMISSION)
     return result.to_legacy_dict()
 
 

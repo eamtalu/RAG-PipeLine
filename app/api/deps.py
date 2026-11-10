@@ -24,6 +24,7 @@ from app.api.service_auth import require_admin_caller
 
 from app.persistence.repositories.customer_repository import CustomerRepository, get_customer_repository
 from app.config.database import async_session
+from app.services.agent_quotas.admission import PostgresAdmission, QuotaLimits
 from app.services.agent_traces.store import PostgresTraceStore
 from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
 from app.services.logspace_agent.namespaces import logspace_namespace
@@ -40,6 +41,12 @@ def tool_registry() -> ToolRegistry:
 def trace_store() -> PostgresTraceStore:
     """Where the gateway stores each run's redacted trace; one per process, own sessions."""
     return PostgresTraceStore(async_session)
+
+
+@cache
+def admission() -> PostgresAdmission:
+    """The gateway's admission for this process: the shared counters, the settings' limits."""
+    return PostgresAdmission(async_session, QuotaLimits.from_settings())
 
 # customer codes are slugs: lowercase letters, digits, hyphen/underscore, 1–64 chars.
 _CUSTOMER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")

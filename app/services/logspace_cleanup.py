@@ -68,6 +68,8 @@ from app.persistence.models.notification import (
 )
 from app.persistence.models.agent_run import AgentRun
 from app.persistence.models.agent_trace import AgentTrace
+from app.persistence.models.agent_in_flight import AgentInFlight
+from app.persistence.models.quota_window import QuotaWindow
 from app.persistence.models.tenant_secret import TenantSecret
 
 logger = logging.getLogger(__name__)
@@ -187,6 +189,8 @@ async def purge_logspace(db: AsyncSession, customer_code: str) -> bool:
     await db.execute(delete(TenantSecret).where(TenantSecret.customer_code == customer_code))
     await db.execute(delete(AgentRun).where(AgentRun.customer_code == customer_code))
     await db.execute(delete(AgentTrace).where(AgentTrace.customer_code == customer_code))
+    await db.execute(delete(AgentInFlight).where(AgentInFlight.customer_code == customer_code))
+    await db.execute(delete(QuotaWindow).where(QuotaWindow.customer_code == customer_code))
 
     # 4) The tenant row → cascades customer_display_names + logspace_presence.
     await db.execute(delete(Customer).where(Customer.customer_code == customer_code))

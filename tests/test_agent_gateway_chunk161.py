@@ -324,9 +324,11 @@ def _job(**over) -> QuestionJob:
 async def test_the_consumer_adapter_builds_the_request_from_the_job(monkeypatch):
     seen = {}
 
-    async def spy(request, *, runtime, prior_turns=(), run_settings=None, trace_store=None):
+    async def spy(request, *, runtime, prior_turns=(), run_settings=None, trace_store=None,
+              admission=None):
         seen.update(request=request, runtime=runtime, prior_turns=prior_turns)
         assert trace_store is not None  # the consumer passes its trace store (step 14)
+        assert admission is not None  # and its admission (step 16)
         return AgentResult(answer="ok", stop_reason="end_turn", model="m")
 
     monkeypatch.setattr(teams_consumer, "run_request", spy)
@@ -370,9 +372,11 @@ async def test_the_web_adapters_build_a_service_principal_with_the_bound_request
 ):
     seen = []
 
-    async def spy(request, *, runtime, prior_turns=(), run_settings=None, trace_store=None):
+    async def spy(request, *, runtime, prior_turns=(), run_settings=None, trace_store=None,
+              admission=None):
         seen.append(request)
         assert trace_store is not None  # both endpoints pass the trace store (step 14)
+        assert admission is not None  # and the admission (step 16)
         return AgentResult(answer="ok", stop_reason="end_turn", model="m")
 
     monkeypatch.setattr(agent_api, "run_request", spy)

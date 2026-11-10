@@ -61,6 +61,7 @@ Then the API is unreachable from the LAN and the token is the second lock.
 Step 12 removed the `TEAMS_AGENT` and `LOG_AGENT_*` settings; the settings class refuses unknown dotenv keys, so before the restart check `grep -nE '^(TEAMS_AGENT|LOG_AGENT_)' /opt/RAG-Pipeline/RAG-PipeLine/.env` prints nothing and delete any line it prints.
 `ANTHROPIC_API_KEY` may stay.
 Step 14 adds the `agent_traces` table (migration `a7c3e9d41b02`); `deploy.sh` runs `alembic upgrade head`, so after the restart `PGPASSWORD=rag psql -h localhost -U rag -d rag -c '\d agent_traces'` must list the table, and the first question from Teams or the web must leave one row in it.
+Step 16 adds `quota_windows` and `agent_in_flight` (migration `b8d4f0a52c17`); the limits default to 60 questions per tenant and 20 per person an hour and 8 runs in flight, overridable with `AGENT_QUOTA_TENANT_PER_HOUR`, `AGENT_QUOTA_USER_PER_HOUR` and `AGENT_QUOTA_TENANT_IN_FLIGHT` in `.env` (docs/agent-quotas.md).
 
 ## Rollback
 
