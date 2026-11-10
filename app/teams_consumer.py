@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 
 import boto3
 
+from app.agent.contracts import AgentRequest, ConversationType, Principal
+from app.agent.gateway import run_request
 from app.background import setup_logging
 from app.config.database import async_session, engine
 from app.persistence.repositories.customer_repository import CustomerRepository
@@ -34,14 +36,37 @@ from app.settings import settings
 logger = logging.getLogger(__name__)
 
 
-async def _run_agent(customer_code: str, question: str, history: list[dict]) -> dict:
-    """Which agent answers is one setting: the LangGraph one runs on any provider (Ollama, Claude,
-    OpenAI, Bedrock); the Claude one needs an Anthropic key. Same signature, same result shape."""
+def _conversation_type(source: str) -> ConversationType:
+    """The kind of conversation a job came from; both doors are one person today.
+
+    >>> _conversation_type("tab"), _conversation_type("bot")
+    ('personal', 'personal')
+    """
+    return "personal"  # "group" and "channel" arrive when the edge sends them (contract v3)
+
+
+async def _run_agent(job: QuestionJob, history: list[dict]) -> dict:
+    """One Teams question answered under a context built from the job; the legacy result dict.
+
+    (job for acme by u-7, earlier turns) -> {"answer", "stop_reason", "tool_calls", ...}
+    """
+    # Step 1: The legacy Claude agent is not a runtime: it keeps one session and reads its own
+    # settings; it stays selectable until step 12 retires it, otherwise TEAMS_AGENT would
+    # silently change meaning.
     if settings.teams_agent == "claude":
-        # The Claude agent still holds one session for its run; it changes with the query model.
         async with async_session() as db:
-            return await LogDebugAgent(db, customer_code).ask(question, history=history)
-    return await AnalyticsAgent(customer_code).ask(question, history=history)
+            return await LogDebugAgent(db, job.customer_code).ask(job.question, history=history)
+    # Step 2: Build the request from the job, so that who asked and where is fixed before any
+    # model runs; the gateway builds the context and the runtime never reads settings.
+    request = AgentRequest(
+        request_id=job.job_id, tenant=job.customer_code,
+        principal=Principal(tenant=job.customer_code, object_id=job.sender_object_id,
+                            display_name=job.sender_name),
+        profile="analytics", text=job.question, conversation_id=job.conversation_id,
+        conversation_type=_conversation_type(job.source))
+    result = await run_request(request, runtime=AnalyticsAgent(job.customer_code),
+                               prior_turns=tuple(history))
+    return result.to_legacy_dict()
 
 
 async def _load_history(conversation_id: str, customer_code: str) -> list[dict]:

@@ -61,9 +61,10 @@ async def _seed(db, cc):
     await db.flush()
 
 
-async def _run(db, cc, name, args, scope=None):
+async def _run(db, cc, name, args, scope=None, public_base_url=""):
     scope = scope or FeedScope(day=TODAY, explicit=False)
-    return json.loads(await run_logspace_tool(name, args, db, cc, scope=scope, tz_name=TZ, today=TODAY))
+    return json.loads(await run_logspace_tool(name, args, db, cc, scope=scope, tz_name=TZ,
+                                              today=TODAY, public_base_url=public_base_url))
 
 
 @pytest.fixture
@@ -100,8 +101,8 @@ async def test_overview_follows_the_feed_filter(db, cc):
 
 # ---- find_transactions ---------------------------------------------------------------------------
 async def test_find_by_delivery_returns_rows_with_quantities_and_links(db, cc, monkeypatch):
-    monkeypatch.setattr(settings, "app_public_base_url", "http://eye")
-    out = await _run(db, cc, "find_transactions", {"delivery_number": "D1", "order": "oldest"})
+    out = await _run(db, cc, "find_transactions", {"delivery_number": "D1", "order": "oldest"},
+                     public_base_url="http://eye")
     assert out["total"] == 4 and [r["reqid"] for r in out["transactions"]] == ["R1", "R2", "R3", "R4"]
     first = out["transactions"][0]
     assert first["time"] == "06:01:00" and first["QuantityPicked"] == "3.0" and first["ExpectedQuantity"] == "3.0"

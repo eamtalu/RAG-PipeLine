@@ -18,7 +18,7 @@ import json
 import logging
 import re
 from datetime import date
-from typing import Any
+from typing import Any, Sequence
 
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
@@ -26,28 +26,33 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
 
+from app.agent.contracts import (AgentRequest, AgentResult, ExecutionContext, ModelSettings,
+                                 Principal, ToolCall)
 from app.agent.runtime.guards import OUT_OF_SCOPE, TopicGate, looks_like_manipulation
 from app.agent.presentation import evidence
 from app.services.notifications.redact import redact_secrets
-from app.settings import settings
 
 logger = logging.getLogger(__name__)
 
 _DATA_LINE = re.compile(r"^From the data:.*$", re.M)
 
 
-def build_model(name: str, factory) -> BaseChatModel:
-    """The chat model a provider string names ("ollama:…", "bedrock_converse:…", "anthropic:…")."""
+def build_model(model: ModelSettings, factory) -> BaseChatModel:
+    """The chat model the settings name ("ollama:…", "bedrock_converse:…", "anthropic:…").
+
+    (ModelSettings(name="ollama:qwen3:8b", ...)) -> factory("ollama:qwen3:8b", base_url=..., ...)
+    """
     kwargs: dict[str, Any] = {}
+    name = model.name
     if name.startswith("ollama:"):
-        kwargs["base_url"] = settings.ollama_base_url
-        kwargs["reasoning"] = settings.analytics_agent_think
-        kwargs["num_ctx"] = settings.analytics_agent_context_tokens
+        kwargs["base_url"] = model.ollama_base_url
+        kwargs["reasoning"] = model.think
+        kwargs["num_ctx"] = model.context_tokens
         kwargs["temperature"] = 0  # a small model invents less at zero, and a run can be repeated
     elif name.startswith(("bedrock:", "bedrock_converse:")):
-        kwargs["region_name"] = settings.bedrock_region
+        kwargs["region_name"] = model.bedrock_region
         kwargs["temperature"] = 0
-        kwargs["max_tokens"] = settings.analytics_agent_max_tokens
+        kwargs["max_tokens"] = model.max_tokens
     return factory(name, **kwargs)
 
 
@@ -146,25 +151,40 @@ class GroundedAgent:
     TIMED_OUT = ("That took too long to answer, so I stopped. Ask again more narrowly, for example "
                  "a shorter time window or one delivery, picker or item.")
 
+    #: the profile name a channel asks for; the subclasses set it ("analytics", "logspace")
+    PROFILE: str = ""
+
     def __init__(self, customer_code: str, *, model: BaseChatModel | None = None,
                  gate: TopicGate | None = None, run_timeout_seconds: float | None = None):
-        # No database session lives here: a run spends most of its time waiting on the model, and a
-        # session held across that wait pins a pooled connection (step 3 of the execution plan).
+        # No database session and no settings live here: a run gets everything from the context
+        # the gateway builds (step 11), and a session held across the model wait would pin a
+        # pooled connection (step 3). The three arguments are overrides for tests.
         self.customer_code = customer_code  # every tool is hard-scoped to this tenant
-        injected = model is not None
-        self.model = model or self.make_model()
-        self.model_name = getattr(model, "model_name", None) or settings.analytics_agent_model
+        self._model_override = model
+        self._gate_override = gate
+        self._deadline_override = run_timeout_seconds
+
+    def resolve_model(self, context: ExecutionContext
+                      ) -> tuple[BaseChatModel, TopicGate | None, str]:
+        """The model, the gate and the model's name for this run, from the context or the overrides.
+
+        (context, no overrides) -> (built model, TopicGate, context.model.name) ;
+        (context, injected scripted model) -> (that model, None, its model_name or the context's)
+        """
         # In real use the gate always runs. A test that injects a scripted model counts its calls,
         # so it gets the gate only when it passes one.
-        self.gate = gate if gate is not None else (None if injected else TopicGate(self.model, self.DOMAIN))
-        self.run_timeout_seconds = (run_timeout_seconds
-                                    or settings.analytics_agent_run_timeout_seconds)
+        injected = self._model_override is not None
+        model = self._model_override or self.make_model(context.model)
+        gate = self._gate_override if self._gate_override is not None else (
+            None if injected else TopicGate(model, self.DOMAIN))
+        model_name = getattr(model, "model_name", None) or context.model.name
+        return model, gate, model_name
 
     # ---- hooks -------------------------------------------------------------------------------------
-    def make_model(self) -> BaseChatModel:
+    def make_model(self, model_settings: ModelSettings) -> BaseChatModel:
         raise NotImplementedError
 
-    def tools(self) -> list[BaseTool]:
+    def tools(self, context: ExecutionContext) -> list[BaseTool]:
         raise NotImplementedError
 
     def tool_text(self) -> str:
@@ -177,7 +197,7 @@ class GroundedAgent:
     def render_evidence(self, trace: list[dict]) -> str | None:
         return None
 
-    def structured_evidence(self, trace: list[dict]) -> dict | None:
+    def structured_evidence(self, trace: list[dict], context: ExecutionContext) -> dict | None:
         return None
 
     def without_own_tables(self, answer: str) -> str:
@@ -185,46 +205,82 @@ class GroundedAgent:
         return evidence.strip_tables(answer)
 
     # ---- the run -----------------------------------------------------------------------------------
-    async def ask(self, question: str, history: list[dict] | None = None) -> dict:
-        """Answer one question under the run deadline: the text plus a trace of the tool calls made.
+    async def run(self, context: ExecutionContext, request: AgentRequest,
+                  prior_turns: Sequence[dict] = ()) -> AgentResult:
+        """Answer one request under its context: the text and the tool calls made, as a result.
 
-        (question) -> {"answer", "stop_reason": "end_turn", "tool_calls", ...} ; a provider that
-        never answers -> {"answer": TIMED_OUT, "stop_reason": "timeout", "tool_calls": []}
+        (context, request) -> AgentResult(stop_reason="end_turn", ...) ; a provider that never
+        answers -> AgentResult(answer=TIMED_OUT, stop_reason="timeout") ; another tenant's context
+        -> ValueError
         """
-        # The deadline wraps the gate and the loop together, so that a provider that hangs can
-        # never hold a consumer slot or a request for longer than the queue's visibility window.
+        # Step 1: Refuse a context for another tenant, because every tool of this runtime is
+        # hard-scoped to its own customer and a mismatch would answer from the wrong data.
+        if context.tenant != self.customer_code:
+            raise ValueError(f"runtime for tenant {self.customer_code!r} given a context for "
+                             f"{context.tenant!r}")
+        model, gate, model_name = self.resolve_model(context)
+        # Step 2: The deadline wraps the gate and the loop together, so that a provider that hangs
+        # can never hold a consumer slot or a request past the queue's visibility window.
         try:
-            return await asyncio.wait_for(self._ask(question, history),
-                                          timeout=self.run_timeout_seconds)
+            return await asyncio.wait_for(
+                self._run(context, request, prior_turns, model=model, gate=gate,
+                          model_name=model_name),
+                timeout=context.seconds_left())
         except asyncio.TimeoutError:
-            logger.warning("agent run timed out after %ss for %s: %s", self.run_timeout_seconds,
-                           self.customer_code, question[:200])
-            return self._timed_out()
+            logger.warning("agent run timed out after %.0fs for %s: %s",
+                           context.budgets.run_timeout_seconds, self.customer_code,
+                           request.text[:200])
+            return self._timed_out(context, model_name)
 
-    async def _ask(self, question: str, history: list[dict] | None = None) -> dict:
+    async def ask(self, question: str, history: list[dict] | None = None) -> dict:
+        """Transitional entry for callers without a request: the same run, as the legacy dict.
+
+        (question, history) -> {"answer", "stop_reason", "tool_calls", ...} ; removed in step 12
+        """
+        # One builder, two callers: the request goes through the gateway like a channel's would,
+        # so this shim can never produce a context the gateway would not.
+        from app.agent.gateway import run_request  # transitional: goes with the subclasses, step 12
+        from app import log_context
+        request = AgentRequest(
+            request_id=log_context.request_id_var.get() or log_context.new_request_id(),
+            tenant=self.customer_code, principal=Principal.anonymous(self.customer_code),
+            profile=self.PROFILE, text=question, conversation_id=None,
+            deadline_seconds=self._deadline_override)
+        result = await run_request(request, runtime=self, prior_turns=tuple(history or ()))
+        return result.to_legacy_dict()
+
+    async def _run(self, context: ExecutionContext, request: AgentRequest,
+                   prior_turns: Sequence[dict], *, model: BaseChatModel, gate: TopicGate | None,
+                   model_name: str) -> AgentResult:
         """The run itself, with no deadline of its own.
 
-        `history` is optional prior turns of the same conversation, oldest first, as
+        `prior_turns` are the conversation's earlier turns, oldest first, as
         {"role": "user"|"assistant", "content": str}. Only plain text is replayed, without figures.
         A draft whose figures no data call produced is discarded and the question asked once more
         with a nudge; a second such draft is withheld."""
+        question = request.text
+        history = list(prior_turns)
         if looks_like_manipulation(question):
             logger.warning("agent declined a manipulation attempt for %s: %s", self.customer_code, question[:200])
-            return self._declined("manipulation", self.MANIPULATION_PREFIX + self.DECLINE)
-        if self.gate is not None and await self.gate.classify(question, history) == OUT_OF_SCOPE:
+            return self._declined(context, model_name, "manipulation",
+                                  self.MANIPULATION_PREFIX + self.DECLINE)
+        if gate is not None and await gate.classify(question, history) == OUT_OF_SCOPE:
             logger.info("agent declined an off-topic question for %s: %s", self.customer_code, question[:200])
-            return self._declined("off_topic", self.DECLINE)
+            return self._declined(context, model_name, "off_topic", self.DECLINE)
 
-        graph = create_agent(self.model, self.tools(), system_prompt=self.SYSTEM_PROMPT)
+        graph = create_agent(model, self.tools(context), system_prompt=self.SYSTEM_PROMPT)
         prior = history_as_messages(history)
         asked = self.question_text(question)
+        max_iterations = context.budgets.max_iterations
         retries = 0
-        draft = await self._draft(graph, prior + [HumanMessage(content=asked)], question)
+        draft = await self._draft(graph, prior + [HumanMessage(content=asked)], question,
+                                  max_iterations=max_iterations)
         if draft["problem"]:
             retries = 1
             nudge = (self.UNGROUNDED_NUDGE.format(figures=", ".join(draft["ungrounded"]))
                      if draft["problem"] == "ungrounded" else self.RETRY_NUDGE)
-            draft = await self._draft(graph, prior + [HumanMessage(content=asked + nudge)], question)
+            draft = await self._draft(graph, prior + [HumanMessage(content=asked + nudge)],
+                                      question, max_iterations=max_iterations)
         answer, stop_reason, trace = draft["answer"], draft["stop_reason"], draft["trace"]
         withheld_figures: list[str] = []
         table: str | None = None
@@ -244,23 +300,25 @@ class GroundedAgent:
             table = self.render_evidence(trace)
             if table:
                 answer = (self.without_own_tables(answer) + "\n\n" + table).strip()
-                data = self.structured_evidence(trace)
-        return {"answer": redact_secrets(answer), "stop_reason": stop_reason,
-                "tool_calls": [{"tool": t["tool"], "input": t["input"]} for t in trace],
-                "iterations": len(trace), "retries": retries, "model": self.model_name,
-                "evidence": table, "evidence_data": data, "withheld_figures": withheld_figures}
+                data = self.structured_evidence(trace, context)
+        return AgentResult(
+            answer=redact_secrets(answer), stop_reason=stop_reason, model=model_name,
+            tool_calls=tuple(ToolCall(t["tool"], t["input"]) for t in trace),
+            iterations=len(trace), retries=retries, evidence=table, evidence_data=data,
+            withheld_figures=tuple(withheld_figures),
+            request_id=context.request_id, trace_id=context.trace_id)
 
-    def _declined(self, why: str, answer: str) -> dict:
-        return {"answer": answer, "stop_reason": "declined", "declined": why, "tool_calls": [],
-                "iterations": 0, "retries": 0, "model": self.model_name, "evidence": None,
-                "evidence_data": None, "withheld_figures": []}
+    def _declined(self, context: ExecutionContext, model_name: str, why: str,
+                  answer: str) -> AgentResult:
+        return AgentResult(answer=answer, stop_reason="declined", model=model_name, declined=why,
+                           request_id=context.request_id, trace_id=context.trace_id)
 
-    def _timed_out(self) -> dict:
-        return {"answer": self.TIMED_OUT, "stop_reason": "timeout", "tool_calls": [],
-                "iterations": 0, "retries": 0, "model": self.model_name, "evidence": None,
-                "evidence_data": None, "withheld_figures": []}
+    def _timed_out(self, context: ExecutionContext, model_name: str) -> AgentResult:
+        return AgentResult(answer=self.TIMED_OUT, stop_reason="timeout", model=model_name,
+                           request_id=context.request_id, trace_id=context.trace_id)
 
-    async def _draft(self, graph, messages: list[BaseMessage], question: str) -> dict:
+    async def _draft(self, graph, messages: list[BaseMessage], question: str, *,
+                     max_iterations: int) -> dict:
         """One run of the tool loop, checked: the answer, its trace, and what is wrong with it
         ("fabricated" = figures with no successful data call, "ungrounded" = a figure no tool
         returned, None = fine)."""
@@ -270,7 +328,7 @@ class GroundedAgent:
         try:
             # Stream by graph step so a run that hits the limit still yields every message before it.
             async for step in graph.astream({"messages": messages}, stream_mode="values",
-                                            config={"recursion_limit": settings.analytics_agent_max_iterations * 2 + 1}):
+                                            config={"recursion_limit": max_iterations * 2 + 1}):
                 seen = step["messages"]
         except GraphRecursionError:
             stop_reason = "max_iterations"

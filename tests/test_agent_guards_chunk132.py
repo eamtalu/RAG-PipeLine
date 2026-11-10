@@ -105,15 +105,22 @@ async def test_an_in_scope_question_runs_the_tools_as_before():
     assert result["answer"].startswith("Across 4 releases") and result["iterations"] == 1
 
 
+def _context():
+    from app.agent.contracts import AgentRequest, Principal
+    from app.agent.gateway import build_context, snapshot_settings
+    request = AgentRequest("r", CC, Principal(CC, "u"), "analytics", "hi", None)
+    return build_context(request, snapshot_settings())
+
+
 def test_the_real_agent_always_has_the_gate(monkeypatch):
     monkeypatch.setattr(agent_module, "init_chat_model", lambda name, **kw: ScriptedModel(script=[], seen=[]))
-    agent = AnalyticsAgent(customer_code=CC)
-    assert isinstance(agent.gate, TopicGate)
+    _, gate, _ = AnalyticsAgent(customer_code=CC).resolve_model(_context())
+    assert isinstance(gate, TopicGate)
 
 
 def test_an_injected_test_model_runs_without_the_gate_unless_given_one():
-    agent = AnalyticsAgent(customer_code=CC, model=_scripted())
-    assert agent.gate is None
+    _, gate, _ = AnalyticsAgent(customer_code=CC, model=_scripted()).resolve_model(_context())
+    assert gate is None
 
 
 # ---- secrets -------------------------------------------------------------------------------------

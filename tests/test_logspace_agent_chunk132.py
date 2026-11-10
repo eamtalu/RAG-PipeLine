@@ -39,13 +39,20 @@ async def cc():
         await db.commit()
 
 
+def _context(code):
+    from app.agent.contracts import AgentRequest, Principal
+    from app.agent.gateway import build_context, snapshot_settings
+    request = AgentRequest("r", code, Principal(code, "u"), "logspace", "hi", None)
+    return build_context(request, snapshot_settings())
+
+
 def _agent(code, model, **kw):
     return LogspaceAgent(code, scope=kw.pop("scope", SCOPE), tz_name=TZ, today=TODAY, model=model, **kw)
 
 
 def test_it_reads_logs_only():
     agent = _agent("X", _scripted())
-    names = {t.name for t in agent.tools()}
+    names = {t.name for t in agent.tools(_context("X"))}
     assert names == {"overview", "find_transactions", "trace", "aggregate", "get_transaction", "search_entries"}
 
 
@@ -61,8 +68,9 @@ def test_the_real_agent_uses_the_analytics_bedrock_model_and_the_gate(monkeypatc
     monkeypatch.setattr(agent_module, "init_chat_model",
                         lambda name, **kw: seen.update(name=name, **kw) or ScriptedModel(script=[], seen=[]))
     agent = LogspaceAgent("X", scope=SCOPE, tz_name=TZ, today=TODAY)
+    _, gate, _ = agent.resolve_model(_context("X"))
     assert seen["name"] == "bedrock_converse:qwen.qwen3-235b-a22b-2507-v1:0" and seen["temperature"] == 0
-    assert isinstance(agent.gate, TopicGate)
+    assert isinstance(gate, TopicGate)
 
 
 async def test_a_delivery_question_is_answered_from_its_trace_with_the_rows_as_evidence(cc):
@@ -98,7 +106,7 @@ async def test_figures_without_any_data_call_are_withheld():
 
 async def test_credentials_in_a_log_record_never_reach_the_model(cc):
     agent = _agent(cc, _scripted())
-    find = next(t for t in agent.tools() if t.name == "find_transactions")
+    find = next(t for t in agent.tools(_context(cc)) if t.name == "find_transactions")
     out = json.loads(await find.ainvoke({"reqid": "R5"}))
     assert "SECRET1" not in json.dumps(out) and "<redacted>" in out["transactions"][0]["error"]
 

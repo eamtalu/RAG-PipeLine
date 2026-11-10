@@ -31,7 +31,8 @@ MUST_DECLINE = [
 
 
 async def main() -> None:
-    model = make_model()
+    from app.agent.gateway import snapshot_settings
+    model = make_model(snapshot_settings().model)
     for name, domain in (("logspace", LOGSPACE_DOMAIN), ("analytics", ANALYTICS_DOMAIN)):
         gate = TopicGate(model, domain)
         wrong = []

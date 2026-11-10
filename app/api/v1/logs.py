@@ -43,6 +43,10 @@ from app.services.mnp_log_ingestion.io_errors import is_disk_io_error, disk_io_d
 
 import logging
 logger = logging.getLogger(__name__)
+from app import log_context
+from app.agent.contracts import AgentRequest, Principal
+from app.agent.gateway import run_request
+from app.api.service_auth import ANONYMOUS, current_caller
 from app.services.logspace_agent.agent import LogspaceAgent
 
 router = APIRouter(prefix="/logs", tags=["logs"])
@@ -1161,22 +1165,32 @@ async def debug_ask(
     # Step 1: End the transaction the tenant lookup and the pending gate began on the request
     # session, so that its pooled connection is free for the whole model wait.
     await db.commit()
-    # Step 2: Run the agent over the feed's scope; the tools open their own short sessions.
+    # Step 2: Build the request with the bound request id and the service caller as principal,
+    # because the web has no signed-in person yet; the scope stays a constructor argument of the
+    # logspace agent until step 12 moves it onto the request.
+    caller = current_caller.get()
+    request = AgentRequest(
+        request_id=log_context.request_id_var.get() or log_context.new_request_id(),
+        tenant=customer,
+        principal=Principal.for_service(customer, caller.name if caller else ANONYMOUS),
+        profile="logspace", text=body.question, conversation_id=None)
+    # Step 3: Run through the gateway over the feed's scope; tools open their own short sessions.
     try:
         agent = LogspaceAgent(customer, scope=scope_from(body.scope, today), tz_name=tz_name,
                               today=today)
-        result = await agent.ask(body.question, history=[t.model_dump() for t in body.history])
+        result = await run_request(request, runtime=agent,
+                                   prior_turns=tuple(t.model_dump() for t in body.history))
     except Exception as exc:  # noqa: BLE001 - the model or its provider is down, throttled or misconfigured
         logger.exception("ask eSmart Eye failed for %s", customer)
         raise HTTPException(503, detail=f"eSmart Eye could not answer right now: the language model is not "
                                         f"available ({type(exc).__name__}: {str(exc)[:200]}). Try again shortly.")
-    if isinstance(result, dict):
-        result["pending_regroup"] = pending
-        # `refs` — LineIds ("<transactionId>#<bodyLineIndex>") the answer cites, so the frontend can
-        # render jump-to-line chips / "pin as note". A valid LineId needs the line's index within the
-        # transaction's rendered body, which the agent doesn't track — computing it would require
-        # replicating the feed renderer, and the contract says do NOT guess. So we surface [] (the
-        # frontend already derives chips client-side from method names as a fallback) until a reliable
-        # index is available. Keep the key present so the shape is stable.
-        result.setdefault("refs", [])
-    return result
+    out = result.to_legacy_dict()
+    out["pending_regroup"] = pending
+    # `refs` — LineIds ("<transactionId>#<bodyLineIndex>") the answer cites, so the frontend can
+    # render jump-to-line chips / "pin as note". A valid LineId needs the line's index within the
+    # transaction's rendered body, which the agent doesn't track — computing it would require
+    # replicating the feed renderer, and the contract says do NOT guess. So we surface [] (the
+    # frontend already derives chips client-side from method names as a fallback) until a reliable
+    # index is available. Keep the key present so the shape is stable.
+    out.setdefault("refs", [])
+    return out

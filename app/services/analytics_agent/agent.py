@@ -20,6 +20,7 @@ from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
+from app.agent.contracts import ExecutionContext, ModelSettings
 from app.agent.runtime import grounded
 from app.agent.runtime.grounded import GroundedAgent
 from app.agent.runtime.guards import TopicGate
@@ -27,7 +28,6 @@ from app.config.database import SessionFactory, async_session
 from app.agent.presentation import evidence
 from app.services.analytics_agent import at_risk_tools
 from app.services.analytics_agent.tools import RECIPES, RELEASE_TOOLS, build_tools
-from app.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -121,9 +121,9 @@ DECLINE = ("I can only help with this warehouse's picking, delivery and log data
            "Try \"top 5 shorted items today\" or \"which deliveries were missed this week\".")
 
 
-def make_model(model_name: str | None = None) -> BaseChatModel:
-    """The chat model for `settings.analytics_agent_model`, whichever provider the string names."""
-    return grounded.build_model(model_name or settings.analytics_agent_model, init_chat_model)
+def make_model(model_settings: ModelSettings) -> BaseChatModel:
+    """The chat model the context names, whichever provider the string names."""
+    return grounded.build_model(model_settings, init_chat_model)
 
 
 # The shared loop's pieces, under the names this module has always had.
@@ -144,14 +144,20 @@ def _looks_fabricated(answer: str, trace: list[dict]) -> str | None:
     return grounded.looks_fabricated(answer, trace, given=[SYSTEM_PROMPT, _TOOL_TEXT], schema_tools=SCHEMA_TOOLS)
 
 
-def _page_link() -> str | None:
-    """The pick releases page, when the app has a public address; a card can then open it."""
-    base = (settings.app_public_base_url or "").rstrip("/")
+def _page_link(public_base_url: str) -> str | None:
+    """The pick releases page, when the app has a public address; a card can then open it.
+
+    >>> _page_link("http://eye/")
+    'http://eye/matrix/releases'
+    >>> _page_link("") is None
+    True
+    """
+    base = (public_base_url or "").rstrip("/")
     return f"{base}/matrix/releases" if base else None
 
 
-def _at_risk_link() -> str | None:
-    base = (settings.app_public_base_url or "").rstrip("/")
+def _at_risk_link(public_base_url: str) -> str | None:
+    base = (public_base_url or "").rstrip("/")
     return f"{base}/matrix/at-risk" if base else None
 
 
@@ -164,6 +170,7 @@ class AnalyticsAgent(GroundedAgent):
     SCHEMA_TOOLS = SCHEMA_TOOLS
     DOMAIN = DOMAIN
     DECLINE = DECLINE
+    PROFILE = "analytics"
 
     def __init__(self, customer_code: str, *, session_factory: SessionFactory = async_session,
                  model: BaseChatModel | None = None, gate: TopicGate | None = None,
@@ -172,10 +179,10 @@ class AnalyticsAgent(GroundedAgent):
         super().__init__(customer_code, model=model, gate=gate,
                          run_timeout_seconds=run_timeout_seconds)
 
-    def make_model(self) -> BaseChatModel:
-        return make_model()
+    def make_model(self, model_settings: ModelSettings) -> BaseChatModel:
+        return make_model(model_settings)
 
-    def tools(self) -> list[BaseTool]:
+    def tools(self, context: ExecutionContext) -> list[BaseTool]:
         return build_tools(self.customer_code, session_factory=self.session_factory)
 
     def tool_text(self) -> str:
@@ -184,5 +191,6 @@ class AnalyticsAgent(GroundedAgent):
     def render_evidence(self, trace: list[dict]) -> str | None:
         return evidence.render(trace)
 
-    def structured_evidence(self, trace: list[dict]) -> dict | None:
-        return evidence.structured(trace, link=_page_link(), at_risk_link=_at_risk_link())
+    def structured_evidence(self, trace: list[dict], context: ExecutionContext) -> dict | None:
+        return evidence.structured(trace, link=_page_link(context.public_base_url),
+                                   at_risk_link=_at_risk_link(context.public_base_url))

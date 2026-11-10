@@ -80,7 +80,9 @@ class Harness:
         async def record(conv, code, q, a, job_id):
             self.recorded.append((conv, code, q, a, job_id))
 
-        async def run_agent(code, question, history):
+        async def run_agent(job, history):
+            # the consumer hands the job over; the fakes keep their (code, question, history) shape
+            code, question = job.customer_code, job.question
             self.in_flight += 1
             self.max_in_flight = max(self.max_in_flight, self.in_flight)
             try:

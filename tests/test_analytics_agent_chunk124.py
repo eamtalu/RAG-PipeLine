@@ -246,7 +246,8 @@ def test_the_trace_pairs_each_call_with_a_preview_of_its_result():
 
 async def test_the_endpoint_returns_the_agent_result_shape(monkeypatch):
     await _plant()
-    monkeypatch.setattr(AnalyticsAgent, "ask", lambda self, q, history=None: _answer(q, history))
+    monkeypatch.setattr(AnalyticsAgent, "run", lambda self, context, request, prior_turns=():
+                        _answer(request.text, prior_turns))
     async with async_session() as db:
         out = await agent_api.ask(agent_api.AskRequest(question="how many?", history=[
             agent_api.HistoryTurn(role="user", content="hi")]), customer=CC, db=db)
@@ -254,18 +255,31 @@ async def test_the_endpoint_returns_the_agent_result_shape(monkeypatch):
 
 
 async def _answer(question, history):
-    return {"answer": f"{question} ({len(history or [])} earlier turn)", "tool_calls": [], "iterations": 0}
+    from app.agent.contracts import AgentResult
+    return AgentResult(answer=f"{question} ({len(history or [])} earlier turn)",
+                       stop_reason="end_turn", model="scripted")
 
 
 async def test_teams_uses_the_langgraph_agent_unless_told_otherwise(monkeypatch):
     from app import teams_consumer
     calls = []
-    monkeypatch.setattr(AnalyticsAgent, "ask", lambda self, q, history=None: _record(calls, "langgraph", q))
+    from app.agent.contracts import AgentResult
+    from app.services.teams.contracts import QuestionJob
+
+    async def langgraph(self, context, request, prior_turns=()):
+        calls.append(("langgraph", request.text))
+        return AgentResult(answer="", stop_reason="end_turn", model="m")
+
+    def job(q):
+        return QuestionJob(job_id="j", tenant_id="t", customer_code=CC, conversation_id="c",
+                           question=q, sender_object_id="u-1")
+
+    monkeypatch.setattr(AnalyticsAgent, "run", langgraph)
     monkeypatch.setattr(teams_consumer.LogDebugAgent, "ask", lambda self, q, history=None: _record(calls, "claude", q))
     monkeypatch.setattr(settings, "teams_agent", "langgraph")
-    await teams_consumer._run_agent(CC, "q1", [])
+    await teams_consumer._run_agent(job("q1"), [])
     monkeypatch.setattr(settings, "teams_agent", "claude")
-    await teams_consumer._run_agent(CC, "q2", [])
+    await teams_consumer._run_agent(job("q2"), [])
     assert calls == [("langgraph", "q1"), ("claude", "q2")]
 
 
@@ -276,15 +290,22 @@ async def _record(calls, which, q):
 
 # ==================================================== 4. the model is one setting
 
+def _model_named(name: str):
+    """The snapshot's model settings with another provider string: what the gateway hands a run."""
+    import dataclasses
+    from app.agent.gateway import snapshot_settings
+    return dataclasses.replace(snapshot_settings().model, name=name)
+
+
 def test_an_ollama_model_gets_the_base_url_thinking_off_and_a_wide_context(monkeypatch):
     seen = {}
     monkeypatch.setattr(agent_module, "init_chat_model", lambda name, **kw: seen.update(name=name, **kw) or object())
     monkeypatch.setattr(settings, "ollama_base_url", "http://127.0.0.1:11434")
-    agent_module.make_model("ollama:qwen3:8b")
+    agent_module.make_model(_model_named("ollama:qwen3:8b"))
     assert seen == {"name": "ollama:qwen3:8b", "base_url": "http://127.0.0.1:11434", "reasoning": False, "num_ctx": 16384,
                     "temperature": 0}
     seen.clear()
-    agent_module.make_model("anthropic:claude-sonnet-5")
+    agent_module.make_model(_model_named("anthropic:claude-sonnet-5"))
     assert seen == {"name": "anthropic:claude-sonnet-5"}
 
 
@@ -293,11 +314,11 @@ def test_a_bedrock_model_gets_the_region_zero_temperature_and_the_output_cap(mon
     monkeypatch.setattr(agent_module, "init_chat_model", lambda name, **kw: seen.update(name=name, **kw) or object())
     monkeypatch.setattr(settings, "bedrock_region", "eu-west-2")
     monkeypatch.setattr(settings, "analytics_agent_max_tokens", 4000)
-    agent_module.make_model("bedrock_converse:qwen.qwen3-235b-a22b-2507-v1:0")
+    agent_module.make_model(_model_named("bedrock_converse:qwen.qwen3-235b-a22b-2507-v1:0"))
     assert seen == {"name": "bedrock_converse:qwen.qwen3-235b-a22b-2507-v1:0", "region_name": "eu-west-2",
                     "temperature": 0, "max_tokens": 4000}
     seen.clear()
-    agent_module.make_model("bedrock:qwen.qwen3-32b-v1:0")
+    agent_module.make_model(_model_named("bedrock:qwen.qwen3-32b-v1:0"))
     assert seen["region_name"] == "eu-west-2" and seen["temperature"] == 0
 
 

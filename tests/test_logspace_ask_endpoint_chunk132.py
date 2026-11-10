@@ -34,12 +34,13 @@ def seen(monkeypatch):
     def fake_init(self, customer_code, *, scope, tz_name, today, session_factory=None, model=None, gate=None):
         s.kwargs = dict(customer=customer_code, scope=scope, tz_name=tz_name, today=today)
 
-    async def fake_ask(self, question, history=None):
-        s.asked = (question, history)
-        return {"answer": "ok", "tool_calls": [], "stop_reason": "end_turn"}
+    async def fake_run(self, context, request, prior_turns=()):
+        from app.agent.contracts import AgentResult
+        s.asked = (request.text, list(prior_turns))
+        return AgentResult(answer="ok", stop_reason="end_turn", model="m")
 
     monkeypatch.setattr(LogspaceAgent, "__init__", fake_init)
-    monkeypatch.setattr(LogspaceAgent, "ask", fake_ask)
+    monkeypatch.setattr(LogspaceAgent, "run", fake_run)
     monkeypatch.setattr(logs_api, "local_today", lambda tz: date_type(2026, 9, 30))
     return s
 
@@ -70,11 +71,11 @@ async def test_a_provider_failure_is_a_clear_503(monkeypatch):
     def fake_init(self, *a, **kw):
         pass
 
-    async def broken(self, question, history=None):
+    async def broken(self, context, request, prior_turns=()):
         raise RuntimeError("Error code: 400 - Your credit balance is too low")
 
     monkeypatch.setattr(LogspaceAgent, "__init__", fake_init)
-    monkeypatch.setattr(LogspaceAgent, "ask", broken)
+    monkeypatch.setattr(LogspaceAgent, "run", broken)
     with pytest.raises(HTTPException) as exc:
         await logs_api.debug_ask(logs_api.DebugAskRequest(question="x"), customer="tmp-live", db=_ReleasedSession(), pending={})
     assert exc.value.status_code == 503

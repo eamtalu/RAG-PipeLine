@@ -63,10 +63,10 @@ async def test_a_run_inside_the_deadline_is_unchanged():
 
 
 def test_the_deadline_defaults_to_the_setting_and_sits_below_the_visibility_window():
-    agent = AnalyticsAgent(CC, model=_scripted())
-    assert agent.run_timeout_seconds == settings.analytics_agent_run_timeout_seconds
-    assert (settings.analytics_agent_run_timeout_seconds
-            < settings.teams_sqs_visibility_seconds)
+    from app.agent.gateway import snapshot_settings
+    budget = snapshot_settings().budgets.run_timeout_seconds
+    assert budget == settings.analytics_agent_run_timeout_seconds
+    assert budget < settings.teams_sqs_visibility_seconds
 
 
 # ==================================================== 2. the consumer answers and frees the slot

@@ -16,6 +16,7 @@ from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
+from app.agent.contracts import ExecutionContext, ModelSettings
 from app.agent.runtime import grounded
 from app.agent.runtime.grounded import GroundedAgent
 from app.agent.runtime.guards import TopicGate
@@ -23,7 +24,6 @@ from app.config.database import SessionFactory, async_session
 from app.services.log_feed.scope import FeedScope, describe
 from app.agent.presentation import logspace_evidence
 from app.services.logspace_agent.tools import LOGSPACE_TOOLS, build_tools
-from app.settings import settings
 
 SYSTEM_PROMPT = """You are eSmart Eye, the assistant for one warehouse logspace. You answer questions about the
 handheld and M3 log records of this logspace by calling tools. You never guess.
@@ -110,9 +110,9 @@ DECLINE = ("I can only help with this logspace's log records: what happened to a
 _TOOL_TEXT = json.dumps(LOGSPACE_TOOLS)
 
 
-def make_model() -> BaseChatModel:
-    """The same model the analytics agent runs on (`ANALYTICS_AGENT_MODEL`, Bedrock in production)."""
-    return grounded.build_model(settings.analytics_agent_model, init_chat_model)
+def make_model(model_settings: ModelSettings) -> BaseChatModel:
+    """The same model the analytics agent runs on (the context names it; Bedrock in production)."""
+    return grounded.build_model(model_settings, init_chat_model)
 
 
 class LogspaceAgent(GroundedAgent):
@@ -124,6 +124,7 @@ class LogspaceAgent(GroundedAgent):
     SCHEMA_TOOLS = frozenset({"overview"})
     DOMAIN = DOMAIN
     DECLINE = DECLINE
+    PROFILE = "logspace"
 
     def __init__(self, customer_code: str, *, scope: FeedScope, tz_name: str, today: date_type,
                  session_factory: SessionFactory = async_session,
@@ -134,12 +135,13 @@ class LogspaceAgent(GroundedAgent):
         super().__init__(customer_code, model=model, gate=gate,
                          run_timeout_seconds=run_timeout_seconds)
 
-    def make_model(self) -> BaseChatModel:
-        return make_model()
+    def make_model(self, model_settings: ModelSettings) -> BaseChatModel:
+        return make_model(model_settings)
 
-    def tools(self) -> list[BaseTool]:
+    def tools(self, context: ExecutionContext) -> list[BaseTool]:
         return build_tools(self.customer_code, self.scope, self.tz_name, self.today,
-                           session_factory=self.session_factory)
+                           session_factory=self.session_factory,
+                           public_base_url=context.public_base_url)
 
     def tool_text(self) -> str:
         return _TOOL_TEXT

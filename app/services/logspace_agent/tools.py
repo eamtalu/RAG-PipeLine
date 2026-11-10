@@ -32,7 +32,6 @@ from app.services.log_feed.scope import FeedScope, day_conditions, describe, sco
 from app.services.mnp_log_ingestion.pipeline import assignments, time_bounds
 from app.services.mnp_log_ingestion.timefmt import _zone
 from app.services.notifications.links import transaction_path
-from app.settings import settings
 
 #: Columns the model may filter or group by, by the names it sees.
 COLUMNS: dict[str, Any] = {
@@ -308,10 +307,10 @@ def _error_excerpt(text: str | None, head: int = 160, tail: int = 240) -> str | 
     return text if len(text) <= head + tail + 3 else f"{text[:head]} … {text[-tail:]}"
 
 
-def _link(t: LogTransaction) -> str | None:
+def _link(t: LogTransaction, public_base_url: str) -> str | None:
     path = transaction_path({"reqid": t.reqid, "date": t.date.isoformat() if t.date else None,
                              "transaction_id": str(t.id)})
-    base = (settings.app_public_base_url or "").rstrip("/")
+    base = (public_base_url or "").rstrip("/")
     return f"{base}{path}" if path else None
 
 
@@ -319,7 +318,7 @@ def _time(t: LogTransaction, tz_name: str) -> str | None:
     return t.started_at.astimezone(_zone(tz_name)).strftime("%H:%M:%S") if t.started_at else None
 
 
-def _row(t: LogTransaction, tz_name: str) -> dict:
+def _row(t: LogTransaction, tz_name: str, public_base_url: str = "") -> dict:
     attrs = t.attributes if isinstance(t.attributes, dict) else {}
     row = {
         "id": str(t.id), "date": t.date.isoformat() if t.date else None, "time": _time(t, tz_name),
@@ -329,7 +328,7 @@ def _row(t: LogTransaction, tz_name: str) -> dict:
         "error": _error_excerpt(t.error_text),
         **{k: attrs.get(k) for k in ROW_FIELDS if attrs.get(k) not in (None, "")},
         "pick_outcome": outcome_of(attrs, t.status),
-        "link": _link(t),
+        "link": _link(t, public_base_url),
     }
     return {k: v for k, v in row.items() if v is not None}
 
@@ -337,8 +336,10 @@ def _row(t: LogTransaction, tz_name: str) -> dict:
 # ============================================================== tools
 
 class Context:
-    def __init__(self, db: AsyncSession, customer_code: str, scope: FeedScope, tz_name: str, today: date_type):
+    def __init__(self, db: AsyncSession, customer_code: str, scope: FeedScope, tz_name: str,
+                 today: date_type, public_base_url: str = ""):
         self.db, self.customer_code, self.scope, self.tz_name, self.today = db, customer_code, scope, tz_name, today
+        self.public_base_url = (public_base_url or "").rstrip("/")  # links in rows
 
     @property
     def records(self) -> str:
@@ -392,7 +393,8 @@ async def find_transactions(ctx: Context, args: dict) -> dict:
     rows = (await ctx.db.execute(select(LogTransaction).where(*conds).order_by(order.nullslast(), LogTransaction.id)
                                  .limit(limit))).scalars().all()
     return _with_note({"records": ctx.records, "total": total, "returned": len(rows),
-                       "transactions": [_row(t, ctx.tz_name) for t in rows]}, args)
+                       "transactions": [_row(t, ctx.tz_name, ctx.public_base_url)
+                                        for t in rows]}, args)
 
 
 async def trace(ctx: Context, args: dict) -> dict:
@@ -436,7 +438,7 @@ async def trace(ctx: Context, args: dict) -> dict:
                 "summary": {"by_method": by_method, "by_status": by_status, "users": users,
                             "errors": by_status.get("error", 0),
                             "first": _time(rows[0], ctx.tz_name), "last": _time(rows[-1], ctx.tz_name)},
-                "transactions": [_row(t, ctx.tz_name) for t in rows]}
+                "transactions": [_row(t, ctx.tz_name, ctx.public_base_url) for t in rows]}
     places = "; ".join(w for _, w, _ in attempts)
     return {"key": key, "value": value, "found": False, "total": 0, "outside_filter": True,
             "looked_in": f"nothing for {key} {value} in {places}", "transactions": []}
@@ -536,7 +538,7 @@ async def get_transaction(ctx: Context, args: dict) -> dict:
     result = await log_tools._get_transaction(ctx.db, args, ctx.customer_code)
     txn = result.get("transaction") if isinstance(result, dict) else None
     if txn:
-        txn["link"] = (settings.app_public_base_url or "").rstrip("/") + (transaction_path(
+        txn["link"] = ctx.public_base_url + (transaction_path(
             {"reqid": txn.get("reqid"), "date": txn.get("date"), "transaction_id": txn.get("id")}) or "")
     return result
 
@@ -580,13 +582,15 @@ def _json(value) -> str:
 
 
 async def run_logspace_tool(name: str, args: dict, db: AsyncSession, customer_code: str, *,
-                            scope: FeedScope, tz_name: str, today: date_type) -> str:
+                            scope: FeedScope, tz_name: str, today: date_type,
+                            public_base_url: str = "") -> str:
     """One tool call; its problems come back as the result so the model can read and fix them."""
     fn = DISPATCH.get(name)
     if fn is None:
         return _json({"error": f"unknown tool {name!r}", "tools": sorted(DISPATCH)})
     try:
-        return _json(await fn(Context(db, customer_code, scope, tz_name, today), args or {}))
+        ctx = Context(db, customer_code, scope, tz_name, today, public_base_url)
+        return _json(await fn(ctx, args or {}))
     except Problem as exc:
         return _json({"error": "the question cannot be asked as spelled", "problems": exc.problems})
     except Exception as exc:  # noqa: BLE001 - surfaced to the model, never crashes the loop
@@ -594,7 +598,8 @@ async def run_logspace_tool(name: str, args: dict, db: AsyncSession, customer_co
 
 
 def build_tools(customer_code: str, scope: FeedScope, tz_name: str, today: date_type, *,
-                session_factory: SessionFactory = async_session) -> list[BaseTool]:
+                session_factory: SessionFactory = async_session,
+                public_base_url: str = "") -> list[BaseTool]:
     """Every logspace tool, bound to this tenant and scope; a session is held only while it reads.
 
     ("acme", scope=today, tz_name="Europe/London", today=date) -> 6 tools on the app pool
@@ -604,6 +609,7 @@ def build_tools(customer_code: str, scope: FeedScope, tz_name: str, today: date_
     async def run(name: str, args: dict) -> str:
         async with session_factory() as db:
             return await run_logspace_tool(name, args, db, customer_code, scope=scope,
-                                           tz_name=tz_name, today=today)
+                                           tz_name=tz_name, today=today,
+                                           public_base_url=public_base_url)
 
     return [wrap_tool(spec, run) for spec in LOGSPACE_TOOLS]

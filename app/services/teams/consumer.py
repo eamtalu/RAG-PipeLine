@@ -77,7 +77,9 @@ class AnswerPoster(Protocol):
         ...
 
 
-AgentRunner = Callable[[str, str, list[dict]], Awaitable[dict]]
+#: Runs the agent for a job with the conversation's earlier turns; the adapter in
+#: app/teams_consumer.py builds the request (who asked, where) from the job.
+AgentRunner = Callable[[QuestionJob, list[dict]], Awaitable[dict]]
 """(customer_code, question, history) -> the agent's result dict ({"answer", "tool_calls", ...})."""
 
 HistoryLoader = Callable[[str, str], Awaitable[list[dict]]]
@@ -300,7 +302,7 @@ class TeamsQuestionConsumer:
                     logger.warning("Teams job %s: command %s refused: %s", job.job_id, job.command.kind, exc)
                     return AnswerPayload(**base, status="error", answer=f"Could not record that: {exc}")
             history = await self._load_history(job.conversation_id, job.customer_code)
-            result = await self._run_agent(job.customer_code, job.question, history)
+            result = await self._run_agent(job, history)
             answer = (result.get("answer") or "").strip() or "I could not find anything to say about that."
             await self._record(job.conversation_id, job.customer_code, job.question, answer, job.job_id)
             return AnswerPayload(**base, status="ok", answer=answer,

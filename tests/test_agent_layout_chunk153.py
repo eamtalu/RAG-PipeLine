@@ -62,6 +62,13 @@ def test_the_agent_package_never_imports_web_worker_or_persistence():
     assert offenders == set()
 
 
+def test_only_the_gateway_reads_settings():
+    """A run gets every value from the context the gateway built; nothing else in the package
+    may reach for settings (step 11)."""
+    readers = {_rel(p) for p in AGENT.rglob("*.py") if "app.settings" in _imports(p)}
+    assert readers == {"app/agent/gateway/context.py"}
+
+
 def test_only_channels_import_the_agent_package():
     importers = {
         _rel(p)
