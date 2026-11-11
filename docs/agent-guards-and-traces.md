@@ -9,7 +9,7 @@ Nothing a person sees changed: both profiles list today's four guards in today's
 | --- | --- | --- | --- |
 | pre | `manipulation` | declines, in code, an attempt to change the rules, see the prompt or reach another tenant (`looks_like_manipulation`) | `Decline("manipulation", prefix + decline)` |
 | pre | `topic_gate` | one short model call: declines a question that is not about the agent's data (`TopicGate`) | `Decline("off_topic", decline)` |
-| post | `fabrication` | figures with no successful data call behind them are replaced by an honest answer (`looks_fabricated`) | `Problem("fabricated", fallback=...)` |
+| post | `fabrication` | figures with no successful data call behind them are replaced by an honest answer (`looks_fabricated`); a draft that called no tool at all may carry no date, time or share the instructions lack (`evidence.stale_markers`, chunk 170) | `Problem("fabricated", fallback=...)` |
 | post | `ungrounded` | every figure in the draft must be in a tool result, or in the instructions when no tool returned anything | `Problem("ungrounded", figures=...)` |
 
 A pre-guard looks at the question and the earlier turns before any model call; a post-guard looks at a `Draft` (the answer, the tool trace behind it, the question, the given text, the schema tools).

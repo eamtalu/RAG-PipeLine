@@ -88,6 +88,29 @@ def ungrounded(answer: str, results: list[str], question: str = "") -> list[str]
     return seen
 
 
+_SHARE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?%(?![\w])")
+
+
+def stale_markers(text: str, given: list[str]) -> list[str]:
+    """The dates, times and shares in `text` that no `given` text contains, in order of appearance:
+    the marks of an answer copied from an earlier turn. `ungrounded` exempts all three on purpose,
+    which is right for a draft backed by a tool call and wrong for one backed by nothing, where
+    "as of 14:09 UTC, about 73% provisional" can only have been copied.
+
+    >>> stale_markers("As of 14:09 on 2026-11-11, 20 releases, 73% provisional.", [])
+    ['14:09', '2026-11-11', '73%']
+    >>> stale_markers("Ready before the 11:30 departure, within 20 min.", ["before the 11:30 "])
+    []
+    """
+    found = [(m.start(), m.group(0)) for m in _DATE_OR_TIME.finditer(text)]
+    found += [(m.start(), m.group(0)) for m in _SHARE.finditer(text)]
+    seen: list[str] = []
+    for _, token in sorted(found):
+        if not any(token in g for g in given) and token not in seen:
+            seen.append(token)
+    return seen
+
+
 # ============================================================== the table from the rows
 
 def _label(name: str) -> str:

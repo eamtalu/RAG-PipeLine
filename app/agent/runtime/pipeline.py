@@ -71,6 +71,10 @@ class PostGuard(Protocol):
         ...
 
 
+NO_FIGURES = "I could not get the data for that question, so I have no figures to give."
+ASK_AGAIN = " Ask again naming the field or window, or ask me to describe what is available."
+
+
 def _failed(t: dict) -> bool:
     return t.get("result", t["result_preview"]).lstrip().startswith('{"error"')
 
@@ -85,7 +89,17 @@ def looks_fabricated(
 
     Dates, times, percentages and small counts are not data figures, nor is a number the
     instructions themselves contain: `given` (the instructions and tool text) and the schema tools'
-    results are the only pool."""
+    results are the only pool.
+
+    A draft that called no tool at all also loses the date, time and share exemptions
+    (`evidence.stale_markers`): on 11 November 2026 a repeated Teams question was answered by
+    copying the earlier turn's lead-in and freshness note, "as of 14:09 UTC, about 73%
+    provisional", which carries no data figure and so passed. Small counts stay exempt, so a
+    description in words ("12 tools cover the last 24 hours") still passes."""
+    # Step 1: With no tool call behind it, a date, a time or a share in the draft can only have
+    # been copied from an earlier turn, so the exemptions below would wave the copy through.
+    if not trace and evidence.stale_markers(answer, list(given)):
+        return NO_FIGURES + ASK_AGAIN
     pool = list(given) + [
         t.get("result", t["result_preview"])
         for t in trace
@@ -103,11 +117,7 @@ def looks_fabricated(
             why = " " + "; ".join(last.get("problems") or [last.get("error", "")])
         except Exception:  # noqa: BLE001 - the preview may be cut mid-JSON
             why = ""
-    return (
-        "I could not get the data for that question, so I have no figures to give."
-        + why
-        + " Ask again naming the field or window, or ask me to describe what is available."
-    )
+    return NO_FIGURES + why + ASK_AGAIN
 
 
 class ManipulationGuard:

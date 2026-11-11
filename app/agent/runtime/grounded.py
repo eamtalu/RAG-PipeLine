@@ -4,8 +4,10 @@ A LangGraph loop (model, tool calls, tool results, repeat) with the guards that 
 the data, run as the pipeline the profile lists (app/agent/runtime/pipeline.py): before the model,
 manipulation is declined in code and the topic gate declines what is not about the agent's data;
 after it, a draft whose figures no data call produced, or that no tool returned, is retried once
-with a nudge and then withheld. History is replayed without its figures; the table is drawn from
-the rows; the answer and every tool result are redacted whatever the profile lists. Every run
+with a nudge and then withheld; a draft that called no tool at all may carry no date, time or
+share the instructions lack, because that is how a repeated question gets the earlier turn echoed
+back (11 November 2026). History is replayed without its figures; the
+table is drawn from the rows; the answer and every tool result are redacted whatever the profile lists. Every run
 collects a trace (app/agent/runtime/trace.py) that the gateway stores.
 
 An agent is a `Profile` (app/agent/profiles, the prompts and names as data) on the tool
