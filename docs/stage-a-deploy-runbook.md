@@ -58,6 +58,9 @@ Then the API is unreachable from the LAN and the token is the second lock.
 
 ## Stage B deploys
 
+Done on 11 November 2026 at 20:33 GMT: backend `16a9fc6`, the three migrations below applied, `.env` backup `.env.bak.20261111-stage-b`, `TEAMS_AGENT` line removed, `AGENT_QUOTA_USER_PER_HOUR=60` and `ANALYTICS_AGENT_CALL_TIMEOUT_SECONDS=120` added after the pull (the stage A code refuses those keys, so they must never be added before `git pull`).
+The checks below all passed; the record is the handoff's top block.
+
 Step 12 removed the `TEAMS_AGENT` and `LOG_AGENT_*` settings; the settings class refuses unknown dotenv keys, so before the restart check `grep -nE '^(TEAMS_AGENT|LOG_AGENT_)' /opt/RAG-Pipeline/RAG-PipeLine/.env` prints nothing and delete any line it prints.
 `ANTHROPIC_API_KEY` may stay.
 Step 14 adds the `agent_traces` table (migration `a7c3e9d41b02`); `deploy.sh` runs `alembic upgrade head`, so after the restart `PGPASSWORD=rag psql -h localhost -U rag -d rag -c '\d agent_traces'` must list the table, and the first question from Teams or the web must leave one row in it.
@@ -67,4 +70,7 @@ Step 19 adds `usage_daily` (migration `c9e5a1b63d04`) and the optional `ANALYTIC
 
 ## Rollback
 
-`git checkout <previous sha>` in the backend directory and `./deploy.sh` again; the migrations are additive (two new tables) and can stay.
+`cp .env.bak.<name> .env && git checkout <previous sha>` in the backend directory, then `sudo systemctl restart fastapirag fastapirag-worker fastapirag-teams-consumer`.
+Do not run `deploy.sh` for a rollback: its `git pull` fails on a detached checkout and `set -e` stops the script before the restarts (this happened on 11 November 2026).
+The migrations are additive (new tables only) and can stay.
+To return to the newest code afterwards, `git checkout main` and `./deploy.sh`.
