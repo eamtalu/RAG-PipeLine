@@ -204,8 +204,9 @@ async def test_a_failure_after_a_tool_call_reruns_from_the_start(monkeypatch):
     assert result.answer == "There are releases." and result.model == FALLBACK
     assert [t.tool for t in result.tool_calls] == ["describe_releases"]
     assert [c["name"] for c in result.trace.tool_calls] == ["describe_releases"] * 2
-    # the primary's loop call raised mid-stream and is not counted; the fallback's two are
-    assert result.usage["model_calls"] == 2
+    # every attempt counts (step 19): the primary's gate, tool call and failed call, then the
+    # fallback's gate, tool call and answer
+    assert result.usage["model_calls"] == 6
 
 
 async def test_both_candidates_failing_propagates_the_second_error(monkeypatch):

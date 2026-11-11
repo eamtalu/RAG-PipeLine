@@ -21,12 +21,12 @@ import logging
 import time
 from typing import Awaitable, Callable, Protocol
 
-import anthropic
 import httpx
 from pydantic import ValidationError
 
 from app import log_context
 from app.services.agent_runs.claims import Claim
+from app.services.model_failures import classify
 from app.services.teams.contracts import AnswerPayload, QuestionJob
 
 logger = logging.getLogger(__name__)
@@ -45,19 +45,20 @@ COMMAND_UNSUPPORTED = "This consumer cannot record actions yet; the check was no
 
 
 def failure_message(exc: BaseException) -> str:
-    """Turn an agent failure into the sentence the person in Teams sees.
+    """Turn an agent failure into the sentence the person in Teams sees, by what the provider said.
 
-    The generic sentence hides the one cause that is worth naming: the language model itself is
-    absent, unfunded or refusing us. That is an operator problem, not a data problem, and saying so
-    stops people re-asking and stops the team looking for a bug in the question.
+    (Bedrock AccessDeniedException | anthropic AuthenticationError | a credit refusal)
+    -> MODEL_UNAVAILABLE ; (throttling | 5xx | a call timeout | unreachable) -> MODEL_BUSY ;
+    (anything else) -> ANSWER_FAILED
     """
-    if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
-        return MODEL_UNAVAILABLE
-    if isinstance(exc, anthropic.BadRequestError) and "credit" in str(exc).lower():
-        return MODEL_UNAVAILABLE
+    # The one cause worth naming: the model itself is absent, unfunded or refusing us. That is
+    # an operator problem, not a data problem, and saying so stops people re-asking.
     if isinstance(exc, RuntimeError) and "anthropic_api_key" in str(exc):
         return MODEL_UNAVAILABLE
-    if isinstance(exc, (anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError)):
+    kind = classify(exc)
+    if kind in ("auth", "billing"):
+        return MODEL_UNAVAILABLE
+    if kind in ("throttled", "server_error", "timeout", "unreachable"):
         return MODEL_BUSY
     return ANSWER_FAILED
 

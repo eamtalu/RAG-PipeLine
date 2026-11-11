@@ -226,7 +226,10 @@ async def test_a_run_carries_a_redacted_record_of_everything_it_did():
     assert call["ok"] is True
     assert call["args"]["group_by"] == ["user_name"] and call["ms"] >= 0
     assert call["result"].lstrip().startswith("{") and "DBOBOC" in call["result"]
-    assert record.usage == {"model_calls": 2, "input_tokens": 0, "output_tokens": 0}
+    usage = dict(record.usage)
+    [by_model] = usage.pop("by_model")
+    assert usage == {"model_calls": 2, "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+    assert (by_model["provider"], by_model["calls"], by_model["failed_calls"]) == ("test", 2, 0)
     assert result.usage == record.usage and record.error is None
     assert "trace" not in result.to_legacy_dict() and "usage" not in result.to_legacy_dict()
 
@@ -316,7 +319,7 @@ class SpyStore:
 
 
 class _RaisingRuntime:
-    async def run(self, context, request, prior_turns=()):
+    async def run(self, context, request, prior_turns=(), *, trace=None):
         raise RuntimeError("provider down")
 
 

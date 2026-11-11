@@ -27,6 +27,7 @@ from app.persistence.repositories.customer_repository import CustomerRepository,
 from app.config.database import async_session
 from app.services.agent_quotas.admission import PostgresAdmission, QuotaLimits
 from app.services.agent_traces.store import PostgresTraceStore
+from app.services.agent_usage.store import PostgresUsageStore
 from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
 from app.services.logspace_agent.namespaces import logspace_namespace
 from app.services.mnp_log_ingestion.timefmt import set_display_timezone
@@ -48,6 +49,12 @@ def model_router() -> ModelRouter:
 def trace_store() -> PostgresTraceStore:
     """Where the gateway stores each run's redacted trace; one per process, own sessions."""
     return PostgresTraceStore(async_session)
+
+
+@cache
+def usage_store() -> PostgresUsageStore:
+    """Where every run's model calls are summed per tenant and day (usage_daily)."""
+    return PostgresUsageStore(async_session)
 
 
 @cache

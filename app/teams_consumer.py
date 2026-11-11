@@ -27,6 +27,7 @@ from app.services.agent_runs import claims
 from app.services.agent_runs.claims import Claim
 from app.services.agent_quotas.admission import PostgresAdmission, QuotaLimits
 from app.services.agent_traces.store import PostgresTraceStore
+from app.services.agent_usage.store import PostgresUsageStore
 from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
 from app.services.logspace_agent.namespaces import logspace_namespace
 from app.services.teams.binding_mirror import build_mirror_from_settings
@@ -51,6 +52,8 @@ _TRACES = PostgresTraceStore(async_session)
 _ADMISSION = PostgresAdmission(async_session, QuotaLimits.from_settings())
 # One router per process: it holds the providers' breakers and bulkheads for every run here.
 _ROUTER = ModelRouter()
+# Where every run's model calls are summed per tenant and day (usage_daily).
+_USAGE = PostgresUsageStore(async_session)
 
 
 def _conversation_type(source: str) -> ConversationType:
@@ -79,7 +82,7 @@ async def _run_agent(job: QuestionJob, history: list[dict]) -> dict:
     runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),
                             registry=_REGISTRY, router=_ROUTER)
     result = await run_request(request, runtime=runtime, prior_turns=tuple(history),
-                               trace_store=_TRACES, admission=_ADMISSION)
+                               trace_store=_TRACES, admission=_ADMISSION, usage_store=_USAGE)
     return result.to_legacy_dict()
 
 

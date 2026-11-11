@@ -61,6 +61,7 @@ The numbers travel in the snapshot (`RunBudgets.call_timeout_seconds`, `RunSetti
 The guard is a counter rather than an `asyncio.Semaphore`, because a semaphore binds to the first event loop that uses it and the test suite runs one loop per test; the loop is single-threaded, so a counter changed between awaits is race-free.
 `classify` (`app/agent/router/failures.py`) reads the HTTP status on the exception or its response, botocore's error code, and failing those the class name.
 Log lines: `agent.model.retry provider= wait=`, `agent.model.failed provider= kind= error=`, `agent.breaker provider= state=`.
+Since step 19 the guard also reports every attempt (provider, model, latency, outcome, tokens) to the run's trace through `on_call`, which is where the usage accounting starts (`docs/agent-usage-accounting.md`); an injected test model goes through a `test` guard so the accounting is one path.
 `tests/test_agent_provider_resilience_chunk168.py` holds the documented result of a timeout, a 429 and a 500 with fake providers and an injected clock.
 
 ## Fake-provider tests
@@ -69,4 +70,4 @@ Log lines: `agent.model.retry provider= wait=`, `agent.model.failed provider= ki
 
 ## What later steps add
 
-Per-attempt accounting and provider-aware failure sentences (19); the capacity table (20); per-model context sizes and an embeddings model in the policy when something embeds; breakers on the connectors' side.
+The capacity table (20); per-model context sizes and an embeddings model in the policy when something embeds; breakers on the connectors' side.

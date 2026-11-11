@@ -13,6 +13,7 @@ from app.agent.contracts import (
     RunBudgets,
     RunSettings,
 )
+from app.agent.gateway.accounting import parse_prices
 from app.settings import settings
 
 
@@ -45,6 +46,7 @@ def snapshot_settings() -> RunSettings:
             breaker_failures=settings.analytics_agent_breaker_failures,
             breaker_cooldown_seconds=float(settings.analytics_agent_breaker_cooldown_seconds),
         ),
+        prices=parse_prices(settings.analytics_agent_prices),
     )
 
 

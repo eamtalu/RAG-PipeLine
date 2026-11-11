@@ -9,7 +9,7 @@ build, kept as they are so the channels' payloads do not change.
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Literal, Mapping
 
@@ -99,6 +99,15 @@ class ResilienceSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelPrice:
+    """USD per million tokens; the cached input price defaults to the input price."""
+
+    input_per_million: float
+    output_per_million: float
+    cached_input_per_million: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RunSettings:
     """The gateway's snapshot of every setting a run needs; the only place they are read."""
 
@@ -106,6 +115,7 @@ class RunSettings:
     budgets: RunBudgets
     public_base_url: str
     resilience: ResilienceSettings = ResilienceSettings()
+    prices: Mapping[str, ModelPrice] = field(default_factory=dict)  # by model string
 
 
 @dataclass(frozen=True, slots=True)

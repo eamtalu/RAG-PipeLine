@@ -177,7 +177,7 @@ class _CountingRuntime:
     def __init__(self, error: Exception | None = None):
         self.calls, self.error = 0, error
 
-    async def run(self, context, request, prior_turns=()):
+    async def run(self, context, request, prior_turns=(), *, trace=None):
         self.calls += 1
         if self.error:
             raise self.error

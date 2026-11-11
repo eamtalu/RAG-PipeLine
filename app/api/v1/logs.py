@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.database import async_session, get_session
 from app.settings import settings
 from app.api.deps import (admission, get_current_customer, get_active_customer, model_router,
-                          tool_registry, trace_store)
+                          tool_registry, trace_store, usage_store)
 from app.persistence.models.job import Job
 from app.persistence.models.log_entry import LogEntry, LogEntryType
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
@@ -1184,7 +1184,8 @@ async def debug_ask(
                                 registry=tool_registry(), router=model_router())
         result = await run_request(request, runtime=runtime,
                                    prior_turns=tuple(t.model_dump() for t in body.history),
-                                   trace_store=trace_store(), admission=admission())
+                                   trace_store=trace_store(), admission=admission(),
+                                   usage_store=usage_store())
     except Exception as exc:  # noqa: BLE001 - the model or its provider is down, throttled or misconfigured
         logger.exception("ask eSmart Eye failed for %s", customer)
         raise HTTPException(503, detail=f"eSmart Eye could not answer right now: the language model is not "

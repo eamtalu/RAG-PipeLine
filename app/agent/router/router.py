@@ -79,12 +79,20 @@ class ModelRouter:
         *,
         timeout_seconds: float,
         resilience: ResilienceSettings,
+        on_call=None,
     ) -> GuardedChatModel:
-        """The built model behind its provider's guard, for every call of the run."""
+        """The built model behind its provider's guard, for every call of the run; `on_call`
+        hears each attempt (provider, model, ms, ok, usage)."""
         adapter = adapter_for(name)
         provider = adapter.name if adapter is not None else name.partition(":")[0]
         guard = self.health.guard_for(provider, resilience)
-        return GuardedChatModel(inner=model, guard=guard, timeout_seconds=timeout_seconds)
+        return GuardedChatModel(
+            inner=model,
+            guard=guard,
+            timeout_seconds=timeout_seconds,
+            model_name=name,
+            on_call=on_call,
+        )
 
     def _serves(
         self,

@@ -22,8 +22,9 @@ from app.agent.router.health import ProviderGuard
 class GuardedRunnable(Runnable[LanguageModelInput, AIMessage]):
     """The tool-bound model of a run, each `ainvoke` under the provider's guard."""
 
-    def __init__(self, inner: Runnable, guard: ProviderGuard, timeout_seconds: float):
+    def __init__(self, inner: Runnable, guard: ProviderGuard, timeout_seconds: float, on_call=None):
         self.inner, self.guard, self.timeout_seconds = inner, guard, timeout_seconds
+        self.on_call = on_call
 
     def invoke(
         self, input: LanguageModelInput, config: RunnableConfig | None = None, **kwargs: Any
@@ -36,6 +37,7 @@ class GuardedRunnable(Runnable[LanguageModelInput, AIMessage]):
         return await self.guard.call(
             lambda: self.inner.ainvoke(input, config, **kwargs),
             timeout_seconds=self.timeout_seconds,
+            on_call=self.on_call,
         )
 
 
@@ -45,6 +47,8 @@ class GuardedChatModel(BaseChatModel):
     inner: Any
     guard: Any
     timeout_seconds: float
+    model_name: str = ""  # the model string, for the accounting
+    on_call: Any = None  # called per attempt with provider, model, ms, ok, usage
 
     @property
     def _llm_type(self) -> str:
@@ -58,11 +62,16 @@ class GuardedChatModel(BaseChatModel):
         message = await self.guard.call(
             lambda: self.inner.ainvoke(messages, stop=stop, **kwargs),
             timeout_seconds=self.timeout_seconds,
+            on_call=self._report,
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
 
     def bind_tools(self, tools: Sequence, **kwargs: Any) -> Runnable[LanguageModelInput, AIMessage]:
         """The inner model bound to the tools, still under the guard."""
         return GuardedRunnable(
-            self.inner.bind_tools(tools, **kwargs), self.guard, self.timeout_seconds
+            self.inner.bind_tools(tools, **kwargs), self.guard, self.timeout_seconds, self._report
         )
+
+    def _report(self, **call: Any) -> None:
+        if self.on_call is not None:
+            self.on_call(model=self.model_name, **call)

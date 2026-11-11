@@ -17,10 +17,14 @@ from app.config.database import async_session
 from app.persistence.models.analytics_fact import AnalyticsFact
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_lookup import AnalyticsLookup, AnalyticsLookupValue
+from app.persistence.models.agent_in_flight import AgentInFlight
+from app.persistence.models.agent_trace import AgentTrace
 from app.persistence.models.analytics_settlement import AnalyticsSettledRow, AnalyticsSettlement
 from app.persistence.models.customer import Customer
 from app.persistence.models.job import Job
 from app.persistence.models.log_transaction import LogTransaction
+from app.persistence.models.quota_window import QuotaWindow
+from app.persistence.models.usage_daily import UsageDaily
 from tests.test_logspace_tools_chunk132 import TODAY as LOGSPACE_TODAY
 from tests.test_logspace_tools_chunk132 import TZ as LOGSPACE_TZ
 from tests.test_logspace_tools_chunk132 import _seed
@@ -60,7 +64,13 @@ BODY = {
     ],
 }
 
+# the agent's own rows for the tenant too (quotas, in-flight, traces, usage), so a tenant's
+# hourly quota cannot carry over between test runs and refuse a later endpoint test
 _ANALYTICS_MODELS = (
+    QuotaWindow,
+    AgentInFlight,
+    AgentTrace,
+    UsageDaily,
     AnalyticsSettledRow,
     AnalyticsSettlement,
     AnalyticsLookupValue,
@@ -125,7 +135,7 @@ def fact(
 
 
 async def wipe_analytics(cc: str) -> None:
-    """Remove every analytics row and the customer row of the tenant."""
+    """Remove every analytics and agent row and the customer row of the tenant."""
     async with async_session() as db:
         for model in _ANALYTICS_MODELS:
             await db.execute(delete(model).where(model.customer_code == cc))

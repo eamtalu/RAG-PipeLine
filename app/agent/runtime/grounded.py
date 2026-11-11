@@ -188,7 +188,8 @@ class GroundedAgent:
 
     # ---- the run -----------------------------------------------------------------------------------
     async def run(self, context: ExecutionContext, request: AgentRequest,
-                  prior_turns: Sequence[dict] = ()) -> AgentResult:
+                  prior_turns: Sequence[dict] = (), *,
+                  trace: RunTrace | None = None) -> AgentResult:
         """Answer one request under its context: the text and the tool calls made, as a result.
 
         (context, request) -> AgentResult(stop_reason="end_turn", ...) ; a provider that never
@@ -200,10 +201,11 @@ class GroundedAgent:
         if context.tenant != self.customer_code:
             raise ValueError(f"runtime for tenant {self.customer_code!r} given a context for "
                              f"{context.tenant!r}")
-        # Step 2: The trace is created outside the deadline, so that a run that times out still
-        # carries every tool call and verdict it collected before it was stopped; `current` names
-        # the model of the attempt in progress for the timeout answer.
-        trace = RunTrace()
+        # Step 2: The trace is the gateway's when it gave one (so a run that raised still has
+        # its calls there), else this run's own; it lives outside the deadline, so a run that
+        # times out keeps what it collected. `current` names the model of the attempt in
+        # progress for the timeout answer.
+        trace = trace if trace is not None else RunTrace()
         current = {"model": context.model.name}
         # Step 3: The deadline wraps the gate and the loop together, so that a provider that hangs
         # can never hold a consumer slot or a request past the queue's visibility window.
@@ -227,8 +229,10 @@ class GroundedAgent:
         """
         # Step 1: An injected model (tests) bypasses the router: one attempt, as always.
         if self._model_override is not None:
-            model, gate, name = self.resolve_model(context)
+            raw, gate, name = self.resolve_model(context)
             current["model"] = name
+            # the injected model goes through a "test" guard too, so accounting is one path
+            model = self._guarded(raw, "test:injected", context, trace)
             return await self._run(context, request, prior_turns, model=model, gate=gate,
                                    model_name=name, trace=trace)
         # Step 2: Pin the first candidate that serves the profile; the gate's model is built once
@@ -237,12 +241,12 @@ class GroundedAgent:
         candidates = (choice.model, *choice.fallbacks)
         gate_model = (None if choice.gate_model == choice.model
                       else self._guarded(make_model(replace(context.model, name=choice.gate_model)),
-                                         choice.gate_model, context))
+                                         choice.gate_model, context, trace))
         for i, name in enumerate(candidates):
             built = make_model(replace(context.model, name=name))
             model_name = getattr(built, "model_name", None) or name
             # every call of the run, the gate's and the loop's, goes through the provider's guard
-            model = self._guarded(built, name, context)
+            model = self._guarded(built, name, context, trace)
             gate = (self._gate_override if self._gate_override is not None
                     else TopicGate(gate_model or model, self.profile.domain))
             current["model"] = name
@@ -260,9 +264,11 @@ class GroundedAgent:
                                candidates[i + 1], type(exc).__name__, str(exc)[:200])
         raise AssertionError("unreachable: every candidate returned or raised")
 
-    def _guarded(self, model: BaseChatModel, name: str, context: ExecutionContext) -> BaseChatModel:
+    def _guarded(self, model: BaseChatModel, name: str, context: ExecutionContext,
+                 trace: RunTrace) -> BaseChatModel:
         return self.router.guarded(model, name, resilience=context.resilience,
-                                   timeout_seconds=context.budgets.call_timeout_seconds)
+                                   timeout_seconds=context.budgets.call_timeout_seconds,
+                                   on_call=trace.record_model_call)
 
     async def _run(self, context: ExecutionContext, request: AgentRequest,
                    prior_turns: Sequence[dict], *, model: BaseChatModel, gate: TopicGate | None,
@@ -365,10 +371,6 @@ class GroundedAgent:
                 seen = step["messages"]
         except GraphRecursionError:
             stop_reason = "max_iterations"
-        # Every model call of this draft, with the tokens the provider reported, onto the trace.
-        for m in seen[len(messages):]:
-            if isinstance(m, AIMessage):
-                trace.record_model_call(getattr(m, "usage_metadata", None))
         final = next((m for m in reversed(seen) if isinstance(m, AIMessage) and not m.tool_calls), None)
         answer = text_of(final) if final is not None else ""
         if stop_reason == "max_iterations" and not answer:

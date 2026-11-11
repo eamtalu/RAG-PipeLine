@@ -1,4 +1,4 @@
-"""The entry every channel calls: snapshot, build the context once, admit, run, store, log."""
+"""The entry every channel calls: snapshot, build the context once, admit, run, store, account."""
 
 from __future__ import annotations
 
@@ -9,9 +9,11 @@ from typing import Any, Mapping, Sequence
 
 from app import log_context
 from app.agent.contracts import AgentRequest, AgentResult, ExecutionContext, RunSettings
+from app.agent.gateway.accounting import usage_rows
 from app.agent.gateway.context import build_context, snapshot_settings
-from app.agent.gateway.ports import Admission, AgentRuntime, TraceStore
+from app.agent.gateway.ports import Admission, AgentRuntime, TraceStore, UsageStore
 from app.agent.profiles.version import code_version
+from app.agent.router.failures import classify
 from app.agent.runtime.trace import RunTrace, error_record
 
 logger = logging.getLogger(__name__)
@@ -37,12 +39,14 @@ async def run_request(
     run_settings: RunSettings | None = None,
     trace_store: TraceStore | None = None,
     admission: Admission | None = None,
+    usage_store: UsageStore | None = None,
 ) -> AgentResult:
     """Run one request through the runtime under a context built here and nowhere else.
 
-    (request, runtime, prior_turns) -> AgentResult, its trace stored when a store is given ;
-    over a quota -> a declined result, the runtime never runs ; a runtime error -> an error row
-    stored, the slot released, then the error propagates to the channel
+    (request, runtime, prior_turns) -> AgentResult, its trace stored and its calls accounted
+    when the stores are given ; over a quota -> a declined result, the runtime never runs ;
+    a runtime error -> an error row stored, the calls accounted, the slot released, then the
+    error propagates to the channel
     """
     # Step 1: Snapshot settings if the channel did not, so that every value the run needs is
     # fixed before it starts and a settings change mid-run cannot reach it.
@@ -63,16 +67,30 @@ async def run_request(
                 result = _refused(context, request, reason)
                 await _store(trace_store, context, result.trace.as_row())
                 return result
+        # Step 5: The gateway owns the collector, so a run that raised still has every tool
+        # call and model call it made for the error row and the accounting.
+        trace = RunTrace()
         try:
             try:
-                result = await runtime.run(context, request, prior_turns)
+                result = await runtime.run(context, request, prior_turns, trace=trace)
             except Exception as exc:
-                # Step 5: A run that raised still leaves a row, because the failed runs are the
-                # ones someone will look for; the channel's own error handling is unchanged.
-                await _store(trace_store, context, error_record(context, request, exc).as_row())
+                # Step 6: A run that raised still leaves a row and its calls are accounted,
+                # because the failed runs are the ones someone will look for and pay for; the
+                # channel's own error handling is unchanged.
+                logger.warning(
+                    "agent.run_failed trace_id=%s kind=%s error=%s: %s",
+                    context.trace_id,
+                    classify(exc),
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+                await _store(
+                    trace_store, context, error_record(context, request, exc, trace).as_row()
+                )
+                await _account(usage_store, context, trace, run_settings)
                 raise
         finally:
-            # Step 6: Free the slot however the run ended, so a timeout or an exception can
+            # Step 7: Free the slot however the run ended, so a timeout or an exception can
             # never pin the tenant at its in-flight limit.
             if admitted:
                 await _release(admission, context)
@@ -91,10 +109,11 @@ async def run_request(
             int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0),
             time.monotonic() - started,
         )
-        # Step 7: Store the redacted record after the answer exists, so storing can never delay
-        # or change what the person gets.
+        # Step 8: Store the redacted record and account the calls after the answer exists, so
+        # neither can delay or change what the person gets.
         if result.trace is not None:
             await _store(trace_store, context, result.trace.as_row())
+        await _account(usage_store, context, trace, run_settings)
     return result
 
 
@@ -166,4 +185,27 @@ async def _store(
     except Exception:  # noqa: BLE001 - the answer must reach the person even when the store is down
         logger.exception(
             "agent.trace_store_failed trace_id=%s tenant=%s", context.trace_id, context.tenant
+        )
+
+
+async def _account(
+    usage_store: UsageStore | None,
+    context: ExecutionContext,
+    trace: RunTrace,
+    run_settings: RunSettings,
+) -> None:
+    """Add the run's calls to the usage store; a store that fails is logged, never fatal.
+
+    (None, a trace) -> nothing ; (a store, a trace of 2 calls) -> one row per model added
+    """
+    if usage_store is None:
+        return
+    rows = usage_rows(trace, context, run_settings.prices)
+    if not rows:
+        return
+    try:
+        await usage_store.add(rows)
+    except Exception:  # noqa: BLE001 - accounting must never cost the person their answer
+        logger.exception(
+            "agent.usage_store_failed trace_id=%s tenant=%s", context.trace_id, context.tenant
         )

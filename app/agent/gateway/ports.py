@@ -1,4 +1,4 @@
-"""What the gateway needs from the outside, as roles: the runtime, the trace store, admission."""
+"""What the gateway needs from the outside, as roles: the runtime and the three stores."""
 
 from __future__ import annotations
 
@@ -10,7 +10,12 @@ from app.agent.contracts import AgentRequest, AgentResult, ExecutionContext
 
 class AgentRuntime(Protocol):
     async def run(
-        self, context: ExecutionContext, request: AgentRequest, prior_turns: Sequence[dict] = ()
+        self,
+        context: ExecutionContext,
+        request: AgentRequest,
+        prior_turns: Sequence[dict] = (),
+        *,
+        trace: Any = None,
     ) -> AgentResult:
         """Answer the request under the context; prior turns are the channel's, oldest first."""
         ...
@@ -31,4 +36,10 @@ class Admission(Protocol):
 
     async def release(self, *, tenant: str, trace_id: str) -> None:
         """Free the run's in-flight slot; a run never admitted is a no-op."""
+        ...
+
+
+class UsageStore(Protocol):
+    async def add(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        """Add each row's counters into its (tenant, day, provider, model) row, creating it."""
         ...

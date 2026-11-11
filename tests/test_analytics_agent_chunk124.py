@@ -188,7 +188,7 @@ def test_the_trace_pairs_each_call_with_a_preview_of_its_result():
 
 async def test_the_endpoint_returns_the_agent_result_shape(monkeypatch):
     await _plant()
-    monkeypatch.setattr(GroundedAgent, "run", lambda self, context, request, prior_turns=():
+    monkeypatch.setattr(GroundedAgent, "run", lambda self, context, request, prior_turns=(), **kw:
                         _answer(request.text, prior_turns))
     async with async_session() as db:
         out = await agent_api.ask(agent_api.AskRequest(question="how many?", history=[
@@ -208,7 +208,7 @@ async def test_the_consumer_runs_the_analytics_profile_through_the_gateway(monke
     from app.services.teams.contracts import QuestionJob
     calls = []
 
-    async def run(self, context, request, prior_turns=()):
+    async def run(self, context, request, prior_turns=(), *, trace=None):
         calls.append((self.profile.name, request.text))
         return AgentResult(answer="", stop_reason="end_turn", model="m")
 

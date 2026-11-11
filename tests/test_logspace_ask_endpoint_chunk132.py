@@ -33,10 +33,11 @@ def seen(monkeypatch):
     s = _Seen()
 
     async def spy(request, *, runtime, prior_turns=(), run_settings=None, trace_store=None,
-              admission=None):
+              admission=None, usage_store=None):
         s.request, s.runtime, s.prior_turns = request, runtime, list(prior_turns)
         assert trace_store is not None  # the endpoint passes the process's trace store (step 14)
         assert admission is not None  # and its admission (step 16)
+        assert usage_store is not None  # and its usage store (step 19)
         return AgentResult(answer="ok", stop_reason="end_turn", model="m")
 
     monkeypatch.setattr(logs_api, "run_request", spy)
@@ -82,7 +83,7 @@ async def test_history_is_passed_through(seen):
 
 async def test_a_provider_failure_is_a_clear_503(monkeypatch):
     async def broken(request, *, runtime, prior_turns=(), run_settings=None, trace_store=None,
-                 admission=None):
+                 admission=None, usage_store=None):
         raise RuntimeError("Error code: 400 - Your credit balance is too low")
 
     monkeypatch.setattr(logs_api, "run_request", broken)

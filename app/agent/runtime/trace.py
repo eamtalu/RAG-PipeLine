@@ -29,9 +29,7 @@ class RunTrace:
 
     tool_calls: list[dict] = field(default_factory=list)
     guards: list[dict] = field(default_factory=list)
-    model_calls: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
+    model_calls_made: list[dict] = field(default_factory=list)  # one per call, by the guard
     finished_at: datetime | None = None  # fixed by the first finish, so a repeat is equal
 
     def record_tool(
@@ -64,29 +62,70 @@ class RunTrace:
             {"name": name, "stage": stage, "verdict": verdict, "detail": detail, "ms": int(ms)}
         )
 
-    def record_model_call(self, usage: Mapping[str, Any] | None) -> None:
-        """One call of the loop's model; the tokens when the provider reported them.
+    def record_model_call(
+        self,
+        *,
+        provider: str,
+        model: str,
+        ms: int,
+        ok: bool,
+        usage: Mapping[str, Any] | None,
+    ) -> None:
+        """One provider call as the guard ran it, with the tokens the provider reported.
 
-        ({"input_tokens": 10, "output_tokens": 3}) -> model_calls+1, tokens added ; (None) -> +1
+        (provider="ollama", model="ollama:x", ms=120, ok=True, usage={"input_tokens": 10,
+        "output_tokens": 3, "input_token_details": {"cache_read": 4}}) -> one record
         """
-        self.model_calls += 1
-        if usage:
-            self.input_tokens += int(usage.get("input_tokens") or 0)
-            self.output_tokens += int(usage.get("output_tokens") or 0)
+        usage = usage or {}
+        details = usage.get("input_token_details") or {}
+        self.model_calls_made.append(
+            {
+                "provider": provider,
+                "model": model,
+                "ms": int(ms),
+                "ok": bool(ok),
+                "input_tokens": int(usage.get("input_tokens") or 0),
+                "output_tokens": int(usage.get("output_tokens") or 0),
+                "cached_tokens": int(details.get("cache_read") or 0),
+            }
+        )
 
     @property
-    def usage(self) -> dict[str, int] | None:
-        """The run's model usage, or None when the loop's model was never called.
+    def usage(self) -> dict[str, Any] | None:
+        """The run's model usage summed, with one row per provider and model, or None.
 
         >>> RunTrace().usage is None
         True
         """
-        if not self.model_calls:
+        if not self.model_calls_made:
             return None
+        by_model: dict[tuple[str, str], dict[str, Any]] = {}
+        for call in self.model_calls_made:
+            row = by_model.setdefault(
+                (call["provider"], call["model"]),
+                {
+                    "provider": call["provider"],
+                    "model": call["model"],
+                    "calls": 0,
+                    "failed_calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                    "latency_ms": 0,
+                },
+            )
+            row["calls"] += 1
+            row["failed_calls"] += 0 if call["ok"] else 1
+            for key in ("input_tokens", "output_tokens", "cached_tokens"):
+                row[key] += call[key]
+            row["latency_ms"] += call["ms"]
+        rows = list(by_model.values())
         return {
-            "model_calls": self.model_calls,
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
+            "model_calls": len(self.model_calls_made),
+            "input_tokens": sum(r["input_tokens"] for r in rows),
+            "output_tokens": sum(r["output_tokens"] for r in rows),
+            "cached_tokens": sum(r["cached_tokens"] for r in rows),
+            "by_model": rows,
         }
 
     def finish(
@@ -126,13 +165,17 @@ class RunTrace:
 
 
 def error_record(
-    context: ExecutionContext, request: AgentRequest, error: BaseException
+    context: ExecutionContext,
+    request: AgentRequest,
+    error: BaseException,
+    trace: RunTrace | None = None,
 ) -> TraceRecord:
-    """The record of a run that raised before it could answer; the error is named, not the stack.
+    """The record of a run that raised before it could answer, with what it did until then.
 
     (context, request, RuntimeError("down")) -> TraceRecord(status="error",
-    error="RuntimeError: down")
+    error="RuntimeError: down") ; with a trace -> its tool calls, verdicts and usage kept
     """
+    trace = trace or RunTrace()
     return _record(
         context,
         request,
@@ -142,13 +185,13 @@ def error_record(
         model=context.model.name,
         profile_version="",
         code_version=code_version(),
-        iterations=0,
+        iterations=len(trace.tool_calls),
         retries=0,
         answer="",
         withheld_figures=(),
-        guards=[],
-        tool_calls=[],
-        usage=None,
+        guards=trace.guards,
+        tool_calls=trace.tool_calls,
+        usage=trace.usage,
         error=f"{type(error).__name__}: {str(error)[:500]}",
         finished_at=None,
     )

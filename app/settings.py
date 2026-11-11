@@ -469,6 +469,10 @@ class Settings(BaseSettings):
     analytics_agent_provider_bulkhead: int = 8
     analytics_agent_breaker_failures: int = 3
     analytics_agent_breaker_cooldown_seconds: float = 30.0
+    # The price list (step 19), JSON: {"<model string>": {"input_per_million": x,
+    # "output_per_million": y, "cached_input_per_million": z}}; a model not listed is recorded
+    # with no cost. Prices are the operator's data, never guessed by the code.
+    analytics_agent_prices: str = ""
 
     # --- Microsoft Teams bot (edge on AWS -> SQS -> consumer here -> HTTP answer back to the edge) ---
     # The consumer is its OWN process (`python -m app.teams_consumer`), not one of the singleton

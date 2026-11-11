@@ -72,7 +72,13 @@ class ProviderGuard:
             return "bulkhead full"
         return None
 
-    async def call(self, provider_call: Callable[[], Awaitable[T]], *, timeout_seconds: float) -> T:
+    async def call(
+        self,
+        provider_call: Callable[[], Awaitable[T]],
+        *,
+        timeout_seconds: float,
+        on_call: Callable[..., None] | None = None,
+    ) -> T:
         """Run one call under the guard; the result, or the failure after the policy is spent.
 
         (a call that answers) -> its result ; (throttled once, then answers) -> its result after
@@ -92,6 +98,7 @@ class ProviderGuard:
             attempt = 1
             while True:
                 self.calls_made += 1
+                began = time.monotonic()
                 try:
                     # Step 2: Bound the call, because a provider that never answers must cost one
                     # failed call, not the run's whole deadline.
@@ -99,12 +106,14 @@ class ProviderGuard:
                 except asyncio.TimeoutError:
                     error = ModelCallTimeout(self.provider, timeout_seconds)
                     self._record_failure("timeout", error)
+                    self._report(on_call, began, ok=False, usage=None)
                     raise error from None
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     kind = classify(exc)
                     self._record_failure(kind, exc)
+                    self._report(on_call, began, ok=False, usage=None)
                     # Step 3: Retry once only when the provider throttled, with jitter, because
                     # a 429 means "later" and every other failure means "not here".
                     if kind == "throttled" and attempt == 1:
@@ -117,11 +126,18 @@ class ProviderGuard:
                         continue
                     raise
                 self._record_success()
+                self._report(on_call, began, ok=True, usage=getattr(result, "usage_metadata", None))
                 return result
         finally:
             # Step 4: Free the slot however the call ended, so a failure can never pin the
             # bulkhead.
             self.in_flight -= 1
+
+    def _report(self, on_call, began: float, *, ok: bool, usage) -> None:
+        """Tell the run about one attempt: the provider, its latency, outcome and tokens."""
+        if on_call is not None:
+            on_call(provider=self.provider, ms=int((time.monotonic() - began) * 1000), ok=ok,
+                    usage=usage)
 
     def _record_failure(self, kind: str, error: BaseException) -> None:
         self.failures += 1
