@@ -28,14 +28,15 @@ class MirrorWriter(Protocol):
 
 
 def envelope(row_type: str, customer_code: str, *, payload: dict, as_of: str, now: float,
-             site_id: str | None = None, source_version: int = 0) -> MirrorEnvelope:
+             site_id: str | None = None, user_id: str | None = None, job_id: str | None = None,
+             source_version: int = 0) -> MirrorEnvelope:
     """One row ready to write, keyed and timed from the shared layout.
 
     ("site_home", "acme", site_id="BRI", payload={...}, as_of="...", now=1000) -> MirrorEnvelope(
     pk="EYE#acme", sk="SITE#BRI#HOME", ttl=4600, ...) ; ("sites", ...) -> ttl None
     """
     spec = KEY_LAYOUT[row_type]
-    pk, sk = spec.key(customer_code, site_id=site_id)
+    pk, sk = spec.key(customer_code, site_id=site_id, user_id=user_id, job_id=job_id)
     stamp = int(now)
     return MirrorEnvelope(pk=pk, sk=sk, row_type=row_type, as_of=as_of, written_at=stamp,
                           source_version=source_version,

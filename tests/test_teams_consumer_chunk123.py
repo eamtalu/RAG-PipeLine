@@ -77,10 +77,13 @@ class Harness:
             self.history_calls.append((conv, code))
             return [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "before"}]
 
-        async def record(conv, code, q, a, job_id):
-            self.recorded.append((conv, code, q, a, job_id))
+        async def record(job, payload):
+            # the recorder takes the job and the answer as posted (step 6); the tuple the tests
+            # read keeps its old shape
+            self.recorded.append((job.conversation_id, job.customer_code, job.question, payload.answer,
+                                  job.job_id))
 
-        async def run_agent(job, history):
+        async def run_agent(job, history, progress=None):
             # the consumer hands the job over; the fakes keep their (code, question, history) shape
             code, question = job.customer_code, job.question
             self.in_flight += 1

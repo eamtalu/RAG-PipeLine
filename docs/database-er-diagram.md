@@ -1360,6 +1360,7 @@ The binding's `customer_code` is an enforced foreign key: a binding to a missing
 `tenant_sites` (stage D, step 4) names the warehouses a customer runs for the eSmart Eye Teams app: the `warehouse` value as it appears on the rows, a display name and the switcher order.
 The consumer computes the Home snapshot once for the whole customer and once per active site and mirrors them to the edge under one key prefix, `EYE#<customer_code>`; a site of a missing log space must fail at write time, so the key is an enforced foreign key too.
 The turns carry the soft tenant key like the log tables, so a tenant purge can remove them and a turn can never be replayed into another tenant's question.
+Since stage D step 6 the answer row also carries who asked, the site, the typed blocks and the times, so the same table is the Ask history of the Teams app: the consumer mirrors one person's last 30 days to the edge (`EYE#<customer>` / `USER#<object id>#HISTORY` and one `TURN` row per answer) and purges older turns every hour (`teams_history_retention_days`).
 `agent_runs` is the run ledger: the consumer inserts one row per edge job id before it runs the model, and the unique `request_id` decides who wins a redelivery.
 A row still `running` means another consumer has the question (unless `claimed_at` is older than the queue's visibility window, when the claim is taken over); a row that is `done` carries the posted answer in `result`, replayed as it is.
 `agent_traces` is what each run did, for audit and troubleshooting: the gateway stores one row per run from every channel (Teams and both web ask endpoints) after the answer exists.
@@ -1400,12 +1401,19 @@ erDiagram
     teams_conversation_turns {
         uuid id PK
         string conversation_id "Teams conversation id; indexed with created_at"
-        string customer_code "soft tenant key"
+        string customer_code "soft tenant key; indexed with sender_object_id, created_at"
         string role "user | assistant"
         smallint position "0 question, 1 answer; orders within one instant"
         text content
         string job_id "edge job that produced it"
         datetime created_at
+        string sender_object_id "Entra object id of who asked (step 6, nullable)"
+        string site_id "the site the page looked at (nullable)"
+        jsonb blocks "the typed answer blocks, on the answer row"
+        datetime asked_at "nullable"
+        datetime answered_at "nullable"
+        datetime data_as_of "the figures' watermark when answered (nullable)"
+        bool provisional "nullable"
     }
 
     agent_runs {

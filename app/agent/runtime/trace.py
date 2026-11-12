@@ -13,7 +13,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from app.agent.contracts import AgentRequest, AgentResult, ExecutionContext, TraceRecord
 from app.agent.profiles.version import code_version
@@ -31,6 +31,17 @@ class RunTrace:
     guards: list[dict] = field(default_factory=list)
     model_calls_made: list[dict] = field(default_factory=list)  # one per call, by the guard
     finished_at: datetime | None = None  # fixed by the first finish, so a repeat is equal
+    #: Told of every event as it is recorded ("tool", "model_call", "guard" with a small dict),
+    #: for a channel that shows progress (step 6); never affects the record, never raises out.
+    listener: Callable[[str, dict], None] | None = field(default=None, compare=False, repr=False)
+
+    def _emit(self, kind: str, data: dict) -> None:
+        if self.listener is None:
+            return
+        try:
+            self.listener(kind, data)
+        except Exception:  # noqa: BLE001 - a progress listener must never break the run
+            pass
 
     def record_tool(
         self,
@@ -54,6 +65,7 @@ class RunTrace:
                 "sensitive_args": sensitive_args,
             }
         )
+        self._emit("tool", {"namespace": namespace, "name": name, "ok": bool(ok)})
 
     def record_guard(
         self, *, name: str, stage: str, verdict: str, ms: int, detail: str | None = None
@@ -61,6 +73,7 @@ class RunTrace:
         self.guards.append(
             {"name": name, "stage": stage, "verdict": verdict, "detail": detail, "ms": int(ms)}
         )
+        self._emit("guard", {"name": name, "stage": stage, "verdict": verdict})
 
     def record_model_call(
         self,
@@ -89,6 +102,7 @@ class RunTrace:
                 "cached_tokens": int(details.get("cache_read") or 0),
             }
         )
+        self._emit("model_call", {"provider": provider, "model": model, "ok": bool(ok)})
 
     @property
     def usage(self) -> dict[str, Any] | None:
