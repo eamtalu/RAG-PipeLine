@@ -39,3 +39,18 @@ Deploy:
 5. The at-risk rows learn their warehouse on the next evaluation (every minute); closed history stays NULL and counts under the whole customer.
 
 Rollback: `git checkout deployed-backend-9c7fee9` and `sudo systemctl restart fastapirag fastapirag-worker fastapirag-teams-consumer`; the new table, column and index can stay, the `EYE#` rows expire within an hour or are ignored.
+
+## D5: typed answer blocks and the presentation tools
+
+What it adds: the analytics profile lists the `presentation` namespace (`show_chart`, `show_table`, `suggest_followups`), empty unless `ANALYTICS_AGENT_PRESENTATION=true`; the runtime turns those calls into `blocks` on the answer; the Teams consumer posts `blocks`, `asked_at`, `answered_at`, `data_as_of` and `provisional` with every answer (contract revision 3.5, `docs/contract_schema.json`).
+No migration. The guards treat a drawn figure like a written one: a chart with no data call behind it is withheld like an invented number.
+The edge must already run the step 5 image, so that the blocks are drawn; an older edge image drops the unknown fields and shows the evidence card, so the order is only about seeing the result.
+
+Deploy:
+
+1. `./deploy.sh` with the flag unset (the default, off). Ask one question in Teams: the answer arrives as before (text plus the card) and the journal shows no `answers` error.
+2. Add `ANALYTICS_AGENT_PRESENTATION=true` to the server `.env`, then `sudo systemctl restart fastapirag-teams-consumer` (the web API reads the same flag; restart `fastapirag` too if the web assistant should draw).
+3. Ask a chart question in Teams ("Show deliveries per day this week as a chart"): the answer carries a chart card with the Bars / Line / Table toggle. In `agent_traces` the run lists a `show_chart` call after the data calls.
+4. If the model draws a chart from nothing, the answer is withheld with the honest sentence (the same path as an invented number) and the journal says so; that is the guard working, not a fault.
+
+Rollback: remove the flag from `.env` and restart the consumer (answers go back to text plus card, nothing else changes); or `git checkout deployed-backend-<previous>` and restart the three units.
