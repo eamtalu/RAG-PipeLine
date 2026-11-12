@@ -59,5 +59,25 @@ Decision: the separation is a package boundary inside this repo first (`app/agen
 | 19 | Accounting to `usage_daily`; provider-aware failure sentences | cost per tenant per day visible |
 | 20 | Capacity table measured; Bedrock quota increase filed | the measured concurrent-run ceiling is written down |
 
+## Stage D: the Teams app (roles, sites, advisories, tasks)
+
+Added 12 November 2026.
+The design pack and the step-by-step prompts live in the edge repo at `docs/design-handoff/` (DESIGN.md, PROMPTS.md, screens 01 to 12); the edge's `docs/design-handoff/PLAN.md` is the repo-local summary.
+Stage D takes roadmap items 5 (roles table) and 7 (presentation blocks) forward together, because the design needs both at once.
+The numbering follows PROMPTS.md so the two repos talk about the same step; D3 is PROMPTS step 3 and so on.
+Rules that hold for every D step: the backend Postgres is the record; what the tab reads is mirrored into the edge's DynamoDB table under one key prefix `EYE#`; what the tab writes arrives as `QuestionJob.action` on the queue and is answered through `/internal/answers`; every contract addition is optional and an unknown action kind is answered "unsupported"; every new loop or mirror is behind a setting that defaults off, so `deploy.sh` with an unchanged `.env` changes nothing.
+Steps D7, D9 and D10 are presented to the owner and wait for an OK before code.
+
+| # | Step | Done when |
+|---|---|---|
+| D4 | Sites: `tenant_sites` lookup (Brighton 1, Bicester 2, London 3 for `tmp-live`, values verified against `analytics_settled_rows.warehouse` first); the Home snapshot computed per site and for all sites; `analytics_at_risk_deliveries.warehouse` filled from what the board already reads; `mirror_outbox` and a `MirrorWriter` shared by every mirror; freshness (`data_as_of`, `provisional` from the unsealed share) | `EYE#<cc>/SITE#<id>#HOME` rows exist for every active site and `HOME#<cc>/SNAPSHOT` is still written; the old tab is unchanged |
+| D5 | Answer blocks: the shared contract gains `blocks`, `asked_at`, `answered_at`, `data_as_of`, `provisional`; presentation tools `show_chart`, `show_table`, `ask_form`, `suggest_followups` behind `analytics_agent_presentation`; `blocks_from_trace`; the ungrounded guard covers chart numbers | a scripted run yields one valid chart block with the fetched numbers; a chart with numbers from no tool is dropped and logged; the legacy `answer` is unchanged |
+| D6 | History: turns keep the sender, the blocks and the times; a conversation index per person; purge at 30 days; mirrored under `EYE#<cc>#U#<oid>/HIST#*`; `history_refresh` re-runs a stored question | a person's own conversations list; another person's never do; a 31-day-old turn is gone |
+| D7 | Access control: `roles`, `capabilities`, `role_capabilities` seeded from `access_matrix.yaml`; `users`, `user_sites`, `approvals`, `audit_events`; one `decide()`; `Principal.roles` and `ExecutionContext.site_ids` applied by the tool executor; the user profile and the Admin rows mirrored; `access_default_role` supervisor until the users are seeded | a supervisor cannot read another site and cannot approve; a model-supplied site outside scope is rewritten and noted on the trace; the matrix in the database equals screen 07 |
+| D8 | Actions: `run_action` dispatch keyed on `action.kind` with the at-risk check folded in; the form registry with `create_user` end to end (permission, approval when the matrix says so, audit, receipt with undo); redelivery replays the stored answer | `create_user` by a supervisor opens an approval and returns a receipt; an ops manager's decision flips the user; an unknown kind is answered "unsupported" |
+| D9 | Advisories: tables, the agent ledger, the runner loop behind `advisory_worker_enabled`; the Delivery agent on `analytics_at_risk_deliveries`; the other four seeded off; feed and roster mirrored; high severity to the customer's Teams webhook | planted at-risk rows yield one advisory per route and day, resolved when the rows close; the roster shows cadence, last and next run |
+| D10 | Tasks: `reminders`, `schedules`, `task_runs` with a unique `(kind, task_id, due_at)`; the scheduler loop in the singleton worker behind `task_scheduler_enabled`; reminders re-run their query as the owner; conditions fire once and re-arm; schedules post to a channel through the notification dispatcher | two workers claim a due run once; a run left running is swept and retried; a condition fires once per crossing; a channel post is enqueued |
+| D11 | Docs and the switch: `docs/stage-d-deploy-runbook.md`, the ER diagram, the handoff; `access_default_role` to none | the runbook has a rollback line per step and the switch is one Terraform apply on the edge |
+
 Later stages follow the roadmap in the architecture document: the query model and `POST /analytics/query`, memory and tenancy, the first customer source, presentation blocks, scale-out.
 Each is detailed when the stage before it is done, because its shape depends on what the earlier stages measure.
