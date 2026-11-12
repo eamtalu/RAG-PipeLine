@@ -8,6 +8,7 @@ coordinate. Scale by starting another instance.
 
 import asyncio
 import logging
+from decimal import Decimal
 import signal
 from datetime import datetime, timedelta, timezone
 
@@ -28,7 +29,7 @@ from app.services.agent_runs.claims import Claim
 from app.services.agent_quotas.admission import PostgresAdmission, QuotaLimits
 from app.services.agent_traces.store import PostgresTraceStore
 from app.services.agent_usage.store import PostgresUsageStore
-from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
+from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace, presentation_namespace
 from app.services.logspace_agent.namespaces import logspace_namespace
 from app.services.teams.binding_mirror import build_mirror_from_settings
 from app.services.teams.binding_sweep import sweep_once
@@ -38,6 +39,7 @@ from app.services.teams.contracts import AnswerPayload, QuestionJob
 from app.services.teams.home_snapshot import build_writer_from_settings
 from app.services.teams.home_snapshot import sweep_once as snapshot_sweep_once
 from app.services.teams.mirror import ChangeTracker, build_mirror_writer_from_settings
+from app.services.teams.freshness import freshness_for
 from app.services.teams.memory import ConversationMemory
 from app.settings import settings
 
@@ -46,7 +48,8 @@ logger = logging.getLogger(__name__)
 
 # This process's registry: every namespace, so the profile's list and the clash rule mean the
 # same here as in the API; the runners open their own sessions on the app pool.
-_REGISTRY = ToolRegistry([logs_namespace(), analytics_namespace(), logspace_namespace()])
+_REGISTRY = ToolRegistry([logs_namespace(), analytics_namespace(), logspace_namespace(),
+                          presentation_namespace(settings.analytics_agent_presentation)])
 # Where the gateway stores each run's redacted trace (agent_traces), in its own short session.
 _TRACES = PostgresTraceStore(async_session)
 # Admission before any model call: shared counters every consumer and web process changes.
@@ -91,6 +94,16 @@ async def _load_history(conversation_id: str, customer_code: str) -> list[dict]:
     async with async_session() as db:
         return await ConversationMemory(db, max_turns=settings.teams_history_turns).history(
             conversation_id, customer_code)
+
+
+async def _read_freshness(customer_code: str) -> dict:
+    """When the customer's figures are from and whether they are still moving, for the answer's stamp.
+
+    ("tmp-live" with unsealed share 0.3) -> {"data_as_of": <watermark>, "provisional": True}
+    """
+    async with async_session() as db:
+        fresh = await freshness_for(db, customer_code, threshold=Decimal(str(settings.teams_provisional_share)))
+    return {"data_as_of": fresh.data_as_of, "provisional": fresh.provisional}
 
 
 async def _record_exchange(conversation_id: str, customer_code: str, question: str, answer: str,
@@ -190,7 +203,7 @@ async def _amain() -> None:
         concurrency=settings.teams_consumer_concurrency,
         visibility_seconds=settings.teams_sqs_visibility_seconds, wait_seconds=settings.teams_sqs_wait_seconds,
         run_command=run_command, run_timeout_seconds=settings.analytics_agent_run_timeout_seconds,
-        claim_run=_claim_run, finish_run=_finish_run)
+        claim_run=_claim_run, finish_run=_finish_run, read_freshness=_read_freshness)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

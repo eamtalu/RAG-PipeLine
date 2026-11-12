@@ -16,7 +16,11 @@ from app.agent.profiles import load_profile
 from app.agent.capabilities.registry import ToolRegistry
 from app.agent.runtime.grounded import GroundedAgent
 from app.config.database import async_session
-from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
+from app.services.analytics_agent.namespaces import (
+    analytics_namespace,
+    logs_namespace,
+    presentation_namespace,
+)
 from app.services.logspace_agent.namespaces import logspace_namespace
 
 TZ = "Europe/London"
@@ -30,6 +34,8 @@ def tool_registry(session_factory=async_session) -> ToolRegistry:
             logs_namespace(session_factory),
             analytics_namespace(session_factory),
             logspace_namespace(session_factory),
+            # the presentation tools are on in the tests, so a scripted run can draw a chart
+            presentation_namespace(True),
         ]
     )
 

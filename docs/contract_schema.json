@@ -1,0 +1,873 @@
+{
+  "key_layout": {
+    "site_home": {
+      "pk": "EYE#{customer_code}",
+      "sk": "SITE#{site_id}#HOME",
+      "ttl_seconds": 3600
+    },
+    "sites": {
+      "pk": "EYE#{customer_code}",
+      "sk": "SITES",
+      "ttl_seconds": null
+    }
+  },
+  "mirror_schema_version": 1,
+  "models": {
+    "AnswerPayload": {
+      "$defs": {
+        "ChartBlock": {
+          "properties": {
+            "kind": {
+              "pattern": "^[a-z][a-z_]{1,15}$",
+              "title": "Kind",
+              "type": "string"
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 48,
+              "minItems": 1,
+              "title": "Labels",
+              "type": "array"
+            },
+            "reference": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChartReference"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "series": {
+              "items": {
+                "$ref": "#/$defs/ChartSeries"
+              },
+              "maxItems": 6,
+              "minItems": 1,
+              "title": "Series",
+              "type": "array"
+            },
+            "stacked": {
+              "default": false,
+              "title": "Stacked",
+              "type": "boolean"
+            },
+            "status": {
+              "default": false,
+              "title": "Status",
+              "type": "boolean"
+            },
+            "title": {
+              "maxLength": 120,
+              "title": "Title",
+              "type": "string"
+            },
+            "type": {
+              "const": "chart",
+              "default": "chart",
+              "title": "Type",
+              "type": "string"
+            },
+            "unit": {
+              "anyOf": [
+                {
+                  "maxLength": 24,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unit"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "labels",
+            "series"
+          ],
+          "title": "ChartBlock",
+          "type": "object"
+        },
+        "ChartReference": {
+          "description": "A horizontal line the chart draws, such as a target.",
+          "properties": {
+            "label": {
+              "maxLength": 40,
+              "title": "Label",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "number"
+            }
+          },
+          "required": [
+            "label",
+            "value"
+          ],
+          "title": "ChartReference",
+          "type": "object"
+        },
+        "ChartSeries": {
+          "properties": {
+            "name": {
+              "maxLength": 60,
+              "title": "Name",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 48,
+              "minItems": 1,
+              "title": "Values",
+              "type": "array"
+            }
+          },
+          "required": [
+            "name",
+            "values"
+          ],
+          "title": "ChartSeries",
+          "type": "object"
+        },
+        "Evidence": {
+          "description": "The rows behind the answer, as data, so the edge draws a real table on the card instead of\nguessing widths from markdown. Optional: absent for answers that rest on no rows. Added on the\nbackend side on 2026-09-27 and mirrored here; both files must stay identical.",
+          "properties": {
+            "columns": {
+              "items": {
+                "$ref": "#/$defs/EvidenceColumn"
+              },
+              "title": "Columns",
+              "type": "array"
+            },
+            "facts": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Small labelled facts under the table: window, sorted by, grain.",
+              "title": "Facts",
+              "type": "object"
+            },
+            "link": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Where the same view lives in the app, for an open-in button.",
+              "title": "Link"
+            },
+            "rows": {
+              "items": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Rows",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "columns",
+            "rows"
+          ],
+          "title": "Evidence",
+          "type": "object"
+        },
+        "EvidenceColumn": {
+          "properties": {
+            "align": {
+              "default": "left",
+              "enum": [
+                "left",
+                "right"
+              ],
+              "title": "Align",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "title": "EvidenceColumn",
+          "type": "object"
+        },
+        "FollowupsBlock": {
+          "properties": {
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 4,
+              "minItems": 1,
+              "title": "Items",
+              "type": "array"
+            },
+            "type": {
+              "const": "followups",
+              "default": "followups",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "title": "FollowupsBlock",
+          "type": "object"
+        },
+        "FormBlock": {
+          "description": "A form the person confirms before anything changes (step 8 builds the submit).",
+          "properties": {
+            "fields": {
+              "items": {
+                "$ref": "#/$defs/FormField"
+              },
+              "maxItems": 12,
+              "minItems": 1,
+              "title": "Fields",
+              "type": "array"
+            },
+            "form_id": {
+              "pattern": "^[a-z][a-z0-9_]{0,31}$",
+              "title": "Form Id",
+              "type": "string"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "maxLength": 300,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "requires_approval": {
+              "default": false,
+              "title": "Requires Approval",
+              "type": "boolean"
+            },
+            "submit_label": {
+              "default": "Submit",
+              "maxLength": 40,
+              "title": "Submit Label",
+              "type": "string"
+            },
+            "title": {
+              "maxLength": 120,
+              "title": "Title",
+              "type": "string"
+            },
+            "type": {
+              "const": "form",
+              "default": "form",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "form_id",
+            "title",
+            "fields"
+          ],
+          "title": "FormBlock",
+          "type": "object"
+        },
+        "FormField": {
+          "properties": {
+            "kind": {
+              "default": "text",
+              "enum": [
+                "text",
+                "number",
+                "date",
+                "select",
+                "checkbox"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "label": {
+              "maxLength": 80,
+              "title": "Label",
+              "type": "string"
+            },
+            "name": {
+              "pattern": "^[a-z][a-z0-9_]{0,31}$",
+              "title": "Name",
+              "type": "string"
+            },
+            "options": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 24,
+              "title": "Options",
+              "type": "array"
+            },
+            "placeholder": {
+              "anyOf": [
+                {
+                  "maxLength": 80,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Placeholder"
+            },
+            "required": {
+              "default": true,
+              "title": "Required",
+              "type": "boolean"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Value"
+            }
+          },
+          "required": [
+            "name",
+            "label"
+          ],
+          "title": "FormField",
+          "type": "object"
+        },
+        "ReceiptBlock": {
+          "description": "What happened after a confirmation, with a reference and a time-limited undo.",
+          "properties": {
+            "reference": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reference"
+            },
+            "status": {
+              "default": "done",
+              "pattern": "^(done|needs_approval|refused)$",
+              "title": "Status",
+              "type": "string"
+            },
+            "text": {
+              "maxLength": 300,
+              "title": "Text",
+              "type": "string"
+            },
+            "type": {
+              "const": "receipt",
+              "default": "receipt",
+              "title": "Type",
+              "type": "string"
+            },
+            "undo_until": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Undo Until"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "title": "ReceiptBlock",
+          "type": "object"
+        },
+        "TableBlock": {
+          "properties": {
+            "columns": {
+              "items": {
+                "$ref": "#/$defs/EvidenceColumn"
+              },
+              "maxItems": 12,
+              "minItems": 1,
+              "title": "Columns",
+              "type": "array"
+            },
+            "rows": {
+              "items": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "maxItems": 25,
+              "title": "Rows",
+              "type": "array"
+            },
+            "title": {
+              "maxLength": 120,
+              "title": "Title",
+              "type": "string"
+            },
+            "type": {
+              "const": "table",
+              "default": "table",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "columns",
+            "rows"
+          ],
+          "title": "TableBlock",
+          "type": "object"
+        },
+        "TextBlock": {
+          "properties": {
+            "markdown": {
+              "maxLength": 4000,
+              "title": "Markdown",
+              "type": "string"
+            },
+            "type": {
+              "const": "text",
+              "default": "text",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "markdown"
+          ],
+          "title": "TextBlock",
+          "type": "object"
+        }
+      },
+      "description": "The worker's answer, POSTed to the edge at /internal/answers.",
+      "properties": {
+        "answer": {
+          "description": "Markdown text. On status=error a short human sentence.",
+          "title": "Answer",
+          "type": "string"
+        },
+        "answered_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answered At"
+        },
+        "asked_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asked At"
+        },
+        "blocks": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "chart": "#/$defs/ChartBlock",
+                "followups": "#/$defs/FollowupsBlock",
+                "form": "#/$defs/FormBlock",
+                "receipt": "#/$defs/ReceiptBlock",
+                "table": "#/$defs/TableBlock",
+                "text": "#/$defs/TextBlock"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/TextBlock"
+              },
+              {
+                "$ref": "#/$defs/TableBlock"
+              },
+              {
+                "$ref": "#/$defs/ChartBlock"
+              },
+              {
+                "$ref": "#/$defs/FormBlock"
+              },
+              {
+                "$ref": "#/$defs/ReceiptBlock"
+              },
+              {
+                "$ref": "#/$defs/FollowupsBlock"
+              }
+            ]
+          },
+          "maxItems": 8,
+          "title": "Blocks",
+          "type": "array"
+        },
+        "cited_transaction_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cited Transaction Ids",
+          "type": "array"
+        },
+        "conversation_id": {
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "data_as_of": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Data As Of"
+        },
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Seconds"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Evidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "job_id": {
+          "title": "Job Id",
+          "type": "string"
+        },
+        "provisional": {
+          "default": false,
+          "title": "Provisional",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "default": "ok",
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "tool_call_count": {
+          "default": 0,
+          "title": "Tool Call Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "job_id",
+        "conversation_id",
+        "answer"
+      ],
+      "title": "AnswerPayload",
+      "type": "object"
+    },
+    "MirrorEnvelope": {
+      "description": "One DynamoDB item: the key, what it is, when it is from, and the payload as one JSON string\n(so DynamoDB's no-floats rule never bites and the edge decodes one attribute).",
+      "properties": {
+        "as_of": {
+          "title": "As Of",
+          "type": "string"
+        },
+        "payload_json": {
+          "maxLength": 390000,
+          "title": "Payload Json",
+          "type": "string"
+        },
+        "pk": {
+          "title": "Pk",
+          "type": "string"
+        },
+        "row_type": {
+          "title": "Row Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "sk": {
+          "title": "Sk",
+          "type": "string"
+        },
+        "source_version": {
+          "default": 0,
+          "title": "Source Version",
+          "type": "integer"
+        },
+        "ttl": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ttl"
+        },
+        "written_at": {
+          "title": "Written At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pk",
+        "sk",
+        "row_type",
+        "as_of",
+        "written_at",
+        "payload_json"
+      ],
+      "title": "MirrorEnvelope",
+      "type": "object"
+    },
+    "QuestionJob": {
+      "$defs": {
+        "Command": {
+          "description": "An action the tab asks the backend to perform instead of a question: today, marking a delivery\non the at-risk board as checked (or taking that back). Rides on a QuestionJob so it reuses the\nqueue, the consumer and the answer poll; the consumer never runs the agent for one. Added on the\nbackend side on 2026-10-02 and mirrored here; both files must stay identical.",
+          "properties": {
+            "by": {
+              "description": "The Teams display name of the person acting.",
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "By",
+              "type": "string"
+            },
+            "delivery_number": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Delivery Number",
+              "type": "string"
+            },
+            "departure_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "YYYY-MM-DD, when the delivery has more than one row.",
+              "title": "Departure Date"
+            },
+            "kind": {
+              "enum": [
+                "at_risk_check",
+                "at_risk_uncheck"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "maxLength": 1000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            }
+          },
+          "required": [
+            "kind",
+            "delivery_number",
+            "by"
+          ],
+          "title": "Command",
+          "type": "object"
+        }
+      },
+      "description": "One question from Teams, published by the edge to SQS and consumed by the backend worker.",
+      "properties": {
+        "activity_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Teams activity id of the question.",
+          "title": "Activity Id"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Command"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Set when the job is an action, not a question; absent for a question."
+        },
+        "conversation_id": {
+          "description": "Teams conversation id; the reply goes here and conversation memory is keyed by it.",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "customer_code": {
+          "description": "Backend log space resolved from the tenant binding.",
+          "title": "Customer Code",
+          "type": "string"
+        },
+        "enqueued_at": {
+          "format": "date-time",
+          "title": "Enqueued At",
+          "type": "string"
+        },
+        "job_id": {
+          "description": "Edge-generated UUID; the worker echoes it in the answer.",
+          "title": "Job Id",
+          "type": "string"
+        },
+        "question": {
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "sender_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sender Name"
+        },
+        "sender_object_id": {
+          "description": "Entra object id of the sender. Required since contract v2: the per-user limits and roles key on it, so a job that cannot say who asked is malformed.",
+          "minLength": 1,
+          "title": "Sender Object Id",
+          "type": "string"
+        },
+        "source": {
+          "default": "bot",
+          "description": "Where the question was typed: the Teams chat, or the Home tab's chat pane (answered by storing the payload on the job rather than sending it).",
+          "enum": [
+            "bot",
+            "tab"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "tenant_id": {
+          "description": "Entra tenant id of the customer, from Microsoft.",
+          "title": "Tenant Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id",
+        "tenant_id",
+        "customer_code",
+        "conversation_id",
+        "sender_object_id",
+        "question"
+      ],
+      "title": "QuestionJob",
+      "type": "object"
+    }
+  },
+  "revision": "3.5"
+}

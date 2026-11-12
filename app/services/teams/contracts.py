@@ -1,6 +1,6 @@
-# COPIED VERBATIM from the edge repository (teams-agent-edge/app/contracts.py). Change there first.
-# Exception, 2026-09-27: `Evidence` and `AnswerPayload.evidence` were added HERE first; the edge must mirror them.
-# Exception, 2026-10-02: `Command` and `QuestionJob.command` (the at-risk check) were added HERE first; the edge must mirror them.
+# The edge/backend wire contract: QuestionJob, AnswerPayload and the answer blocks.
+# Copied from the Teams edge repo (app/core/contracts_dto.py) by scripts/sync_contract.sh;
+# edit it there, run scripts/contract_schema.py --write, then sync. Both repos test the snapshot.
 """The two messages that cross the edge/backend boundary.
 
 These models are the contract with the backend worker (RAG FAST API, `teams_question_worker`).
@@ -10,24 +10,40 @@ verbatim.
 """
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+#: Logged by both sides at start-up, so an operator can see which revision each runs. The
+#: schema_version fields below stay: every addition since v2 is optional, so an older side
+#: ignores what it does not know and a newer side fills in defaults.
+CONTRACT_REVISION = "3.5"
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# These are the pydantic models used in requests, responses and external messages
+
+
 class Command(BaseModel):
     """An action the tab asks the backend to perform instead of a question: today, marking a delivery
     on the at-risk board as checked (or taking that back). Rides on a QuestionJob so it reuses the
-    queue, the consumer and the answer poll; the consumer never runs the agent for one."""
+    queue, the consumer and the answer poll; the consumer never runs the agent for one. Added on the
+    backend side on 2026-10-02 and mirrored here; both files must stay identical."""
 
     kind: Literal["at_risk_check", "at_risk_uncheck"]
     delivery_number: str = Field(..., min_length=1, max_length=64)
-    departure_date: str | None = Field(default=None, description="YYYY-MM-DD, when the delivery has more than one row.")
-    by: str = Field(..., min_length=1, max_length=128, description="The Teams display name of the person acting.")
+    departure_date: str | None = Field(
+        default=None, description="YYYY-MM-DD, when the delivery has more than one row."
+    )
+    by: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        description="The Teams display name of the person acting.",
+    )
     note: str | None = Field(default=None, max_length=1000)
 
 
@@ -47,7 +63,8 @@ class QuestionJob(BaseModel):
     )
     activity_id: str | None = Field(default=None, description="Teams activity id of the question.")
     sender_object_id: str = Field(
-        ..., min_length=1,
+        ...,
+        min_length=1,
         description="Entra object id of the sender. Required since contract v2: the per-user "
         "limits and roles key on it, so a job that cannot say who asked is malformed.",
     )
@@ -72,14 +89,141 @@ class EvidenceColumn(BaseModel):
 
 class Evidence(BaseModel):
     """The rows behind the answer, as data, so the edge draws a real table on the card instead of
-    guessing widths from markdown. Optional: absent for answers that rest on no rows. ADDED on the
-    backend side on 2026-09-27; mirror into the edge's contracts.py and its card builder."""
+    guessing widths from markdown. Optional: absent for answers that rest on no rows. Added on the
+    backend side on 2026-09-27 and mirrored here; both files must stay identical."""
 
     title: str
     columns: list[EvidenceColumn]
     rows: list[list[str]]
-    facts: dict[str, str] = Field(default_factory=dict, description="Small labelled facts under the table: window, sorted by, grain.")
-    link: str | None = Field(default=None, description="Where the same view lives in the app, for an open-in button.")
+    facts: dict[str, str] = Field(
+        default_factory=dict,
+        description="Small labelled facts under the table: window, sorted by, grain.",
+    )
+    link: str | None = Field(
+        default=None, description="Where the same view lives in the app, for an open-in button."
+    )
+
+
+# ---------------------------------------------------------------------------- answer blocks
+# An answer is text plus an ordered list of typed blocks the page renders with code it ships
+# (DESIGN.md "Ask response contract", built in stage D step 5). The model never emits HTML: the
+# backend lifts these out of its presentation tool calls, validates them, and drops what fails.
+# The edge drops one unreadable block, never the answer (`app/core/answer_parsing.py`).
+
+KNOWN_CHART_KINDS = frozenset({"bar", "line", "pie"})
+_NAME = r"^[a-z][a-z0-9_]{0,31}$"
+
+
+class TextBlock(BaseModel):
+    type: Literal["text"] = "text"
+    markdown: str = Field(..., max_length=4000)
+
+
+class TableBlock(BaseModel):
+    type: Literal["table"] = "table"
+    title: str = Field(..., max_length=120)
+    columns: list[EvidenceColumn] = Field(..., min_length=1, max_length=12)
+    rows: list[list[str]] = Field(..., max_length=25)
+
+    @model_validator(mode="after")
+    def _rows_fit_columns(self) -> "TableBlock":
+        """Every row has one cell per column, so the page never draws a ragged table.
+
+        (2 columns, rows of 2) -> ok ; (a row of 3) -> ValueError
+        """
+        width = len(self.columns)
+        if any(len(row) != width for row in self.rows):
+            raise ValueError(f"every row must have {width} cells")
+        return self
+
+
+class ChartSeries(BaseModel):
+    name: str = Field(..., max_length=60)
+    values: list[float] = Field(..., min_length=1, max_length=48)
+
+
+class ChartReference(BaseModel):
+    """A horizontal line the chart draws, such as a target."""
+
+    label: str = Field(..., max_length=40)
+    value: float
+
+
+class ChartBlock(BaseModel):
+    type: Literal["chart"] = "chart"
+    kind: str = Field(..., pattern=r"^[a-z][a-z_]{1,15}$")  # bar | line | pie; unknown = dropped
+    title: str = Field(..., max_length=120)
+    labels: list[str] = Field(..., min_length=1, max_length=48)
+    series: list[ChartSeries] = Field(..., min_length=1, max_length=6)
+    unit: str | None = Field(default=None, max_length=24)
+    stacked: bool = False
+    #: Series named on_time / late / left_behind are drawn in the status colours.
+    status: bool = False
+    reference: ChartReference | None = None
+
+    @model_validator(mode="after")
+    def _shape_holds(self) -> "ChartBlock":
+        """The numbers line up with the labels, a pie is one series of non-negative shares, and the
+        kind is one the page can draw.
+
+        (bar, 3 labels, series of 3) -> ok ; (series of 2) -> ValueError ; (pie, 2 series) -> ValueError
+        """
+        if self.kind not in KNOWN_CHART_KINDS:
+            raise ValueError(f"unknown chart kind {self.kind!r}")
+        for s in self.series:
+            if len(s.values) != len(self.labels):
+                raise ValueError(
+                    f"series {s.name!r} has {len(s.values)} values for {len(self.labels)} labels"
+                )
+        if self.kind == "pie":
+            if len(self.series) != 1:
+                raise ValueError("a pie has exactly one series")
+            if any(v < 0 for v in self.series[0].values):
+                raise ValueError("a pie has no negative values")
+        return self
+
+
+class FormField(BaseModel):
+    name: str = Field(..., pattern=_NAME)
+    label: str = Field(..., max_length=80)
+    kind: Literal["text", "number", "date", "select", "checkbox"] = "text"
+    options: list[str] = Field(default_factory=list, max_length=24)
+    required: bool = True
+    placeholder: str | None = Field(default=None, max_length=80)
+    value: str | None = Field(default=None, max_length=200)  # what the assistant pre-filled
+
+
+class FormBlock(BaseModel):
+    """A form the person confirms before anything changes (step 8 builds the submit)."""
+
+    type: Literal["form"] = "form"
+    form_id: str = Field(..., pattern=_NAME)
+    title: str = Field(..., max_length=120)
+    fields: list[FormField] = Field(..., min_length=1, max_length=12)
+    requires_approval: bool = False
+    submit_label: str = Field(default="Submit", max_length=40)
+    note: str | None = Field(default=None, max_length=300)
+
+
+class ReceiptBlock(BaseModel):
+    """What happened after a confirmation, with a reference and a time-limited undo."""
+
+    type: Literal["receipt"] = "receipt"
+    text: str = Field(..., max_length=300)
+    reference: str | None = Field(default=None, max_length=40)
+    status: str = Field(default="done", pattern=r"^(done|needs_approval|refused)$")
+    undo_until: datetime | None = None
+
+
+class FollowupsBlock(BaseModel):
+    type: Literal["followups"] = "followups"
+    items: list[str] = Field(..., min_length=1, max_length=4)
+
+
+Block = Annotated[
+    TextBlock | TableBlock | ChartBlock | FormBlock | ReceiptBlock | FollowupsBlock,
+    Field(discriminator="type"),
+]
 
 
 class AnswerPayload(BaseModel):
@@ -94,3 +238,10 @@ class AnswerPayload(BaseModel):
     tool_call_count: int = 0
     duration_seconds: float | None = None
     evidence: Evidence | None = None
+    # --- stage D step 5: the typed blocks and the times (all optional, schema_version stays 1)
+    blocks: list[Block] = Field(default_factory=list, max_length=8)
+    asked_at: datetime | None = None
+    answered_at: datetime | None = None
+    #: When the figures are from (the tenant's analytics watermark), and whether they still move.
+    data_as_of: datetime | None = None
+    provisional: bool = False
