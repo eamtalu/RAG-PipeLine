@@ -210,6 +210,8 @@ class AgentResult:
     evidence: str | None = None
     evidence_data: Mapping[str, Any] | None = None
     withheld_figures: tuple[str, ...] = ()
+    #: The typed blocks the presentation calls asked for (step 5), as wire-contract dicts.
+    blocks: tuple[Mapping[str, Any], ...] = ()
     declined: str | None = None
     request_id: str = ""
     trace_id: str = ""
@@ -235,7 +237,7 @@ class AgentResult:
 
         >>> list(AgentResult(answer="x", stop_reason="end_turn", model="m").to_legacy_dict())
         ['answer', 'stop_reason', 'tool_calls', 'iterations', 'retries', 'model', 'evidence', \
-'evidence_data', 'withheld_figures']
+'evidence_data', 'withheld_figures', 'blocks']
         """
         out: dict[str, Any] = {
             "answer": self.answer,
@@ -247,6 +249,7 @@ class AgentResult:
             "evidence": self.evidence,
             "evidence_data": self.evidence_data,
             "withheld_figures": list(self.withheld_figures),
+            "blocks": [dict(b) for b in self.blocks],
         }
         if self.declined is not None:
             out["declined"] = self.declined

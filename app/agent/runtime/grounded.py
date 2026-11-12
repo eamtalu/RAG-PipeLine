@@ -328,16 +328,20 @@ class GroundedAgent:
             answer = ("I could not verify these figures against the data, so I am not giving them: "
                       + ", ".join(withheld_figures) + ". Ask again more narrowly, or ask me to show the rows.")
             stop_reason = "withheld"
+        blocks: list[dict] = []
         if draft["problem"] != "fabricated":
             table = self.presentation.render(calls)
             if table:
                 answer = (self.presentation.strip(answer) + "\n\n" + table).strip()
                 data = self.presentation.structured(calls, context.public_base_url)
+            # the typed blocks the presentation calls asked for (step 5); a withheld answer has none
+            if stop_reason != "withheld":
+                blocks = self.presentation.blocks(calls)
         result = AgentResult(
             answer=redact_secrets(answer), stop_reason=stop_reason, model=model_name,
             tool_calls=tuple(ToolCall(t["tool"], t["input"]) for t in calls),
             iterations=len(calls), retries=retries, evidence=table, evidence_data=data,
-            withheld_figures=tuple(withheld_figures), usage=trace.usage,
+            withheld_figures=tuple(withheld_figures), blocks=tuple(blocks), usage=trace.usage,
             request_id=context.request_id, trace_id=context.trace_id,
             profile_version=self.profile.version, code_version=code_version())
         # Step 3: Finish the trace from the result, so the stored record and the answer agree.

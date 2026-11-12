@@ -44,7 +44,7 @@ def test_both_profiles_load_with_exactly_the_required_keys():
         assert set(raw) == set(REQUIRED_KEYS)
         profile = load_profile(name)
         assert profile.name == name and profile.presentation == name
-        expected = {"analytics": ("logs", "analytics"), "logspace": ("logspace",)}
+        expected = {"analytics": ("logs", "analytics", "presentation"), "logspace": ("logspace",)}
         assert profile.namespaces == expected[name]
 
 
@@ -155,6 +155,7 @@ async def test_a_result_carries_both_versions_and_the_log_line_names_them(caplog
         "evidence",
         "evidence_data",
         "withheld_figures",
+        "blocks",
     ]
     line = next(r.message for r in caplog.records if r.message.startswith("agent.run"))
     assert (

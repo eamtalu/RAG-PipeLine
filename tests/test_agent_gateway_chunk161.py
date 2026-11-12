@@ -100,6 +100,7 @@ def test_the_legacy_dict_has_exactly_the_keys_the_channels_read_today():
         "evidence",
         "evidence_data",
         "withheld_figures",
+        "blocks",  # the typed answer blocks of step 5 (chunk 171)
     ]
     assert legacy["tool_calls"] == [{"tool": "describe_releases", "input": {}}]
     assert legacy["withheld_figures"] == ["9"] and "request_id" not in legacy
@@ -353,6 +354,7 @@ async def test_the_consumer_adapter_builds_the_request_from_the_job(monkeypatch)
         "evidence": None,
         "evidence_data": None,
         "withheld_figures": [],
+        "blocks": [],
     }
 
 

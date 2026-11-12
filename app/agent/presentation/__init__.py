@@ -9,18 +9,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from app.agent.presentation import blocks as answer_blocks
 from app.agent.presentation import evidence, logspace_evidence
 from app.agent.presentation.links import at_risk_link, page_link
 
 
 @dataclass(frozen=True, slots=True)
 class Presentation:
-    """How a profile's answers are finished: the table, the card data, its own tables cut."""
+    """How a profile's answers are finished: the table, the card data, its own tables cut, and
+    the typed blocks its presentation calls asked for (step 5)."""
 
     name: str
     render: Callable[[list[dict]], str | None]
     structured: Callable[[list[dict], str], dict | None]  # (trace, public_base_url)
     strip: Callable[[str], str]
+    blocks: Callable[[list[dict]], list[dict]] = lambda trace: []
 
 
 def _analytics_structured(trace: list[dict], public_base_url: str) -> dict | None:
@@ -31,7 +34,11 @@ def _analytics_structured(trace: list[dict], public_base_url: str) -> dict | Non
 
 _PRESENTATIONS = {
     "analytics": Presentation(
-        "analytics", evidence.render, _analytics_structured, evidence.strip_tables
+        "analytics",
+        evidence.render,
+        _analytics_structured,
+        evidence.strip_tables,
+        answer_blocks.blocks_from_trace,
     ),
     "logspace": Presentation(
         "logspace",

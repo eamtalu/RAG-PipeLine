@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
+from app.agent.presentation import blocks as answer_blocks
 from app.agent.presentation import evidence
 from app.agent.profiles import Profile
 from app.agent.runtime.guards import OUT_OF_SCOPE, TopicGate, looks_like_manipulation
@@ -157,15 +158,26 @@ class SkippedGuard:
         return None
 
 
+def _checked_text(draft: Draft) -> str:
+    """The draft plus every number its chart and table calls carry, so a drawn figure is held to
+    the same rule as a written one (step 5).
+
+    (answer "3 short", show_chart values [41, 3]) -> "3 short\\n41 3"
+    """
+    drawn = answer_blocks.presentation_figures(list(draft.trace))
+    return f"{draft.answer}\n{drawn}" if drawn else draft.answer
+
+
 class FabricationGuard:
-    """Figures with no successful data call behind them are replaced by an honest answer."""
+    """Figures with no successful data call behind them are replaced by an honest answer. A
+    presentation call is not a data call: a chart drawn with no data fetched is fabricated."""
 
     name = "fabrication"
 
     def inspect(self, draft: Draft) -> Problem | None:
         fallback = looks_fabricated(
-            draft.answer,
-            list(draft.trace),
+            _checked_text(draft),
+            answer_blocks.data_trace(list(draft.trace)),
             given=list(draft.given),
             schema_tools=draft.schema_tools,
         )
@@ -173,16 +185,20 @@ class FabricationGuard:
 
 
 class UngroundedGuard:
-    """Every figure in the draft must be in a tool result, or in the instructions when no tool
-    returned anything (a description of what is available)."""
+    """Every figure in the draft, written or drawn, must be in a data tool result, or in the
+    instructions when no tool returned anything (a description of what is available)."""
 
     name = "ungrounded"
 
     def inspect(self, draft: Draft) -> Problem | None:
         results = [
-            t["result"] for t in draft.trace if not t["result"].lstrip().startswith('{"error"')
+            t["result"]
+            for t in answer_blocks.data_trace(list(draft.trace))
+            if not t["result"].lstrip().startswith('{"error"')
         ]
-        figures = evidence.ungrounded(draft.answer, results or list(draft.given), draft.question)
+        figures = evidence.ungrounded(
+            _checked_text(draft), results or list(draft.given), draft.question
+        )
         return Problem("ungrounded", figures=tuple(figures)) if figures else None
 
 

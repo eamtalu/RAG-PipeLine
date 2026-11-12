@@ -13,7 +13,7 @@ from typing import Any, Mapping
 from app.agent.capabilities.spec import Namespace, ToolSpec
 from app.agent.contracts import AgentRequest, ExecutionContext
 from app.config.database import SessionFactory, async_session
-from app.services.analytics_agent import at_risk_tools
+from app.services.analytics_agent import at_risk_tools, presentation_tools
 from app.services.analytics_agent.tools import RECIPES, RELEASE_TOOLS, run_release_tool
 from app.services.log_agent import tools as log_tools
 
@@ -60,3 +60,23 @@ def analytics_namespace(session_factory: SessionFactory = async_session) -> Name
         ToolSpec.from_dict("analytics", s) for s in (*RELEASE_TOOLS, *at_risk_tools.AT_RISK_TOOLS)
     )
     return Namespace(name="analytics", specs=specs, runner=run, tool_text=ANALYTICS_TOOL_TEXT)
+
+
+def presentation_namespace(enabled: bool) -> Namespace:
+    """The three presentation tools (chart, table, follow-ups), or an empty namespace while the
+    `ANALYTICS_AGENT_PRESENTATION` switch is off, so the profile may always list it.
+
+    (True) -> Namespace("presentation", 3 specs) ; (False) -> Namespace("presentation", no specs)
+    """
+
+    async def run(
+        context: ExecutionContext, request: AgentRequest, name: str, args: Mapping[str, Any]
+    ) -> str:
+        return await presentation_tools.run_presentation_tool(name, args)
+
+    specs = (
+        tuple(ToolSpec.from_dict("presentation", s) for s in presentation_tools.PRESENTATION_TOOLS)
+        if enabled
+        else ()
+    )
+    return Namespace(name="presentation", specs=specs, runner=run)

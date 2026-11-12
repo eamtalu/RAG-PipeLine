@@ -19,6 +19,7 @@ All boto3 calls run on a worker thread; the event loop is never blocked by its s
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Protocol
 
 import httpx
@@ -101,6 +102,9 @@ RunClaimer = Callable[[QuestionJob], Awaitable[Claim]]
 
 #: Stores the answer for a job before it is posted, so a redelivery can replay it.
 RunFinisher = Callable[[QuestionJob, AnswerPayload], Awaitable[None]]
+#: How fresh a customer's figures are, for the answer's stamp (step 5): a dict with
+#: `data_as_of` (datetime or None) and `provisional` (bool), from app.services.teams.freshness.
+FreshnessReader = Callable[[str], Awaitable[dict]]
 """A job carrying a `command` -> the one-line confirmation to show. Raises on a refused command."""
 
 
@@ -159,7 +163,8 @@ class TeamsQuestionConsumer:
                  wait_seconds: int = 20, heartbeat_seconds: float | None = None,
                  clock: Callable[[], float] = time.monotonic, run_command: CommandRunner | None = None,
                  run_timeout_seconds: float | None = None, claim_run: RunClaimer | None = None,
-                 finish_run: RunFinisher | None = None):
+                 finish_run: RunFinisher | None = None, read_freshness: FreshnessReader | None = None):
+        self._read_freshness = read_freshness
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
         if visibility_seconds < 30:
@@ -306,10 +311,17 @@ class TeamsQuestionConsumer:
             result = await self._run_agent(job, history)
             answer = (result.get("answer") or "").strip() or "I could not find anything to say about that."
             await self._record(job.conversation_id, job.customer_code, job.question, answer, job.job_id)
+            # Step 2: Stamp the answer with its times and the figures' freshness (step 5), so the
+            # page can say when it was asked, answered, and how settled the numbers are.
+            fresh = await self._read_freshness(job.customer_code) if self._read_freshness else {}
             return AnswerPayload(**base, status="ok", answer=answer,
                                  cited_transaction_ids=cited_transaction_ids(result),
                                  tool_call_count=len(result.get("tool_calls") or []),
-                                 evidence=result.get("evidence_data") or None)
+                                 evidence=result.get("evidence_data") or None,
+                                 blocks=list(result.get("blocks") or []),
+                                 asked_at=job.enqueued_at, answered_at=datetime.now(timezone.utc),
+                                 data_as_of=fresh.get("data_as_of"),
+                                 provisional=bool(fresh.get("provisional", False)))
         except Exception as exc:
             message = failure_message(exc)
             log = logger.critical if message == MODEL_UNAVAILABLE else logger.exception

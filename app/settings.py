@@ -498,6 +498,9 @@ class Settings(BaseSettings):
     # --- the eSmart Eye Teams app (stage D). The snapshot is also computed per site and mirrored
     # under EYE#<customer>; figures are stamped provisional above this unsealed share.
     teams_provisional_share: float = 0.20         # unsealed share above which figures are "provisional"
+    # The presentation tools (show_chart, show_table, suggest_followups) the analytics agent may call
+    # to answer with typed blocks (step 5). Off = the namespace is registered with no tools.
+    analytics_agent_presentation: bool = False
     teams_max_sites_per_customer: int = 3         # per-site snapshots computed per sweep, at most
 
     # --- HTTP API callers (app/api/service_auth.py). Every route under /api/v1 needs a bearer token

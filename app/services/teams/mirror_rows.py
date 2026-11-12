@@ -1,7 +1,10 @@
+# The rows the backend mirrors into the edge's DynamoDB table (key layout and envelope).
+# Copied from the Teams edge repo (app/core/mirror_rows_dto.py) by scripts/sync_contract.sh;
+# edit it there, run scripts/contract_schema.py --write, then sync. Both repos test the snapshot.
 """The rows the backend mirrors into the edge's DynamoDB table for the eSmart Eye Teams app.
 
-Shared with the edge (`app/core/mirror_rows_dto.py` there); the edge copy is canonical and this
-file is copied from it, so keep it dependency-free apart from pydantic. Every row shares one
+Shared with the backend (`app/services/teams/mirror_rows.py` there); this copy is canonical and
+the backend's is copied from it, so keep it dependency-free apart from pydantic. Every row shares one
 envelope and lives under one key prefix, `EYE#<customer_code>`, so the consumer's IAM policy names
 one prefix and the key layout is a table in code rather than a convention in prose.
 
@@ -36,7 +39,9 @@ class KeySpec(BaseModel):
 
 
 KEY_LAYOUT: dict[str, KeySpec] = {
-    "site_home": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="SITE#{site_id}#HOME", ttl_seconds=3600),
+    "site_home": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}", sk="SITE#{site_id}#HOME", ttl_seconds=3600
+    ),
     "sites": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="SITES", ttl_seconds=None),
 }
 
