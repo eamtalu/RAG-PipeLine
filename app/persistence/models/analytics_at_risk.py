@@ -68,6 +68,8 @@ class AnalyticsAtRiskDelivery(Base):
               postgresql_where=text("checked_at IS NOT NULL")),
         # The profile aggregate: one route's closed deliveries over a window of days.
         Index("ix_analytics_at_risk_deliveries_route", "customer_code", "route", "departure_date"),
+        # The Teams app's board per site (stage D, step 4).
+        Index("ix_analytics_at_risk_deliveries_site", "customer_code", "warehouse", "departure_date"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -80,6 +82,9 @@ class AnalyticsAtRiskDelivery(Base):
     route: Mapped[str | None] = mapped_column(String(32), nullable=True)
     customer_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     customer_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: The warehouse (site) the delivery's route rows carry, so the board can be shown per site
+    #: (stage D, step 4). NULL on rows closed before the column existed: those count as "all sites".
+    warehouse: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # --- tier ---
     tier: Mapped[str] = mapped_column(String(16), nullable=False, default="none", server_default="none")

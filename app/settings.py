@@ -495,6 +495,10 @@ class Settings(BaseSettings):
     agent_quota_tenant_in_flight: int = 8         # runs live at once per tenant, all processes
     teams_binding_mirror_sweep_seconds: float = 60.0  # how often the consumer re-pushes stale bindings
     teams_home_snapshot_seconds: float = 60.0     # how often the consumer rewrites the Teams tab's Home snapshot
+    # --- the eSmart Eye Teams app (stage D). The snapshot is also computed per site and mirrored
+    # under EYE#<customer>; figures are stamped provisional above this unsealed share.
+    teams_provisional_share: float = 0.20         # unsealed share above which figures are "provisional"
+    teams_max_sites_per_customer: int = 3         # per-site snapshots computed per sweep, at most
 
     # --- HTTP API callers (app/api/service_auth.py). Every route under /api/v1 needs a bearer token
     # from this list, `name=token,name=token`; the name says which system is calling. Names listed

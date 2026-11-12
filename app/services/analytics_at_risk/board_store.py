@@ -72,6 +72,7 @@ class _Route:
     route: str | None
     customer_name: str | None
     customer_number: str | None
+    warehouse: str | None = None
 
 
 async def _routes(db: AsyncSession, cc: str, *, settlement: str, now: datetime, tz: tzinfo,
@@ -83,7 +84,7 @@ async def _routes(db: AsyncSession, cc: str, *, settlement: str, now: datetime, 
     ).order_by(AnalyticsSettledRow.event_time).limit(ROUTE_ROWS_CAP))).all()
     out: dict[str, _Route] = {}
     unreadable = 0
-    for key_parts, attributes, _warehouse in rows:
+    for key_parts, attributes, warehouse in rows:
         delivery = str((key_parts or [None])[0] or "").strip()
         if not delivery:
             continue
@@ -97,7 +98,8 @@ async def _routes(db: AsyncSession, cc: str, *, settlement: str, now: datetime, 
             continue
         out[delivery] = _Route(departure_at=departure, route=_text(attrs.get("resp.Route")),
                                customer_name=_text(attrs.get("resp.CustomerName")),
-                               customer_number=_text(attrs.get("resp.CustomerNumber")))
+                               customer_number=_text(attrs.get("resp.CustomerNumber")),
+                               warehouse=_text(warehouse))
     return out, unreadable
 
 
@@ -238,7 +240,8 @@ def assemble(delivery: str, r: _Route, p: _Picks, k: _Packages | None, *, expect
         loading_expected=r.route in loading_routes if r.route else True,
         transaction_names=p.transaction_names,
         route_loaded_at=route_loaded.get(day_key) if day_key else None,
-        route_loading_from=route_loading_from.get(day_key) if day_key else None)
+        route_loading_from=route_loading_from.get(day_key) if day_key else None,
+        warehouse=r.warehouse)
 
 
 # ============================================================== the board

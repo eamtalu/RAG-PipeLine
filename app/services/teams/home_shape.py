@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.analytics_agent.tools import aggregate_releases
+from app.services.teams.sites import Site, with_site
 
 HOURS = 24
 TX_ORDER = ("stock", "jit", "milk", "frz", "other")
@@ -132,12 +133,14 @@ def _counted(n: int, word: str) -> str:
 
 
 # ============================================================== the reads
-async def compute(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo) -> dict:
-    """The last 24 hours for one customer. Raises what the reads raise; the snapshot decides."""
+async def compute(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo,
+                  site: Site | None = None) -> dict:
+    """The last 24 hours for one customer, or for one site. Raises what the reads raise; the snapshot decides."""
     hours = hour_starts(now.astimezone(tz))
     window = {"start": hours[0].replace(tzinfo=tz).astimezone(timezone.utc).isoformat(), "end": now.isoformat()}
-    lines = await aggregate_releases(db, {**window, "group_by": ["hour_start", "transaction_name"],
-                                          "limit": _GROUPS_CAP}, customer_code)
-    pickers = await aggregate_releases(db, {**window, "group_by": ["hour_start"], "stat": ["distinct:user_name"],
-                                            "limit": _GROUPS_CAP}, customer_code)
+    lines = await aggregate_releases(db, with_site({**window, "group_by": ["hour_start", "transaction_name"],
+                                                    "limit": _GROUPS_CAP}, site), customer_code)
+    pickers = await aggregate_releases(db, with_site({**window, "group_by": ["hour_start"],
+                                                      "stat": ["distinct:user_name"], "limit": _GROUPS_CAP}, site),
+                                       customer_code)
     return build(hours, lines["rows"], pickers["rows"])

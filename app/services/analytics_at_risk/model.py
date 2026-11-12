@@ -81,6 +81,8 @@ class DeliveryState:
     route_loaded_at: datetime | None = None
     #: The first scan on that dock on the departure day: the van's loading started.
     route_loading_from: datetime | None = None
+    #: The warehouse (site) on the delivery's route rows, for the per-site board; None when unknown.
+    warehouse: str | None = None
 
     @property
     def last_at(self) -> datetime | None:

@@ -35,7 +35,11 @@ from app.persistence.repositories.customer_repository import get_customer_timezo
 from app.persistence.repositories.teams_repository import TeamsBindingRepository
 from app.services.analytics.settle_reads import ReadProblem, UnknownSettlement
 from app.services.analytics_agent.tools import aggregate_releases, list_releases
+from app.services.teams import freshness as freshness_rules
 from app.services.teams import home_at_risk, home_forecast, home_shape
+from app.services.teams.mirror import ChangeTracker, MirrorWriter, envelope, write_if_changed
+from app.services.teams.sites import ALL_SITES_ID, Site, list_sites, with_site
+from app.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -47,27 +51,36 @@ CHRONIC_MIN_RELEASES = 3
 
 
 # ============================================================== compute
-async def compute(db: AsyncSession, customer_code: str) -> dict | None:
-    """The snapshot for one customer, or None when the customer has no pick_release settlement."""
+async def compute(db: AsyncSession, customer_code: str, site: Site | None = None) -> dict | None:
+    """The snapshot for one customer, or for one of its sites, or None when the customer has no
+    pick_release settlement. With a site every settlement read is narrowed to that warehouse.
+
+    (customer with rows) -> dict with site_id "all" ; (site BRI) -> dict counting BRI rows only
+    """
+    # Step 1: Read every figure through the site filter, because a site's Home must never show
+    # another warehouse's lines; `with_site` is the one place that filter is spelled
+    def q(args: dict) -> dict:
+        return with_site(args, site)
+
     tz = ZoneInfo(await get_customer_timezone(db, customer_code))
     now = datetime.now(timezone.utc)
     local_now = now.astimezone(tz)
     try:
-        today = await aggregate_releases(db, {"day": "today", "group_by": ["hour_start"]}, customer_code)
-        yesterday = await aggregate_releases(db, {"day": "yesterday", "group_by": ["hour_start"]}, customer_code)
-        totals = await aggregate_releases(db, {"day": "today"}, customer_code)
-        zero = await aggregate_releases(db, {"day": "today", "where": ["picked==0"]}, customer_code)
-        short = await aggregate_releases(db, {"day": "today", "where": ["shortfall<0"]}, customer_code)
-        zero_items = await _optional(aggregate_releases, db, {"day": "today", "where": ["picked==0"],
-                                                              "group_by": ITEM_GROUP, "sort": "rows", "limit": 3},
+        today = await aggregate_releases(db, q({"day": "today", "group_by": ["hour_start"]}), customer_code)
+        yesterday = await aggregate_releases(db, q({"day": "yesterday", "group_by": ["hour_start"]}), customer_code)
+        totals = await aggregate_releases(db, q({"day": "today"}), customer_code)
+        zero = await aggregate_releases(db, q({"day": "today", "where": ["picked==0"]}), customer_code)
+        short = await aggregate_releases(db, q({"day": "today", "where": ["shortfall<0"]}), customer_code)
+        zero_items = await _optional(aggregate_releases, db, q({"day": "today", "where": ["picked==0"],
+                                                                "group_by": ITEM_GROUP, "sort": "rows", "limit": 3}),
                                      customer_code)
-        chronic = await _optional(aggregate_releases, db, {"start": (now - timedelta(days=7)).isoformat(),
-                                                           "end": now.isoformat(), "where": ["shortfall<0"],
-                                                           "group_by": ITEM_GROUP, "sort": "rows", "limit": 5},
+        chronic = await _optional(aggregate_releases, db, q({"start": (now - timedelta(days=7)).isoformat(),
+                                                             "end": now.isoformat(), "where": ["shortfall<0"],
+                                                             "group_by": ITEM_GROUP, "sort": "rows", "limit": 5}),
                                   customer_code)
-        customers = await _optional(aggregate_releases, db, {"day": "today", "group_by": CUSTOMER_GROUP,
-                                                             "sort": "rows", "limit": 5}, customer_code)
-        problems = await list_releases(db, {"day": "today", "where": ["shortfall<0"], "limit": 6}, customer_code)
+        customers = await _optional(aggregate_releases, db, q({"day": "today", "group_by": CUSTOMER_GROUP,
+                                                               "sort": "rows", "limit": 5}), customer_code)
+        problems = await list_releases(db, q({"day": "today", "where": ["shortfall<0"], "limit": 6}), customer_code)
     except UnknownSettlement:
         return None
     except ReadProblem as exc:
@@ -100,12 +113,19 @@ async def compute(db: AsyncSession, customer_code: str) -> dict | None:
     ]
     attention = _attention(zero_items, chronic)
     customer_rows = _customers(customers)
-    shape = await _shape(db, customer_code, now, tz)
-    forecast = await _forecast(db, customer_code, now, tz)
-    at_risk = await _at_risk(db, customer_code, now, tz)
+    shape = await _shape(db, customer_code, now, tz, site)
+    forecast = await _forecast(db, customer_code, now, tz, site)
+    at_risk = await _at_risk(db, customer_code, now, tz, site)
+    # Step 2: Stamp the figures with how settled they are, so every tile can say "provisional"
+    # from one rule shared with the answers (step 5)
+    fresh = await freshness_rules.freshness_for(db, customer_code,
+                                                threshold=Decimal(str(settings.teams_provisional_share)))
+    site_name = site.name if site is not None else await _site(db, customer_code)
     return {
         "customer_code": customer_code,
-        "site": await _site(db, customer_code),
+        "site": site_name,
+        "site_id": site.site_id if site is not None else ALL_SITES_ID,
+        "freshness": fresh.as_dict(),
         "as_of": now.isoformat(),
         "kpis": kpis,
         "attention": attention,
@@ -119,28 +139,31 @@ async def compute(db: AsyncSession, customer_code: str) -> dict | None:
     }
 
 
-async def _forecast(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo) -> dict:
+async def _forecast(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo,
+                    site: Site | None = None) -> dict:
     """The forecast card. A failure here leaves the card saying so, never the snapshot missing."""
     try:
-        return await home_forecast.compute(db, customer_code, now, tz)
+        return await home_forecast.compute(db, customer_code, now, tz, site=site)
     except Exception:
         logger.exception("home snapshot for %s: forecast block failed", customer_code)
         return {"available": False, "note": "forecast unavailable right now"}
 
 
-async def _at_risk(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo) -> dict:
+async def _at_risk(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo,
+                   site: Site | None = None) -> dict:
     """The deliveries-at-risk card. A failure here leaves the card saying so, never the snapshot missing."""
     try:
-        return await home_at_risk.compute(db, customer_code, now, tz)
+        return await home_at_risk.compute(db, customer_code, now, tz, site=site)
     except Exception:
         logger.exception("home snapshot for %s: at-risk block failed", customer_code)
         return {"available": False, "note": "at-risk board unavailable right now"}
 
 
-async def _shape(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo) -> dict | None:
+async def _shape(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo,
+                 site: Site | None = None) -> dict | None:
     """The chart under the tiles. A read it cannot make leaves the chart out, not the snapshot."""
     try:
-        return await home_shape.compute(db, customer_code, now, tz)
+        return await home_shape.compute(db, customer_code, now, tz, site=site)
     except ReadProblem as exc:
         logger.warning("home snapshot for %s: no shape of the day: %s", customer_code, exc.problems)
         return None
@@ -321,9 +344,16 @@ class DynamoHomeSnapshotWriter:
         await asyncio.to_thread(lambda: self._table.put_item(Item=item))
 
 
-async def sweep_once(writer: HomeSnapshotWriter, *, only: list[str] | None = None) -> list[str]:
-    """Compute and write one snapshot per distinct bound, enabled customer. One failure does not
-    stop the rest. Returns the customer codes written."""
+async def sweep_once(writer: HomeSnapshotWriter, *, only: list[str] | None = None,
+                     mirror: MirrorWriter | None = None, tracker: ChangeTracker | None = None,
+                     max_sites: int = 3) -> list[str]:
+    """Compute and write one snapshot per distinct bound, enabled customer: the legacy HOME# row
+    for the old page and, when a mirror is given, the EYE# rows the new page reads (the whole
+    customer, each active site, the site list). One failure does not stop the rest. Returns the
+    customer codes written.
+
+    (two bound customers, one without the settlement) -> ["acme"] ; (mirror given) -> EYE# rows too
+    """
     async with async_session() as db:
         if only is None:
             codes = sorted({b.customer_code for b in await TeamsBindingRepository(db).list_all() if b.enabled})
@@ -337,13 +367,42 @@ async def sweep_once(writer: HomeSnapshotWriter, *, only: list[str] | None = Non
                     continue
                 await writer.put(code, snapshot)
                 written.append(code)
+                if mirror is not None:
+                    await _mirror_customer(db, code, snapshot, mirror, tracker, max_sites=max_sites)
             except Exception:
                 logger.exception("home snapshot for %s failed", code)
     return written
 
 
+async def _mirror_customer(db: AsyncSession, code: str, whole: dict, mirror: MirrorWriter,
+                           tracker: ChangeTracker | None, *, max_sites: int) -> None:
+    """The new page's rows for one customer: the whole-customer Home under the site id "all", one
+    Home per active site (at most `max_sites`, in switcher order), and the site list.
+
+    (sites BRI, LON) -> SITE#all#HOME, SITE#BRI#HOME, SITE#LON#HOME, SITES ; (no sites) -> all + SITES
+    """
+    # Step 1: Cap the sites per customer, because every site costs a full set of reads a minute and
+    # the budget is the consumer's, not the customer's
+    sites = (await list_sites(db, code))[:max_sites]
+    now = time.time()
+    await write_if_changed(mirror, tracker, envelope("site_home", code, site_id=ALL_SITES_ID, payload=whole,
+                                                     as_of=whole["as_of"], now=now), now=now)
+    for site in sites:
+        snapshot = await compute(db, code, site)
+        if snapshot is None:
+            continue
+        await write_if_changed(mirror, tracker, envelope("site_home", code, site_id=site.site_id,
+                                                         payload=snapshot, as_of=snapshot["as_of"], now=now),
+                               now=now)
+    # Step 2: Write the list last, so a switcher that reads it finds every site's row already there
+    listing = {"customer_code": code, "customer_name": whole["site"],
+               "default_site_id": sites[0].site_id if sites else ALL_SITES_ID,
+               "sites": [{"site_id": s.site_id, "name": s.name} for s in sites]}
+    await write_if_changed(mirror, tracker, envelope("sites", code, payload=listing, as_of=whole["as_of"], now=now),
+                           now=now)
+
+
 def build_writer_from_settings() -> HomeSnapshotWriter | None:
-    from app.settings import settings
     if not settings.teams_edge_dynamodb_table:
         return None
     return DynamoHomeSnapshotWriter(settings.teams_edge_dynamodb_table, region_name=settings.teams_aws_region,

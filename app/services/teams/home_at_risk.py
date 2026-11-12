@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.analytics_at_risk import AnalyticsAtRiskDelivery
 from app.services.analytics_at_risk import delivery_store, model, settings_store, state_store
+from app.services.teams.sites import Site
 from app.settings import settings
 
 #: The tab scrolls, so this is a safety cap, not a page.
@@ -182,14 +183,18 @@ def build_rows(rows: list[AnalyticsAtRiskDelivery], now: datetime, tz: ZoneInfo)
 
 
 # ============================================================== the reads
-async def compute(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo) -> dict:
-    """The block for one customer, or the two-field "no board yet" block."""
+async def compute(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo,
+                  site: Site | None = None) -> dict:
+    """The block for one customer or one site, or the two-field "no board yet" block. The accuracy
+    line stays customer-wide: closed history mostly predates the warehouse column."""
     state = await state_store.get(db, customer_code)
     if state is None or state.last_evaluated_at is None:
         return {"available": False, "note": NO_BOARD_NOTE}
     today = now.astimezone(tz).date()
+    warehouse = site.site_id if site is not None else None
     cfg = await settings_store.effective(db, customer_code)
-    open_rows = await delivery_store.board_rows(db, customer_code, dates=[today - timedelta(days=1), today, today + timedelta(days=1)])
+    open_rows = await delivery_store.board_rows(db, customer_code, dates=[today - timedelta(days=1), today, today + timedelta(days=1)],
+                                               warehouse=warehouse)
     stale = (now - state.last_evaluated_at) > timedelta(seconds=settings.analytics_at_risk_poll_seconds * STALE_POLLS)
     counts = {"open": len(open_rows), "left_behind": sum(r.tier == "left_behind" for r in open_rows),
               "at_risk": sum(r.tier == "at_risk" for r in open_rows), "watch": sum(r.tier == "watch" for r in open_rows),
@@ -200,9 +205,11 @@ async def compute(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneI
         n = len(open_rows)
         empty = f"nothing to watch right now · {n} {'delivery' if n == 1 else 'deliveries'} open, all on course"
     if not open_rows:
-        closed_today = [r for r in await delivery_store.board_rows(db, customer_code, dates=[today], include_closed=True)
+        closed_today = [r for r in await delivery_store.board_rows(db, customer_code, dates=[today], include_closed=True,
+                                                                    warehouse=warehouse)
                         if r.status == "closed"]
-        upcoming = await delivery_store.board_rows(db, customer_code, dates=[today + timedelta(days=1), today + timedelta(days=2)])
+        upcoming = await delivery_store.board_rows(db, customer_code, dates=[today + timedelta(days=1), today + timedelta(days=2)],
+                                                   warehouse=warehouse)
         empty = empty_text(closed_today, min((r.departure_at for r in upcoming), default=None), tz)
     agg = await delivery_store.accuracy(db, customer_code, start=today - timedelta(days=14), end=today - timedelta(days=1))
     rows = build_rows(flagged, now, tz)

@@ -37,6 +37,7 @@ from app.services.teams.consumer import HttpAnswerPoster, TeamsQuestionConsumer
 from app.services.teams.contracts import AnswerPayload, QuestionJob
 from app.services.teams.home_snapshot import build_writer_from_settings
 from app.services.teams.home_snapshot import sweep_once as snapshot_sweep_once
+from app.services.teams.mirror import ChangeTracker, build_mirror_writer_from_settings
 from app.services.teams.memory import ConversationMemory
 from app.settings import settings
 
@@ -153,9 +154,14 @@ async def _snapshot_loop(stop: asyncio.Event) -> None:
     if writer is None:
         logger.info("home snapshot loop off: TEAMS_EDGE_DYNAMODB_TABLE is not set")
         return
+    # The new page's rows (stage D) go to the same table under EYE#; unchanged rows are skipped but
+    # rewritten well before their one-hour TTL
+    mirror = build_mirror_writer_from_settings()
+    tracker = ChangeTracker(max_age_seconds=settings.teams_home_snapshot_seconds * 20)
     while not stop.is_set():
         try:
-            written = await snapshot_sweep_once(writer)
+            written = await snapshot_sweep_once(writer, mirror=mirror, tracker=tracker,
+                                                max_sites=settings.teams_max_sites_per_customer)
             logger.debug("home snapshot written for %s", written)
         except Exception:
             logger.exception("home snapshot sweep failed")

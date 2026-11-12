@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.analytics_forecast import MODEL_VERSION, accuracy_store, history_store, prediction_store, run_store, runner, series
+from app.services.teams.sites import Site
 
 DAYS_BACK = 7
 DAYS_AHEAD = 7
@@ -160,11 +161,14 @@ def tiles(days: list[dict], live, backtest, shifts: list[dict], scored: int) -> 
 
 
 # ============================================================== the reads
-async def compute(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo) -> dict:
-    """The block for one customer, or the two-field "no run yet" block."""
+async def compute(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo,
+                  site: Site | None = None) -> dict:
+    """The block for one customer or one site (the forecast already keeps one series per warehouse),
+    or the two-field "no run yet" block."""
     run = await run_store.latest_completed(db, customer_code)
     if run is None:
         return {"available": False, "note": NO_RUN_NOTE}
+    kind, subject = ("warehouse", site.site_id) if site is not None else ("total", "total")
     cfg = runner.config_from_settings(customer_code)
     today = now.astimezone(tz).date()
     as_of = run.as_of_date
@@ -173,20 +177,20 @@ async def compute(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneI
     rows = await history_store.read_daily_for(
         db, customer_code, cfg.settlement, since=series.local_midnight(first, tz),
         until=series.local_midnight(today + timedelta(days=1), tz), tz=tz, units_value=cfg.units_value,
-        subject_kind="total", subject="total")
+        subject_kind=kind, subject=subject)
     daily = {d: float(lines) for d, lines, _units in rows}
     preds = {p.target_at.astimezone(tz).date(): p for p in await prediction_store.latest_per_target(
-        db, customer_code, metric="lines", grain="day", subject_kind="total", subject="total",
+        db, customer_code, metric="lines", grain="day", subject_kind=kind, subject=subject,
         start=series.local_midnight(first, tz), end=series.local_midnight(last + timedelta(days=1), tz))}
     days = build_days(today, daily, preds)
 
     hour_rows = {}
     span_end = series.local_midnight(today + timedelta(days=SHIFTS + 1), tz)
     lines_by_hour = {p.target_at: float(p.value or 0) for p in await prediction_store.latest_per_target(
-        db, customer_code, metric="lines", grain="hour", subject_kind="total", subject="total",
+        db, customer_code, metric="lines", grain="hour", subject_kind=kind, subject=subject,
         start=series.local_midnight(today, tz), end=span_end)}
     for p in await prediction_store.latest_per_target(
-            db, customer_code, metric="pickers", grain="hour", subject_kind="total", subject="total",
+            db, customer_code, metric="pickers", grain="hour", subject_kind=kind, subject=subject,
             start=series.local_midnight(today, tz), end=span_end):
         local = p.target_at.astimezone(tz).replace(tzinfo=None)
         hour_rows[local] = (int(p.value or 0), lines_by_hour.get(p.target_at, 0.0))

@@ -97,6 +97,8 @@ def _write_progress(row: AnalyticsAtRiskDelivery, state: model.DeliveryState) ->
         row.route_loaded_at = state.route_loaded_at
     if state.route_loading_from is not None:
         row.route_loading_from = state.route_loading_from
+    if state.warehouse is not None:
+        row.warehouse = state.warehouse
 
 
 def _write_clock(row: AnalyticsAtRiskDelivery, clock: model.RouteClock) -> None:
@@ -133,7 +135,7 @@ def _state_from_row(row: AnalyticsAtRiskDelivery) -> model.DeliveryState:
         last_pick_at=row.last_pick_at, last_load_at=row.last_load_at,
         loading_expected=True if row.loading_expected is None else bool(row.loading_expected),
         transaction_names=tuple(row.transaction_names or ()), route_loaded_at=row.route_loaded_at,
-        route_loading_from=row.route_loading_from)
+        route_loading_from=row.route_loading_from, warehouse=row.warehouse)
 
 
 def _clock_from_row(row: AnalyticsAtRiskDelivery, *, warn_before: timedelta, gone_after: timedelta) -> model.RouteClock:
@@ -254,12 +256,16 @@ TIER_ORDER = case({"left_behind": 3, "at_risk": 2, "watch": 1}, value=AnalyticsA
 
 
 async def board_rows(db: AsyncSession, cc: str, *, dates: Sequence[date], tiers: Sequence[str] | None = None,
-                     include_closed: bool = False, limit: int = 500) -> list[AnalyticsAtRiskDelivery]:
-    """The rows for these departure dates, worst tier first, then the nearest departure."""
+                     include_closed: bool = False, limit: int = 500,
+                     warehouse: str | None = None) -> list[AnalyticsAtRiskDelivery]:
+    """The rows for these departure dates, worst tier first, then the nearest departure; one site's
+    rows when `warehouse` is given (rows that never learned their warehouse belong to no site)."""
     stmt = select(AnalyticsAtRiskDelivery).where(AnalyticsAtRiskDelivery.customer_code == cc,
                                                  AnalyticsAtRiskDelivery.departure_date.in_(list(dates)))
     if not include_closed:
         stmt = stmt.where(AnalyticsAtRiskDelivery.status == "open")
+    if warehouse is not None:
+        stmt = stmt.where(AnalyticsAtRiskDelivery.warehouse == warehouse)
     if tiers:
         stmt = stmt.where(AnalyticsAtRiskDelivery.tier.in_(list(tiers)))
     stmt = stmt.order_by(TIER_ORDER.desc(), AnalyticsAtRiskDelivery.departure_at, AnalyticsAtRiskDelivery.delivery_number).limit(limit)

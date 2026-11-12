@@ -66,6 +66,7 @@ erDiagram
     customers ||--o{ customer_display_names : "aliases"
     customers ||--o{ logspace_presence : "presence"
     customers ||--o{ teams_tenant_bindings : "Teams tenant"
+    customers ||--o{ tenant_sites : "runs the sites"
 
     notification_events ||--o{ notification_deliveries : "fans out to"
     customer_notification_channels ||--o{ notification_deliveries : "sent via"
@@ -74,7 +75,7 @@ erDiagram
 ### Tenant partitioning (`customer_code`, soft links)
 
 `customer_code` is the multi-tenant key.
-It is a real foreign key only from `customer_display_names`, `logspace_presence` and `teams_tenant_bindings` to `customers` (solid lines below).
+It is a real foreign key only from `customer_display_names`, `logspace_presence`, `teams_tenant_bindings` and `tenant_sites` to `customers` (solid lines below).
 On every other table it is a soft convention with no constraint (dashed lines below).
 
 ```mermaid
@@ -82,6 +83,7 @@ erDiagram
     customers ||--o{ customer_display_names : "FK (enforced)"
     customers ||--o{ logspace_presence : "FK (enforced)"
     customers ||--o{ teams_tenant_bindings : "FK (enforced)"
+    customers ||--o{ tenant_sites : "FK (enforced)"
     customers ||..o{ teams_conversation_turns : "soft"
     customers ||..o{ agent_runs : "soft"
     customers ||..o{ agent_traces : "soft"
@@ -1191,6 +1193,7 @@ erDiagram
         string route
         string customer_name
         string customer_number
+        string warehouse "the site the route rows carry; NULL on rows closed before d3b7e9f1a2c4"
         string tier "none | watch | at_risk | late"
         string max_tier "highest ever reached"
         datetime first_flagged_at
@@ -1354,6 +1357,8 @@ Every message carries the sender's Entra tenant id, set by Microsoft, and `teams
 Postgres is the source of truth; the bot edge on AWS reads a mirrored DynamoDB copy, and `mirrored_at` older than `updated_at` means the consumer must push the row again.
 `teams_conversation_turns` keeps the last questions and answers per Teams conversation so a follow-up question carries context.
 The binding's `customer_code` is an enforced foreign key: a binding to a missing log space must fail at write time.
+`tenant_sites` (stage D, step 4) names the warehouses a customer runs for the eSmart Eye Teams app: the `warehouse` value as it appears on the rows, a display name and the switcher order.
+The consumer computes the Home snapshot once for the whole customer and once per active site and mirrors them to the edge under one key prefix, `EYE#<customer_code>`; a site of a missing log space must fail at write time, so the key is an enforced foreign key too.
 The turns carry the soft tenant key like the log tables, so a tenant purge can remove them and a turn can never be replayed into another tenant's question.
 `agent_runs` is the run ledger: the consumer inserts one row per edge job id before it runs the model, and the unique `request_id` decides who wins a redelivery.
 A row still `running` means another consumer has the question (unless `claimed_at` is older than the queue's visibility window, when the claim is taken over); a row that is `done` carries the posted answer in `result`, replayed as it is.
@@ -1378,6 +1383,16 @@ erDiagram
         string display_name
         string created_by
         datetime mirrored_at "when the edge copy last matched; NULL = never"
+        datetime created_at
+        datetime updated_at
+    }
+
+    tenant_sites {
+        string customer_code PK,FK "-> customers.customer_code (CASCADE)"
+        string site_id PK "the warehouse value on the rows, as stored"
+        string name "display name for the site switcher"
+        int sort_order
+        bool active "false hides the site from the switcher"
         datetime created_at
         datetime updated_at
     }
@@ -1463,6 +1478,7 @@ erDiagram
     }
 
     customers ||--o{ teams_tenant_bindings : "is answered from"
+    customers ||--o{ tenant_sites : "runs the sites"
     customers ||..o{ teams_conversation_turns : "tenant of"
     customers ||..o{ agent_runs : "tenant of"
     customers ||..o{ agent_traces : "tenant of"
@@ -1519,6 +1535,7 @@ erDiagram
 | `customers.customer_code` | `customer_display_names.customer_code` | CASCADE |
 | `customers.customer_code` | `logspace_presence.customer_code` | CASCADE |
 | `customers.customer_code` | `teams_tenant_bindings.customer_code` | CASCADE |
+| `customers.customer_code` | `tenant_sites.customer_code` | CASCADE |
 | `notification_events.id` | `notification_deliveries.event_id` | CASCADE |
 | `customer_notification_channels.id` | `notification_deliveries.channel_id` | SET NULL |
 
