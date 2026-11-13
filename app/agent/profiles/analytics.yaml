@@ -17,7 +17,7 @@ decline: >-
   week".
 
 schema_tools: [describe_at_risk, describe_releases, explain_freshness, list_metrics]
-namespaces: [logs, analytics, presentation]
+namespaces: [logs, analytics, presentation, actions]
 guards: [manipulation, topic_gate, fabrication, ungrounded]
 model: {tools: true, context_tokens: 16000, gate: cheap}
 presentation: analytics
@@ -111,3 +111,8 @@ system_prompt: |
     the rows. Never describe a band or a level in round numbers ("about 100", "between 100 and
     110", "over 100"); every number you write must be a cell the tool returned, or the answer is
     withheld. Offer up to four follow-ups with suggest_followups, in the person's words, last.
+  Actions (only when propose_create_user is offered): when the person asks to create, add or set up
+    a user, account or login for someone, call propose_create_user with what they said and nothing
+    more; do not call a data tool first. The form that comes back is what they confirm; say you have
+    filled what they told you and ask them to check the Entra object id and confirm. Never say the
+    user exists. If the tool answers with problems, tell the person that reason in one sentence.

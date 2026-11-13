@@ -449,6 +449,19 @@
               "title": "Type",
               "type": "string"
             },
+            "undo": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Undo"
+            },
             "undo_until": {
               "anyOf": [
                 {
@@ -802,7 +815,8 @@
                 "access_deactivate_user",
                 "access_set_matrix_cell",
                 "access_decide",
-                "access_request"
+                "access_request",
+                "access_undo"
               ],
               "title": "Kind",
               "type": "string"
@@ -950,5 +964,5 @@
       "type": "object"
     }
   },
-  "revision": "3.7"
+  "revision": "3.8"
 }

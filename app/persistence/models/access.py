@@ -31,7 +31,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.config.database import Base
 
 USER_STATUSES = ("active", "pending", "dormant", "deactivated")
-APPROVAL_STATUSES = ("pending", "approved", "declined", "expired")
+APPROVAL_STATUSES = ("pending", "approved", "declined", "expired", "withdrawn")
 
 
 def _now() -> datetime:

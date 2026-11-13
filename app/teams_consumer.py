@@ -29,7 +29,8 @@ from app.services.agent_runs.claims import Claim
 from app.services.agent_quotas.admission import PostgresAdmission, QuotaLimits
 from app.services.agent_traces.store import PostgresTraceStore
 from app.services.agent_usage.store import PostgresUsageStore
-from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace, presentation_namespace
+from app.services.analytics_agent.namespaces import (actions_namespace, analytics_namespace, logs_namespace,
+                                                     presentation_namespace)
 from app.services.logspace_agent.namespaces import logspace_namespace
 from app.services.teams.binding_mirror import build_mirror_from_settings
 from app.services.teams.binding_sweep import sweep_once
@@ -56,7 +57,8 @@ logger = logging.getLogger(__name__)
 # This process's registry: every namespace, so the profile's list and the clash rule mean the
 # same here as in the API; the runners open their own sessions on the app pool.
 _REGISTRY = ToolRegistry([logs_namespace(), analytics_namespace(), logspace_namespace(),
-                          presentation_namespace(settings.analytics_agent_presentation)])
+                          presentation_namespace(settings.analytics_agent_presentation),
+                          actions_namespace(settings.analytics_agent_presentation)])
 # Where the gateway stores each run's redacted trace (agent_traces), in its own short session.
 _TRACES = PostgresTraceStore(async_session)
 # Admission before any model call: shared counters every consumer and web process changes.
@@ -88,7 +90,7 @@ async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> di
         principal=Principal(tenant=job.customer_code, object_id=job.sender_object_id,
                             display_name=job.sender_name),
         profile="analytics", text=job.question, conversation_id=job.conversation_id,
-        conversation_type=_conversation_type(job.source))
+        conversation_type=_conversation_type(job.source), site_id=job.site_id)
     # Step 2: Name the profile; it lists its namespaces, and the registry binds their tools.
     runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),
                             registry=_REGISTRY, router=_ROUTER)

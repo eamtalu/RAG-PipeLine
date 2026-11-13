@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.7"
+CONTRACT_REVISION = "3.8"
 
 
 def _now() -> datetime:
@@ -32,13 +32,15 @@ def _now() -> datetime:
 #:   starts_on?, note?, capabilities?} (creates the user when new, else changes them);
 #: access_deactivate_user {object_id}; access_set_matrix_cell {role, capability, state};
 #: access_decide {reference, approve: bool, changes?, note?};
-#: access_request {capability} or {site_ids} (the person asking for more, for themselves).
+#: access_request {capability} or {site_ids} (the person asking for more, for themselves);
+#: access_undo {reference} or {object_id} (a receipt's undo, within its window; step 8).
 ACCESS_COMMAND_KINDS = (
     "access_set_user",
     "access_deactivate_user",
     "access_set_matrix_cell",
     "access_decide",
     "access_request",
+    "access_undo",
 )
 
 
@@ -57,6 +59,7 @@ class Command(BaseModel):
         "access_set_matrix_cell",
         "access_decide",
         "access_request",
+        "access_undo",
     ]
     #: The at-risk fields; required for the two at-risk kinds, checked by the backend's runner.
     delivery_number: str | None = Field(default=None, max_length=64)
@@ -245,6 +248,9 @@ class ReceiptBlock(BaseModel):
     reference: str | None = Field(default=None, max_length=40)
     status: str = Field(default="done", pattern=r"^(done|needs_approval|refused)$")
     undo_until: datetime | None = None
+    #: What the page sends as the `access_undo` command's payload while undo_until has not passed
+    #: (step 8); absent when nothing can be undone.
+    undo: dict[str, Any] | None = None
 
 
 class FollowupsBlock(BaseModel):

@@ -516,6 +516,8 @@ class Settings(BaseSettings):
     # site), and the fill-rate target its tiles and chart show.
     teams_exec_home_seconds: float = 300.0
     teams_fill_rate_target: float = 0.98
+    # A receipt's Undo (step 8) works this long after the action.
+    teams_undo_minutes: int = 10
 
     # --- HTTP API callers (app/api/service_auth.py). Every route under /api/v1 needs a bearer token
     # from this list, `name=token,name=token`; the name says which system is calling. Names listed

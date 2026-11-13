@@ -309,28 +309,28 @@ async def test_an_admin_creates_changes_and_deactivates_users_by_command():
         await users.create_user(db, CC, "u-adm", actor=SUPER, now=NOW,
                                 change=users.UserChange(display_name="Ada Admin", role_code="admin", all_sites=True))
         await db.commit()
-    text = await access_commands.run(
+    text = (await access_commands.run(
         _command("u-adm", "access_set_user", {"object_id": "u-9", "display_name": "Jo Bloggs",
                                               "role": "supervisor", "site_ids": ["BRI"]}, "Ada"),
-        mirror=mirror, now=NOW)
+        mirror=mirror, now=NOW)).text
     assert text == "created Jo Bloggs as Supervisor for BRI"
     assert (f"EYE#{CC}", "USER#u-9#ACCESS") in mirror.items  # mirrored at once
-    text = await access_commands.run(
+    text = (await access_commands.run(
         _command("u-adm", "access_set_user", {"object_id": "u-9", "role": "ops_manager", "all_sites": True}, "Ada"),
-        mirror=mirror, now=NOW)
+        mirror=mirror, now=NOW)).text
     assert text == "updated Jo Bloggs"
     async with async_session() as db:
         record = await records.access_record_for(db, CC, "u-9")
     assert record.role_code == "ops_manager" and record.all_sites
-    text = await access_commands.run(_command("u-adm", "access_deactivate_user", {"object_id": "u-9"}, "Ada"),
-                                     mirror=mirror, now=NOW)
+    text = (await access_commands.run(_command("u-adm", "access_deactivate_user", {"object_id": "u-9"}, "Ada"),
+                                      mirror=mirror, now=NOW)).text
     assert text == "deactivated Jo Bloggs" and (f"EYE#{CC}", "USER#u-9#ACCESS") not in mirror.items
     with pytest.raises(access_commands.Refused, match="yourself"):
         await access_commands.run(_command("u-adm", "access_deactivate_user", {"object_id": "u-adm"}), mirror=mirror)
     # the generic runner routes access kinds here and still refuses an at-risk command with no delivery
     assert (await run_command(_command("u-adm", "access_set_matrix_cell",
                                        {"role": "supervisor", "capability": "export", "state": "allowed"}, "Ada"))
-            ) == "export for Supervisor: allowed"
+            ).text == "export for Supervisor: allowed"
     with pytest.raises(ValueError, match="delivery_number"):
         await run_command(QuestionJob(job_id="j", tenant_id="t", customer_code=CC, conversation_id="c",
                                       sender_object_id="u-adm", question="x", source="tab",
@@ -344,10 +344,10 @@ async def test_a_supervisors_user_change_becomes_a_request_and_an_ops_manager_de
         await users.create_user(db, CC, "u-ops", actor=SUPER, now=NOW,
                                 change=users.UserChange(display_name="Olu Ops", role_code="ops_manager", all_sites=True))
         await db.commit()
-    text = await access_commands.run(
+    text = (await access_commands.run(
         _command("u-sup", "access_set_user", {"object_id": "u-new", "display_name": "Dan Roberts",
                                               "role": "picker", "site_ids": ["BRI"], "note": "night shift"}, "Sam"),
-        mirror=mirror, now=NOW)
+        mirror=mirror, now=NOW)).text
     assert text == "sent for approval · USR-1"
     async with async_session() as db:
         assert await users.get_user(db, CC, "u-new") is None
@@ -356,9 +356,9 @@ async def test_a_supervisors_user_change_becomes_a_request_and_an_ops_manager_de
     # the supervisor may not decide; the ops manager may, and the approval creates the user
     with pytest.raises(access_commands.Refused, match="approve"):
         await access_commands.run(_command("u-sup", "access_decide", {"reference": "USR-1", "approve": True}), mirror=mirror)
-    text = await access_commands.run(
+    text = (await access_commands.run(
         _command("u-ops", "access_decide", {"reference": "USR-1", "approve": True, "changes": {"role": "shift_lead"}}, "Olu"),
-        mirror=mirror, now=NOW)
+        mirror=mirror, now=NOW)).text
     assert text == "approved USR-1 · New user: Dan Roberts"
     async with async_session() as db:
         new = await users.get_user(db, CC, "u-new")
@@ -374,15 +374,15 @@ async def test_a_person_requests_a_capability_or_more_sites_for_themselves():
     async with async_session() as db:
         await _supervisor(db)
         await db.commit()
-    text = await access_commands.run(
+    text = (await access_commands.run(
         _command("u-sup", "access_request", {"capability": "view_all_sites", "reason": "weekly review"}, "Sam"),
-        mirror=mirror, now=NOW)
+        mirror=mirror, now=NOW)).text
     assert text == "requested · ACC-1 · waiting for an Ops manager"
-    text = await access_commands.run(_command("u-sup", "access_request", {"site_ids": ["LON"]}, "Sam"),
-                                     mirror=mirror, now=NOW + timedelta(seconds=1))  # a later moment
+    text = (await access_commands.run(_command("u-sup", "access_request", {"site_ids": ["LON"]}, "Sam"),
+                                      mirror=mirror, now=NOW + timedelta(seconds=1))).text  # a later moment
     assert text == "requested · ACC-2 · waiting for an Ops manager"
     assert (await access_commands.run(_command("u-sup", "access_request", {"capability": "ask"}), mirror=mirror)
-            ) == "you already have Ask the assistant"
+            ).text == "you already have Ask the assistant"
     with pytest.raises(ValueError, match="unknown capability"):
         await access_commands.run(_command("u-sup", "access_request", {"capability": "fly"}), mirror=mirror)
     with pytest.raises(access_commands.Refused, match="no active access"):

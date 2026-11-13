@@ -31,7 +31,7 @@ async def run_command(job: QuestionJob) -> str:
         raise ValueError("the job carries no command")
     # the Admin tab's actions (step 7c) live with the access service
     if command.kind in ACCESS_COMMAND_KINDS:
-        return await access_commands.run(job)
+        return await access_commands.run(job)  # a CommandOutcome: the line and the receipt
     if not command.delivery_number:
         raise ValueError("an at-risk command names a delivery_number")
     actor = (command.by or job.sender_name or check_store.DEFAULT_ACTOR).strip()[:128]

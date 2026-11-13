@@ -13,7 +13,7 @@ from typing import Any, Mapping
 from app.agent.capabilities.spec import Namespace, ToolSpec
 from app.agent.contracts import AgentRequest, ExecutionContext
 from app.config.database import SessionFactory, async_session
-from app.services.analytics_agent import at_risk_tools, presentation_tools
+from app.services.analytics_agent import action_tools, at_risk_tools, presentation_tools
 from app.services.analytics_agent.tools import RECIPES, RELEASE_TOOLS, run_release_tool
 from app.services.log_agent import tools as log_tools
 
@@ -80,3 +80,23 @@ def presentation_namespace(enabled: bool) -> Namespace:
         else ()
     )
     return Namespace(name="presentation", specs=specs, runner=run)
+
+
+def actions_namespace(enabled: bool, session_factory: SessionFactory = async_session) -> Namespace:
+    """The action tools (step 8: propose_create_user), or an empty namespace while the presentation
+    switch is off, so the profile may always list it. The runner reads the asker's own record.
+
+    (True) -> Namespace("actions", 1 spec) ; (False) -> Namespace("actions", no specs)
+    """
+
+    async def run(
+        context: ExecutionContext, request: AgentRequest, name: str, args: Mapping[str, Any]
+    ) -> str:
+        async with session_factory() as db:
+            return await action_tools.run_action_tool(
+                db, context.tenant, request.principal.object_id, request.site_id, name, args)
+
+    specs = (
+        tuple(ToolSpec.from_dict("actions", s) for s in action_tools.ACTION_TOOLS) if enabled else ()
+    )
+    return Namespace(name="actions", specs=specs, runner=run)

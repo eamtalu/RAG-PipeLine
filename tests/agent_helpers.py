@@ -19,6 +19,7 @@ from app.config.database import async_session
 from app.services.analytics_agent.namespaces import (
     analytics_namespace,
     logs_namespace,
+    actions_namespace,
     presentation_namespace,
 )
 from app.services.logspace_agent.namespaces import logspace_namespace
@@ -36,6 +37,7 @@ def tool_registry(session_factory=async_session) -> ToolRegistry:
             logspace_namespace(session_factory),
             # the presentation tools are on in the tests, so a scripted run can draw a chart
             presentation_namespace(True),
+            actions_namespace(True),
         ]
     )
 

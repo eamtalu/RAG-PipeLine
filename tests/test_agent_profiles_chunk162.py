@@ -44,7 +44,7 @@ def test_both_profiles_load_with_exactly_the_required_keys():
         assert set(raw) == set(REQUIRED_KEYS)
         profile = load_profile(name)
         assert profile.name == name and profile.presentation == name
-        expected = {"analytics": ("logs", "analytics", "presentation"), "logspace": ("logspace",)}
+        expected = {"analytics": ("logs", "analytics", "presentation", "actions"), "logspace": ("logspace",)}
         assert profile.namespaces == expected[name]
 
 

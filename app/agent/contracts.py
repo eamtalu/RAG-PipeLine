@@ -55,6 +55,8 @@ class AgentRequest:
     text: str
     conversation_id: str | None
     conversation_type: ConversationType = "personal"
+    #: The site the page looked at when asking (step 8); the action tools pre-fill it.
+    site_id: str | None = None
     action: str | None = None
     deadline_seconds: float | None = None
     scope: Mapping[str, Any] | None = None
