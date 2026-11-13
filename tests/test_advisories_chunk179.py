@@ -110,6 +110,7 @@ async def test_the_delivery_agent_lifts_the_at_risk_board_with_its_own_words():
     assert high.evidence == "Picking progress · 60 of 84 lines · 1 of 3 packages loaded · van usually ready 09:25 · 25 min to go"
     assert high.impact == "24 lines not yet picked for Hove Deli"
     assert high.dedup_key == "delivery:D-1:2026-11-13" and high.source["delivery_number"] == "D-1"
+    assert (high.source["lines_picked"], high.source["lines_expected"]) == (60, 84)  # the card's picking bar
     assert high.confidence is None  # nothing closed in the last fortnight yet
     assert high.due_at == NOW + timedelta(minutes=25)
 

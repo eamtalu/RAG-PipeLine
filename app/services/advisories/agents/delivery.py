@@ -70,7 +70,8 @@ async def run(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo)
             site_id=row.warehouse,
             due_at=row.usual_ready_at or row.departure_at,
             source={"kind": "delivery", "delivery_number": row.delivery_number,
-                    "departure_date": row.departure_date.isoformat(), "route": row.route},
+                    "departure_date": row.departure_date.isoformat(), "route": row.route,
+                    "lines_picked": row.lines_picked, "lines_expected": row.lines_expected},
             actions=("ask_why", "acknowledge", "assign", "snooze"),
         ))
     return findings
