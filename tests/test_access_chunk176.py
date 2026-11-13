@@ -99,9 +99,10 @@ async def test_a_supervisor_sees_their_site_only_and_cannot_approve():
 async def test_an_override_and_an_admin_with_all_sites():
     async with async_session() as db:
         await _supervisor(db)
-        await users.update_user(db, CC, "u-sup", actor=SUPER, now=NOW,
+        # distinct moments, so the audit list's order is the order of the changes
+        await users.update_user(db, CC, "u-sup", actor=SUPER, now=NOW + timedelta(seconds=1),
                                 change=users.UserChange(capabilities={"export": ALLOWED}))
-        await users.create_user(db, CC, "u-adm", actor=SUPER, now=NOW,
+        await users.create_user(db, CC, "u-adm", actor=SUPER, now=NOW + timedelta(seconds=2),
                                 change=users.UserChange(display_name="Ada Admin", role_code="admin",
                                                         all_sites=True, email="ada@example.com"))
         await db.commit()
