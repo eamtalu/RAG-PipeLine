@@ -239,3 +239,4 @@ Check in Teams after the edge: Ask "Where is delivery <a live number>?" (chips p
 
 Rollback: the previous checkout and a restart (watches added through Ask stay and keep being checked).
 
+Deployed 13 November 2026 as `a35ffe8` (PR #23); the edge image `909b34d` followed.
