@@ -147,3 +147,24 @@ The `ADVISORIES` row under `EYE#tmp-live` is written on the same tick (the edge 
 To switch an agent off for a customer: `UPDATE advisory_agents SET enabled=false, updated_by='<you>' WHERE customer_code='tmp-live' AND agent='location';` (the Admin tab's roster toggle is a later step).
 
 Rollback: the previous checkout and a restart; `alembic downgrade a6e1c4d9f832` drops the three tables.
+
+## D10: reminders and schedules (the tasks loop)
+
+What it adds: migration `c8e3f6a9d054` (`teams_tasks`, `teams_task_runs`), `app/services/tasks/` (the specs and their next-fire maths in the customer's time zone, the store, the runner the consumer ticks, the `task_create` / `task_update` commands, the per-person `USER#<id>#TASKS` mirror row with the suggestions from the person's own history), the consumer's `_tasks_loop` every `TEAMS_TASKS_TICK_SECONDS` (30) with the catch-up window `TEAMS_TASKS_CATCH_UP_HOURS` (6), the two proposing tools (`propose_reminder`, `propose_schedule`) on the analytics profile beside `propose_create_user`, the prompt snapshot regenerated.
+Contract 3.10 synced from the edge.
+No new flag: the loop runs wherever the edge table is set.
+
+The scheduler is the table: every task row carries `next_fire_at`; the loop claims the due rows with `FOR UPDATE SKIP LOCKED`, writes the ledger row first (unique per task and planned moment), runs the attached question as the owner through the same gateway as a Teams question, and books the next firing from the planned time.
+After a restart the loop picks up whatever is due; a task more than six hours late is noted as `missed` on the ledger and rebooked, not fired.
+
+Deploy: `./deploy.sh` (the migration runs inside it).
+Then, once the edge step 10 image is live, set a reminder in Teams a few minutes ahead and watch:
+
+```
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT kind, title, status, next_fire_at, fire_count FROM teams_tasks WHERE customer_code='tmp-live' ORDER BY created_at DESC LIMIT 10;"
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT planned_at, outcome, left(text,80) FROM teams_task_runs WHERE customer_code='tmp-live' ORDER BY planned_at DESC LIMIT 10;"
+```
+
+Expected: the reminder row with `next_fire_at` a few minutes ahead, then one ledger row `sent` within 30 s of that moment and the reminder `done`; a schedule row keeps `status active` and moves `next_fire_at` on.
+
+Rollback: the previous checkout and a restart; `alembic downgrade b7f2d5e8c943` drops the two tables.

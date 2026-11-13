@@ -55,6 +55,11 @@
       "sk": "USER#{user_id}#HISTORY",
       "ttl_seconds": 2678400
     },
+    "user_tasks": {
+      "pk": "EYE#{customer_code}",
+      "sk": "USER#{user_id}#TASKS",
+      "ttl_seconds": null
+    },
     "users": {
       "pk": "EYE#{customer_code}",
       "sk": "USERS",
@@ -822,7 +827,9 @@
                 "access_decide",
                 "access_request",
                 "access_undo",
-                "advisory_act"
+                "advisory_act",
+                "task_create",
+                "task_update"
               ],
               "title": "Kind",
               "type": "string"
@@ -970,5 +977,5 @@
       "type": "object"
     }
   },
-  "revision": "3.9"
+  "revision": "3.10"
 }

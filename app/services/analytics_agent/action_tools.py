@@ -20,7 +20,9 @@ from app.services.teams.contracts import FormBlock, FormField
 from app.services.teams.sites import list_sites
 
 PROPOSE_CREATE_USER = "propose_create_user"
-ACTION_TOOL_NAMES = frozenset({PROPOSE_CREATE_USER})
+PROPOSE_REMINDER = "propose_reminder"
+PROPOSE_SCHEDULE = "propose_schedule"
+ACTION_TOOL_NAMES = frozenset({PROPOSE_CREATE_USER, PROPOSE_REMINDER, PROPOSE_SCHEDULE})
 
 SHIFTS = ["Night · 22:00 – 06:00", "Day · 06:00 – 14:00", "Late · 14:00 – 22:00"]
 
@@ -54,7 +56,59 @@ ACTION_TOOLS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
         "side_effects": False,
-    }
+    },
+    {
+        "name": PROPOSE_REMINDER,
+        "description": (
+            "Propose a reminder for the person to confirm, when they ask to be reminded of something at a "
+            "time (\"remind me at 5 to check Route 14\", \"tomorrow at 9 remind me to plan cover\"). Call "
+            "it with what they said: what to be reminded of, the time, the day when said, and whether it "
+            "repeats. The form that comes back is what they confirm; never say the reminder is set. If "
+            "their earlier question should come back with the reminder, pass it as attach_question."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "What to be reminded of, in their words."},
+                "time": {"type": "string", "description": "The clock time, e.g. 17:45 or 5pm."},
+                "date": {"type": "string", "description": "YYYY-MM-DD when a day was said (tomorrow, Monday)."},
+                "repeat": {"type": "string", "description": "once | daily | weekdays; once when not said."},
+                "attach_question": {"type": "string",
+                                    "description": "A question to re-run when it goes off, when one fits."},
+                "note": {"type": "string", "description": "Anything else said, briefly."},
+            },
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+        "side_effects": False,
+    },
+    {
+        "name": PROPOSE_SCHEDULE,
+        "description": (
+            "Propose a schedule for the person to confirm, when they ask for something to be sent or run "
+            "automatically on a rhythm (\"send me the short products list every weekday at 4pm\", \"every "
+            "Monday at 8 post the deliveries graph in the channel\") or whenever a figure crosses a line "
+            "(\"tell me if fill rate drops below 97%\"). Call it with what they said. The form that comes "
+            "back is what they confirm; never say the schedule is set."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "what": {"type": "string", "description": "The question to run, in their words."},
+                "how_often": {"type": "string",
+                              "description": "weekdays | daily | weekly | once | when fill rate drops below."},
+                "weekday": {"type": "string", "description": "The day for a weekly one, e.g. Monday."},
+                "time": {"type": "string", "description": "The clock time, e.g. 16:00 or 4pm."},
+                "threshold": {"type": "string", "description": "The fill rate line in percent, e.g. 97."},
+                "send_to": {"type": "string", "description": "me | channel; me when not said."},
+                "show_as": {"type": "string", "description": "table | graph | summary; table when not said."},
+                "until": {"type": "string", "description": "YYYY-MM-DD when an end was said."},
+            },
+            "required": ["what"],
+            "additionalProperties": False,
+        },
+        "side_effects": False,
+    },
 ]
 
 
@@ -142,6 +196,8 @@ async def run_action_tool(db: AsyncSession, customer_code: str, actor_object_id:
     ("propose_create_user", {"display_name": "Dan"}) -> '{"shown": "form", "block": {...}}' ;
     (a picker asking) -> '{"problems": ["you cannot create users: …"]}'
     """
+    if name in (PROPOSE_REMINDER, PROPOSE_SCHEDULE):
+        return await _propose_task(db, customer_code, actor_object_id, actor_site_id, name, args)
     if name != PROPOSE_CREATE_USER:
         return json.dumps({"problems": [f"unknown action tool {name!r}"]})
     if not str(args.get("display_name") or "").strip():
@@ -152,3 +208,34 @@ async def run_action_tool(db: AsyncSession, customer_code: str, actor_object_id:
         return json.dumps({"problems": [str(exc)]})
     return json.dumps({"shown": "form", "requires_approval": block.requires_approval,
                        "block": block.model_dump(mode="json")})
+
+
+async def _propose_task(db: AsyncSession, customer_code: str, actor_object_id: str, actor_site_id: str | None,
+                        name: str, args: Mapping[str, Any]) -> str:
+    """The New reminder or New schedule form (step 10) for the actor, or the problems.
+
+    ("propose_schedule", {"what": "short products list", "how_often": "weekdays", "time": "4pm"})
+    -> '{"shown": "form", "block": {"form_id": "new_schedule", ...}}'
+    """
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from app.persistence.repositories.customer_repository import get_customer_timezone
+    from app.services.tasks import forms
+
+    record = await records.access_record_for(db, customer_code, actor_object_id)
+    if record is None or not record.is_active:
+        return json.dumps({"problems": ["you have no active access record"]})
+    if name == PROPOSE_SCHEDULE and not str(args.get("what") or "").strip():
+        return json.dumps({"problems": ["what is required: the question to run"]})
+    if name == PROPOSE_REMINDER and not str(args.get("title") or "").strip():
+        return json.dumps({"problems": ["title is required: what to be reminded of"]})
+    tz = ZoneInfo(await get_customer_timezone(db, customer_code))
+    now = datetime.now(timezone.utc)
+    if name == PROPOSE_REMINDER:
+        block = forms.reminder_form(args, now=now, tz=tz, last_question=None)
+    else:
+        sites = await list_sites(db, customer_code)
+        site_name = next((s.name for s in sites if s.site_id == actor_site_id), None)
+        block = forms.schedule_form(args, now=now, tz=tz, last_question=None, site_name=site_name)
+    return json.dumps({"shown": "form", "requires_approval": False, "block": block.model_dump(mode="json")})

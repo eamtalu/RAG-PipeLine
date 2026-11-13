@@ -67,6 +67,7 @@ from app.persistence.models.access import (  # noqa: F401
     TeamsUserSite,
 )
 from app.persistence.models.advisory import Advisory, AdvisoryAgent, AdvisoryAgentRun  # noqa: F401
+from app.persistence.models.task import TeamsTask, TeamsTaskRun  # noqa: F401
 from app.persistence.models.agent_run import AgentRun
 from app.persistence.models.agent_trace import AgentTrace
 from app.persistence.models.agent_in_flight import AgentInFlight
@@ -149,6 +150,9 @@ __all__ = [
     "Advisory",
     "AdvisoryAgent",
     "AdvisoryAgentRun",
+    # --- tasks (stage D, step 10) ---
+    "TeamsTask",
+    "TeamsTaskRun",
     "AgentRun",
     "AgentTrace",
     "AgentInFlight",
