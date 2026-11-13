@@ -747,20 +747,34 @@
     "QuestionJob": {
       "$defs": {
         "Command": {
-          "description": "An action the tab asks the backend to perform instead of a question: today, marking a delivery\non the at-risk board as checked (or taking that back). Rides on a QuestionJob so it reuses the\nqueue, the consumer and the answer poll; the consumer never runs the agent for one. Added on the\nbackend side on 2026-10-02 and mirrored here; both files must stay identical.",
+          "description": "An action the tab asks the backend to perform instead of a question: marking a delivery on\nthe at-risk board as checked (or taking that back), and since step 7c the access-control\nactions of the Admin tab. Rides on a QuestionJob so it reuses the queue, the consumer and the\nanswer poll; the consumer never runs the agent for one. Added on the backend side on\n2026-10-02 and mirrored here; both files must stay identical.",
           "properties": {
             "by": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
               "description": "The Teams display name of the person acting.",
-              "maxLength": 128,
-              "minLength": 1,
-              "title": "By",
-              "type": "string"
+              "title": "By"
             },
             "delivery_number": {
-              "maxLength": 64,
-              "minLength": 1,
-              "title": "Delivery Number",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Delivery Number"
             },
             "departure_date": {
               "anyOf": [
@@ -778,7 +792,12 @@
             "kind": {
               "enum": [
                 "at_risk_check",
-                "at_risk_uncheck"
+                "at_risk_uncheck",
+                "access_set_user",
+                "access_deactivate_user",
+                "access_set_matrix_cell",
+                "access_decide",
+                "access_request"
               ],
               "title": "Kind",
               "type": "string"
@@ -795,12 +814,15 @@
               ],
               "default": null,
               "title": "Note"
+            },
+            "payload": {
+              "additionalProperties": true,
+              "title": "Payload",
+              "type": "object"
             }
           },
           "required": [
-            "kind",
-            "delivery_number",
-            "by"
+            "kind"
           ],
           "title": "Command",
           "type": "object"
@@ -923,5 +945,5 @@
       "type": "object"
     }
   },
-  "revision": "3.6"
+  "revision": "3.7"
 }

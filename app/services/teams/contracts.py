@@ -10,14 +10,14 @@ verbatim.
 """
 
 from datetime import datetime, timezone
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.6"
+CONTRACT_REVISION = "3.7"
 
 
 def _now() -> datetime:
@@ -27,24 +27,50 @@ def _now() -> datetime:
 # These are the pydantic models used in requests, responses and external messages
 
 
-class Command(BaseModel):
-    """An action the tab asks the backend to perform instead of a question: today, marking a delivery
-    on the at-risk board as checked (or taking that back). Rides on a QuestionJob so it reuses the
-    queue, the consumer and the answer poll; the consumer never runs the agent for one. Added on the
-    backend side on 2026-10-02 and mirrored here; both files must stay identical."""
+#: The access-control actions of the Admin tab (step 7c). Each carries its fields in `payload`:
+#: access_set_user {object_id, display_name?, email?, role?, all_sites?, site_ids?, status?,
+#:   starts_on?, note?, capabilities?} (creates the user when new, else changes them);
+#: access_deactivate_user {object_id}; access_set_matrix_cell {role, capability, state};
+#: access_decide {reference, approve: bool, changes?, note?};
+#: access_request {capability} or {site_ids} (the person asking for more, for themselves).
+ACCESS_COMMAND_KINDS = (
+    "access_set_user",
+    "access_deactivate_user",
+    "access_set_matrix_cell",
+    "access_decide",
+    "access_request",
+)
 
-    kind: Literal["at_risk_check", "at_risk_uncheck"]
-    delivery_number: str = Field(..., min_length=1, max_length=64)
+
+class Command(BaseModel):
+    """An action the tab asks the backend to perform instead of a question: marking a delivery on
+    the at-risk board as checked (or taking that back), and since step 7c the access-control
+    actions of the Admin tab. Rides on a QuestionJob so it reuses the queue, the consumer and the
+    answer poll; the consumer never runs the agent for one. Added on the backend side on
+    2026-10-02 and mirrored here; both files must stay identical."""
+
+    kind: Literal[
+        "at_risk_check",
+        "at_risk_uncheck",
+        "access_set_user",
+        "access_deactivate_user",
+        "access_set_matrix_cell",
+        "access_decide",
+        "access_request",
+    ]
+    #: The at-risk fields; required for the two at-risk kinds, checked by the backend's runner.
+    delivery_number: str | None = Field(default=None, max_length=64)
     departure_date: str | None = Field(
         default=None, description="YYYY-MM-DD, when the delivery has more than one row."
     )
-    by: str = Field(
-        ...,
-        min_length=1,
+    by: str | None = Field(
+        default=None,
         max_length=128,
         description="The Teams display name of the person acting.",
     )
     note: str | None = Field(default=None, max_length=1000)
+    #: The access actions' fields (step 7c); empty for the at-risk kinds.
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class QuestionJob(BaseModel):
