@@ -70,12 +70,13 @@ async def _customer():
 
 
 def _at_risk(delivery: str, tier: str = "none", *, route="R14", customer="Hove Deli", warehouse="BRI",
-             lines_expected=36, lines_picked=31, status="open", outcome=None) -> AnalyticsAtRiskDelivery:
+             lines_expected=36, lines_picked=31, lines_confirmed=None, lines_short=0, status="open", outcome=None) -> AnalyticsAtRiskDelivery:
     return AnalyticsAtRiskDelivery(
         customer_code=CC, delivery_number=delivery, departure_date=NOW.astimezone(TZ).date(),
         departure_at=NOW + timedelta(hours=3), route=route, customer_name=customer, warehouse=warehouse,
         tier=tier, max_tier=tier, first_flagged_at=NOW - timedelta(minutes=5), first_flagged_tier=tier,
-        lines_expected=lines_expected, lines_confirmed=lines_picked, lines_picked=lines_picked, packages_created=3,
+        lines_expected=lines_expected, lines_confirmed=lines_picked if lines_confirmed is None else lines_confirmed,
+        lines_picked=lines_picked, lines_short=lines_short, packages_created=3,
         packages_loaded=1, last_pick_at=NOW - timedelta(minutes=2), usual_ready_at=NOW + timedelta(hours=2),
         usual_ready_source="learned", status=status, outcome=outcome, rule_version=RULE_VERSION, last_evaluated_at=NOW)
 
@@ -369,6 +370,32 @@ async def test_stop_undo_change_alert_not_now_and_the_rows_the_edge_reads():
     await commands.run(_command("u-ops", "watch_add", {"kind": "delivery", "entity_id": "D-1"}, "Olu"), mirror=mirror, now=NOW)
     assert await watch_mirror.sweep_once(sweep, only=[CC], now=NOW) == {CC: 2}  # no tracker: both rows written
     assert {k[1] for k in sweep.items} == {"WATCHABLES", "USER#u-ops#WATCHES"}
+
+
+async def test_a_delivery_without_an_expected_count_is_worded_from_its_confirmed_lines():
+    # every live row has lines_expected NULL (the WMS release never states it); the words come
+    # from the confirmed lines, as the Home board does, never "of 0"
+    mirror_ = InMemoryMirrorWriter()
+    async with async_session() as db:
+        db.add_all([_at_risk("D-1", lines_expected=None, lines_confirmed=8, lines_picked=7, lines_short=1),
+                    _at_risk("D-2", route="R14", lines_expected=None, lines_confirmed=1, lines_picked=1)])
+        await db.commit()
+        added = await commands.run(_command("u-sup", "watch_add", {"kind": "delivery", "entity_id": "D-1"}, "Sam"), mirror=mirror_, now=NOW)
+        assert "Watching · D-1 · Hove Deli" in added.text
+        await commands.run(_command("u-sup", "watch_add", {"kind": "route", "entity_id": "R14"}, "Sam"), mirror=mirror_, now=NOW)
+    assert await _tick(NOW + timedelta(seconds=5), mirror_) == {CC: 0}
+    row_payload = json.loads(mirror_.items[(f"EYE#{CC}", "USER#u-sup#WATCHES")].payload_json)
+    by_kind = {w["kind"]: w for w in row_payload["watches"]}
+    assert by_kind["delivery"]["summary"].startswith("7 of 8 lines picked · 1 short · leaves ")
+    assert by_kind["delivery"]["value"]["lines_expected"] is None and by_kind["delivery"]["value"]["lines_total"] == 8
+    assert by_kind["route"]["summary"].startswith("2 open · 8 of 9 lines picked · next leaves ")
+    assert by_kind["route"]["value"]["lines_total"] == 9
+    async with async_session() as db:
+        watchables = await watch_mirror.watchables_payload(db, CC, now=NOW)
+        details = {d["entity_id"]: d["detail"] for d in watchables["deliveries"]}
+        assert details["D-1"].startswith("7 of 8 lines picked · 1 short · leaves ") and details["D-2"].startswith("1 of 1 lines picked · leaves ")
+        assert watchables["routes"][0]["detail"] == "2 open · 8 of 9 lines picked"
+    assert registry.lines_words(1, None, 0) == "1 line picked" and registry.lines_words(3, None, None, short=2) == "3 lines picked · 2 short"
 
 
 async def test_a_watch_ends_quietly_when_its_time_is_up_or_the_person_lost_the_site():

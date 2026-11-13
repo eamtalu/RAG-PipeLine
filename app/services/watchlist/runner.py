@@ -52,13 +52,15 @@ async def assess_deliveries(db: AsyncSession, customer_code: str, watches: list[
             out[w.id] = Assessment("unknown", dict(w.last_value or {}), "the delivery is no longer on the board", "not_found")
             continue
         status = registry.delivery_status(row.status, row.tier, row.outcome)
-        value = {"lines_picked": int(row.lines_picked or 0), "lines_expected": int(row.lines_expected or 0),
+        value = {"lines_picked": int(row.lines_picked or 0), "lines_expected": row.lines_expected,
+                 "lines_confirmed": int(row.lines_confirmed or 0),
+                 "lines_total": registry.lines_total(row.lines_expected, row.lines_confirmed),
                  "lines_short": int(row.lines_short or 0), "route": row.route, "customer_name": row.customer_name,
                  "departure_at": row.departure_at.isoformat() if row.departure_at else None, "tier": row.tier,
                  "outcome": row.outcome, "warehouse": row.warehouse}
+        lines = registry.lines_words(value["lines_picked"], row.lines_expected, row.lines_confirmed, short=value["lines_short"])
         leaves = f"leaves {_hhmm(value['departure_at'], tz)}" + (f" on Route {row.route}" if row.route else "")
-        summary = (f"{value['lines_picked']} of {value['lines_expected']} lines picked · {leaves}" if row.status == "open"
-                   else f"{registry.status_text(status)} · {value['lines_picked']} of {value['lines_expected']} lines picked")
+        summary = f"{lines} · {leaves}" if row.status == "open" else f"{registry.status_text(status)} · {lines}"
         out[w.id] = Assessment(status, value, summary, "delivered" if row.status == "closed" else None)
     return out
 
@@ -67,8 +69,9 @@ async def assess_routes(db: AsyncSession, customer_code: str, watches: list[Watc
     aggregates = await readers.route_aggregates(db, customer_code, [w.entity_id for w in watches], now.astimezone(tz).date())
     out: dict[uuid.UUID, Assessment] = {}
     for w in watches:
-        agg = aggregates.get(w.entity_id) or {"open": 0, "by_tier": {}, "lines_picked": 0, "lines_expected": 0,
-                                               "next_departure": None, "closed_today": 0, "late_today": 0, "warehouses": []}
+        agg = aggregates.get(w.entity_id) or {"open": 0, "by_tier": {}, "lines_picked": 0, "lines_expected": 0, "lines_confirmed": 0,
+                                               "lines_total": 0, "lines_short": 0, "next_departure": None, "closed_today": 0,
+                                               "late_today": 0, "warehouses": []}
         status = registry.route_status(agg["by_tier"], agg["closed_today"])
         behind = sum(n for t, n in agg["by_tier"].items() if t in ("at_risk", "left_behind"))
         value = {k: v for k, v in agg.items() if k != "warehouses"}
@@ -77,7 +80,7 @@ async def assess_routes(db: AsyncSession, customer_code: str, watches: list[Watc
         elif status == "done":
             summary = f"{agg['closed_today']} gone today" + (f" · {agg['late_today']} late" if agg["late_today"] else " · all in time")
         else:
-            summary = (f"{agg['open']} open · {agg['lines_picked']} of {agg['lines_expected']} lines picked"
+            summary = (f"{agg['open']} open · {registry.lines_words(agg['lines_picked'], agg['lines_total'], None)}"
                        + (f" · {behind} behind" if behind else "") + f" · next leaves {_hhmm(agg['next_departure'], tz)}")
         out[w.id] = Assessment(status, value, summary)
     return out
