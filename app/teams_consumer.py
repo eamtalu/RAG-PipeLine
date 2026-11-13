@@ -48,6 +48,10 @@ from app.services.access import records as access_records
 from app.services.access import users as access_users
 from app.services.advisories import runner as advisories_runner
 from app.services.notifications import dispatcher as notifications
+from app.services.tasks import mirror as tasks_mirror
+from app.services.tasks import runner as tasks_runner
+from app.services.teams import home_snapshot
+from app.services.teams.sites import list_sites as list_customer_sites
 from app.services.teams import exec_home, history
 from app.services.teams.memory import ConversationMemory
 from app.services.teams.progress import ProgressReporter
@@ -356,6 +360,60 @@ async def _advisories_loop(stop: asyncio.Event) -> None:
             pass
 
 
+async def _run_task_query(task) -> dict:
+    """A task's attached question answered as its owner (step 10): the same gateway as a Teams
+    question, the owner's record deciding, no conversation memory.
+
+    (schedule "short products list" by u-7) -> {"answer", "blocks", ...}
+    """
+    job = QuestionJob(job_id=f"task-{task.id}-{int(datetime.now(timezone.utc).timestamp())}",
+                      tenant_id="", customer_code=task.customer_code,
+                      conversation_id=f"task:{task.id}", sender_object_id=task.owner_object_id,
+                      sender_name=task.owner_name, question=task.query_text or task.title, source="tab",
+                      site_id=task.site_id)
+    refusal = await _check_access(job)
+    if refusal:
+        return {"answer": refusal, "blocks": []}
+    return await _run_agent(job, [])
+
+
+async def _read_fill_rate(customer_code: str, site_id: str | None) -> float | None:
+    """The site's fill rate now, for the condition schedules."""
+    async with async_session() as db:
+        site = None
+        if site_id and site_id != "all":
+            site = next((s for s in await list_customer_sites(db, customer_code) if s.site_id == site_id), None)
+        snapshot = await home_snapshot.compute(db, customer_code, site)
+    return await tasks_runner.fill_rate_of(snapshot)
+
+
+async def _tasks_loop(stop: asyncio.Event) -> None:
+    """The reminders and schedules (step 10): every tick fires what is due, checks the condition
+    schedules, and rewrites the task rows of the people touched; once a minute every task row."""
+    mirror = _mirror_writer()
+    if mirror is None:
+        logger.info("tasks loop off: TEAMS_EDGE_DYNAMODB_TABLE is not set")
+        return
+    tracker = ChangeTracker(max_age_seconds=settings.teams_tasks_tick_seconds * 20)
+    last_sweep = 0.0
+    while not stop.is_set():
+        try:
+            fired = await tasks_runner.tick(mirror, run_query=_run_task_query, enqueue=notifications.enqueue,
+                                            read_fill_rate=_read_fill_rate, tracker=tracker,
+                                            catch_up_hours=settings.teams_tasks_catch_up_hours)
+            if any(fired.values()):
+                logger.info("tasks fired %s", fired)
+            if asyncio.get_running_loop().time() - last_sweep >= 60:
+                await tasks_mirror.sweep_once(mirror, tracker=tracker)
+                last_sweep = asyncio.get_running_loop().time()
+        except Exception:
+            logger.exception("tasks tick failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.teams_tasks_tick_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _amain() -> None:
     setup_logging()
     queue_url = _require(settings.teams_sqs_queue_url, "TEAMS_SQS_QUEUE_URL")
@@ -382,7 +440,7 @@ async def _amain() -> None:
     try:
         await asyncio.gather(consumer.run_forever(stop), _sweep_loop(stop), _snapshot_loop(stop),
                              _history_loop(stop), _access_loop(stop), _exec_loop(stop),
-                             _advisories_loop(stop))
+                             _advisories_loop(stop), _tasks_loop(stop))
     finally:
         await engine.dispose()
 

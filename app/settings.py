@@ -521,6 +521,10 @@ class Settings(BaseSettings):
     # The advisories loop (step 9) ticks this often; each agent runs on its own cadence (the
     # advisory_agents table, seeded from the registry: delivery 5 min, stock 15, location 30).
     teams_advisories_tick_seconds: float = 30.0
+    # The tasks loop (step 10) ticks this often; a reminder or schedule missed while the consumer
+    # was down fires once if it is under the catch-up window late, else it is skipped with a note.
+    teams_tasks_tick_seconds: float = 30.0
+    teams_tasks_catch_up_hours: float = 6.0
 
     # --- HTTP API callers (app/api/service_auth.py). Every route under /api/v1 needs a bearer token
     # from this list, `name=token,name=token`; the name says which system is calling. Names listed

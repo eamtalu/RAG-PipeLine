@@ -1365,6 +1365,8 @@ Access control (stage D, step 7) is the matrix of screen 07 as data: `access_rol
 Every one of them is a real foreign key to the customer; the effective record a person gets is computed in `app/services/access/records.py` and mirrored to the edge.
 Advisories (stage D, step 9) are what the agents found: `advisories` holds one row per thing (unique on `customer_code` + `dedup_key`), kept open while the agent keeps finding it, resolved with reason `cleared` when it stops, reopened on the same row when it returns, and moved by people to `acknowledged`, `snoozed`, `dismissed` or `resolved` with an `audit_events` line each (`advisory.<action>`); `advisory_agents` is each agent's switch and cadence per customer, seeded from `app/services/advisories/registry.py` on the first tick (Delivery, Stock controller and Location on; the others off with a reason); `advisory_agent_runs` the ledger of every run with what it opened, resolved or raised.
 All three are real foreign keys to the customer; the agents read `analytics_at_risk_deliveries` and `analytics_facts`, never a table of their own.
+Tasks (stage D, step 10) are the reminders and schedules of the Tasks tab: `teams_tasks` holds both kinds (`kind` reminder | schedule) with the spec as JSON (`when`: once at a moment, recurring on weekdays at a time, or a condition such as fill rate below a line) and `next_fire_at`, the moment the consumer's loop acts, so a restart loses nothing; `teams_task_runs` is the ledger, one row per planned firing, unique on (`task_id`, `planned_at`), so a firing happens exactly once (outcomes sent, skipped, missed, failed).
+A task belongs to one person (`owner_object_id`), runs its attached question with that person's access, and is audited in `audit_events` as `task.<action>`.
 `teams_conversations` (step 6b) is the header of each thread: the page starts a new conversation id whenever the person asks for one, the agent replays only that thread's turns, and the rail lists threads by title with their turns inside; the header is a soft reference to its turns by `conversation_id` and goes with them in the purge.
 `agent_runs` is the run ledger: the consumer inserts one row per edge job id before it runs the model, and the unique `request_id` decides who wins a redelivery.
 A row still `running` means another consumer has the question (unless `claimed_at` is older than the queue's visibility window, when the claim is taken over); a row that is `done` carries the posted answer in `result`, replayed as it is.
@@ -1548,6 +1550,46 @@ erDiagram
         text error
     }
 
+    teams_tasks {
+        uuid id PK
+        string customer_code FK "customers; indexed with owner_object_id, status"
+        string owner_object_id
+        string owner_name
+        string kind "reminder | schedule"
+        string title
+        text note
+        string site_id
+        jsonb when "once | recurring | condition spec"
+        string status "active | paused | done | stopped; indexed with next_fire_at"
+        datetime next_fire_at
+        datetime last_fired_at
+        int fire_count
+        text query_text "the question re-run on fire"
+        jsonb skip_if "advisory or delivery that makes it pointless"
+        string target "me | channel"
+        string show_as "table | chart | summary"
+        datetime until
+        string created_via "tab | ask | advisory"
+        jsonb source
+        jsonb last_result "the latest firing's words"
+        datetime created_at
+        datetime updated_at
+        datetime done_at
+    }
+
+    teams_task_runs {
+        uuid id PK
+        uuid task_id FK "teams_tasks; unique with planned_at"
+        string customer_code FK "customers; indexed with started_at"
+        datetime planned_at
+        datetime started_at
+        datetime finished_at
+        string outcome "sent | skipped | missed | failed"
+        text text
+        jsonb blocks
+        text error
+    }
+
     teams_conversations {
         uuid id PK
         string customer_code "soft tenant key; unique with conversation_id"
@@ -1659,6 +1701,10 @@ erDiagram
     customers ||--o{ advisory_agents : "switches of"
     customers ||--o{ advisory_agent_runs : "agent runs of"
     advisories ||..o{ audit_events : "acted on (subject_kind advisory)"
+    customers ||--o{ teams_tasks : "tasks of"
+    customers ||--o{ teams_task_runs : "task firings of"
+    teams_tasks ||--o{ teams_task_runs : "fired as"
+    teams_tasks ||..o{ audit_events : "changed (subject_kind task)"
     access_roles ||--o{ access_role_capabilities : "row of"
     access_capabilities ||--o{ access_role_capabilities : "column of"
     access_roles ||--o{ teams_users : "role of"
@@ -1730,6 +1776,9 @@ erDiagram
 | `customers.customer_code` | `advisories.customer_code` | CASCADE |
 | `customers.customer_code` | `advisory_agents.customer_code` | CASCADE |
 | `customers.customer_code` | `advisory_agent_runs.customer_code` | CASCADE |
+| `customers.customer_code` | `teams_tasks.customer_code` | CASCADE |
+| `customers.customer_code` | `teams_task_runs.customer_code` | CASCADE |
+| `teams_tasks.id` | `teams_task_runs.task_id` | CASCADE |
 | `notification_events.id` | `notification_deliveries.event_id` | CASCADE |
 | `customer_notification_channels.id` | `notification_deliveries.channel_id` | SET NULL |
 
