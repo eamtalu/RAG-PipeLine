@@ -312,6 +312,31 @@ def day_start(now: datetime, tz: ZoneInfo) -> datetime:
     return now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def lines_total(expected: int | None, confirmed: int | None) -> int | None:
+    """The lines a delivery is measured against: the expected count when the release states it,
+    else the confirmed lines (every live row today), else nothing.
+
+    >>> lines_total(36, 31), lines_total(None, 8), lines_total(None, 0), lines_total(None, None)
+    (36, 8, None, None)
+    """
+    if expected:
+        return int(expected)
+    if confirmed:
+        return int(confirmed)
+    return None
+
+
+def lines_words(picked: int, expected: int | None, confirmed: int | None, *, short: int = 0) -> str:
+    """The picking figure in the card's words, never "of 0".
+
+    >>> lines_words(31, 36, 31), lines_words(7, None, 8, short=1), lines_words(1, None, 0)
+    ('31 of 36 lines picked', '7 of 8 lines picked · 1 short', '1 line picked')
+    """
+    total = lines_total(expected, confirmed)
+    words = (f"{picked} of {total} lines picked" if total else f"{picked} line{'s' if picked != 1 else ''} picked")
+    return f"{words} · {short} short" if short else words
+
+
 def pct(value: float | None) -> str:
     """A fraction as the card writes it.
 

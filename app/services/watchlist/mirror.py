@@ -128,14 +128,14 @@ async def watchables_payload(db: AsyncSession, customer_code: str, *, now: datet
     rows = await readers.open_rows(db, customer_code)
     deliveries = [{
         "entity_id": r.delivery_number, "label": f"{r.delivery_number} · {r.customer_name}" if r.customer_name else r.delivery_number,
-        "detail": f"{int(r.lines_picked or 0)} of {int(r.lines_expected or 0)} lines picked · leaves {r.departure_at.astimezone(tz).strftime('%H:%M') if r.departure_at else '–'}",
+        "detail": f"{registry.lines_words(int(r.lines_picked or 0), r.lines_expected, r.lines_confirmed, short=int(r.lines_short or 0))} · leaves {r.departure_at.astimezone(tz).strftime('%H:%M') if r.departure_at else '–'}",
         "route": r.route, "tier": r.tier, "site_id": r.warehouse, "departure_date": r.departure_date.isoformat() if r.departure_date else None,
     } for r in rows]
     routes = sorted({r.route for r in rows if r.route})
     aggregates = await readers.route_aggregates(db, customer_code, routes, now.astimezone(tz).date())
     route_rows = [{
         "entity_id": route, "label": f"Route {route}",
-        "detail": f"{a['open']} open · {a['lines_picked']} of {a['lines_expected']} lines picked",
+        "detail": f"{a['open']} open · {registry.lines_words(a['lines_picked'], a['lines_total'], None)}",
         "site_id": a["warehouses"][0] if len(a["warehouses"]) == 1 else None, "site_ids": a["warehouses"],
     } for route, a in ((r, aggregates[r]) for r in routes)]
     sites = await list_sites(db, customer_code)

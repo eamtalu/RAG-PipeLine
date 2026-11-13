@@ -59,8 +59,8 @@ async def route_aggregates(db: AsyncSession, customer_code: str, routes: Iterabl
     wanted = sorted({r for r in routes if r})
     if not wanted:
         return {}
-    out = {r: {"open": 0, "by_tier": {}, "lines_picked": 0, "lines_expected": 0, "next_departure": None,
-               "closed_today": 0, "late_today": 0, "warehouses": set()} for r in wanted}
+    out = {r: {"open": 0, "by_tier": {}, "lines_picked": 0, "lines_expected": 0, "lines_confirmed": 0, "lines_total": 0,
+               "lines_short": 0, "next_departure": None, "closed_today": 0, "late_today": 0, "warehouses": set()} for r in wanted}
     d = AnalyticsAtRiskDelivery
     open_rows_ = (await db.execute(select(d).where(
         d.customer_code == customer_code, d.status == "open", d.route.in_(wanted)).order_by(d.departure_at))).scalars()
@@ -70,6 +70,9 @@ async def route_aggregates(db: AsyncSession, customer_code: str, routes: Iterabl
         agg["by_tier"][row.tier or "none"] = agg["by_tier"].get(row.tier or "none", 0) + 1
         agg["lines_picked"] += int(row.lines_picked or 0)
         agg["lines_expected"] += int(row.lines_expected or 0)
+        agg["lines_confirmed"] += int(row.lines_confirmed or 0)
+        agg["lines_short"] += int(row.lines_short or 0)
+        agg["lines_total"] += int(row.lines_expected or row.lines_confirmed or 0)
         if agg["next_departure"] is None and row.departure_at is not None:
             agg["next_departure"] = row.departure_at.isoformat()
         if row.warehouse:

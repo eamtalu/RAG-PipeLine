@@ -75,7 +75,7 @@ async def resolve(db: AsyncSession, customer_code: str, record: AccessRecord, ki
         label = f"{row.delivery_number} · {row.customer_name}" if row.customer_name else row.delivery_number
         return Resolved("delivery", row.delivery_number, label, row.warehouse,
                         {"row_id": str(row.id), "route": row.route, "departure_date": row.departure_date.isoformat() if row.departure_date else None},
-                        detail=f"{int(row.lines_picked or 0)} of {int(row.lines_expected or 0)} lines picked · leaves {_hhmm(row.departure_at, tz)}")
+                        detail=f"{registry.lines_words(int(row.lines_picked or 0), row.lines_expected, row.lines_confirmed, short=int(row.lines_short or 0))} · leaves {_hhmm(row.departure_at, tz)}")
     if kind == "route":
         aggregates = await readers.route_aggregates(db, customer_code, [entity_id], datetime.now(tz).date())
         agg = aggregates.get(entity_id)
@@ -85,7 +85,7 @@ async def resolve(db: AsyncSession, customer_code: str, record: AccessRecord, ki
         for warehouse in agg["warehouses"]:
             _check_site(record, warehouse, f"route {entity_id}")
         return Resolved("route", entity_id, f"Route {entity_id}", site, {"warehouses": agg["warehouses"]},
-                        detail=f"{agg['open']} open · {agg['lines_picked']} of {agg['lines_expected']} lines picked")
+                        detail=f"{agg['open']} open · {registry.lines_words(agg['lines_picked'], agg['lines_total'], None)}")
     if kind == "measure":
         site_id = entity_id[len(MEASURE_PREFIX):] if entity_id.startswith(MEASURE_PREFIX) else entity_id
         sites = {s.site_id: s.name for s in await list_sites(db, customer_code)}
@@ -159,7 +159,7 @@ async def find(db: AsyncSession, customer_code: str, record: AccessRecord, text:
             if words in hay and record.may_see(row.warehouse):
                 label = f"{row.delivery_number} · {row.customer_name}" if row.customer_name else row.delivery_number
                 out.append(Candidate("delivery", row.delivery_number, label,
-                                     f"{int(row.lines_picked or 0)} of {int(row.lines_expected or 0)} lines picked · leaves {_hhmm(row.departure_at, tz)}",
+                                     f"{registry.lines_words(int(row.lines_picked or 0), row.lines_expected, row.lines_confirmed, short=int(row.lines_short or 0))} · leaves {_hhmm(row.departure_at, tz)}",
                                      row.warehouse))
     if "route" in kinds:
         code = _route_code(words)
@@ -169,7 +169,7 @@ async def find(db: AsyncSession, customer_code: str, record: AccessRecord, text:
         for route in routes:
             agg = aggregates[route]
             if all(record.may_see(w) for w in agg["warehouses"]):
-                out.append(Candidate("route", route, f"Route {route}", f"{agg['open']} open · {agg['lines_picked']} of {agg['lines_expected']} lines picked",
+                out.append(Candidate("route", route, f"Route {route}", f"{agg['open']} open · {registry.lines_words(agg['lines_picked'], agg['lines_total'], None)}",
                                      agg["warehouses"][0] if len(agg["warehouses"]) == 1 else None))
     if "measure" in kinds and ("fill" in words or "rate" in words):
         for site in await list_sites(db, customer_code):
