@@ -258,3 +258,4 @@ Expected: `a7c3e5f9b012`; the existing runs all `time`.
 
 Rollback: the previous checkout and a restart; `alembic downgrade f1b6c9d3e487` drops the four columns (by-hand runs and ticks keep their rows as plain runs).
 
+Deployed 13 November 2026 as `f8fb4cf` (PR #24); the edge image `87af592` followed.
