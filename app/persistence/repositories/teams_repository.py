@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.persistence.models.teams_binding import TeamsTenantBinding
+from app.persistence.models.teams_conversation import TeamsConversation
 from app.persistence.models.teams_conversation_turn import ROLE_ASSISTANT, ROLE_USER, TeamsConversationTurn
 
 
@@ -157,6 +158,48 @@ class TeamsConversationRepository:
                             TeamsConversationTurn.job_id.in_(job_ids)))
         by_job = {q.job_id: q for q in (await self.db.execute(questions)).scalars()}
         return [(by_job[a.job_id], a) for a in answer_rows if a.job_id in by_job]
+
+    async def touch_conversation(self, customer_code: str, conversation_id: str, *,
+                                 sender_object_id: str, title: str, site_id: str | None,
+                                 now: datetime) -> TeamsConversation:
+        """Create the conversation on its first turn, else bump its last turn and count.
+
+        (new id, "How many?") -> row titled "How many?", 1 turn ; (again) -> 2 turns, later last_turn_at
+        """
+        row = (await self.db.execute(
+            select(TeamsConversation).where(TeamsConversation.customer_code == customer_code,
+                                            TeamsConversation.conversation_id == conversation_id)
+        )).scalar_one_or_none()
+        if row is None:
+            row = TeamsConversation(customer_code=customer_code, conversation_id=conversation_id,
+                                    sender_object_id=sender_object_id, title=title[:200],
+                                    site_id=site_id, started_at=now, last_turn_at=now, turn_count=1)
+            self.db.add(row)
+        else:
+            row.last_turn_at = now
+            row.turn_count = (row.turn_count or 0) + 1
+        await self.db.commit()
+        return row
+
+    async def user_conversations(self, customer_code: str, sender_object_id: str, *, since: datetime,
+                                 limit: int) -> list[TeamsConversation]:
+        """One person's conversations with a turn since the moment, most recent first."""
+        if limit <= 0:
+            return []
+        stmt = (select(TeamsConversation)
+                .where(TeamsConversation.customer_code == customer_code,
+                       TeamsConversation.sender_object_id == sender_object_id,
+                       TeamsConversation.last_turn_at >= since)
+                .order_by(TeamsConversation.last_turn_at.desc())
+                .limit(limit))
+        return list((await self.db.execute(stmt)).scalars())
+
+    async def purge_conversations_before(self, cutoff: datetime) -> int:
+        """Delete the headers of conversations whose last turn is older than the cutoff."""
+        result = await self.db.execute(
+            delete(TeamsConversation).where(TeamsConversation.last_turn_at < cutoff))
+        await self.db.commit()
+        return result.rowcount or 0
 
     async def purge_older_than(self, cutoff: datetime, *, batch_size: int) -> int:
         """Delete turns created before the cutoff, at most one batch, and say how many went.

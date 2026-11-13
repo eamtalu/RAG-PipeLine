@@ -274,3 +274,53 @@ async def test_the_reporter_is_finished_even_when_the_run_fails():
 @pytest.mark.parametrize("site_id", ["BRI", None])
 def test_the_job_carries_the_site_the_page_looked_at(site_id):
     assert QuestionJob.model_validate_json(_job(site_id=site_id).model_dump_json()).site_id == site_id
+
+
+# ==================================================== 5. conversations (step 6b)
+
+
+async def test_conversations_are_headed_on_their_first_turn_and_listed_with_their_turns():
+    me = f"u-{uuid.uuid4()}"
+    conv_a, conv_b = f"tab:t:{me}:a", f"tab:t:{me}:b"
+    mirror = InMemoryMirrorWriter()
+    async with async_session() as db:
+        repo = TeamsConversationRepository(db)
+        for conv, question in ((conv_a, "How many short?"), (conv_a, "and yesterday?"), (conv_b, "Route 14?")):
+            now = datetime.now(timezone.utc)
+            await repo.append_exchange(conv, CC, question=question, answer="a", job_id=f"{conv}-{question[:3]}",
+                                       details=ExchangeDetails(me, "BRI", [], now, now, None, False))
+            header = await repo.touch_conversation(CC, conv, sender_object_id=me, title=question,
+                                                   site_id="BRI", now=now)
+            await asyncio.sleep(0.01)
+        assert (header.title, header.turn_count) == ("Route 14?", 1)
+        rows = await repo.user_conversations(CC, me, since=NOW - timedelta(days=30), limit=10)
+        assert [(r.title, r.turn_count) for r in rows] == [("Route 14?", 1), ("How many short?", 2)]
+        n = await history.mirror_user_history(db, mirror, CC, me, now=datetime.now(timezone.utc),
+                                              retention_days=30, limit=100)
+        assert n == 3
+        # the headers go with their turns in the purge
+        future = datetime.now(timezone.utc) + timedelta(days=31)
+        while await history.purge_once(db, now=future, retention_days=30, batch_size=50):
+            pass
+        assert await repo.user_conversations(CC, me, since=NOW - timedelta(days=400), limit=10) == []
+    body = json.loads(mirror.items[("EYE#acme", f"USER#{me}#HISTORY")].payload_json)
+    conversations = body["conversations"]
+    assert [c["title"] for c in conversations] == ["Route 14?", "How many short?"]
+    assert [t["question"] for t in conversations[1]["turns"]] == ["How many short?", "and yesterday?"]
+    assert conversations[1]["turn_count"] == 2 and conversations[1]["site_id"] == "BRI"
+    assert [e["question"] for e in body["entries"]][0] == "Route 14?"  # the flat list stays
+
+
+async def test_a_turn_without_a_header_still_shows_as_its_own_thread():
+    me = f"u-{uuid.uuid4()}"
+    conv = f"tab:t:{me}"
+    mirror = InMemoryMirrorWriter()
+    async with async_session() as db:
+        repo = TeamsConversationRepository(db)
+        await repo.append_exchange(conv, CC, question="old style", answer="a", job_id=f"{conv}-1",
+                                   details=ExchangeDetails(me, None, [], NOW, NOW, None, False))
+        await history.mirror_user_history(db, mirror, CC, me, now=datetime.now(timezone.utc),
+                                          retention_days=30, limit=100)
+        await repo.purge_customer(CC)
+    body = json.loads(mirror.items[("EYE#acme", f"USER#{me}#HISTORY")].payload_json)
+    assert [(c["title"], c["turn_count"]) for c in body["conversations"]] == [("old style", 1)]
