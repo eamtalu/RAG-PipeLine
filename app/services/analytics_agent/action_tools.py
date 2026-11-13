@@ -1,5 +1,5 @@
-"""The action tools (stage D, step 8): how the model proposes an action for the person to confirm.
-Today one action: creating a user. The model never creates anything; it calls
+"""The action tools (stage D, step 8): how the model proposes an action for the person to confirm
+(creating a user, a reminder, a schedule), and since step 14c acts on the watchlist (watch_tools.py). The model never creates anything; it calls
 `propose_create_user` with what the person said, the runner reads the actor's own record (may
 they manage users, and does the matrix want an approval), the customer's sites and the roles, and
 answers with the form block, pre-filled, that the page shows for confirmation. The confirmed form
@@ -19,10 +19,12 @@ from app.services.access import records
 from app.services.teams.contracts import FormBlock, FormField
 from app.services.teams.sites import list_sites
 
+from app.services.analytics_agent.watch_tools import WATCH_TOOL_NAMES, WATCH_TOOLS, run_watch_tool
+
 PROPOSE_CREATE_USER = "propose_create_user"
 PROPOSE_REMINDER = "propose_reminder"
 PROPOSE_SCHEDULE = "propose_schedule"
-ACTION_TOOL_NAMES = frozenset({PROPOSE_CREATE_USER, PROPOSE_REMINDER, PROPOSE_SCHEDULE})
+ACTION_TOOL_NAMES = frozenset({PROPOSE_CREATE_USER, PROPOSE_REMINDER, PROPOSE_SCHEDULE}) | WATCH_TOOL_NAMES
 
 SHIFTS = ["Night · 22:00 – 06:00", "Day · 06:00 – 14:00", "Late · 14:00 – 22:00"]
 
@@ -108,6 +110,7 @@ ACTION_TOOLS: list[dict[str, Any]] = [
         },
         "side_effects": False,
     },
+    *WATCH_TOOLS,
 ]
 
 
@@ -189,12 +192,14 @@ def _role_note(role: str) -> str:
 
 
 async def run_action_tool(db: AsyncSession, customer_code: str, actor_object_id: str, actor_site_id: str | None,
-                          name: str, args: Mapping[str, Any]) -> str:
+                          name: str, args: Mapping[str, Any], *, actor_name: str | None = None) -> str:
     """Run one action tool: the form block as JSON under "block", or the problems the model can fix.
 
     ("propose_create_user", {"display_name": "Dan"}) -> '{"shown": "form", "block": {...}}' ;
     (a picker asking) -> '{"problems": ["you cannot create users: …"]}'
     """
+    if name in WATCH_TOOL_NAMES:
+        return await run_watch_tool(db, customer_code, actor_object_id, actor_site_id, name, args, actor_name=actor_name)
     if name in (PROPOSE_REMINDER, PROPOSE_SCHEDULE):
         return await _propose_task(db, customer_code, actor_object_id, actor_site_id, name, args)
     if name != PROPOSE_CREATE_USER:

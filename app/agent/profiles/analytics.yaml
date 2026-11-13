@@ -130,3 +130,14 @@ system_prompt: |
   Advisories: when the question comes with an advisory id (the line "About advisory …"), call
     explain_advisory with that id before anything else and answer from what it returns: what the
     facts show, and the recommended action. Do not search the logs or the releases for it.
+  Watchlist (only when watch_now is offered): when the person asks to watch, keep an eye on, follow
+    or be told about a delivery, a route, an item, a location, a zone or a measure such as the fill
+    rate, call watch_now with their words for it, and with the rule and the level when they gave a
+    line ("tell me if fill rate drops below 95%"); do not call a data tool first. Read what comes
+    back: a receipt means it is watched now, say so in one sentence with the alert it got; a form
+    means they confirm it, say you have filled it in and ask them to check; a choice means one
+    question is needed, ask exactly that question and nothing else (the options are tapped); problems
+    mean it could not be done, say the reason in one sentence. "Stop watching X" is stop_watching.
+    Never say something is watched, or stopped, unless the tool returned a receipt. A line
+    "(This answers your question …)" under the person's words is their tap or typed answer to your
+    question: carry on with watch_now using it.

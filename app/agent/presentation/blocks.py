@@ -12,6 +12,7 @@ import json
 import logging
 import re
 
+from app.agent.presentation.entities import entities_from_trace
 from app.services.analytics_agent.action_tools import ACTION_TOOL_NAMES
 from app.services.analytics_agent.presentation_tools import PRESENTATION_TOOL_NAMES, block_from_call
 
@@ -20,7 +21,7 @@ DRAWING_TOOL_NAMES = PRESENTATION_TOOL_NAMES | ACTION_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
 
-MAX_BLOCKS = 4
+MAX_BLOCKS = 6
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 
@@ -48,7 +49,8 @@ def _refused(call: dict) -> bool:
 
 def blocks_from_trace(trace: list[dict]) -> list[dict]:
     """The blocks the presentation calls describe, in order, at most MAX_BLOCKS, one per kind
-    (the last chart wins, the last table wins, the last follow-ups win).
+    (the last chart wins, the last table wins, the last follow-ups win), plus the entities the
+    data calls named (step 14c).
 
     >>> blocks_from_trace([{"tool": "suggest_followups", "input": {"items": ["Why?"]}, "result": "{}"}])
     [{'type': 'followups', 'items': ['Why?']}]
@@ -71,7 +73,11 @@ def blocks_from_trace(trace: list[dict]) -> list[dict]:
             logger.warning("agent.block_dropped tool=%s reason=%s", call["tool"], str(exc)[:160])
             continue
         by_type[block["type"]] = block
-    ordered = [by_type[k] for k in ("table", "chart", "form", "followups") if k in by_type]
+    # the watchable things the data calls named (step 14c), read from the results, never the text
+    entities = entities_from_trace(trace)
+    if entities is not None and "entities" not in by_type:
+        by_type["entities"] = entities
+    ordered = [by_type[k] for k in ("entities", "table", "chart", "form", "receipt", "choice", "followups") if k in by_type]
     return ordered[:MAX_BLOCKS]
 
 

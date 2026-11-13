@@ -115,9 +115,11 @@ async def test_a_scripted_run_draws_a_chart_from_the_fetched_numbers():
     )
     result = await ask(analytics_runtime(CC, model=model), "which products were short, as a chart?")
     assert result["retries"] == 0
-    assert [b["type"] for b in result["blocks"]] == ["chart", "followups"]
-    assert result["blocks"][0]["labels"] == ["100230", "104568"]
-    assert result["blocks"][0]["series"][0]["values"] == [10.0, 1.0]
+    # the entities the data call named lead (step 14c), then the chart and the follow-ups
+    assert [b["type"] for b in result["blocks"]] == ["entities", "chart", "followups"]
+    assert [i["id"] for i in result["blocks"][0]["items"]] == ["100230", "104568"]
+    assert result["blocks"][1]["labels"] == ["100230", "104568"]
+    assert result["blocks"][1]["series"][0]["values"] == [10.0, 1.0]
     assert [t["tool"] for t in result["tool_calls"]] == ["aggregate_releases", "show_chart", "suggest_followups"]
 
 
@@ -134,5 +136,5 @@ async def test_a_chart_with_a_number_no_tool_returned_is_withheld():
         AIMessage(content="Two items were short: 100230 and 104568."),
     )
     result = await ask(analytics_runtime(CC, model=model), "which products were short, as a chart?")
-    assert result["retries"] == 1 and result["blocks"] == []
+    assert result["retries"] == 1 and [b["type"] for b in result["blocks"]] == ["entities"], "the chart is withheld"
     assert result["answer"].startswith("Two items were short: 100230")
