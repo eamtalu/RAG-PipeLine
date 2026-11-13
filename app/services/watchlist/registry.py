@@ -337,6 +337,31 @@ def lines_words(picked: int, expected: int | None, confirmed: int | None, *, sho
     return f"{words} · {short} short" if short else words
 
 
+def when_words(moment, now: datetime, tz: ZoneInfo) -> str:
+    """A departure in the card's words: the clock alone today, "tomorrow HH:MM", else the day too.
+
+    >>> from datetime import timezone
+    >>> now = datetime(2026, 11, 13, 15, 10, tzinfo=timezone.utc); tz = ZoneInfo("Europe/London")
+    >>> when_words("2026-11-13T18:10:00+00:00", now, tz), when_words("2026-11-14T11:30:00+00:00", now, tz)
+    ('18:10', 'tomorrow 11:30')
+    >>> when_words("2026-11-16T11:30:00+00:00", now, tz), when_words(None, now, tz)
+    ('Mon 16 Nov 11:30', '–')
+    """
+    if not moment:
+        return "–"
+    at = datetime.fromisoformat(moment) if isinstance(moment, str) else moment
+    local, today = at.astimezone(tz), now.astimezone(tz).date()
+    clock = local.strftime("%H:%M")
+    days = (local.date() - today).days
+    if days == 0:
+        return clock
+    if days == 1:
+        return f"tomorrow {clock}"
+    if days == -1:
+        return f"yesterday {clock}"
+    return f"{local.strftime('%a')} {local.day} {local.strftime('%b')} {clock}"
+
+
 def pct(value: float | None) -> str:
     """A fraction as the card writes it.
 

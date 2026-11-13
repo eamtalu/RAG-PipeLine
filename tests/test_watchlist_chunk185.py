@@ -70,10 +70,12 @@ async def _customer():
 
 
 def _at_risk(delivery: str, tier: str = "none", *, route="R14", customer="Hove Deli", warehouse="BRI",
-             lines_expected=36, lines_picked=31, lines_confirmed=None, lines_short=0, status="open", outcome=None) -> AnalyticsAtRiskDelivery:
+             lines_expected=36, lines_picked=31, lines_confirmed=None, lines_short=0, status="open", outcome=None,
+             days_ahead=0) -> AnalyticsAtRiskDelivery:
+    departure = NOW + timedelta(hours=3, days=days_ahead)
     return AnalyticsAtRiskDelivery(
-        customer_code=CC, delivery_number=delivery, departure_date=NOW.astimezone(TZ).date(),
-        departure_at=NOW + timedelta(hours=3), route=route, customer_name=customer, warehouse=warehouse,
+        customer_code=CC, delivery_number=delivery, departure_date=departure.astimezone(TZ).date(),
+        departure_at=departure, route=route, customer_name=customer, warehouse=warehouse,
         tier=tier, max_tier=tier, first_flagged_at=NOW - timedelta(minutes=5), first_flagged_tier=tier,
         lines_expected=lines_expected, lines_confirmed=lines_picked if lines_confirmed is None else lines_confirmed,
         lines_picked=lines_picked, lines_short=lines_short, packages_created=3,
@@ -378,7 +380,8 @@ async def test_a_delivery_without_an_expected_count_is_worded_from_its_confirmed
     mirror_ = InMemoryMirrorWriter()
     async with async_session() as db:
         db.add_all([_at_risk("D-1", lines_expected=None, lines_confirmed=8, lines_picked=7, lines_short=1),
-                    _at_risk("D-2", route="R14", lines_expected=None, lines_confirmed=1, lines_picked=1)])
+                    _at_risk("D-2", route="R14", lines_expected=None, lines_confirmed=1, lines_picked=1),
+                    _at_risk("D-3", route="R21", customer="Lewes Grocer", lines_expected=None, lines_confirmed=5, lines_picked=0, days_ahead=1)])
         await db.commit()
         added = await commands.run(_command("u-sup", "watch_add", {"kind": "delivery", "entity_id": "D-1"}, "Sam"), mirror=mirror_, now=NOW)
         assert "Watching · D-1 · Hove Deli" in added.text
@@ -386,15 +389,19 @@ async def test_a_delivery_without_an_expected_count_is_worded_from_its_confirmed
     assert await _tick(NOW + timedelta(seconds=5), mirror_) == {CC: 0}
     row_payload = json.loads(mirror_.items[(f"EYE#{CC}", "USER#u-sup#WATCHES")].payload_json)
     by_kind = {w["kind"]: w for w in row_payload["watches"]}
-    assert by_kind["delivery"]["summary"].startswith("7 of 8 lines picked · 1 short · leaves ")
+    assert by_kind["delivery"]["summary"] == "7 of 8 lines picked · 1 short · leaves 18:10 on Route R14"
     assert by_kind["delivery"]["value"]["lines_expected"] is None and by_kind["delivery"]["value"]["lines_total"] == 8
-    assert by_kind["route"]["summary"].startswith("2 open · 8 of 9 lines picked · next leaves ")
+    # the route shows its short lines and says which day the next van leaves
+    assert by_kind["route"]["summary"] == "2 open · 8 of 9 lines picked · 1 short · next leaves 18:10"
     assert by_kind["route"]["value"]["lines_total"] == 9
     async with async_session() as db:
         watchables = await watch_mirror.watchables_payload(db, CC, now=NOW)
         details = {d["entity_id"]: d["detail"] for d in watchables["deliveries"]}
-        assert details["D-1"].startswith("7 of 8 lines picked · 1 short · leaves ") and details["D-2"].startswith("1 of 1 lines picked · leaves ")
-        assert watchables["routes"][0]["detail"] == "2 open · 8 of 9 lines picked"
+        assert details["D-1"] == "7 of 8 lines picked · 1 short · leaves 18:10"
+        assert details["D-3"] == "0 of 5 lines picked · leaves tomorrow 18:10"
+        routes = {r["entity_id"]: r["detail"] for r in watchables["routes"]}
+        assert routes["R14"] == "2 open · 8 of 9 lines picked · 1 short" and routes["R21"] == "1 open · 0 of 5 lines picked"
+    assert registry.when_words("2026-11-16T11:30:00+00:00", NOW, TZ) == "Mon 16 Nov 11:30"
     assert registry.lines_words(1, None, 0) == "1 line picked" and registry.lines_words(3, None, None, short=2) == "3 lines picked · 2 short"
 
 

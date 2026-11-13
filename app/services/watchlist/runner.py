@@ -26,12 +26,6 @@ from app.settings import settings
 logger = logging.getLogger(__name__)
 
 
-def _hhmm(iso: str | None, tz: ZoneInfo) -> str:
-    if not iso:
-        return "–"
-    return datetime.fromisoformat(iso).astimezone(tz).strftime("%H:%M")
-
-
 class Assessment:
     """What one check found: the status, the live value, the words, and whether the thing is over."""
 
@@ -43,7 +37,7 @@ class Assessment:
 
 # ============================================================== one kind at a time
 
-async def assess_deliveries(db: AsyncSession, customer_code: str, watches: list[Watch], *, tz: ZoneInfo) -> dict[uuid.UUID, Assessment]:
+async def assess_deliveries(db: AsyncSession, customer_code: str, watches: list[Watch], *, now: datetime, tz: ZoneInfo) -> dict[uuid.UUID, Assessment]:
     rows = await readers.delivery_rows(db, customer_code, [uuid.UUID(str(w.entity_ref.get("row_id"))) for w in watches if w.entity_ref.get("row_id")])
     out: dict[uuid.UUID, Assessment] = {}
     for w in watches:
@@ -59,7 +53,7 @@ async def assess_deliveries(db: AsyncSession, customer_code: str, watches: list[
                  "departure_at": row.departure_at.isoformat() if row.departure_at else None, "tier": row.tier,
                  "outcome": row.outcome, "warehouse": row.warehouse}
         lines = registry.lines_words(value["lines_picked"], row.lines_expected, row.lines_confirmed, short=value["lines_short"])
-        leaves = f"leaves {_hhmm(value['departure_at'], tz)}" + (f" on Route {row.route}" if row.route else "")
+        leaves = f"leaves {registry.when_words(value['departure_at'], now, tz)}" + (f" on Route {row.route}" if row.route else "")
         summary = f"{lines} · {leaves}" if row.status == "open" else f"{registry.status_text(status)} · {lines}"
         out[w.id] = Assessment(status, value, summary, "delivered" if row.status == "closed" else None)
     return out
@@ -80,8 +74,8 @@ async def assess_routes(db: AsyncSession, customer_code: str, watches: list[Watc
         elif status == "done":
             summary = f"{agg['closed_today']} gone today" + (f" · {agg['late_today']} late" if agg["late_today"] else " · all in time")
         else:
-            summary = (f"{agg['open']} open · {registry.lines_words(agg['lines_picked'], agg['lines_total'], None)}"
-                       + (f" · {behind} behind" if behind else "") + f" · next leaves {_hhmm(agg['next_departure'], tz)}")
+            summary = (f"{agg['open']} open · {registry.lines_words(agg['lines_picked'], agg['lines_total'], None, short=agg['lines_short'])}"
+                       + (f" · {behind} behind" if behind else "") + f" · next leaves {registry.when_words(agg['next_departure'], now, tz)}")
         out[w.id] = Assessment(status, value, summary)
     return out
 
@@ -228,7 +222,7 @@ async def evaluate_customer(db: AsyncSession, customer_code: str, watches: list[
         by_kind.setdefault(w.kind, []).append(w)
     found: dict[uuid.UUID, Assessment] = {}
     if by_kind.get("delivery"):
-        found.update(await assess_deliveries(db, customer_code, by_kind["delivery"], tz=tz))
+        found.update(await assess_deliveries(db, customer_code, by_kind["delivery"], now=now, tz=tz))
     if by_kind.get("route"):
         found.update(await assess_routes(db, customer_code, by_kind["route"], now=now, tz=tz))
     if by_kind.get("measure"):
