@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.10"
+CONTRACT_REVISION = "3.11"
 
 
 def _now() -> datetime:
@@ -116,6 +116,9 @@ class QuestionJob(BaseModel):
         "absent from the bot and from older pages. Shown on the history, never a filter.",
     )
     question: str = Field(..., min_length=1)
+    #: What the question is about, when the page knows (3.11): {"advisory_id": ...} from "Ask why";
+    #: the backend frames the question with it so the agent reads the advisory first.
+    context: dict[str, Any] | None = Field(default=None)
     enqueued_at: datetime = Field(default_factory=_now)
     source: Literal["bot", "tab"] = Field(
         default="bot",

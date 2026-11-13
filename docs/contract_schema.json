@@ -887,6 +887,19 @@
           "default": null,
           "description": "Set when the job is an action, not a question; absent for a question."
         },
+        "context": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context"
+        },
         "conversation_id": {
           "description": "Teams conversation id; the reply goes here and conversation memory is keyed by it.",
           "title": "Conversation Id",
@@ -977,5 +990,5 @@
       "type": "object"
     }
   },
-  "revision": "3.10"
+  "revision": "3.11"
 }
