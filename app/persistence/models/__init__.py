@@ -56,6 +56,16 @@ from app.persistence.models.teams_binding import TeamsTenantBinding
 from app.persistence.models.tenant_site import TenantSite  # noqa: F401
 from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
 from app.persistence.models.teams_conversation import TeamsConversation
+from app.persistence.models.access import (  # noqa: F401
+    AccessApproval,
+    AccessCapability,
+    AccessRole,
+    AccessRoleCapability,
+    AuditEvent,
+    TeamsUser,
+    TeamsUserCapability,
+    TeamsUserSite,
+)
 from app.persistence.models.agent_run import AgentRun
 from app.persistence.models.agent_trace import AgentTrace
 from app.persistence.models.agent_in_flight import AgentInFlight
@@ -125,6 +135,15 @@ __all__ = [
     "TeamsTenantBinding",
     "TeamsConversationTurn",
     "TeamsConversation",
+    # --- access control (stage D, step 7) ---
+    "AccessRole",
+    "AccessCapability",
+    "AccessRoleCapability",
+    "TeamsUser",
+    "TeamsUserSite",
+    "TeamsUserCapability",
+    "AccessApproval",
+    "AuditEvent",
     "AgentRun",
     "AgentTrace",
     "AgentInFlight",

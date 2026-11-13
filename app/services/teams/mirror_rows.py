@@ -17,6 +17,13 @@ Row types so far:
   history can reopen it without a backend call; expires with the retention.
 - job_progress (step 6): the steps of a run in progress, rewritten as the agent works; read by
   the poll while the job is pending, expires within the hour.
+- user_access (step 7): one person's access record (role, sites, each capability's effective
+  state, status); every /api/v2 route checks it. Removed when the person is deactivated.
+- roles (step 7): the customer's role matrix and the role and capability names, for the Admin
+  tab and the role chip.
+- users (step 7): the customer's users as the Admin tab lists them (no secrets).
+- approvals (step 7): the pending and recent approvals, for the queue and the badge.
+- audit (step 7): the latest audit events, for the Admin tab's list.
 Later steps add their rows here, and the edge's `KEY_LAYOUT` test keeps the Terraform prefix list
 in step with this table.
 """
@@ -76,6 +83,13 @@ KEY_LAYOUT: dict[str, KeySpec] = {
     "job_progress": KeySpec(
         pk=f"{KEY_PREFIX}#{{customer_code}}", sk="JOB#{job_id}#PROGRESS", ttl_seconds=3600
     ),
+    "user_access": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USER#{user_id}#ACCESS", ttl_seconds=None
+    ),
+    "roles": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="ROLES", ttl_seconds=None),
+    "users": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USERS", ttl_seconds=None),
+    "approvals": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="APPROVALS", ttl_seconds=None),
+    "audit": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="AUDIT", ttl_seconds=None),
 }
 
 

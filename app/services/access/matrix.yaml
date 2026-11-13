@@ -1,0 +1,48 @@
+# The roles, the capabilities and the default matrix of the eSmart Eye Teams app (screen 07).
+# Seeded into access_roles and access_capabilities by the migration, and into
+# access_role_capabilities per customer on first use; an Admin may then change a customer's cells
+# in the app. Codes are stable once shipped; names are what the Admin tab shows.
+
+roles:
+  - code: picker
+    name: Picker
+  - code: shift_lead
+    name: Shift lead
+  - code: supervisor
+    name: Supervisor
+  - code: ops_manager
+    name: Ops manager
+  - code: executive
+    name: Executive
+  - code: admin
+    name: Admin
+
+capabilities:
+  - code: view_own_site
+    name: View own site dashboard
+  - code: view_all_sites
+    name: View all sites
+  - code: ask
+    name: Ask the assistant
+  - code: run_actions
+    name: Run actions (reassign, substitute)
+  - code: manage_users
+    name: Create & edit users
+  - code: approve
+    name: Approve requests
+  - code: configure_agents
+    name: Configure agents & routing
+  - code: export
+    name: Export data & board packs
+
+# allowed | with_approval | no, one row per capability in the order above, one column per role
+# in the order above.
+matrix:
+  view_own_site:    [allowed, allowed, allowed, allowed, allowed, allowed]
+  view_all_sites:   ["no", "no", with_approval, allowed, allowed, allowed]
+  ask:              [with_approval, allowed, allowed, allowed, allowed, allowed]
+  run_actions:      ["no", with_approval, allowed, allowed, "no", allowed]
+  manage_users:     ["no", "no", with_approval, allowed, "no", allowed]
+  approve:          ["no", "no", "no", allowed, allowed, allowed]
+  configure_agents: ["no", "no", "no", allowed, "no", allowed]
+  export:           ["no", "no", with_approval, allowed, allowed, allowed]

@@ -11,6 +11,7 @@ from app.api.v1.customers import router as customers_router
 from app.api.v1.notifications import router as notifications_router
 from app.api.v1.analytics import router as analytics_router
 from app.api.v1.teams import router as teams_router
+from app.api.v1.teams_access import router as teams_access_router
 from app.api.v1.analytics_agent import router as analytics_agent_router
 from app.api.v1.analytics_forecast import router as analytics_forecast_router
 from app.api.v1.analytics_at_risk import router as analytics_at_risk_router
@@ -29,3 +30,4 @@ api_router.include_router(analytics_agent_router)
 api_router.include_router(analytics_forecast_router)
 api_router.include_router(analytics_at_risk_router)
 api_router.include_router(teams_router)
+api_router.include_router(teams_access_router)

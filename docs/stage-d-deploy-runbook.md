@@ -81,3 +81,24 @@ Deploy:
 3. Press "New conversation" on the page and ask again: a second conversation appears, and the agent's answer carries no memory of the first.
 
 Rollback: `git checkout deployed-backend-<previous>` and restart the three units; the table can stay.
+
+## D7a: access control (the record, the matrix, users, approvals, audit)
+
+What it adds: migration `a6e1c4d9f832` (eight tables: roles and capabilities seeded from `app/services/access/matrix.yaml`, the matrix per customer, `teams_users`, their sites and overrides, `access_approvals`, `audit_events`); the consumer refuses a question before any model runs when the person has no user row, is deactivated, or asks about a site outside their scope (audited as `ask.refused`); an hourly-ish sweep (every `TEAMS_ACCESS_SWEEP_SECONDS`, 60) rewrites the access rows for the edge (`USER#<id>#ACCESS`, `ROLES`, `USERS`, `APPROVALS`, `AUDIT`), expires approvals older than 24 h and purges audit older than `TEAMS_AUDIT_RETENTION_DAYS` (90); the superadmin's API under `/api/v1/teams/access/<customer>/...` and `scripts/teams_users.py`.
+
+**The owner's decision 9 flips here: a person with no user row cannot ask any more.** So the first Admin must be created right after the deploy, before anyone asks.
+
+Deploy:
+
+1. `./deploy.sh` (pulls, migrates, restarts the three units).
+2. Make the first Admin at once, with the owner's Entra object id (the edge logs it as `sender=` on `tab.intake`; the bot's as the sender's `aadObjectId`):
+   ```
+   PYTHONPATH=. venv/bin/python scripts/teams_users.py set tmp-live <object id> "Amin Talukder" --role admin --all-sites --email amin.talukder@becsi.co.uk
+   PYTHONPATH=. venv/bin/python scripts/teams_users.py list tmp-live
+   PYTHONPATH=. venv/bin/python scripts/teams_users.py matrix tmp-live
+   ```
+   The `set` prints `mirrored 5 access row(s) to the edge`; `EYE#tmp-live` / `USER#<object id>#ACCESS` exists in the edge's table.
+3. Ask a question in Teams: it answers as before, and `teams_users.last_active_at` is stamped. Ask from a second account that has no user row: the answer is "You have no access to eSmart Eye yet…" and the journal shows `audit ask.refused`.
+4. Add the other people with `teams_users.py set … --role supervisor --sites BRI` (or through the Admin tab once the edge step 7b/7c is live).
+
+Rollback: `git checkout deployed-backend-<previous>` and restart the three units; the tables can stay. The refusal stops with the old consumer.
