@@ -1361,6 +1361,8 @@ The binding's `customer_code` is an enforced foreign key: a binding to a missing
 The consumer computes the Home snapshot once for the whole customer and once per active site and mirrors them to the edge under one key prefix, `EYE#<customer_code>`; a site of a missing log space must fail at write time, so the key is an enforced foreign key too.
 The turns carry the soft tenant key like the log tables, so a tenant purge can remove them and a turn can never be replayed into another tenant's question.
 Since stage D step 6 the answer row also carries who asked, the site, the typed blocks and the times, so the same table is the Ask history of the Teams app: the consumer mirrors one person's last 30 days to the edge (`EYE#<customer>` / `USER#<object id>#HISTORY` and one `TURN` row per answer) and purges older turns every hour (`teams_history_retention_days`).
+Access control (stage D, step 7) is the matrix of screen 07 as data: `access_roles` and `access_capabilities` are seeded from `app/services/access/matrix.yaml`, `access_role_capabilities` holds one state per cell per customer (seeded from the file on first use, changed by an Admin in the app), `teams_users` is a person (Entra object id) within a customer with a role, `teams_user_sites` the sites they may see (none when `all_sites`), `teams_user_capabilities` a per-person override of a cell set by an Admin or granted for good by an approval, `access_approvals` the queue of "with approval" requests (24 h expiry), and `audit_events` every permission decision that changed data, append-only, purged after 90 days.
+Every one of them is a real foreign key to the customer; the effective record a person gets is computed in `app/services/access/records.py` and mirrored to the edge.
 `teams_conversations` (step 6b) is the header of each thread: the page starts a new conversation id whenever the person asks for one, the agent replays only that thread's turns, and the rail lists threads by title with their turns inside; the header is a soft reference to its turns by `conversation_id` and goes with them in the purge.
 `agent_runs` is the run ledger: the consumer inserts one row per edge job id before it runs the model, and the unique `request_id` decides who wins a redelivery.
 A row still `running` means another consumer has the question (unless `claimed_at` is older than the queue's visibility window, when the claim is taken over); a row that is `done` carries the posted answer in `result`, replayed as it is.
@@ -1397,6 +1399,100 @@ erDiagram
         bool active "false hides the site from the switcher"
         datetime created_at
         datetime updated_at
+    }
+
+    access_roles {
+        string code PK "picker | shift_lead | supervisor | ops_manager | executive | admin"
+        string name
+        int sort_order
+    }
+
+    access_capabilities {
+        string code PK "view_own_site, view_all_sites, ask, run_actions, manage_users, approve, configure_agents, export"
+        string name
+        int sort_order
+    }
+
+    access_role_capabilities {
+        string customer_code PK,FK "customers; seeded per customer from matrix.yaml"
+        string role_code PK,FK "access_roles"
+        string capability_code PK,FK "access_capabilities"
+        string state "allowed | with_approval | no"
+        datetime updated_at
+        string updated_by
+    }
+
+    teams_users {
+        uuid id PK
+        string customer_code FK "customers; unique with object_id"
+        string object_id "Entra object id"
+        string display_name
+        string email
+        string role_code FK "access_roles"
+        bool all_sites
+        string status "active | pending | dormant | deactivated"
+        date starts_on
+        string note
+        string created_by
+        datetime created_at
+        datetime updated_at
+        datetime last_active_at "the last question answered"
+        datetime deactivated_at
+    }
+
+    teams_user_sites {
+        uuid user_id PK,FK "teams_users, cascade"
+        string customer_code FK "tenant_sites, with site_id"
+        string site_id PK
+    }
+
+    teams_user_capabilities {
+        uuid user_id PK,FK "teams_users, cascade"
+        string capability_code PK,FK "access_capabilities"
+        string state "overrides the matrix cell for this person"
+        string granted_by
+        datetime granted_at
+        uuid approval_id "the approval that granted it, if any"
+    }
+
+    access_approvals {
+        uuid id PK
+        string customer_code FK "customers"
+        string reference "USR-2041, ACC-311, ACT-17; unique per customer"
+        string kind "create_user | change_role | grant_capability | add_sites | run_action | export"
+        string requested_by "object id"
+        string requested_by_name
+        string requested_via "ask | admin | advisory"
+        string site_id
+        string title
+        string detail
+        jsonb payload
+        string status "pending | approved | declined | expired"
+        string decided_by
+        datetime decided_at
+        jsonb changes "what the approver altered"
+        string note
+        datetime expires_at "24 h after the request"
+        datetime created_at
+    }
+
+    audit_events {
+        uuid id PK
+        string customer_code FK "customers; indexed with at"
+        datetime at
+        string actor_object_id
+        string actor_name
+        string actor_kind "user | agent | system"
+        string action "area.action"
+        string capability_code
+        string decision "allowed | needs_approval | refused | approved | declined | expired"
+        string subject_kind
+        string subject_id
+        string site_id
+        string request_id
+        string trace_id
+        text text "the sentence the audit list shows"
+        jsonb detail
     }
 
     teams_conversations {
@@ -1502,6 +1598,17 @@ erDiagram
     customers ||--o{ tenant_sites : "runs the sites"
     customers ||..o{ teams_conversation_turns : "tenant of"
     customers ||..o{ teams_conversations : "tenant of"
+    customers ||--o{ access_role_capabilities : "matrix of"
+    customers ||--o{ teams_users : "people of"
+    customers ||--o{ access_approvals : "queue of"
+    customers ||--o{ audit_events : "trail of"
+    access_roles ||--o{ access_role_capabilities : "row of"
+    access_capabilities ||--o{ access_role_capabilities : "column of"
+    access_roles ||--o{ teams_users : "role of"
+    teams_users ||--o{ teams_user_sites : "may see"
+    tenant_sites ||--o{ teams_user_sites : "seen by"
+    teams_users ||--o{ teams_user_capabilities : "overrides for"
+    access_capabilities ||--o{ teams_user_capabilities : "overridden"
     teams_conversations ||..o{ teams_conversation_turns : "thread of (by conversation_id)"
     customers ||..o{ agent_runs : "tenant of"
     customers ||..o{ agent_traces : "tenant of"

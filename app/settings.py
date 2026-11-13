@@ -507,6 +507,11 @@ class Settings(BaseSettings):
     teams_history_retention_days: int = 30
     teams_history_entries: int = 100              # exchanges listed per person on the mirror row
     teams_history_purge_seconds: float = 3600.0
+    # Access control (step 7): the audit log's retention, how often the consumer rewrites the
+    # access rows for the edge, and how long a "with approval" request waits.
+    teams_audit_retention_days: int = 90
+    teams_access_sweep_seconds: float = 60.0
+    teams_approval_hours: int = 24
 
     # --- HTTP API callers (app/api/service_auth.py). Every route under /api/v1 needs a bearer token
     # from this list, `name=token,name=token`; the name says which system is calling. Names listed

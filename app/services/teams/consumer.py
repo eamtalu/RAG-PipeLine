@@ -102,6 +102,10 @@ ExchangeRecorder = Callable[[QuestionJob, AnswerPayload], Awaitable[None]]
 #: Builds the progress reporter for one job, or None when progress goes nowhere (no mirror).
 ProgressFactory = Callable[[QuestionJob], "ProgressReporter | None"]
 
+#: Whether the person may ask this, at the site in view (step 7): None to run the agent, else the
+#: sentence to answer with instead. The job's own claims are never trusted for this.
+AccessCheck = Callable[[QuestionJob], Awaitable[str | None]]
+
 #: The customer a Teams tenant id is bound to in Postgres, or None when the tenant is unbound,
 #: the binding is disabled or the customer is inactive. The job's own customer_code is not trusted.
 CustomerResolver = Callable[[str], Awaitable[str | None]]
@@ -176,9 +180,11 @@ class TeamsQuestionConsumer:
                  clock: Callable[[], float] = time.monotonic, run_command: CommandRunner | None = None,
                  run_timeout_seconds: float | None = None, claim_run: RunClaimer | None = None,
                  finish_run: RunFinisher | None = None, read_freshness: FreshnessReader | None = None,
-                 progress_factory: ProgressFactory | None = None):
+                 progress_factory: ProgressFactory | None = None,
+                 check_access: AccessCheck | None = None):
         self._read_freshness = read_freshness
         self._progress_factory = progress_factory
+        self._check_access = check_access
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
         if visibility_seconds < 30:
@@ -321,8 +327,16 @@ class TeamsQuestionConsumer:
                 except Exception as exc:  # noqa: BLE001 - a refused command is a sentence, never a crash
                     logger.warning("Teams job %s: command %s refused: %s", job.job_id, job.command.kind, exc)
                     return AnswerPayload(**base, status="error", answer=f"Could not record that: {exc}")
+            # Step 2: Refuse before any model runs when the person may not ask here (step 7), so a
+            # refusal costs nothing and the refusal sentence is the whole answer.
+            if self._check_access is not None:
+                refusal = await self._check_access(job)
+                if refusal is not None:
+                    logger.info("Teams job %s refused by access control for %s", job.job_id,
+                                job.sender_object_id)
+                    return AnswerPayload(**base, status="error", answer=refusal)
             history = await self._load_history(job.conversation_id, job.customer_code)
-            # Step 2: Report progress while the agent runs (step 6), so the page can show what is
+            # Step 3: Report progress while the agent runs (step 6), so the page can show what is
             # happening; a reporter that fails never delays or loses the answer.
             progress = self._progress_factory(job) if self._progress_factory is not None else None
             if progress is not None:
@@ -333,7 +347,7 @@ class TeamsQuestionConsumer:
                 if progress is not None:
                     await progress.finished()
             answer = (result.get("answer") or "").strip() or "I could not find anything to say about that."
-            # Step 3: Stamp the answer with its times and the figures' freshness (step 5), so the
+            # Step 4: Stamp the answer with its times and the figures' freshness (step 5), so the
             # page can say when it was asked, answered, and how settled the numbers are.
             fresh = await self._read_freshness(job.customer_code) if self._read_freshness else {}
             payload = AnswerPayload(**base, status="ok", answer=answer,
@@ -344,7 +358,7 @@ class TeamsQuestionConsumer:
                                     asked_at=job.enqueued_at, answered_at=datetime.now(timezone.utc),
                                     data_as_of=fresh.get("data_as_of"),
                                     provisional=bool(fresh.get("provisional", False)))
-            # Step 4: Record the exchange as posted, so the agent's memory and the history (step 6)
+            # Step 5: Record the exchange as posted, so the agent's memory and the history (step 6)
             # hold the same answer the person saw.
             await self._record(job, payload)
             return payload

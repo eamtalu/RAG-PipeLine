@@ -40,6 +40,11 @@ from app.services.teams.home_snapshot import build_writer_from_settings
 from app.services.teams.home_snapshot import sweep_once as snapshot_sweep_once
 from app.services.teams.mirror import ChangeTracker, build_mirror_writer_from_settings
 from app.services.teams.freshness import freshness_for
+from app.services.access import approvals as access_approvals
+from app.services.access import audit as access_audit
+from app.services.access import mirror as access_mirror
+from app.services.access import records as access_records
+from app.services.access import users as access_users
 from app.services.teams import history
 from app.services.teams.memory import ConversationMemory
 from app.services.teams.progress import ProgressReporter
@@ -248,6 +253,64 @@ def _require(value: str, name: str) -> str:
     return value
 
 
+async def _check_access(job: QuestionJob) -> str | None:
+    """Whether the person may ask, at the site in view: None to run, else the refusal sentence.
+
+    (u-7 supervisor of BRI asks about BRI) -> None ; (about LON) -> "…outside your sites…" ;
+    (no user row) -> "You have no access yet…"
+    """
+    now = history.utc_now()
+    async with async_session() as db:
+        record = await access_records.access_record_for(db, job.customer_code, job.sender_object_id)
+        decision = access_records.decide(record, "ask", job.site_id)
+        if decision.is_allowed:
+            await access_users.touch_last_active(db, job.customer_code, job.sender_object_id, now=now)
+            await db.commit()
+            return None
+        # a refusal that changes nothing is still audited: it is the trail the Admin reads
+        await access_audit.record_event(
+            db, job.customer_code, actor_object_id=job.sender_object_id, actor_name=job.sender_name,
+            action="ask.refused", capability_code="ask", decision="refused", site_id=job.site_id,
+            request_id=job.job_id, text=f"{job.sender_name or job.sender_object_id} was refused: "
+                                        f"{decision.reason}", at=now)
+        await db.commit()
+    if record is None:
+        return NO_ACCESS_YET
+    if decision.outcome == "needs_approval":
+        return ASK_NEEDS_APPROVAL
+    return f"You cannot ask that here: {decision.reason}. Ask your admin if that is wrong."
+
+
+NO_ACCESS_YET = ("You have no access to eSmart Eye yet. Ask your admin to add you; nothing was "
+                 "looked up.")
+ASK_NEEDS_APPROVAL = ("Asking the assistant needs approval for your role. A request has not been "
+                      "sent automatically; ask your admin or Ops manager.")
+
+
+async def _access_loop(stop: asyncio.Event) -> None:
+    """Rewrite the access rows for the edge every minute, expire old approvals, purge old audit."""
+    mirror = _mirror_writer()
+    if mirror is None:
+        logger.info("access mirror loop off: TEAMS_EDGE_DYNAMODB_TABLE is not set")
+        return
+    tracker = ChangeTracker(max_age_seconds=settings.teams_access_sweep_seconds * 20)
+    while not stop.is_set():
+        try:
+            async with async_session() as db:
+                await access_approvals.expire_once(db, now=history.utc_now())
+                while await access_audit.purge_once(
+                        db, now=history.utc_now(), retention_days=settings.teams_audit_retention_days):
+                    pass
+            written = await access_mirror.sweep_once(mirror, tracker=tracker)
+            logger.debug("access rows written %s", written)
+        except Exception:
+            logger.exception("access sweep failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.teams_access_sweep_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _amain() -> None:
     setup_logging()
     queue_url = _require(settings.teams_sqs_queue_url, "TEAMS_SQS_QUEUE_URL")
@@ -262,7 +325,7 @@ async def _amain() -> None:
         visibility_seconds=settings.teams_sqs_visibility_seconds, wait_seconds=settings.teams_sqs_wait_seconds,
         run_command=run_command, run_timeout_seconds=settings.analytics_agent_run_timeout_seconds,
         claim_run=_claim_run, finish_run=_finish_run, read_freshness=_read_freshness,
-        progress_factory=_progress_factory)
+        progress_factory=_progress_factory, check_access=_check_access)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -273,7 +336,7 @@ async def _amain() -> None:
             pass
     try:
         await asyncio.gather(consumer.run_forever(stop), _sweep_loop(stop), _snapshot_loop(stop),
-                             _history_loop(stop))
+                             _history_loop(stop), _access_loop(stop))
     finally:
         await engine.dispose()
 
