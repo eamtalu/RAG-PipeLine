@@ -13,6 +13,7 @@ from datetime import date, datetime, timezone
 from app.config.database import async_session
 from app.services.analytics_at_risk import check_store
 from app.services.access import commands as access_commands
+from app.services.advisories import actions as advisory_actions
 from app.services.teams.contracts import ACCESS_COMMAND_KINDS, QuestionJob
 
 
@@ -29,6 +30,9 @@ async def run_command(job: QuestionJob) -> str:
     command = job.command
     if command is None:
         raise ValueError("the job carries no command")
+    # the Advisories tab's actions (step 9) live with the advisories service
+    if command.kind == "advisory_act":
+        return await advisory_actions.run(job)  # a CommandOutcome: the line and the receipt
     # the Admin tab's actions (step 7c) live with the access service
     if command.kind in ACCESS_COMMAND_KINDS:
         return await access_commands.run(job)  # a CommandOutcome: the line and the receipt

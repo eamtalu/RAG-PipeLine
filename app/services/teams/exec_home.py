@@ -5,8 +5,9 @@ Four periods (today, this week, the last 30 days, the last 90 days), each with t
 and every site: fill rate and its change against the period before, on-time dispatch from the
 closed at-risk departures, lines, releases, deliveries and pickers; the 30-day fill-rate series
 per site for the chart; the decisions waiting (the pending approvals). Mirrored under
-`EYE#<customer>` / `EXEC#HOME` every few minutes by the consumer. The weekly brief and the open
-advisories are not computed here: the Insight agent and the advisory agents are later steps.
+`EYE#<customer>` / `EXEC#HOME` every few minutes by the consumer. The weekly brief is not computed
+here (the Insight agent is a later step); the open advisories are counted from the advisories
+table (step 9).
 """
 
 from __future__ import annotations
@@ -191,7 +192,8 @@ async def compute(db: AsyncSession, customer_code: str, *, now: datetime | None 
     except ReadProblem as exc:
         logger.warning("executive home for %s could not be read: %s", customer_code, exc.problems)
         return None
-    # Step 3: The decisions waiting are the pending approvals; advisories and the brief are later
+    # Step 3: The decisions waiting are the pending approvals; the advisories are what the agents
+    # hold open (step 9), by severity and site; the brief is later
     decisions = [
         {"reference": a.reference, "kind": a.kind, "title": a.title, "detail": a.detail,
          "requested_by_name": a.requested_by_name, "created_at": a.created_at.isoformat()}
@@ -205,9 +207,35 @@ async def compute(db: AsyncSession, customer_code: str, *, now: datetime | None 
         "periods": periods,
         "series": series,
         "decisions": decisions,
-        # STUB: the advisory agents (step 9) and the Insight agent (MISSING.md) are not built
-        "advisories": {"open": 0, "high": 0, "note": "No advisory agents yet (step 9)."},
+        "advisories": await advisories_summary(db, customer_code),
+        # STUB: the Insight agent (MISSING.md) is not built
         "brief": {"text": None, "note": "The weekly brief is written by an Insight agent that is not built yet."},
+    }
+
+
+async def advisories_summary(db: AsyncSession, customer_code: str) -> dict:
+    """The open advisories as the executive Home shows them: counts by severity, per site, and
+    the HIGH ones by title, worst first.
+
+    (2 open: one high at BRI, one medium at LON) -> {"open": 2, "high": 1, "medium": 1, "low": 0,
+    "by_site": {"BRI": {...}, "LON": {...}}, "top": [the high one]}
+    """
+    from app.services.advisories import store as advisories_store
+
+    rows = [r for r in await advisories_store.live_rows(db, customer_code) if r.status == "open"]
+    by_site: dict[str, dict] = {}
+    for r in rows:
+        site = by_site.setdefault(r.site_id or ALL_SITES_ID, {"open": 0, "high": 0})
+        site["open"] += 1
+        site["high"] += int(r.severity == "high")
+    return {
+        "open": len(rows),
+        "high": sum(r.severity == "high" for r in rows),
+        "medium": sum(r.severity == "medium" for r in rows),
+        "low": sum(r.severity == "low" for r in rows),
+        "by_site": by_site,
+        "top": [{"id": str(r.id), "agent": r.agent, "severity": r.severity, "site_id": r.site_id,
+                 "title": r.title, "impact": r.impact} for r in rows[:5]],
     }
 
 

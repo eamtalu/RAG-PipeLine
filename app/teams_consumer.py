@@ -46,6 +46,8 @@ from app.services.access import audit as access_audit
 from app.services.access import mirror as access_mirror
 from app.services.access import records as access_records
 from app.services.access import users as access_users
+from app.services.advisories import runner as advisories_runner
+from app.services.notifications import dispatcher as notifications
 from app.services.teams import exec_home, history
 from app.services.teams.memory import ConversationMemory
 from app.services.teams.progress import ProgressReporter
@@ -333,6 +335,27 @@ async def _exec_loop(stop: asyncio.Event) -> None:
             pass
 
 
+async def _advisories_loop(stop: asyncio.Event) -> None:
+    """The agents of the Advisories tab (step 9): every tick runs whichever agent is due per bound
+    customer, announces new HIGH advisories, and rewrites the ADVISORIES row."""
+    mirror = _mirror_writer()
+    if mirror is None:
+        logger.info("advisories loop off: TEAMS_EDGE_DYNAMODB_TABLE is not set")
+        return
+    tracker = ChangeTracker(max_age_seconds=settings.teams_advisories_tick_seconds * 20)
+    while not stop.is_set():
+        try:
+            ran = await advisories_runner.sweep_once(mirror, tracker=tracker, enqueue=notifications.enqueue)
+            if any(ran.values()):
+                logger.info("advisory agents ran %s", ran)
+        except Exception:
+            logger.exception("advisories tick failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.teams_advisories_tick_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _amain() -> None:
     setup_logging()
     queue_url = _require(settings.teams_sqs_queue_url, "TEAMS_SQS_QUEUE_URL")
@@ -358,7 +381,8 @@ async def _amain() -> None:
             pass
     try:
         await asyncio.gather(consumer.run_forever(stop), _sweep_loop(stop), _snapshot_loop(stop),
-                             _history_loop(stop), _access_loop(stop), _exec_loop(stop))
+                             _history_loop(stop), _access_loop(stop), _exec_loop(stop),
+                             _advisories_loop(stop))
     finally:
         await engine.dispose()
 

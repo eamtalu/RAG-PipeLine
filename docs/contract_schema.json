@@ -1,5 +1,10 @@
 {
   "key_layout": {
+    "advisories": {
+      "pk": "EYE#{customer_code}",
+      "sk": "ADVISORIES",
+      "ttl_seconds": null
+    },
     "approvals": {
       "pk": "EYE#{customer_code}",
       "sk": "APPROVALS",
@@ -816,7 +821,8 @@
                 "access_set_matrix_cell",
                 "access_decide",
                 "access_request",
-                "access_undo"
+                "access_undo",
+                "advisory_act"
               ],
               "title": "Kind",
               "type": "string"
@@ -964,5 +970,5 @@
       "type": "object"
     }
   },
-  "revision": "3.8"
+  "revision": "3.9"
 }

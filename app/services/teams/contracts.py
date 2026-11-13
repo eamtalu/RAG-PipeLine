@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.8"
+CONTRACT_REVISION = "3.9"
 
 
 def _now() -> datetime:
@@ -33,7 +33,9 @@ def _now() -> datetime:
 #: access_deactivate_user {object_id}; access_set_matrix_cell {role, capability, state};
 #: access_decide {reference, approve: bool, changes?, note?};
 #: access_request {capability} or {site_ids} (the person asking for more, for themselves);
-#: access_undo {reference} or {object_id} (a receipt's undo, within its window; step 8).
+#: access_undo {reference} or {object_id} (a receipt's undo, within its window; step 8);
+#: advisory_act {advisory_id, action: acknowledge | assign | snooze | dismiss | resolve, assignee?,
+#:   until?} (the Advisories tab's buttons; step 9).
 ACCESS_COMMAND_KINDS = (
     "access_set_user",
     "access_deactivate_user",
@@ -41,6 +43,7 @@ ACCESS_COMMAND_KINDS = (
     "access_decide",
     "access_request",
     "access_undo",
+    "advisory_act",
 )
 
 
@@ -60,6 +63,7 @@ class Command(BaseModel):
         "access_decide",
         "access_request",
         "access_undo",
+        "advisory_act",
     ]
     #: The at-risk fields; required for the two at-risk kinds, checked by the backend's runner.
     delivery_number: str | None = Field(default=None, max_length=64)
