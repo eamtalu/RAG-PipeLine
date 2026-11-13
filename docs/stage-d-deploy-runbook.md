@@ -190,3 +190,23 @@ PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT event_typ
 ```
 
 Rollback: the previous checkout and a restart; `alembic downgrade c8e3f6a9d054` drops the three tables and the column. Without groups nothing is posted, as with the hotfix.
+
+## D13: the per-group cap (how many, after step 12 decided who)
+
+What it adds: migration `e0a5b8c2d376` (`notification_groups.max_per_hour`, default 5, and the ledger `advisory_announcements`), `app/services/groups/caps.py` (which of the groups that take a finding still have room this clock hour; the ledger lines sent / held / notice / summary; the notice card when a group reaches its cap; the summary card of what it held once the hour is over, written to the ledger before it is sent), the runner announcing within the cap (`notify()`), the quiet period for findings that come back (`teams_advisories_reannounce_hours`, default 2: a finding cleared and found again within that time of its last card keeps its stamp), `group_set` taking `max_per_hour` (1 to 60), the GROUPS row carrying `max_per_hour`, `sent_this_hour` and `held_this_hour` per group.
+Contract 3.13 synced from the edge.
+Worst case per group and hour: the cap, one notice, one summary.
+Every open advisory already carries a stamp, so the first group made after this deploy receives only findings opened after it exists.
+
+Deploy: `./deploy.sh` (the migration runs inside it).
+Then the edge step 13 image (the group dialog's "Cards per hour" and the counters).
+Check on the server, after the first group exists and a counting hour has passed:
+
+```
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT g.name, g.max_per_hour, a.window_start, a.status, count(*) FROM advisory_announcements a JOIN notification_groups g ON g.id = a.group_id WHERE a.customer_code='tmp-live' GROUP BY 1,2,3,4 ORDER BY 3,1,4;"
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT event_type, count(*) FROM notification_events WHERE created_at > now() - interval '1 hour' GROUP BY 1;"
+```
+
+Expected: per group and hour, `sent` at most `max_per_hour`, at most one `notice` and one `summary`; `advisory` events at most the cap per group per hour, plus `advisory_cap` and `advisory_summary` at most one each.
+
+Rollback: the previous checkout and a restart; `alembic downgrade d9f4a7b1e265` drops the ledger and the column. The step 12 runner then announces every finding a group takes, with no cap: delete the groups first if the channel must stay quiet.

@@ -116,7 +116,7 @@ async def test_managing_needs_configure_agents_and_everyone_may_join_or_leave():
     outcome = await commands.run(_command("u-ops", "group_set", {
         "name": "Stock", "topics": ["advisory:stock"], "min_severity": "medium", "channel_ids": [str(uuid.UUID(int=2))],
         "members": ["u-ops"]}, "Olu"), mirror=mirror, now=NOW)
-    assert outcome.text == "group Stock saved · 1 channel · 1 member"
+    assert outcome.text == "group Stock saved · 1 channel · 1 member · 5 cards an hour"
     group_id = outcome.blocks[0]["reference"]
     # the supervisor joins, then leaves
     assert (await commands.run(_command("u-sup", "group_join", {"group_id": group_id}, "Sam"), mirror=mirror, now=NOW)).text == "joined Stock"

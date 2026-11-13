@@ -80,11 +80,13 @@ async def _group_set(db: AsyncSession, job: QuestionJob, actor: users.Actor, pay
     group = await store.set_group(
         db, job.customer_code, group_id=payload.get("group_id"), name=str(payload.get("name") or ""),
         topics=payload.get("topics"), min_severity=payload.get("min_severity"), channel_ids=payload.get("channel_ids"),
-        member_object_ids=payload.get("members"), actor_object_id=actor.object_id, now=now)
+        member_object_ids=payload.get("members"), actor_object_id=actor.object_id, now=now,
+        max_per_hour=payload.get("max_per_hour"))
     channels, members = len(payload.get("channel_ids") or []), len(payload.get("members") or [])
     text = (f"group {group.name} saved · {channels} channel{'s' if channels != 1 else ''} · "
-            f"{members} member{'s' if members != 1 else ''}")
-    return text, "group", str(group.id), {"topics": group.topics, "min_severity": group.min_severity}
+            f"{members} member{'s' if members != 1 else ''} · {group.max_per_hour} card{'s' if group.max_per_hour != 1 else ''} an hour")
+    return text, "group", str(group.id), {"topics": group.topics, "min_severity": group.min_severity,
+                                           "max_per_hour": group.max_per_hour}
 
 
 async def _group_delete(db: AsyncSession, job: QuestionJob, actor: users.Actor, payload: dict, now: datetime):

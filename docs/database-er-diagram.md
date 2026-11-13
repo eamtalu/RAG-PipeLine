@@ -1367,6 +1367,8 @@ Advisories (stage D, step 9) are what the agents found: `advisories` holds one r
 All three are real foreign keys to the customer; the agents read `analytics_at_risk_deliveries` and `analytics_facts`, never a table of their own.
 Notification groups (stage D, step 12) route what the agents and the schedules produce: `notification_groups` is a named route per customer (the topics it takes as a JSON list, the lowest severity it takes, enabled), `notification_group_channels` the Teams channels it posts to (`customer_notification_channels`, by webhook), `notification_group_members` the people who see it in the app; `teams_tasks.target_group_id` names the group a schedule posts to.
 Routing is one lookup at dispatch; a finding no group takes goes nowhere, so a new channel receives nothing until a group takes it.
+The cap (stage D, step 13) bounds how many: a group sends at most `notification_groups.max_per_hour` advisory cards per clock hour, and `advisory_announcements` is its ledger, one line per advisory sent or held in an hour (`window_start`) plus the hour's `notice` line (the card that says the group went quiet) and `summary` line (the card that lists what was held once the hour is over).
+Held is recorded, not dropped, so which findings a summary covered stays answerable; the summary line is written before the card is sent, so a restart never repeats it.
 Tasks (stage D, step 10) are the reminders and schedules of the Tasks tab: `teams_tasks` holds both kinds (`kind` reminder | schedule) with the spec as JSON (`when`: once at a moment, recurring on weekdays at a time, or a condition such as fill rate below a line) and `next_fire_at`, the moment the consumer's loop acts, so a restart loses nothing; `teams_task_runs` is the ledger, one row per planned firing, unique on (`task_id`, `planned_at`), so a firing happens exactly once (outcomes sent, skipped, missed, failed).
 A task belongs to one person (`owner_object_id`), runs its attached question with that person's access, and is audited in `audit_events` as `task.<action>`.
 `teams_conversations` (step 6b) is the header of each thread: the page starts a new conversation id whenever the person asks for one, the agent replays only that thread's turns, and the rail lists threads by title with their turns inside; the header is a soft reference to its turns by `conversation_id` and goes with them in the purge.
@@ -1586,10 +1588,21 @@ erDiagram
         string name
         jsonb topics "advisory:delivery | advisory:stock | advisory:location | schedule"
         string min_severity "high | medium | low"
+        int max_per_hour "advisory cards per clock hour; default 5"
         boolean enabled
         string created_by
         datetime created_at
         datetime updated_at
+    }
+
+    advisory_announcements {
+        uuid id PK
+        string customer_code FK "customers"
+        uuid group_id FK "notification_groups"
+        uuid advisory_id FK "advisories; null for notice and summary"
+        string status "sent | held | notice | summary"
+        datetime window_start "the clock hour"
+        datetime at
     }
 
     notification_group_channels {
@@ -1737,6 +1750,9 @@ erDiagram
     customer_notification_channels ||--o{ notification_group_channels : "taken by"
     notification_groups ||--o{ notification_group_members : "seen by"
     notification_groups ||--o{ teams_tasks : "target of (SET NULL)"
+    customers ||--o{ advisory_announcements : "announcement ledger of"
+    notification_groups ||--o{ advisory_announcements : "sent or held by"
+    advisories ||--o{ advisory_announcements : "announced as"
     access_roles ||--o{ access_role_capabilities : "row of"
     access_capabilities ||--o{ access_role_capabilities : "column of"
     access_roles ||--o{ teams_users : "role of"
@@ -1816,6 +1832,9 @@ erDiagram
 | `customer_notification_channels.id` | `notification_group_channels.channel_id` | CASCADE |
 | `notification_groups.id` | `notification_group_members.group_id` | CASCADE |
 | `notification_groups.id` | `teams_tasks.target_group_id` | SET NULL |
+| `customers.customer_code` | `advisory_announcements.customer_code` | CASCADE |
+| `notification_groups.id` | `advisory_announcements.group_id` | CASCADE |
+| `advisories.id` | `advisory_announcements.advisory_id` | CASCADE |
 | `notification_events.id` | `notification_deliveries.event_id` | CASCADE |
 | `customer_notification_channels.id` | `notification_deliveries.channel_id` | SET NULL |
 
