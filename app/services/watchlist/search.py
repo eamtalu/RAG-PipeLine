@@ -81,7 +81,7 @@ async def resolve(db: AsyncSession, customer_code: str, record: AccessRecord, ki
         for warehouse in agg["warehouses"]:
             _check_site(record, warehouse, f"route {entity_id}")
         return Resolved("route", entity_id, f"Route {entity_id}", site, {"warehouses": agg["warehouses"]},
-                        detail=f"{agg['open']} open · {registry.lines_words(agg['lines_picked'], agg['lines_total'], None, short=agg['lines_short'])}")
+                        detail=f"{registry.route_words(agg['open'], agg['by_tier'])} · {registry.lines_words(agg['lines_picked'], agg['lines_total'], None, short=agg['lines_short'])}")
     if kind == "measure":
         site_id = entity_id[len(MEASURE_PREFIX):] if entity_id.startswith(MEASURE_PREFIX) else entity_id
         sites = {s.site_id: s.name for s in await list_sites(db, customer_code)}
@@ -165,7 +165,7 @@ async def find(db: AsyncSession, customer_code: str, record: AccessRecord, text:
         for route in routes:
             agg = aggregates[route]
             if all(record.may_see(w) for w in agg["warehouses"]):
-                out.append(Candidate("route", route, f"Route {route}", f"{agg['open']} open · {registry.lines_words(agg['lines_picked'], agg['lines_total'], None, short=agg['lines_short'])}",
+                out.append(Candidate("route", route, f"Route {route}", f"{registry.route_words(agg['open'], agg['by_tier'])} · {registry.lines_words(agg['lines_picked'], agg['lines_total'], None, short=agg['lines_short'])}",
                                      agg["warehouses"][0] if len(agg["warehouses"]) == 1 else None))
     if "measure" in kinds and ("fill" in words or "rate" in words):
         for site in await list_sites(db, customer_code):

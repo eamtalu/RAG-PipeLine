@@ -249,7 +249,7 @@ async def test_a_route_rolls_up_its_deliveries_and_a_measure_crosses_its_line_wi
     assert await _tick(NOW + timedelta(seconds=5), mirror) == {CC: 0}
     row_payload = json.loads(mirror.items[(f"EYE#{CC}", "USER#u-sup#WATCHES")].payload_json)
     by_kind = {w["kind"]: w for w in row_payload["watches"]}
-    assert by_kind["route"]["status"] == "on_track" and by_kind["route"]["summary"].startswith("2 open · 41 of 72 lines picked")
+    assert by_kind["route"]["status"] == "on_track" and by_kind["route"]["summary"].startswith("2 deliveries to go · 41 of 72 lines picked")
     assert by_kind["measure"]["status"] == "above" and by_kind["measure"]["summary"] == "98.0% · your line 97%"
     # Step 1: one delivery falls behind: the route is behind, one alert
     async with async_session() as db:
@@ -258,6 +258,9 @@ async def test_a_route_rolls_up_its_deliveries_and_a_measure_crosses_its_line_wi
         await db.commit()
     home_snapshot._LATEST_FILL_RATES[(CC, "BRI")]["fill_rate"] = 0.965
     assert await _tick(NOW + timedelta(minutes=2), mirror) == {CC: 2}
+    # the route names what is flagged by its tier, never a vague "behind"
+    row_payload = json.loads(mirror.items[(f"EYE#{CC}", "USER#u-sup#WATCHES")].payload_json)
+    assert {w["kind"]: w for w in row_payload["watches"]}["route"]["summary"].startswith("2 deliveries to go · 1 left behind · 41 of 72 lines picked")
     # Step 2: the figure hovers back over the line but under the band: still below; over the band: above, a quiet event
     home_snapshot._LATEST_FILL_RATES[(CC, "BRI")]["fill_rate"] = 0.972
     assert await _tick(NOW + timedelta(minutes=4), mirror) == {CC: 0}
@@ -354,7 +357,7 @@ async def test_stop_undo_change_alert_not_now_and_the_rows_the_edge_reads():
         # Step 4: the WATCHABLES row lists what can be watched, with the site that decides who may
         watchables = await watch_mirror.watchables_payload(db, CC, now=NOW)
         assert [d["entity_id"] for d in watchables["deliveries"]] == ["D-1"] and watchables["deliveries"][0]["site_id"] == "BRI"
-        assert watchables["routes"][0] == {"entity_id": "R14", "label": "Route R14", "detail": "1 open · 31 of 36 lines picked", "site_id": "BRI", "site_ids": ["BRI"]}
+        assert watchables["routes"][0] == {"entity_id": "R14", "label": "Route R14", "detail": "1 delivery to go · 31 of 36 lines picked", "site_id": "BRI", "site_ids": ["BRI"]}
         assert [m["entity_id"] for m in watchables["measures"]] == ["fill_rate:BRI", "fill_rate:LON"]
         assert watchables["products"] == [{"entity_id": "I9", "label": "Nutmeg · I9", "detail": "", "site_id": None}]
         # the search finds things by their words, within the person's sites
@@ -392,7 +395,7 @@ async def test_a_delivery_without_an_expected_count_is_worded_from_its_confirmed
     assert by_kind["delivery"]["summary"] == "7 of 8 lines picked · 1 short · leaves 18:10 on Route R14"
     assert by_kind["delivery"]["value"]["lines_expected"] is None and by_kind["delivery"]["value"]["lines_total"] == 8
     # the route shows its short lines and says which day the next van leaves
-    assert by_kind["route"]["summary"] == "2 open · 8 of 9 lines picked · 1 short · next leaves 18:10"
+    assert by_kind["route"]["summary"] == "2 deliveries to go · 8 of 9 lines picked · 1 short · next leaves 18:10"
     assert by_kind["route"]["value"]["lines_total"] == 9
     async with async_session() as db:
         watchables = await watch_mirror.watchables_payload(db, CC, now=NOW)
@@ -400,7 +403,8 @@ async def test_a_delivery_without_an_expected_count_is_worded_from_its_confirmed
         assert details["D-1"] == "7 of 8 lines picked · 1 short · leaves 18:10"
         assert details["D-3"] == "0 of 5 lines picked · leaves tomorrow 18:10"
         routes = {r["entity_id"]: r["detail"] for r in watchables["routes"]}
-        assert routes["R14"] == "2 open · 8 of 9 lines picked · 1 short" and routes["R21"] == "1 open · 0 of 5 lines picked"
+        assert routes["R14"] == "2 deliveries to go · 8 of 9 lines picked · 1 short" and routes["R21"] == "1 delivery to go · 0 of 5 lines picked"
+    assert registry.route_words(3, {"none": 1, "watch": 1, "at_risk": 1}) == "3 deliveries to go · 1 at risk · 1 needs a look"
     assert registry.when_words("2026-11-16T11:30:00+00:00", NOW, TZ) == "Mon 16 Nov 11:30"
     assert registry.lines_words(1, None, 0) == "1 line picked" and registry.lines_words(3, None, None, short=2) == "3 lines picked · 2 short"
 

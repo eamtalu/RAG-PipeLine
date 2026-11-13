@@ -337,6 +337,30 @@ def lines_words(picked: int, expected: int | None, confirmed: int | None, *, sho
     return f"{words} · {short} short" if short else words
 
 
+def route_words(open_count: int, by_tier: dict[str, int] | None = None) -> str:
+    """A route's open deliveries in a person's words: how many are still to go, and how many of
+    them the board has flagged, named by their tier.
+
+    >>> route_words(3, {"none": 3}), route_words(1, {"at_risk": 1}), route_words(0, {})
+    ('3 deliveries to go', '1 delivery to go · 1 at risk', 'nothing to go')
+    >>> route_words(4, {"none": 1, "watch": 2, "left_behind": 1})
+    '4 deliveries to go · 1 left behind · 2 need a look'
+    """
+    if open_count <= 0:
+        return "nothing to go"
+    words = f"{open_count} deliver{'ies' if open_count != 1 else 'y'} to go"
+    tiers = by_tier or {}
+    flagged = []
+    if tiers.get("left_behind"):
+        flagged.append(f"{tiers['left_behind']} left behind")
+    if tiers.get("at_risk"):
+        flagged.append(f"{tiers['at_risk']} at risk")
+    if tiers.get("watch"):
+        n = tiers["watch"]
+        flagged.append(f"{n} need{'s' if n == 1 else ''} a look")
+    return " · ".join([words, *flagged])
+
+
 def when_words(moment, now: datetime, tz: ZoneInfo) -> str:
     """A departure in the card's words: the clock alone today, "tomorrow HH:MM", else the day too.
 

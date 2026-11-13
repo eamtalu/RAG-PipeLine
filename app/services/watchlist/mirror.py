@@ -135,7 +135,7 @@ async def watchables_payload(db: AsyncSession, customer_code: str, *, now: datet
     aggregates = await readers.route_aggregates(db, customer_code, routes, now.astimezone(tz).date())
     route_rows = [{
         "entity_id": route, "label": f"Route {route}",
-        "detail": f"{a['open']} open · {registry.lines_words(a['lines_picked'], a['lines_total'], None, short=a['lines_short'])}",
+        "detail": f"{registry.route_words(a['open'], a['by_tier'])} · {registry.lines_words(a['lines_picked'], a['lines_total'], None, short=a['lines_short'])}",
         "site_id": a["warehouses"][0] if len(a["warehouses"]) == 1 else None, "site_ids": a["warehouses"],
     } for route, a in ((r, aggregates[r]) for r in routes)]
     sites = await list_sites(db, customer_code)
