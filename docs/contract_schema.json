@@ -10,6 +10,11 @@
       "sk": "AUDIT",
       "ttl_seconds": null
     },
+    "exec_home": {
+      "pk": "EYE#{customer_code}",
+      "sk": "EXEC#HOME",
+      "ttl_seconds": 7200
+    },
     "history_turn": {
       "pk": "EYE#{customer_code}",
       "sk": "USER#{user_id}#TURN#{job_id}",

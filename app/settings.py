@@ -512,6 +512,10 @@ class Settings(BaseSettings):
     teams_audit_retention_days: int = 90
     teams_access_sweep_seconds: float = 60.0
     teams_approval_hours: int = 24
+    # The executive Home (step 7d): rewritten every few minutes (it reads four periods for every
+    # site), and the fill-rate target its tiles and chart show.
+    teams_exec_home_seconds: float = 300.0
+    teams_fill_rate_target: float = 0.98
 
     # --- HTTP API callers (app/api/service_auth.py). Every route under /api/v1 needs a bearer token
     # from this list, `name=token,name=token`; the name says which system is calling. Names listed

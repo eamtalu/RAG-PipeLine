@@ -45,7 +45,7 @@ from app.services.access import audit as access_audit
 from app.services.access import mirror as access_mirror
 from app.services.access import records as access_records
 from app.services.access import users as access_users
-from app.services.teams import history
+from app.services.teams import exec_home, history
 from app.services.teams.memory import ConversationMemory
 from app.services.teams.progress import ProgressReporter
 from app.settings import settings
@@ -311,6 +311,26 @@ async def _access_loop(stop: asyncio.Event) -> None:
             pass
 
 
+async def _exec_loop(stop: asyncio.Event) -> None:
+    """The executive Home (step 7d), rewritten every few minutes per bound customer."""
+    mirror = _mirror_writer()
+    if mirror is None:
+        logger.info("executive home loop off: TEAMS_EDGE_DYNAMODB_TABLE is not set")
+        return
+    tracker = ChangeTracker(max_age_seconds=settings.teams_exec_home_seconds * 6)
+    while not stop.is_set():
+        try:
+            written = await exec_home.sweep_once(mirror, tracker=tracker, target=settings.teams_fill_rate_target,
+                                                 max_sites=settings.teams_max_sites_per_customer)
+            logger.debug("executive home written for %s", written)
+        except Exception:
+            logger.exception("executive home sweep failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.teams_exec_home_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _amain() -> None:
     setup_logging()
     queue_url = _require(settings.teams_sqs_queue_url, "TEAMS_SQS_QUEUE_URL")
@@ -336,7 +356,7 @@ async def _amain() -> None:
             pass
     try:
         await asyncio.gather(consumer.run_forever(stop), _sweep_loop(stop), _snapshot_loop(stop),
-                             _history_loop(stop), _access_loop(stop))
+                             _history_loop(stop), _access_loop(stop), _exec_loop(stop))
     finally:
         await engine.dispose()
 

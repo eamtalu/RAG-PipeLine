@@ -24,6 +24,9 @@ Row types so far:
 - users (step 7): the customer's users as the Admin tab lists them (no secrets).
 - approvals (step 7): the pending and recent approvals, for the queue and the badge.
 - audit (step 7): the latest audit events, for the Admin tab's list.
+- exec_home (step 7d): the executive Home of screen 02: the week's figures per site and for the
+  whole customer, four periods, the 30-day fill-rate series, the decisions waiting; rewritten
+  every few minutes.
 Later steps add their rows here, and the edge's `KEY_LAYOUT` test keeps the Terraform prefix list
 in step with this table.
 """
@@ -90,6 +93,7 @@ KEY_LAYOUT: dict[str, KeySpec] = {
     "users": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USERS", ttl_seconds=None),
     "approvals": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="APPROVALS", ttl_seconds=None),
     "audit": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="AUDIT", ttl_seconds=None),
+    "exec_home": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="EXEC#HOME", ttl_seconds=7200),
 }
 
 
