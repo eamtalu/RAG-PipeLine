@@ -126,3 +126,24 @@ What it adds: the `actions` namespace on the analytics profile (one tool, `propo
 Deploy: `./deploy.sh`. Then, once the edge step 8 image is live, ask "Create a user for Dan Roberts" in Teams as Admin: the form comes back pre-filled (the trace shows one `propose_create_user` call and no data call); confirm it with an Entra object id: the receipt says created, and `teams_users` has the row with `created_by` your object id; Undo within ten minutes deactivates it (audited as `access.user_deactivated`).
 
 Rollback: the previous checkout and a restart.
+
+## D9: advisories (the agents, the runner, the actions)
+
+What it adds: migration `b7f2d5e8c943` (`advisories`, `advisory_agents`, `advisory_agent_runs`), `app/services/advisories/` (the registry of seven agents, three of them live: Delivery from the at-risk board every 5 min, Stock controller from the Quick Stock Count facts every 15 min, Location from today's zero-picks every 30 min; the runner; the actions; the `ADVISORIES` mirror row), the consumer's `_advisories_loop` every `TEAMS_ADVISORIES_TICK_SECONDS` (30), the `advisory_act` command (acknowledge, assign, snooze, dismiss, resolve; audited as `advisory.<action>`), and new HIGH advisories announced once to the customer's notification channels as an `advisory` event (the existing outbox and webhook adapters deliver it).
+Contract 3.9 synced from the edge.
+No new flag: the loop runs wherever the edge table is set.
+
+Deploy: `./deploy.sh` (the migration runs inside it).
+Then watch the consumer for one minute:
+
+```
+sudo journalctl -u fastapirag-teams-consumer --since "-2 min" --no-pager | grep -i "advisory\|advisories"
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT agent, enabled, cadence_seconds, last_run_at, last_result FROM advisory_agents WHERE customer_code='tmp-live' ORDER BY agent;"
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT agent, severity, status, site_id, left(title,70) FROM advisories WHERE customer_code='tmp-live' ORDER BY opened_at DESC LIMIT 20;"
+```
+
+Expected: seven switches (delivery, stock, location enabled), one run per live agent within the first tick, and whatever the data holds (today's zero-pick locations and count variances are the likely first rows; a delivery row only while the board flags one).
+The `ADVISORIES` row under `EYE#tmp-live` is written on the same tick (the edge step 9 image reads it).
+To switch an agent off for a customer: `UPDATE advisory_agents SET enabled=false, updated_by='<you>' WHERE customer_code='tmp-live' AND agent='location';` (the Admin tab's roster toggle is a later step).
+
+Rollback: the previous checkout and a restart; `alembic downgrade a6e1c4d9f832` drops the three tables.

@@ -66,6 +66,7 @@ from app.persistence.models.access import (  # noqa: F401
     TeamsUserCapability,
     TeamsUserSite,
 )
+from app.persistence.models.advisory import Advisory, AdvisoryAgent, AdvisoryAgentRun  # noqa: F401
 from app.persistence.models.agent_run import AgentRun
 from app.persistence.models.agent_trace import AgentTrace
 from app.persistence.models.agent_in_flight import AgentInFlight
@@ -144,6 +145,10 @@ __all__ = [
     "TeamsUserCapability",
     "AccessApproval",
     "AuditEvent",
+    # --- advisories (stage D, step 9) ---
+    "Advisory",
+    "AdvisoryAgent",
+    "AdvisoryAgentRun",
     "AgentRun",
     "AgentTrace",
     "AgentInFlight",

@@ -24,6 +24,8 @@ Row types so far:
 - users (step 7): the customer's users as the Admin tab lists them (no secrets).
 - approvals (step 7): the pending and recent approvals, for the queue and the badge.
 - audit (step 7): the latest audit events, for the Admin tab's list.
+- advisories (step 9): the open, acknowledged and snoozed advisories with the agent roster and
+  the counts, rewritten after every agent run and every action.
 - exec_home (step 7d): the executive Home of screen 02: the week's figures per site and for the
   whole customer, four periods, the 30-day fill-rate series, the decisions waiting; rewritten
   every few minutes.
@@ -94,6 +96,7 @@ KEY_LAYOUT: dict[str, KeySpec] = {
     "approvals": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="APPROVALS", ttl_seconds=None),
     "audit": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="AUDIT", ttl_seconds=None),
     "exec_home": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="EXEC#HOME", ttl_seconds=7200),
+    "advisories": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="ADVISORIES", ttl_seconds=None),
 }
 
 

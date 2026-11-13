@@ -1363,6 +1363,8 @@ The turns carry the soft tenant key like the log tables, so a tenant purge can r
 Since stage D step 6 the answer row also carries who asked, the site, the typed blocks and the times, so the same table is the Ask history of the Teams app: the consumer mirrors one person's last 30 days to the edge (`EYE#<customer>` / `USER#<object id>#HISTORY` and one `TURN` row per answer) and purges older turns every hour (`teams_history_retention_days`).
 Access control (stage D, step 7) is the matrix of screen 07 as data: `access_roles` and `access_capabilities` are seeded from `app/services/access/matrix.yaml`, `access_role_capabilities` holds one state per cell per customer (seeded from the file on first use, changed by an Admin in the app), `teams_users` is a person (Entra object id) within a customer with a role, `teams_user_sites` the sites they may see (none when `all_sites`), `teams_user_capabilities` a per-person override of a cell set by an Admin or granted for good by an approval, `access_approvals` the queue of "with approval" requests (24 h expiry), and `audit_events` every permission decision that changed data, append-only, purged after 90 days.
 Every one of them is a real foreign key to the customer; the effective record a person gets is computed in `app/services/access/records.py` and mirrored to the edge.
+Advisories (stage D, step 9) are what the agents found: `advisories` holds one row per thing (unique on `customer_code` + `dedup_key`), kept open while the agent keeps finding it, resolved with reason `cleared` when it stops, reopened on the same row when it returns, and moved by people to `acknowledged`, `snoozed`, `dismissed` or `resolved` with an `audit_events` line each (`advisory.<action>`); `advisory_agents` is each agent's switch and cadence per customer, seeded from `app/services/advisories/registry.py` on the first tick (Delivery, Stock controller and Location on; the others off with a reason); `advisory_agent_runs` the ledger of every run with what it opened, resolved or raised.
+All three are real foreign keys to the customer; the agents read `analytics_at_risk_deliveries` and `analytics_facts`, never a table of their own.
 `teams_conversations` (step 6b) is the header of each thread: the page starts a new conversation id whenever the person asks for one, the agent replays only that thread's turns, and the rail lists threads by title with their turns inside; the header is a soft reference to its turns by `conversation_id` and goes with them in the purge.
 `agent_runs` is the run ledger: the consumer inserts one row per edge job id before it runs the model, and the unique `request_id` decides who wins a redelivery.
 A row still `running` means another consumer has the question (unless `claimed_at` is older than the queue's visibility window, when the claim is taken over); a row that is `done` carries the posted answer in `result`, replayed as it is.
@@ -1495,6 +1497,57 @@ erDiagram
         jsonb detail
     }
 
+    advisories {
+        uuid id PK
+        string customer_code FK "customers; unique with dedup_key; indexed with status, opened_at"
+        string site_id
+        string agent "delivery | stock | location | ..."
+        string severity "high | medium | low"
+        string title
+        text evidence
+        text impact
+        text recommended
+        float confidence "0..1 where the agent has one"
+        string status "open | acknowledged | snoozed | resolved | dismissed"
+        string assignee_object_id
+        string assignee_name
+        string acknowledged_by
+        datetime snoozed_until
+        datetime due_at
+        string dedup_key "the agent's key for the thing found"
+        jsonb source "what it points at (delivery, item, location)"
+        jsonb actions "the buttons it offers"
+        datetime opened_at
+        datetime updated_at
+        datetime last_seen_at
+        datetime resolved_at
+        string resolved_reason "cleared, or the actor's object id"
+        datetime notified_at "when the channel was told (HIGH only)"
+    }
+
+    advisory_agents {
+        string customer_code PK,FK "customers"
+        string agent PK
+        boolean enabled
+        int cadence_seconds
+        datetime last_run_at
+        datetime next_run_at
+        jsonb last_result "opened, resolved, found, error"
+        datetime updated_at
+        string updated_by
+    }
+
+    advisory_agent_runs {
+        uuid id PK
+        string customer_code FK "customers; indexed with started_at"
+        string agent
+        datetime started_at
+        datetime finished_at
+        int opened
+        int resolved
+        text error
+    }
+
     teams_conversations {
         uuid id PK
         string customer_code "soft tenant key; unique with conversation_id"
@@ -1602,6 +1655,10 @@ erDiagram
     customers ||--o{ teams_users : "people of"
     customers ||--o{ access_approvals : "queue of"
     customers ||--o{ audit_events : "trail of"
+    customers ||--o{ advisories : "findings for"
+    customers ||--o{ advisory_agents : "switches of"
+    customers ||--o{ advisory_agent_runs : "agent runs of"
+    advisories ||..o{ audit_events : "acted on (subject_kind advisory)"
     access_roles ||--o{ access_role_capabilities : "row of"
     access_capabilities ||--o{ access_role_capabilities : "column of"
     access_roles ||--o{ teams_users : "role of"
@@ -1666,6 +1723,13 @@ erDiagram
 | `customers.customer_code` | `logspace_presence.customer_code` | CASCADE |
 | `customers.customer_code` | `teams_tenant_bindings.customer_code` | CASCADE |
 | `customers.customer_code` | `tenant_sites.customer_code` | CASCADE |
+| `customers.customer_code` | `access_role_capabilities.customer_code` | CASCADE |
+| `customers.customer_code` | `teams_users.customer_code` | CASCADE |
+| `customers.customer_code` | `access_approvals.customer_code` | CASCADE |
+| `customers.customer_code` | `audit_events.customer_code` | CASCADE |
+| `customers.customer_code` | `advisories.customer_code` | CASCADE |
+| `customers.customer_code` | `advisory_agents.customer_code` | CASCADE |
+| `customers.customer_code` | `advisory_agent_runs.customer_code` | CASCADE |
 | `notification_events.id` | `notification_deliveries.event_id` | CASCADE |
 | `customer_notification_channels.id` | `notification_deliveries.channel_id` | SET NULL |
 

@@ -518,6 +518,9 @@ class Settings(BaseSettings):
     teams_fill_rate_target: float = 0.98
     # A receipt's Undo (step 8) works this long after the action.
     teams_undo_minutes: int = 10
+    # The advisories loop (step 9) ticks this often; each agent runs on its own cadence (the
+    # advisory_agents table, seeded from the registry: delivery 5 min, stock 15, location 30).
+    teams_advisories_tick_seconds: float = 30.0
 
     # --- HTTP API callers (app/api/service_auth.py). Every route under /api/v1 needs a bearer token
     # from this list, `name=token,name=token`; the name says which system is calling. Names listed
