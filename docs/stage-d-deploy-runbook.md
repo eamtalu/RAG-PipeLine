@@ -148,6 +148,10 @@ To switch an agent off for a customer: `UPDATE advisory_agents SET enabled=false
 
 Rollback: the previous checkout and a restart; `alembic downgrade a6e1c4d9f832` drops the three tables.
 
+Hotfix of 13 November 2026: `TEAMS_ADVISORIES_TO_CHANNEL` (default false) switches the channel posts off; the first live day had sent 73 cards to the one channel in six hours.
+The advisories still open, resolve and show in the tab; only the Teams card stops.
+D12 (notification groups) replaces the switch with routing by topic and severity, where nothing goes to a channel unless a group takes it, a new channel included.
+
 ## D10: reminders and schedules (the tasks loop)
 
 What it adds: migration `c8e3f6a9d054` (`teams_tasks`, `teams_task_runs`), `app/services/tasks/` (the specs and their next-fire maths in the customer's time zone, the store, the runner the consumer ticks, the `task_create` / `task_update` commands, the per-person `USER#<id>#TASKS` mirror row with the suggestions from the person's own history), the consumer's `_tasks_loop` every `TEAMS_TASKS_TICK_SECONDS` (30) with the catch-up window `TEAMS_TASKS_CATCH_UP_HOURS` (6), the two proposing tools (`propose_reminder`, `propose_schedule`) on the analytics profile beside `propose_create_user`, the prompt snapshot regenerated.

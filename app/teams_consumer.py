@@ -349,7 +349,9 @@ async def _advisories_loop(stop: asyncio.Event) -> None:
     tracker = ChangeTracker(max_age_seconds=settings.teams_advisories_tick_seconds * 20)
     while not stop.is_set():
         try:
-            ran = await advisories_runner.sweep_once(mirror, tracker=tracker, enqueue=notifications.enqueue)
+            ran = await advisories_runner.sweep_once(
+                mirror, tracker=tracker,
+                enqueue=notifications.enqueue if settings.teams_advisories_to_channel else None)
             if any(ran.values()):
                 logger.info("advisory agents ran %s", ran)
         except Exception:
