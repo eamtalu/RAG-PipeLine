@@ -379,7 +379,7 @@ async def test_a_person_requests_a_capability_or_more_sites_for_themselves():
         mirror=mirror, now=NOW)
     assert text == "requested · ACC-1 · waiting for an Ops manager"
     text = await access_commands.run(_command("u-sup", "access_request", {"site_ids": ["LON"]}, "Sam"),
-                                     mirror=mirror, now=NOW)
+                                     mirror=mirror, now=NOW + timedelta(seconds=1))  # a later moment
     assert text == "requested · ACC-2 · waiting for an Ops manager"
     assert (await access_commands.run(_command("u-sup", "access_request", {"capability": "ask"}), mirror=mirror)
             ) == "you already have Ask the assistant"
