@@ -12,7 +12,8 @@ from datetime import date, datetime, timezone
 
 from app.config.database import async_session
 from app.services.analytics_at_risk import check_store
-from app.services.teams.contracts import QuestionJob
+from app.services.access import commands as access_commands
+from app.services.teams.contracts import ACCESS_COMMAND_KINDS, QuestionJob
 
 
 def _departure_date(text: str | None) -> date | None:
@@ -28,6 +29,11 @@ async def run_command(job: QuestionJob) -> str:
     command = job.command
     if command is None:
         raise ValueError("the job carries no command")
+    # the Admin tab's actions (step 7c) live with the access service
+    if command.kind in ACCESS_COMMAND_KINDS:
+        return await access_commands.run(job)
+    if not command.delivery_number:
+        raise ValueError("an at-risk command names a delivery_number")
     actor = (command.by or job.sender_name or check_store.DEFAULT_ACTOR).strip()[:128]
     departure_date = _departure_date(command.departure_date)
     now = datetime.now(timezone.utc)

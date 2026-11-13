@@ -102,3 +102,11 @@ Deploy:
 4. Add the other people with `teams_users.py set … --role supervisor --sites BRI` (or through the Admin tab once the edge step 7b/7c is live).
 
 Rollback: `git checkout deployed-backend-<previous>` and restart the three units; the tables can stay. The refusal stops with the old consumer.
+
+## D7c: the Admin tab's commands
+
+What it adds: the five access commands on the question queue (`access_set_user`, `access_deactivate_user`, `access_set_matrix_cell`, `access_decide`, `access_request`), run by `app/services/access/commands.py` from the actor's own record; a change the matrix marks "with approval" becomes a request; the access rows are mirrored at once after each. Contract 3.7 (synced from the edge). No migration, no flag.
+
+Deploy: `./deploy.sh`. Then, once the edge step 7c image is live, open the Admin tab as Admin, click one matrix cell: the answer line arrives within a few seconds and the journal shows `audit access.matrix_changed`.
+
+Rollback: the previous checkout and a restart; the edge's commands are then refused as unknown until the edge is rolled back too.
