@@ -51,6 +51,19 @@ CHRONIC_MIN_RELEASES = 3
 
 
 # ============================================================== compute
+#: The latest fill rate per (customer, site id) this process computed, for the measure watches
+#: (step 14): the snapshot loop fills it every minute, so a watch never recomputes a snapshot
+_LATEST_FILL_RATES: dict[tuple[str, str], dict] = {}
+
+
+def latest_fill_rate(customer_code: str, site_id: str | None) -> dict | None:
+    """The last fill rate computed for a site (or the whole customer with None / "all"), or None.
+
+    (after compute for BRI) -> {"fill_rate": 0.976, "as_of": iso, "provisional": False} ; (never) -> None
+    """
+    return _LATEST_FILL_RATES.get((customer_code, site_id or ALL_SITES_ID))
+
+
 async def compute(db: AsyncSession, customer_code: str, site: Site | None = None) -> dict | None:
     """The snapshot for one customer, or for one of its sites, or None when the customer has no
     pick_release settlement. With a site every settlement read is narrowed to that warehouse.
@@ -121,6 +134,9 @@ async def compute(db: AsyncSession, customer_code: str, site: Site | None = None
     fresh = await freshness_rules.freshness_for(db, customer_code,
                                                 threshold=Decimal(str(settings.teams_provisional_share)))
     site_name = site.name if site is not None else await _site(db, customer_code)
+    _LATEST_FILL_RATES[(customer_code, site.site_id if site is not None else ALL_SITES_ID)] = {
+        "fill_rate": float(fill) if fill is not None else None, "as_of": now.isoformat(),
+        "provisional": bool(fresh.as_dict().get("provisional")), "expected": int(expected)}
     return {
         "customer_code": customer_code,
         "site": site_name,
@@ -273,7 +289,7 @@ def _attention(zero_items: dict, chronic: dict) -> list[dict]:
         label = f"{desc} ({item})" if desc else item
         n = int(r.get("rows") or 0)
         units = -_dec(r.get("shortfall"))
-        out.append({"id": f"zero:{item}", "kind": "stock",
+        out.append({"id": f"zero:{item}", "kind": "stock", "entity": {"kind": "product", "id": item},
                     "title": f"{label} zero-picked {n} time{'s' if n != 1 else ''} today",
                     "detail": f"{_units(units)} units short",
                     "ask_text": f"Why was item {item} zero-picked today?"})
@@ -284,7 +300,7 @@ def _attention(zero_items: dict, chronic: dict) -> list[dict]:
         dims = r.get("dimensions") or []
         item, desc = str(dims[0]) if dims else "?", str(dims[1]) if len(dims) > 1 and dims[1] else ""
         label = f"{desc} ({item})" if desc else item
-        out.append({"id": f"chronic:{item}", "kind": "other",
+        out.append({"id": f"chronic:{item}", "kind": "other", "entity": {"kind": "product", "id": item},
                     "title": f"{label} short on {n} releases this week",
                     "detail": f"{_units(-_dec(r.get('shortfall')))} units short over 7 days",
                     "ask_text": f"Which customers were short of item {item} this week?"})

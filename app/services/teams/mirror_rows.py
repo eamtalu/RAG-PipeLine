@@ -106,6 +106,12 @@ KEY_LAYOUT: dict[str, KeySpec] = {
     "user_groups": KeySpec(
         pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USER#{user_id}#GROUPS", ttl_seconds=None
     ),
+    #: step 14: one row per person with their watches, today's changes and the unseen count; and the
+    #: customer's watchable things (open deliveries, routes, sites, zones, locations, items)
+    "user_watches": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USER#{user_id}#WATCHES", ttl_seconds=None
+    ),
+    "watchables": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="WATCHABLES", ttl_seconds=600),
 }
 
 

@@ -529,6 +529,13 @@ class Settings(BaseSettings):
     # was down fires once if it is under the catch-up window late, else it is skipped with a note.
     teams_tasks_tick_seconds: float = 30.0
     teams_tasks_catch_up_hours: float = 6.0
+    # The watches loop (step 14) ticks this often; each watch is checked on its kind's cadence
+    # (deliveries, routes and measures every 60 s, products, locations and zones every 300 s). A
+    # downgrade (a tier going down) must hold for the settle time before it is a change, so a
+    # bouncing tier is one event. A person keeps at most this many active watches.
+    teams_watches_tick_seconds: float = 30.0
+    teams_watches_settle_seconds: float = 120.0
+    teams_watches_limit: int = 10
 
     # --- HTTP API callers (app/api/service_auth.py). Every route under /api/v1 needs a bearer token
     # from this list, `name=token,name=token`; the name says which system is calling. Names listed

@@ -166,35 +166,6 @@ async def test_a_task_missed_by_more_than_the_window_is_noted_not_fired_and_a_po
         assert row.last_result["text"] == "skipped: the advisory is resolved"
 
 
-async def test_a_condition_schedule_fires_when_the_figure_crosses_and_then_waits_its_cooldown():
-    async with async_session() as db:
-        await _reminder(db, kind="schedule", title="Fill rate warning",
-                        when={"kind": "condition", "metric": "fill_rate", "op": "<", "value": 0.97, "cooldown_minutes": 60})
-        await db.commit()
-    figures = {"BRI": 0.99}
-    sent = []
-
-    async def read_fill_rate(cc, site_id):
-        return figures.get(site_id)
-
-    async def run_query(task):
-        return {"answer": "fill rate 95.0%", "blocks": []}
-
-    async def enqueue(event):
-        sent.append(event)
-        return [uuid.uuid4()]
-
-    assert await runner.tick(None, run_query=run_query, enqueue=enqueue, read_fill_rate=read_fill_rate, only=[CC], now=NOW) == {}
-    figures["BRI"] = 0.95
-    assert await runner.tick(None, run_query=run_query, enqueue=enqueue, read_fill_rate=read_fill_rate, only=[CC], now=NOW + timedelta(minutes=1)) == {CC: 1}
-    # still below, inside the cooldown: nothing; after it: again
-    assert await runner.tick(None, run_query=run_query, enqueue=enqueue, read_fill_rate=read_fill_rate, only=[CC], now=NOW + timedelta(minutes=30)) == {}
-    assert await runner.tick(None, run_query=run_query, enqueue=enqueue, read_fill_rate=read_fill_rate, only=[CC], now=NOW + timedelta(minutes=62)) == {CC: 1}
-    assert sent == []  # aimed at "me": nothing goes to the channel
-    async with async_session() as db:
-        row = (await db.execute(select(TeamsTask).where(TeamsTask.customer_code == CC))).scalar_one()
-        assert row.status == "active" and row.fire_count == 2 and row.next_fire_at is None
-
 
 async def _group(db, name="Ops", topics=("schedule",)) -> tuple[str, str]:
     channel = CustomerNotificationChannel(customer_code=CC, channel_type="teams", name=f"{name}-channel", config={})
@@ -330,9 +301,10 @@ async def test_the_assistant_proposes_the_two_forms_from_what_was_said():
     assert forms.clock("4pm", "08:00") == "16:00" and forms.clock("quarter to six", "08:00") == "08:00"
     reminder = forms.reminder_from_form({"title": "x", "date": "2026-11-13", "time": "17:45", "repeat": "Every weekday at this time"}, tz=TZ)
     assert reminder["when"] == {"kind": "recurring", "weekdays": [0, 1, 2, 3, 4], "time": "17:45"}
-    schedule = forms.schedule_from_form({"what": "x", "how_often": "When fill rate drops below…", "threshold": "97"}, tz=TZ)
-    assert schedule["when"] == {"kind": "condition", "metric": "fill_rate", "op": "<", "value": 0.97}
-    assert specs.when_text(schedule["when"], TZ) == "Whenever fill rate drops below 97%"
+    # a condition is a watch since step 14: the schedule form no longer offers it
+    assert len(forms.HOW_OFTEN) == 4
+    with pytest.raises(ValueError, match="once or recurring"):
+        specs.validate({"kind": "condition", "metric": "fill_rate", "op": "<", "value": 0.97})
 
 
 async def test_the_suggestions_come_from_the_persons_own_habit():

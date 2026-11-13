@@ -169,6 +169,7 @@ def build_rows(rows: list[AnalyticsAtRiskDelivery], now: datetime, tz: ZoneInfo)
             reopened = TIER_ORDER.get(row.tier, 0) > TIER_ORDER.get(row.checked_tier or "none", 0)
         out.append({
             "delivery_number": row.delivery_number, "route": row.route or "–", "departure_at": clock_at.isoformat(),
+            "departure_date": row.departure_date.isoformat() if row.departure_date else None, "warehouse": row.warehouse,
             "departure_text": f"van usually ready {_hhmm(clock_at, tz)}" if row.usual_ready_source == "learned" else f"WMS departure {_hhmm(clock_at, tz)}",
             "minutes_to_departure": int(minutes.to_integral_value(rounding="ROUND_HALF_UP")),
             "minutes_text": minutes_text(minutes), "tier": row.tier, "tier_text": TIER_TEXT.get(row.tier, row.tier),

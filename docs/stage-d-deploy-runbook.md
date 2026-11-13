@@ -210,3 +210,21 @@ PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT event_typ
 Expected: per group and hour, `sent` at most `max_per_hour`, at most one `notice` and one `summary`; `advisory` events at most the cap per group per hour, plus `advisory_cap` and `advisory_summary` at most one each.
 
 Rollback: the previous checkout and a restart; `alembic downgrade d9f4a7b1e265` drops the ledger and the column. The step 12 runner then announces every finding a group takes, with no cap: delete the groups first if the channel must stay quiet.
+
+## D14a: the watchlist (watches, the tick, the rows the edge reads)
+
+What it adds: migration `f1b6c9d3e487` (`watches`, `watch_events`, `watch_not_now`; any remaining condition schedule is stopped with a note), `app/services/watchlist/` (`registry.py` the pure rules: six kinds, cadences, status sets, default alerts, which changes are alerts, which are silent; `readers.py` one read per kind for all the watched things of a customer; `store.py` the rows, the limit of ten with the quietest first for the swap, the events, the Not now answers; `runner.py` the tick; `mirror.py` the `USER#<id>#WATCHES` and `WATCHABLES` rows; `commands.py` `watch_add` / `watch_update` / `watch_stop` / `watch_seen` / `watch_not_now`; `search.py` resolving ids and words; `suggest.py` the Suggested box from open HIGH advisories), the consumer's `_watches_loop` (settings `teams_watches_tick_seconds` 30, `teams_watches_settle_seconds` 120, `teams_watches_limit` 10), the Home snapshot keeping each site's fill rate in process for the measure watches (`home_snapshot.latest_fill_rate`), the Home rows carrying `departure_date`, `warehouse` and the attention items an `entity` for the eye toggle.
+Retired: the condition schedules of step 10 (`when.kind == "condition"`, `_read_fill_rate`, `check_conditions`, the schedule form's "When fill rate drops below…"); a condition is a measure watch now.
+Contract 3.14 synced from the edge (the watch kinds, the `entities`, `watch_suggestion` and `choice` blocks, the two rows).
+
+Deploy: `./deploy.sh` (the migration runs inside it).
+The watches loop has nothing to do until the edge step 14b image lets people add watches; the `WATCHABLES` row is written for every bound customer from the first minute.
+Check on the server:
+
+```
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT version_num FROM alembic_version;" -c "SELECT count(*) FROM watches;" -c "SELECT count(*) FROM teams_tasks WHERE \"when\"->>'kind' = 'condition' AND status = 'active';"
+```
+
+Expected: `f1b6c9d3e487`, 0 watches, 0 active condition schedules.
+
+Rollback: the previous checkout and a restart; `alembic downgrade e0a5b8c2d376` drops the three tables (a stopped condition schedule stays stopped).

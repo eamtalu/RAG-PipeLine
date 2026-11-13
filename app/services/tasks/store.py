@@ -40,9 +40,9 @@ async def create(db: AsyncSession, customer_code: str, *, owner_object_id: str, 
         raise ValueError("target must be me or channel; show_as table, chart or summary")
     spec = specs.validate(when)
     first = specs.next_fire(spec, now, tz)
-    if first is None and spec["kind"] != "condition":
+    if first is None:
         raise ValueError("that time has already passed")
-    if kind == "schedule" and not (query_text or "").strip() and spec["kind"] != "condition":
+    if kind == "schedule" and not (query_text or "").strip():
         raise ValueError("a schedule needs the question it runs")
     task = TeamsTask(id=uuid.uuid4(), customer_code=customer_code, owner_object_id=owner_object_id,
                      owner_name=owner_name, kind=kind, title=title.strip()[:200], note=(note or None),
@@ -81,13 +81,6 @@ async def claim_due(db: AsyncSession, *, now: datetime, limit: int = 50) -> list
         .order_by(TeamsTask.next_fire_at).limit(limit).with_for_update(skip_locked=True))).scalars())
 
 
-async def condition_tasks(db: AsyncSession, customer_code: str) -> list[TeamsTask]:
-    """The active condition schedules of a customer, which the tick evaluates every time."""
-    rows = (await db.execute(
-        select(TeamsTask).where(TeamsTask.customer_code == customer_code, TeamsTask.status == "active",
-                                TeamsTask.kind == "schedule"))).scalars()
-    return [t for t in rows if t.when.get("kind") == "condition"]
-
 
 def advance(task: TeamsTask, *, fired_at: datetime, tz: ZoneInfo) -> None:
     """Book the next firing after one, or close the task when there is none (a once reminder is
@@ -99,7 +92,7 @@ def advance(task: TeamsTask, *, fired_at: datetime, tz: ZoneInfo) -> None:
     following = specs.next_fire(task.when, fired_at, tz)
     if task.until is not None and following is not None and following > task.until:
         following = None
-    if following is None and task.when.get("kind") != "condition":
+    if following is None:
         task.status = "done" if task.kind == "reminder" else "stopped"
         task.done_at = fired_at
         task.next_fire_at = None
@@ -122,7 +115,7 @@ def apply(task: TeamsTask, action: str, fields: dict[str, Any], *, now: datetime
     if action == "resume":
         task.status = "active"
         task.next_fire_at = specs.next_fire(task.when, now, tz)
-        if task.next_fire_at is None and task.when.get("kind") != "condition":
+        if task.next_fire_at is None:
             raise ValueError("that time has already passed; edit the task first")
         return f"resumed · {task.title}"
     if action == "run_now":

@@ -1,6 +1,7 @@
 """Actions a Teams job can carry instead of a question (chunk 150).
 
-Today there is one family: marking a delivery on the at-risk board as checked, or taking that back.
+The at-risk check is answered here; every other family (access, advisories, tasks, groups, the
+watchlist) lives with its own service and is routed to it.
 The consumer hands the whole job here; this module opens its own short session, calls the same
 store function the web API uses, and returns the one-line confirmation the tab shows. A refused
 command raises, and the consumer turns that into a short error sentence.
@@ -16,6 +17,7 @@ from app.services.access import commands as access_commands
 from app.services.advisories import actions as advisory_actions
 from app.services.tasks import commands as task_commands
 from app.services.groups import commands as group_commands
+from app.services.watchlist import commands as watch_commands
 from app.services.teams.contracts import ACCESS_COMMAND_KINDS, QuestionJob
 
 
@@ -32,6 +34,9 @@ async def run_command(job: QuestionJob) -> str:
     command = job.command
     if command is None:
         raise ValueError("the job carries no command")
+    # the watchlist (step 14) lives with the watchlist service
+    if command.kind in watch_commands.KINDS:
+        return await watch_commands.run(job)  # a CommandOutcome: the line, a receipt or a choice
     # the groups and channels (step 12) live with the groups service
     if command.kind in group_commands.KINDS:
         return await group_commands.run(job)  # a CommandOutcome: the line and the receipt

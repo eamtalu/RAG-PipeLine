@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from app.services.teams.contracts import FormBlock, FormField
 
 REPEATS = ["Just this once", "Every day at this time", "Every weekday at this time"]
-HOW_OFTEN = ["Every weekday (Mon – Fri)", "Every day", "Once a week", "Once only", "When fill rate drops below…"]
+HOW_OFTEN = ["Every weekday (Mon – Fri)", "Every day", "Once a week", "Once only"]
 WEEKDAY_OPTIONS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 SEND_TO = ["Me, in the app"]  # plus one entry per group the person may send to (step 12)
 SHOW_AS = ["A table", "A graph", "A short summary"]
@@ -83,8 +83,7 @@ def schedule_form(args: Mapping[str, Any], *, now: datetime, tz: ZoneInfo, last_
     weekdays at 16:00, to me, as a table)
     """
     often = str(args.get("how_often") or "").lower()
-    how = (HOW_OFTEN[4] if "below" in often or "drops" in often or "when" in often
-           else HOW_OFTEN[3] if "once" in often and "week" not in often
+    how = (HOW_OFTEN[3] if "once" in often and "week" not in often
            else HOW_OFTEN[2] if "week" in often and "day" not in often
            else HOW_OFTEN[1] if "every day" in often or "daily" in often
            else HOW_OFTEN[0])
@@ -105,8 +104,6 @@ def schedule_form(args: Mapping[str, Any], *, now: datetime, tz: ZoneInfo, last_
                   value=weekday, required=False),
         FormField(name="time", label="At what time", kind="text", required=False,
                   value=clock(args.get("time"), "08:00"), placeholder="HH:MM"),
-        FormField(name="threshold", label="Fill rate below (%)", kind="number", required=False,
-                  value=str(args.get("threshold") or "").strip() or None),
         FormField(name="send_to", label="Send it to", kind="select", options=options, value=target),
         FormField(name="show_as", label="Show it as", kind="select", options=SHOW_AS, value=show),
         FormField(name="until", label="Keep going until", kind="date", required=False,
@@ -155,14 +152,10 @@ def schedule_from_form(values: Mapping[str, Any], *, tz: ZoneInfo, groups: list[
     what = str(values.get("what") or "").strip()
     how = str(values.get("how_often") or HOW_OFTEN[0])
     at = clock(values.get("time"), "08:00")
-    if how == HOW_OFTEN[4]:
-        raw = str(values.get("threshold") or "").strip().rstrip("%")
-        value = float(raw) / 100 if raw else 0.97
-        when: dict[str, Any] = {"kind": "condition", "metric": "fill_rate", "op": "<", "value": value}
-    elif how == HOW_OFTEN[3]:
+    if how == HOW_OFTEN[3]:
         day = date.fromisoformat(str(values.get("until") or "").strip()) if values.get("until") else None
         day = day or date.today()
-        when = {"kind": "once", "at": datetime.combine(day, time.fromisoformat(at), tzinfo=tz).isoformat()}
+        when: dict[str, Any] = {"kind": "once", "at": datetime.combine(day, time.fromisoformat(at), tzinfo=tz).isoformat()}
     elif how == HOW_OFTEN[2]:
         weekday = str(values.get("weekday") or "Monday")
         when = {"kind": "recurring", "weekdays": [WEEKDAY_OPTIONS.index(weekday) if weekday in WEEKDAY_OPTIONS else 0],
