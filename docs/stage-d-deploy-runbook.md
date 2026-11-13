@@ -228,3 +228,14 @@ PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT version_n
 Expected: `f1b6c9d3e487`, 0 watches, 0 active condition schedules.
 
 Rollback: the previous checkout and a restart; `alembic downgrade e0a5b8c2d376` drops the three tables (a stopped condition schedule stays stopped).
+
+## D14c: the watchlist in Ask (entities, the suggestion, the watch tools, the choice)
+
+What it adds: `app/agent/presentation/entities.py` (the watchable things an answer was built on, read from the at-risk, releases, aggregate and advisory tool results in the trace, never from the text; the `entities` block leads the answer's blocks, `MAX_BLOCKS` 6), `app/services/watchlist/ask_hooks.py` (after the agent returns, each entity is marked watched or not and out of reach; at most one `watch_suggestion` for the thing the question named, never when watched, after Not now within a day, when the list is full, on a turn that already acts; a failure never costs the answer), `app/services/analytics_agent/watch_tools.py` (`watch_now` and `stop_watching` on the actions namespace: a plain watch is added at once as the asker and answers with the receipt, a rule with a level is the `add_watch` form, several matches or a rule without a level is one `choice` whose options carry the ready command, nothing matching or no access is a problem the model reads out), `app/services/watchlist/forms.py` (the add_watch form and how a confirmed one is read back; `watch_add` takes `form_id` + `values`), `framed_question` for `context.choice` (the words answer the model's own question), the profile's "Watchlist" paragraph (snapshot regenerated), and `watch_commands.run(job, db=…)` running on the caller's session (two sessions deadlocked on the lazily seeded access matrix).
+No migration. No new setting.
+
+Deploy: `./deploy.sh`, before the edge step 14c image (an older edge hides the three blocks).
+Check in Teams after the edge: Ask "Where is delivery <a live number>?" (chips plus one suggestion), "watch route <code>" (a receipt), "tell me if fill rate drops below 95%" (the form), "stop watching <it>" (a receipt). On the server, `SELECT created_via, count(*) FROM watches GROUP BY 1;` shows `ask` once the first one is added that way.
+
+Rollback: the previous checkout and a restart (watches added through Ask stay and keep being checked).
+

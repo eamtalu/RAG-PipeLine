@@ -47,6 +47,7 @@ from app.services.access import mirror as access_mirror
 from app.services.access import records as access_records
 from app.services.access import users as access_users
 from app.services.advisories import runner as advisories_runner
+from app.services.watchlist import ask_hooks
 from app.services.watchlist import mirror as watch_mirror
 from app.services.watchlist import runner as watch_runner
 from app.services.groups import mirror as groups_mirror
@@ -95,10 +96,17 @@ def framed_question(job: QuestionJob) -> str:
     >>> framed_question(QuestionJob(job_id="j", tenant_id="t", customer_code="c", conversation_id="c",
     ...                 sender_object_id="u", question="How many?"))
     'How many?'
+    >>> framed_question(QuestionJob(job_id="j", tenant_id="t", customer_code="c", conversation_id="c",
+    ...                 sender_object_id="u", question="85", context={"choice": {"question": "At what level?"}}))
+    '85\n\n(This answers your question "At what level?": carry on with what you were doing, using this answer; do not ask it again.)'
     """
     advisory_id = (job.context or {}).get("advisory_id")
     if advisory_id:
         return f"{job.question}\n\n(About advisory {advisory_id}: call explain_advisory with this id first.)"
+    choice = (job.context or {}).get("choice")
+    if isinstance(choice, dict) and choice.get("question"):
+        return (f"{job.question}\n\n(This answers your question \"{str(choice['question'])[:200]}\": carry on with "
+                "what you were doing, using this answer; do not ask it again.)")
     return job.question
 
 
@@ -121,7 +129,9 @@ async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> di
     result = await run_request(request, runtime=runtime, prior_turns=tuple(history),
                                trace_store=_TRACES, admission=_ADMISSION, usage_store=_USAGE,
                                on_event=progress.on_event if progress is not None else None)
-    return result.to_legacy_dict()
+    # Step 3: Mark the answer's entities as watched or not and add the one suggestion the
+    # watchlist's rules allow (step 14c); a failure here never costs the answer
+    return await ask_hooks.decorate_safely(result.to_legacy_dict(), job)
 
 
 async def _load_history(conversation_id: str, customer_code: str) -> list[dict]:

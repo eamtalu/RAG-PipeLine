@@ -20,7 +20,7 @@ from app.services.access import audit, records, users
 from app.services.access.commands import CommandOutcome, Refused, receipt
 from app.services.teams.contracts import QuestionJob
 from app.services.teams.mirror import MirrorWriter, build_mirror_writer_from_settings
-from app.services.watchlist import registry, search, store
+from app.services.watchlist import forms, registry, search, store
 from app.services.watchlist import mirror as watch_mirror
 from app.settings import settings
 
@@ -31,8 +31,10 @@ FORM_ID = "add_watch"
 
 
 async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | None = None,
-              now: datetime | None = None) -> CommandOutcome:
+              now: datetime | None = None, db: AsyncSession | None = None) -> CommandOutcome:
     """Run one watchlist command for the job's sender; the line the page shows, with its blocks.
+    With `db` the command runs and commits on that session (the Ask tools' own, step 14c), because
+    a second session would wait on the rows the first one has not committed yet.
 
     (watch_add delivery D-1) -> "Watching D-1 · Riverside Kitchens · 7 of 10 places used" + receipt with Undo ;
     (11th) -> "Your watchlist is full (10 of 10)" + choice block ; (another site) -> Refused
@@ -40,35 +42,43 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
     command = job.command
     if command is None or command.kind not in KINDS:
         raise ValueError("the job carries no watchlist command")
+    if db is not None:
+        return await _run_on(db, job, mirror=mirror, now=now)
+    factory = session_factory or async_session
+    async with factory() as own:
+        return await _run_on(own, job, mirror=mirror, now=now)
+
+
+async def _run_on(db: AsyncSession, job: QuestionJob, *, mirror: MirrorWriter | None, now: datetime | None) -> CommandOutcome:
+    command = job.command
+    assert command is not None
     now = now or datetime.now(timezone.utc)
     actor = users.Actor(job.sender_object_id, job.sender_name)
-    factory = session_factory or async_session
-    async with factory() as db:
-        # Step 1: The actor's own record decides, so a forged job cannot watch for someone else or
-        # watch a site the role may not see
-        record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
-        if record is None or not record.is_active:
-            raise Refused("you have no active access record")
-        tz = ZoneInfo(await get_customer_timezone(db, job.customer_code))
-        payload = dict(command.payload)
-        handler = _HANDLERS[command.kind]
+    # Step 1: The actor's own record decides, so a forged job cannot watch for someone else or
+    # watch a site the role may not see
+    record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
+    if record is None or not record.is_active:
+        raise Refused("you have no active access record")
+    tz = ZoneInfo(await get_customer_timezone(db, job.customer_code))
+    payload = dict(command.payload)
+    handler = _HANDLERS[command.kind]
+    try:
+        text, blocks, subject_id, detail = await handler(db, job, record, actor, payload, now, tz)
+    except (search.NotFound, search.NoAccess, ValueError) as exc:
+        raise Refused(str(exc))
+    await audit.record_event(
+        db, job.customer_code, actor_object_id=actor.object_id, actor_name=actor.name, action=f"{command.kind}",
+        decision="allowed", subject_kind="watch", subject_id=subject_id, site_id=job.site_id, request_id=job.job_id,
+        text=f"{actor.name or actor.object_id}: {text}", detail=detail, at=now)
+    await db.commit()
+    # Step 2: Mirror the person's row now, so the tab and the eye toggles follow at once
+    writer = mirror if mirror is not None else build_mirror_writer_from_settings()
+    if writer is not None:
         try:
-            text, blocks, subject_id, detail = await handler(db, job, record, actor, payload, now, tz)
-        except (search.NotFound, search.NoAccess, ValueError) as exc:
-            raise Refused(str(exc))
-        await audit.record_event(
-            db, job.customer_code, actor_object_id=actor.object_id, actor_name=actor.name, action=f"{command.kind}",
-            decision="allowed", subject_kind="watch", subject_id=subject_id, site_id=job.site_id, request_id=job.job_id,
-            text=f"{actor.name or actor.object_id}: {text}", detail=detail, at=now)
-        await db.commit()
-        # Step 2: Mirror the person's row now, so the tab and the eye toggles follow at once
-        writer = mirror if mirror is not None else build_mirror_writer_from_settings()
-        if writer is not None:
-            try:
-                await watch_mirror.mirror_user(db, writer, job.customer_code, actor.object_id, now=now)
-            except Exception:
-                logger.warning("watches of %s not mirrored after %s", actor.object_id, command.kind, exc_info=True)
-        return CommandOutcome(text, tuple(blocks))
+            await watch_mirror.mirror_user(db, writer, job.customer_code, actor.object_id, now=now)
+        except Exception:
+            logger.warning("watches of %s not mirrored after %s", actor.object_id, command.kind, exc_info=True)
+    return CommandOutcome(text, tuple(blocks))
 
 
 def _until(raw, now: datetime, tz: ZoneInfo) -> datetime | None:
@@ -110,6 +120,17 @@ def full_choice(watches: list[Watch], limit: int, wanted: dict, label: str) -> d
 
 async def _add(db: AsyncSession, job: QuestionJob, record: records.AccessRecord, actor: users.Actor, payload: dict,
                now: datetime, tz: ZoneInfo):
+    # Step 0: A confirmed Ask form (step 14c) names the thing in words; find it again within the
+    # person's sites and read the rule, so one path adds every watch
+    if payload.get("form_id") == forms.FORM_ID:
+        values = dict(payload.get("values") or {})
+        form_kind = forms.kind_from_form(values)
+        found = await search.find(db, job.customer_code, record, str(values.get("what") or ""), kind=form_kind, tz=tz, limit=1)
+        if not found:
+            raise ValueError(f"nothing called {values.get('what')!r} to watch")
+        payload = {**payload, "kind": found[0].kind, "entity_id": found[0].entity_id,
+                   "alert": forms.alert_from_form(found[0].kind, values), "until": forms.until_from_form(values),
+                   "via": payload.get("via") or "ask"}
     kind = str(payload.get("kind") or "").strip().lower()
     entity_id = str(payload.get("entity_id") or "").strip()
     resolved = await search.resolve(db, job.customer_code, record, kind, entity_id, tz=tz)

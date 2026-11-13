@@ -86,10 +86,11 @@ def presentation_namespace(enabled: bool) -> Namespace:
 
 
 def actions_namespace(enabled: bool, session_factory: SessionFactory = async_session) -> Namespace:
-    """The action tools (step 8: propose_create_user), or an empty namespace while the presentation
-    switch is off, so the profile may always list it. The runner reads the asker's own record.
+    """The action tools (step 8: the three propose tools; step 14c: watch_now and stop_watching), or
+    an empty namespace while the presentation switch is off, so the profile may always list it.
+    The runner reads the asker's own record.
 
-    (True) -> Namespace("actions", 1 spec) ; (False) -> Namespace("actions", no specs)
+    (True) -> Namespace("actions", 5 specs) ; (False) -> Namespace("actions", no specs)
     """
 
     async def run(
@@ -97,7 +98,8 @@ def actions_namespace(enabled: bool, session_factory: SessionFactory = async_ses
     ) -> str:
         async with session_factory() as db:
             return await action_tools.run_action_tool(
-                db, context.tenant, request.principal.object_id, request.site_id, name, args)
+                db, context.tenant, request.principal.object_id, request.site_id, name, args,
+                actor_name=getattr(request.principal, "display_name", None))
 
     specs = (
         tuple(ToolSpec.from_dict("actions", s) for s in action_tools.ACTION_TOOLS) if enabled else ()
