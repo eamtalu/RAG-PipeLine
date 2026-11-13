@@ -379,7 +379,9 @@ class GroundedAgent:
             stop_reason = "max_iterations"
         final = next((m for m in reversed(seen) if isinstance(m, AIMessage) and not m.tool_calls), None)
         answer = text_of(final) if final is not None else ""
-        if stop_reason == "max_iterations" and not answer:
+        # A draft that ran out of tool rounds is not trusted, even when the model wrote a sentence:
+        # on 13 November it ended an "Ask why" with words about a reminder form nobody asked for
+        if stop_reason == "max_iterations":
             answer = ("I could not settle on an answer within the allowed number of tool calls. "
                       "Ask a narrower question, or name the field or window you want.")
         calls = tool_trace(seen)

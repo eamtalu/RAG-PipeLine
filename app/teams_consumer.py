@@ -84,6 +84,22 @@ def _conversation_type(source: str) -> ConversationType:
     return "personal"  # "group" and "channel" arrive when the edge sends them (contract v3)
 
 
+def framed_question(job: QuestionJob) -> str:
+    r"""The question as the agent reads it: the person's words, and the context the page sent.
+
+    >>> framed_question(QuestionJob(job_id="j", tenant_id="t", customer_code="c", conversation_id="c",
+    ...                 sender_object_id="u", question="Why is this empty?", context={"advisory_id": "a-1"}))
+    'Why is this empty?\n\n(About advisory a-1: call explain_advisory with this id first.)'
+    >>> framed_question(QuestionJob(job_id="j", tenant_id="t", customer_code="c", conversation_id="c",
+    ...                 sender_object_id="u", question="How many?"))
+    'How many?'
+    """
+    advisory_id = (job.context or {}).get("advisory_id")
+    if advisory_id:
+        return f"{job.question}\n\n(About advisory {advisory_id}: call explain_advisory with this id first.)"
+    return job.question
+
+
 async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> dict:
     """One Teams question answered under a context built from the job; the legacy result dict.
 
@@ -95,7 +111,7 @@ async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> di
         request_id=job.job_id, tenant=job.customer_code,
         principal=Principal(tenant=job.customer_code, object_id=job.sender_object_id,
                             display_name=job.sender_name),
-        profile="analytics", text=job.question, conversation_id=job.conversation_id,
+        profile="analytics", text=framed_question(job), conversation_id=job.conversation_id,
         conversation_type=_conversation_type(job.source), site_id=job.site_id)
     # Step 2: Name the profile; it lists its namespaces, and the registry binds their tools.
     runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),

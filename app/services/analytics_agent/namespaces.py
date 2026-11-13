@@ -13,7 +13,7 @@ from typing import Any, Mapping
 from app.agent.capabilities.spec import Namespace, ToolSpec
 from app.agent.contracts import AgentRequest, ExecutionContext
 from app.config.database import SessionFactory, async_session
-from app.services.analytics_agent import action_tools, at_risk_tools, presentation_tools
+from app.services.analytics_agent import action_tools, advisory_tools, at_risk_tools, presentation_tools
 from app.services.analytics_agent.tools import RECIPES, RELEASE_TOOLS, run_release_tool
 from app.services.log_agent import tools as log_tools
 
@@ -54,10 +54,13 @@ def analytics_namespace(session_factory: SessionFactory = async_session) -> Name
         async with session_factory() as db:
             if name in _AT_RISK_NAMES:
                 return await at_risk_tools.run_at_risk_tool(name, dict(args), db, context.tenant)
+            if name in advisory_tools.ADVISORY_TOOL_NAMES:
+                return await advisory_tools.run_advisory_tool(db, context.tenant, name, args)
             return await run_release_tool(name, dict(args), db, context.tenant)
 
     specs = tuple(
-        ToolSpec.from_dict("analytics", s) for s in (*RELEASE_TOOLS, *at_risk_tools.AT_RISK_TOOLS)
+        ToolSpec.from_dict("analytics", s)
+        for s in (*RELEASE_TOOLS, *at_risk_tools.AT_RISK_TOOLS, *advisory_tools.ADVISORY_TOOLS)
     )
     return Namespace(name="analytics", specs=specs, runner=run, tool_text=ANALYTICS_TOOL_TEXT)
 
