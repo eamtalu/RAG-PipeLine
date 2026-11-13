@@ -110,3 +110,11 @@ What it adds: the five access commands on the question queue (`access_set_user`,
 Deploy: `./deploy.sh`. Then, once the edge step 7c image is live, open the Admin tab as Admin, click one matrix cell: the answer line arrives within a few seconds and the journal shows `audit access.matrix_changed`.
 
 Rollback: the previous checkout and a restart; the edge's commands are then refused as unknown until the edge is rolled back too.
+
+## D7d: the executive Home
+
+What it adds: `app/services/teams/exec_home.py` computes, every `TEAMS_EXEC_HOME_SECONDS` (300), the operation across every site for four periods (fill rate against the same stretch of the period before, on-time dispatch from the closed departures, lines, deliveries, pickers), the 30-day fill-rate series per site and the decisions waiting, and mirrors it as `EYE#<customer>` / `EXEC#HOME` (TTL two hours). `TEAMS_FILL_RATE_TARGET` (0.98) is the target the tiles show. The at-risk history counts take a site. No migration, no flag.
+
+Deploy: `./deploy.sh`. Within five minutes `EYE#tmp-live` / `EXEC#HOME` exists; the journal shows no `executive home … failed` line. To see the page, give a test user the Executive role: `teams_users.py set tmp-live <object id> "<name>" --role executive --all-sites`.
+
+Rollback: the previous checkout and a restart; the row expires within two hours.
