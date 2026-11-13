@@ -67,15 +67,15 @@ async def assess_routes(db: AsyncSession, customer_code: str, watches: list[Watc
                                                "lines_total": 0, "lines_short": 0, "next_departure": None, "closed_today": 0,
                                                "late_today": 0, "warehouses": []}
         status = registry.route_status(agg["by_tier"], agg["closed_today"])
-        behind = sum(n for t, n in agg["by_tier"].items() if t in ("at_risk", "left_behind"))
         value = {k: v for k, v in agg.items() if k != "warehouses"}
         if status == "idle":
             summary = "no deliveries on it yet today"
         elif status == "done":
             summary = f"{agg['closed_today']} gone today" + (f" · {agg['late_today']} late" if agg["late_today"] else " · all in time")
         else:
-            summary = (f"{agg['open']} open · {registry.lines_words(agg['lines_picked'], agg['lines_total'], None, short=agg['lines_short'])}"
-                       + (f" · {behind} behind" if behind else "") + f" · next leaves {registry.when_words(agg['next_departure'], now, tz)}")
+            summary = (f"{registry.route_words(agg['open'], agg['by_tier'])} · "
+                       f"{registry.lines_words(agg['lines_picked'], agg['lines_total'], None, short=agg['lines_short'])}"
+                       f" · next leaves {registry.when_words(agg['next_departure'], now, tz)}")
         out[w.id] = Assessment(status, value, summary)
     return out
 
