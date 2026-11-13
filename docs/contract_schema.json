@@ -70,10 +70,20 @@
       "sk": "USER#{user_id}#TASKS",
       "ttl_seconds": null
     },
+    "user_watches": {
+      "pk": "EYE#{customer_code}",
+      "sk": "USER#{user_id}#WATCHES",
+      "ttl_seconds": null
+    },
     "users": {
       "pk": "EYE#{customer_code}",
       "sk": "USERS",
       "ttl_seconds": null
+    },
+    "watchables": {
+      "pk": "EYE#{customer_code}",
+      "sk": "WATCHABLES",
+      "ttl_seconds": 600
     }
   },
   "mirror_schema_version": 1,
@@ -202,6 +212,166 @@
             "values"
           ],
           "title": "ChartSeries",
+          "type": "object"
+        },
+        "ChoiceBlock": {
+          "description": "One question with answers to tap (and a typed answer when allowed): which of two zones,\nwhat level, which watch to swap out.",
+          "properties": {
+            "allow_typed": {
+              "default": true,
+              "title": "Allow Typed",
+              "type": "boolean"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/$defs/ChoiceOption"
+              },
+              "maxItems": 12,
+              "minItems": 1,
+              "title": "Options",
+              "type": "array"
+            },
+            "question": {
+              "maxLength": 300,
+              "title": "Question",
+              "type": "string"
+            },
+            "type": {
+              "const": "choice",
+              "default": "choice",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "question",
+            "options"
+          ],
+          "title": "ChoiceBlock",
+          "type": "object"
+        },
+        "ChoiceOption": {
+          "properties": {
+            "command": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Command"
+            },
+            "detail": {
+              "default": "",
+              "maxLength": 200,
+              "title": "Detail",
+              "type": "string"
+            },
+            "id": {
+              "maxLength": 128,
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "maxLength": 200,
+              "title": "Label",
+              "type": "string"
+            },
+            "suggested": {
+              "default": false,
+              "title": "Suggested",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "ChoiceOption",
+          "type": "object"
+        },
+        "EntitiesBlock": {
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/$defs/EntityRef"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "title": "Items",
+              "type": "array"
+            },
+            "type": {
+              "const": "entities",
+              "default": "entities",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "title": "EntitiesBlock",
+          "type": "object"
+        },
+        "EntityRef": {
+          "properties": {
+            "can_watch": {
+              "default": true,
+              "title": "Can Watch",
+              "type": "boolean"
+            },
+            "id": {
+              "maxLength": 128,
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "delivery",
+                "route",
+                "location",
+                "zone",
+                "product",
+                "measure"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "label": {
+              "maxLength": 200,
+              "title": "Label",
+              "type": "string"
+            },
+            "site_id": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Site Id"
+            },
+            "watched": {
+              "default": false,
+              "title": "Watched",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "label"
+          ],
+          "title": "EntityRef",
           "type": "object"
         },
         "Evidence": {
@@ -563,6 +733,37 @@
           ],
           "title": "TextBlock",
           "type": "object"
+        },
+        "WatchSuggestionBlock": {
+          "description": "At most one per answer: an offer to watch the thing the question was about.",
+          "properties": {
+            "default_alert": {
+              "maxLength": 120,
+              "title": "Default Alert",
+              "type": "string"
+            },
+            "entity": {
+              "$ref": "#/$defs/EntityRef"
+            },
+            "text": {
+              "maxLength": 300,
+              "title": "Text",
+              "type": "string"
+            },
+            "type": {
+              "const": "watch_suggestion",
+              "default": "watch_suggestion",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "entity",
+            "text",
+            "default_alert"
+          ],
+          "title": "WatchSuggestionBlock",
+          "type": "object"
         }
       },
       "description": "The worker's answer, POSTed to the edge at /internal/answers.",
@@ -603,11 +804,14 @@
             "discriminator": {
               "mapping": {
                 "chart": "#/$defs/ChartBlock",
+                "choice": "#/$defs/ChoiceBlock",
+                "entities": "#/$defs/EntitiesBlock",
                 "followups": "#/$defs/FollowupsBlock",
                 "form": "#/$defs/FormBlock",
                 "receipt": "#/$defs/ReceiptBlock",
                 "table": "#/$defs/TableBlock",
-                "text": "#/$defs/TextBlock"
+                "text": "#/$defs/TextBlock",
+                "watch_suggestion": "#/$defs/WatchSuggestionBlock"
               },
               "propertyName": "type"
             },
@@ -629,6 +833,15 @@
               },
               {
                 "$ref": "#/$defs/FollowupsBlock"
+              },
+              {
+                "$ref": "#/$defs/EntitiesBlock"
+              },
+              {
+                "$ref": "#/$defs/WatchSuggestionBlock"
+              },
+              {
+                "$ref": "#/$defs/ChoiceBlock"
               }
             ]
           },
@@ -846,7 +1059,12 @@
                 "group_leave",
                 "channel_set",
                 "channel_delete",
-                "channel_test"
+                "channel_test",
+                "watch_add",
+                "watch_update",
+                "watch_stop",
+                "watch_seen",
+                "watch_not_now"
               ],
               "title": "Kind",
               "type": "string"
@@ -1007,5 +1225,5 @@
       "type": "object"
     }
   },
-  "revision": "3.13"
+  "revision": "3.14"
 }

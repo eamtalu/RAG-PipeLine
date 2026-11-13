@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.13"
+CONTRACT_REVISION = "3.14"
 
 
 def _now() -> datetime:
@@ -44,6 +44,10 @@ def _now() -> datetime:
 #: group_join {group_id} ; group_leave {group_id}
 #: channel_set {channel_id?, name, webhook_url?, channel_type?}
 #: channel_delete {channel_id} ; channel_test {channel_id}
+#: watch_add {kind: delivery | route | location | zone | product | measure, entity_id, alert?, until?:
+#:   end_of_day | 7_days | iso, swap_watch_id?, via?} (step 14; a full list answers with a choice block
+#:   whose options carry the swap) ; watch_update {watch_id, action: set_alert | resume, alert?, until?}
+#: watch_stop {watch_id, via?} ; watch_seen {event_ids?} ; watch_not_now {kind, entity_id}
 ACCESS_COMMAND_KINDS = (
     "access_set_user",
     "access_deactivate_user",
@@ -61,6 +65,11 @@ ACCESS_COMMAND_KINDS = (
     "channel_set",
     "channel_delete",
     "channel_test",
+    "watch_add",
+    "watch_update",
+    "watch_stop",
+    "watch_seen",
+    "watch_not_now",
 )
 
 
@@ -90,6 +99,11 @@ class Command(BaseModel):
         "channel_set",
         "channel_delete",
         "channel_test",
+        "watch_add",
+        "watch_update",
+        "watch_stop",
+        "watch_seen",
+        "watch_not_now",
     ]
     #: The at-risk fields; required for the two at-risk kinds, checked by the backend's runner.
     delivery_number: str | None = Field(default=None, max_length=64)
@@ -136,7 +150,8 @@ class QuestionJob(BaseModel):
     )
     question: str = Field(..., min_length=1)
     #: What the question is about, when the page knows (3.11): {"advisory_id": ...} from "Ask why";
-    #: the backend frames the question with it so the agent reads the advisory first.
+    #: the backend frames the question with it so the agent reads the advisory first. Since 3.14 also
+    #: {"choice": {"question": ..., "text": ...}} when the person typed an answer to a choice block.
     context: dict[str, Any] | None = Field(default=None)
     enqueued_at: datetime = Field(default_factory=_now)
     source: Literal["bot", "tab"] = Field(
@@ -291,8 +306,61 @@ class FollowupsBlock(BaseModel):
     items: list[str] = Field(..., min_length=1, max_length=4)
 
 
+#: The watchlist blocks (step 14). An entity is a watchable thing an answer was built on (from the
+#: query results, never parsed out of the text); the page draws it as a chip with the eye toggle.
+class EntityRef(BaseModel):
+    kind: Literal["delivery", "route", "location", "zone", "product", "measure"]
+    id: str = Field(..., max_length=128)
+    label: str = Field(..., max_length=200)
+    watched: bool = False
+    can_watch: bool = True
+    site_id: str | None = Field(default=None, max_length=16)
+
+
+class EntitiesBlock(BaseModel):
+    type: Literal["entities"] = "entities"
+    items: list[EntityRef] = Field(..., min_length=1, max_length=8)
+
+
+class WatchSuggestionBlock(BaseModel):
+    """At most one per answer: an offer to watch the thing the question was about."""
+
+    type: Literal["watch_suggestion"] = "watch_suggestion"
+    entity: EntityRef
+    text: str = Field(..., max_length=300)
+    default_alert: str = Field(..., max_length=120)
+
+
+class ChoiceOption(BaseModel):
+    id: str = Field(..., max_length=128)
+    label: str = Field(..., max_length=200)
+    detail: str = Field(default="", max_length=200)
+    suggested: bool = False
+    #: A ready command the page runs when the option is tapped (kind + payload), so a tap never
+    #: goes back through the model; absent for an option that only closes the question.
+    command: dict[str, Any] | None = None
+
+
+class ChoiceBlock(BaseModel):
+    """One question with answers to tap (and a typed answer when allowed): which of two zones,
+    what level, which watch to swap out."""
+
+    type: Literal["choice"] = "choice"
+    question: str = Field(..., max_length=300)
+    options: list[ChoiceOption] = Field(..., min_length=1, max_length=12)
+    allow_typed: bool = True
+
+
 Block = Annotated[
-    TextBlock | TableBlock | ChartBlock | FormBlock | ReceiptBlock | FollowupsBlock,
+    TextBlock
+    | TableBlock
+    | ChartBlock
+    | FormBlock
+    | ReceiptBlock
+    | FollowupsBlock
+    | EntitiesBlock
+    | WatchSuggestionBlock
+    | ChoiceBlock,
     Field(discriminator="type"),
 ]
 

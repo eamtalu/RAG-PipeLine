@@ -1369,6 +1369,9 @@ Notification groups (stage D, step 12) route what the agents and the schedules p
 Routing is one lookup at dispatch; a finding no group takes goes nowhere, so a new channel receives nothing until a group takes it.
 The cap (stage D, step 13) bounds how many: a group sends at most `notification_groups.max_per_hour` advisory cards per clock hour, and `advisory_announcements` is its ledger, one line per advisory sent or held in an hour (`window_start`) plus the hour's `notice` line (the card that says the group went quiet) and `summary` line (the card that lists what was held once the hour is over).
 Held is recorded, not dropped, so which findings a summary covered stays answerable; the summary line is written before the card is sent, so a restart never repeats it.
+The watchlist (stage D, step 14) is what a person chose to keep an eye on: `watches` holds one active watch per person and thing (a partial unique index on `customer_code`, `owner_object_id`, `kind`, `entity_id` where the status is active), with the kind (delivery, route, location, zone, product, measure), the reference the kind needs to find it again (`entity_ref`, such as a delivery's row id or a zone's locations), the alert rule, the live value and status the consumer's watches loop refreshes on the kind's cadence, and how and when it ended (stopped, delivered, until, access, swapped, not_found).
+`watch_events` is one line per status change (never per number moving), with a sequence unique per watch, whether the change is one the alert rule names, and when the person saw it; `watch_not_now` remembers a "Not now" to Ask's suggestion for a day.
+Conditions ("when fill rate drops below") are measure watches since this step; the migration stops any condition schedule that remained in `teams_tasks`.
 Tasks (stage D, step 10) are the reminders and schedules of the Tasks tab: `teams_tasks` holds both kinds (`kind` reminder | schedule) with the spec as JSON (`when`: once at a moment, recurring on weekdays at a time, or a condition such as fill rate below a line) and `next_fire_at`, the moment the consumer's loop acts, so a restart loses nothing; `teams_task_runs` is the ledger, one row per planned firing, unique on (`task_id`, `planned_at`), so a firing happens exactly once (outcomes sent, skipped, missed, failed).
 A task belongs to one person (`owner_object_id`), runs its attached question with that person's access, and is audited in `audit_events` as `task.<action>`.
 `teams_conversations` (step 6b) is the header of each thread: the page starts a new conversation id whenever the person asks for one, the agent replays only that thread's turns, and the rail lists threads by title with their turns inside; the header is a soft reference to its turns by `conversation_id` and goes with them in the purge.
@@ -1610,6 +1613,51 @@ erDiagram
         uuid channel_id PK,FK "customer_notification_channels"
     }
 
+    watches {
+        uuid id PK
+        string customer_code FK "customers"
+        string owner_object_id "unique with kind and entity_id while active"
+        string kind "delivery | route | location | zone | product | measure"
+        string entity_id
+        jsonb entity_ref "row id, locations, site"
+        string label
+        string site_id
+        jsonb alert "tier_from | below | above | status_change | show_only"
+        boolean also_teams
+        string status "active | ended"
+        datetime until
+        jsonb last_value
+        string last_status
+        datetime last_changed_at
+        datetime last_checked_at
+        datetime next_check_at
+        int change_count "the event sequence"
+        string ended_reason "stopped | delivered | until | access | swapped | not_found"
+    }
+
+    watch_events {
+        uuid id PK
+        string customer_code FK "customers"
+        uuid watch_id FK "watches; unique with seq"
+        string owner_object_id
+        int seq
+        datetime at
+        string old_status
+        string new_status
+        boolean is_alert
+        text summary
+        jsonb value
+        datetime seen_at
+    }
+
+    watch_not_now {
+        string customer_code PK,FK "customers"
+        string owner_object_id PK
+        string kind PK
+        string entity_id PK
+        datetime until
+    }
+
     notification_group_members {
         uuid group_id PK,FK "notification_groups"
         string object_id PK
@@ -1753,6 +1801,10 @@ erDiagram
     customers ||--o{ advisory_announcements : "announcement ledger of"
     notification_groups ||--o{ advisory_announcements : "sent or held by"
     advisories ||--o{ advisory_announcements : "announced as"
+    customers ||--o{ watches : "watchlists of"
+    customers ||--o{ watch_events : "watch changes of"
+    customers ||--o{ watch_not_now : "not-nows of"
+    watches ||--o{ watch_events : "changed as"
     access_roles ||--o{ access_role_capabilities : "row of"
     access_capabilities ||--o{ access_role_capabilities : "column of"
     access_roles ||--o{ teams_users : "role of"
@@ -1835,6 +1887,10 @@ erDiagram
 | `customers.customer_code` | `advisory_announcements.customer_code` | CASCADE |
 | `notification_groups.id` | `advisory_announcements.group_id` | CASCADE |
 | `advisories.id` | `advisory_announcements.advisory_id` | CASCADE |
+| `customers.customer_code` | `watches.customer_code` | CASCADE |
+| `customers.customer_code` | `watch_events.customer_code` | CASCADE |
+| `watches.id` | `watch_events.watch_id` | CASCADE |
+| `customers.customer_code` | `watch_not_now.customer_code` | CASCADE |
 | `notification_events.id` | `notification_deliveries.event_id` | CASCADE |
 | `customer_notification_channels.id` | `notification_deliveries.channel_id` | SET NULL |
 

@@ -2,8 +2,8 @@
 the ledger row first (so a crash or a second consumer never fires the same planned moment twice),
 skip the ones made pointless (an advisory resolved, a delivery gone), re-run the attached
 question with the owner's own access, deliver (the person's row, and the customer's channel for a
-schedule aimed there), book the next firing; and evaluate the condition schedules against the
-site's current figures. A task missed by more than the catch-up window is noted, not fired.
+schedule aimed there), book the next firing. A task missed by more than the catch-up window is
+noted, not fired. Conditions ("when fill rate drops below") are watches since step 14.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
@@ -33,8 +32,6 @@ logger = logging.getLogger(__name__)
 
 #: Runs the task's question as its owner: (task) -> {"answer": str, "blocks": [...], "withheld": bool}
 RunQuery = Callable[[TeamsTask], Awaitable[dict[str, Any]]]
-#: Reads the current figures of a site for the condition schedules: (customer, site_id) -> fill rate 0..1 or None
-ReadFillRate = Callable[[str, str | None], Awaitable[float | None]]
 
 
 async def is_pointless(db: AsyncSession, task: TeamsTask) -> str | None:
@@ -125,51 +122,12 @@ async def fire(db: AsyncSession, task: TeamsTask, *, now: datetime, tz: ZoneInfo
     return run
 
 
-async def fill_rate_of(snapshot: dict | None) -> float | None:
-    """The fill rate 0..1 from a site Home snapshot's rail, or None.
-
-    >>> import asyncio
-    >>> asyncio.run(fill_rate_of({"rail": {"fill_rate": "89.6%"}})), asyncio.run(fill_rate_of(None))
-    (0.896, None)
-    """
-    if not snapshot:
-        return None
-    raw = str((snapshot.get("rail") or {}).get("fill_rate") or "").rstrip("%")
-    try:
-        return float(Decimal(raw) / 100) if raw else None
-    except InvalidOperation:
-        return None
-
-
-async def check_conditions(db: AsyncSession, customer_code: str, *, now: datetime, read_fill_rate: ReadFillRate | None) -> int:
-    """Book a firing now for every condition schedule whose figure crosses its line and whose
-    cooldown has passed; how many were booked."""
-    if read_fill_rate is None:
-        return 0
-    booked = 0
-    figures: dict[str | None, float | None] = {}
-    for task in await store.condition_tasks(db, customer_code):
-        if task.site_id not in figures:
-            figures[task.site_id] = await read_fill_rate(customer_code, task.site_id)
-        if not specs.holds(task.when, figures[task.site_id]):
-            continue
-        cooldown = timedelta(minutes=int(task.when.get("cooldown_minutes") or 60))
-        if task.last_fired_at is not None and now - task.last_fired_at < cooldown:
-            continue
-        task.next_fire_at = now
-        task.note = (task.note or "")  # the message carries the figure through the note below
-        task.last_result = {**(task.last_result or {}), "figure": figures[task.site_id]}
-        booked += 1
-    await db.flush()
-    return booked
-
 
 async def tick(mirror: MirrorWriter | None, *, run_query: RunQuery | None, enqueue=None,
-               read_fill_rate: ReadFillRate | None = None, tracker: ChangeTracker | None = None,
+               tracker: ChangeTracker | None = None,
                catch_up_hours: float = 6.0, session_factory=None, now: datetime | None = None,
                only: list[str] | None = None) -> dict[str, int]:
-    """One tick: conditions, then everything due, then the rows of the owners touched.
-    Fired runs per customer."""
+    """One tick: everything due, then the rows of the owners touched. Fired runs per customer."""
     from app.config.database import async_session
     from app.persistence.repositories.teams_repository import TeamsBindingRepository
 
@@ -180,13 +138,6 @@ async def tick(mirror: MirrorWriter | None, *, run_query: RunQuery | None, enque
     async with factory() as db:
         codes = list(only) if only is not None else sorted(
             {b.customer_code for b in await TeamsBindingRepository(db).list_all() if b.enabled})
-        for code in codes:
-            try:
-                await check_conditions(db, code, now=now, read_fill_rate=read_fill_rate)
-                await db.commit()
-            except Exception:
-                logger.exception("condition schedules of %s not checked", code)
-                await db.rollback()
         # Step 1: Claim and fire inside one transaction per task, so a crash mid-way leaves the
         # ledger row and the unique constraint refuses a second attempt at that planned time
         for task in await store.claim_due(db, now=now):

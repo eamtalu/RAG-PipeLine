@@ -10,15 +10,17 @@ domain: >-
   the vans and when each route's van is usually ready, and the handheld/M3 log transactions of this
   logspace (what a call did, why it failed); and the assistant's own housekeeping for the person
   asking: setting a reminder for themselves ("remind me at 5 to check Route 14"), scheduling a
-  question to run automatically ("every weekday at 4pm send me the short products list", "tell me
-  if fill rate drops below 97%"), and creating a user of this app.
+  question to run automatically ("every weekday at 4pm send me the short products list"), keeping
+  an eye on a delivery, a route, a location, a product or a measure through their watchlist
+  ("watch Route 14", "tell me if fill rate drops below 97%", "stop watching D-48213"), and creating
+  a user of this app.
 
 decline: >-
   I can only help with this warehouse's picking, delivery and log data: for example lines,
   deliveries, pickers, shortfalls and zero-picks, which deliveries missed their van or held it, or
-  why a handheld call failed, and with reminders, schedules and users of this app. Try "top 5
-  shorted items today", "which deliveries were missed this week" or "remind me at 5 to check
-  Route 14".
+  why a handheld call failed, and with reminders, schedules, your watchlist and users of this
+  app. Try "top 5 shorted items today", "which deliveries were missed this week" or "remind me
+  at 5 to check Route 14".
 
 schema_tools: [describe_at_risk, describe_releases, explain_freshness, list_metrics]
 namespaces: [logs, analytics, presentation, actions]

@@ -87,19 +87,18 @@ ACTION_TOOLS: list[dict[str, Any]] = [
         "description": (
             "Propose a schedule for the person to confirm, when they ask for something to be sent or run "
             "automatically on a rhythm (\"send me the short products list every weekday at 4pm\", \"every "
-            "Monday at 8 post the deliveries graph in the channel\") or whenever a figure crosses a line "
-            "(\"tell me if fill rate drops below 97%\"). Call it with what they said. The form that comes "
-            "back is what they confirm; never say the schedule is set."
+            "Monday at 8 post the deliveries graph in the channel\"). Not for a figure crossing a line "
+            "(\"tell me if fill rate drops below 97%\" is a watch, not a schedule). Call it with what they "
+            "said. The form that comes back is what they confirm; never say the schedule is set."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "what": {"type": "string", "description": "The question to run, in their words."},
                 "how_often": {"type": "string",
-                              "description": "weekdays | daily | weekly | once | when fill rate drops below."},
+                              "description": "weekdays | daily | weekly | once."},
                 "weekday": {"type": "string", "description": "The day for a weekly one, e.g. Monday."},
                 "time": {"type": "string", "description": "The clock time, e.g. 16:00 or 4pm."},
-                "threshold": {"type": "string", "description": "The fill rate line in percent, e.g. 97."},
                 "send_to": {"type": "string", "description": "me | channel; me when not said."},
                 "show_as": {"type": "string", "description": "table | graph | summary; table when not said."},
                 "until": {"type": "string", "description": "YYYY-MM-DD when an end was said."},
