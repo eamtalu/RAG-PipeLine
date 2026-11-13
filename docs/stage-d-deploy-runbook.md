@@ -97,7 +97,7 @@ Deploy:
    PYTHONPATH=. venv/bin/python scripts/teams_users.py list tmp-live
    PYTHONPATH=. venv/bin/python scripts/teams_users.py matrix tmp-live
    ```
-   The `set` prints `mirrored 5 access row(s) to the edge`; `EYE#tmp-live` / `USER#<object id>#ACCESS` exists in the edge's table.
+   The `set` prints `mirrored 5 access row(s) to the edge` when the shell has the service's AWS credentials; from a plain shell it prints `saved; not mirrored from this shell` and the consumer's sweep writes the rows within a minute (seen on 13 November: the first run crashed on `NoCredentialsError` after saving the row; the sweep mirrored it anyway). Either way `EYE#tmp-live` / `USER#<object id>#ACCESS` exists in the edge's table within a minute.
 3. Ask a question in Teams: it answers as before, and `teams_users.last_active_at` is stamped. Ask from a second account that has no user row: the answer is "You have no access to eSmart Eye yet…" and the journal shows `audit ask.refused`.
 4. Add the other people with `teams_users.py set … --role supervisor --sites BRI` (or through the Admin tab once the edge step 7b/7c is live).
 
