@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.12"
+CONTRACT_REVISION = "3.13"
 
 
 def _now() -> datetime:
@@ -39,7 +39,8 @@ def _now() -> datetime:
 #: task_create {kind: reminder | schedule, title, when: spec, note?, site_id?, query_text?, skip_if?,
 #:   target?: me | channel, show_as?: table | chart | summary, until?, source?, via?} (step 10)
 #: task_update {task_id, action: pause | resume | run_now | done | stop | delete | edit, fields?}
-#: group_set {group_id?, name, topics, min_severity, channel_ids, members} (step 12) ; group_delete {group_id}
+#: group_set {group_id?, name, topics, min_severity, channel_ids, members, max_per_hour?} (step 12;
+#:   max_per_hour 1..60 is step 13, the cards a group sends per clock hour) ; group_delete {group_id}
 #: group_join {group_id} ; group_leave {group_id}
 #: channel_set {channel_id?, name, webhook_url?, channel_type?}
 #: channel_delete {channel_id} ; channel_test {channel_id}

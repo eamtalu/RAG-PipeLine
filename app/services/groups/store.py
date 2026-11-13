@@ -45,6 +45,21 @@ class GroupView:
     member_object_ids: list[str] = field(default_factory=list)
 
 
+def route_of(views: list[GroupView] | tuple[GroupView, ...]) -> Route:
+    """The one route for a set of groups: their ids and names in order, their channels and members
+    without repeats.
+
+    ([Stock on ch1 with u-1, Ops on ch1 and ch2]) -> Route((s, o), ("Stock", "Ops"), (ch1, ch2), (u-1,)) ; ([]) -> empty
+    """
+    channels: list[str] = []
+    members: list[str] = []
+    for v in views:
+        channels.extend(str(c) for c in v.channel_ids if str(c) not in channels)
+        members.extend(m for m in v.member_object_ids if m not in members)
+    return Route(group_ids=tuple(str(v.group.id) for v in views), group_names=tuple(v.group.name for v in views),
+                 channel_ids=tuple(channels), member_object_ids=tuple(members))
+
+
 async def list_groups(db: AsyncSession, customer_code: str, *, include_disabled: bool = True) -> list[GroupView]:
     """Every group of a customer with its channels and members, by name."""
     q = select(NotificationGroup).where(NotificationGroup.customer_code == customer_code)
@@ -80,11 +95,12 @@ async def customer_channels(db: AsyncSession, customer_code: str) -> list[Custom
 
 
 async def set_group(db: AsyncSession, customer_code: str, *, group_id: str | None, name: str, topics, min_severity,
-                    channel_ids, member_object_ids, actor_object_id: str, now: datetime) -> NotificationGroup:
+                    channel_ids, member_object_ids, actor_object_id: str, now: datetime,
+                    max_per_hour=None) -> NotificationGroup:
     """Make or change a group with its channels and members; ValueError for a bad field or a
-    channel that is not the customer's.
+    channel that is not the customer's. A cap left out keeps the group's own (5 for a new one).
 
-    (None, "Stock", ["advisory:stock"], "medium", [ch1], ["u-1"]) -> a new group ; (id, ...) -> changed
+    (None, "Stock", ["advisory:stock"], "medium", [ch1], ["u-1"], max_per_hour=3) -> a new group ; (id, ...) -> changed
     """
     # Step 1: Check every field before touching anything, so a half-made group never lingers
     clean_name = name.strip()[:80]
@@ -92,6 +108,7 @@ async def set_group(db: AsyncSession, customer_code: str, *, group_id: str | Non
         raise ValueError("a group needs a name")
     clean_topics = routing.clean_topics(topics)
     severity = routing.clean_severity(min_severity)
+    cap = routing.clean_cap(max_per_hour) if max_per_hour is not None else None
     own = {c.id for c in await customer_channels(db, customer_code)}
     wanted_channels: list[uuid.UUID] = []
     for raw in channel_ids or []:
@@ -109,6 +126,8 @@ async def set_group(db: AsyncSession, customer_code: str, *, group_id: str | Non
         if group is None:
             raise ValueError("that group no longer exists")
         group.name, group.topics, group.min_severity, group.updated_at = clean_name, clean_topics, severity, now
+        if cap is not None:
+            group.max_per_hour = cap
         await db.execute(delete(NotificationGroupChannel).where(NotificationGroupChannel.group_id == group.id))
         await db.execute(delete(NotificationGroupMember).where(NotificationGroupMember.group_id == group.id))
     else:
@@ -117,8 +136,8 @@ async def set_group(db: AsyncSession, customer_code: str, *, group_id: str | Non
         if clash is not None:
             raise ValueError(f"a group named {clean_name!r} already exists")
         group = NotificationGroup(id=uuid.uuid4(), customer_code=customer_code, name=clean_name, topics=clean_topics,
-                                  min_severity=severity, enabled=True, created_by=actor_object_id,
-                                  created_at=now, updated_at=now)
+                                  min_severity=severity, max_per_hour=cap if cap is not None else routing.CAP_DEFAULT,
+                                  enabled=True, created_by=actor_object_id, created_at=now, updated_at=now)
         db.add(group)
         await db.flush()
     db.add_all([NotificationGroupChannel(group_id=group.id, channel_id=c) for c in wanted_channels])
@@ -154,21 +173,20 @@ async def set_membership(db: AsyncSession, customer_code: str, group_id: str, ob
     return group
 
 
+async def takers(db: AsyncSession, customer_code: str, topic: str, severity: str) -> list[GroupView]:
+    """The enabled groups that take a finding of this topic and severity, by name; the cap then
+    decides which of them still have room (step 13)."""
+    return [v for v in await list_groups(db, customer_code, include_disabled=False)
+            if routing.admits(list(v.group.topics or []), v.group.min_severity, topic, severity)]
+
+
 async def routes_for(db: AsyncSession, customer_code: str, topic: str, severity: str) -> Route:
     """The channels and the people that take a finding of this topic and severity, across every
     enabled group; empty when no group takes it (so nothing goes out).
 
     ("advisory:stock", "high" with a Stock group on ch1 with u-1) -> Route(("<id>",), ("Stock",), ("ch1",), ("u-1",))
     """
-    groups = [v for v in await list_groups(db, customer_code, include_disabled=False)
-              if routing.admits(list(v.group.topics or []), v.group.min_severity, topic, severity)]
-    channels: list[str] = []
-    members: list[str] = []
-    for v in groups:
-        channels.extend(str(c) for c in v.channel_ids if str(c) not in channels)
-        members.extend(m for m in v.member_object_ids if m not in members)
-    return Route(group_ids=tuple(str(v.group.id) for v in groups), group_names=tuple(v.group.name for v in groups),
-                 channel_ids=tuple(channels), member_object_ids=tuple(members))
+    return route_of(await takers(db, customer_code, topic, severity))
 
 
 async def group_route(db: AsyncSession, customer_code: str, group_id) -> Route:
@@ -191,11 +209,14 @@ async def groups_of(db: AsyncSession, customer_code: str, object_id: str) -> lis
     return list(rows)
 
 
-def group_payload(view: GroupView, channel_names: dict[uuid.UUID, str]) -> dict:
-    """One group as the Admin tab draws it."""
+def group_payload(view: GroupView, channel_names: dict[uuid.UUID, str], hour_counts: dict[str, int] | None = None) -> dict:
+    """One group as the Admin tab draws it, with its cap and this hour's counters (step 13)."""
     g = view.group
+    counts = hour_counts or {}
     return {
         "id": str(g.id), "name": g.name, "topics": list(g.topics or []), "min_severity": g.min_severity,
+        "max_per_hour": int(g.max_per_hour or routing.CAP_DEFAULT),
+        "sent_this_hour": int(counts.get("sent", 0)), "held_this_hour": int(counts.get("held", 0)),
         "enabled": g.enabled, "created_by": g.created_by,
         "channels": [{"id": str(c), "name": channel_names.get(c, "?")} for c in view.channel_ids],
         "members": list(view.member_object_ids),

@@ -1,7 +1,8 @@
 """Runs the agents on their cadences (stage D, step 9): seeds each customer's switches from the
 registry, runs whichever agent is due, reconciles its findings into the advisories table, writes
-the run ledger, tells the channel about new HIGH advisories, and mirrors the row the edge reads.
-Called by the consumer's advisories loop every few seconds; nothing runs before its time.
+the run ledger, announces new advisories to the groups that take them within each group's hourly
+cap (steps 12 and 13), and mirrors the row the edge reads. Called by the consumer's advisories
+loop every few seconds; nothing runs before its time.
 """
 
 from __future__ import annotations
@@ -18,11 +19,12 @@ from app.persistence.models.advisory import AdvisoryAgent, AdvisoryAgentRun
 from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.services.advisories import registry, store
 from app.services.advisories import mirror as advisories_mirror
-from app.services.groups import routing
+from app.services.groups import caps, routing
 from app.services.groups import store as groups_store
 from app.services.groups.store import Route
 from app.services.notifications.events import NotificationEvent
 from app.services.teams.mirror import ChangeTracker, MirrorWriter
+from app.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,9 @@ async def run_agent(db: AsyncSession, customer_code: str, switch: AdvisoryAgent,
         # Step 1: The agent reads the customer's data and returns findings; an agent that raises
         # must not take the others down, so the error lands on its ledger row instead
         findings = await spec.run(db, customer_code, now, tz)
-        run.opened, run.resolved = await store.reconcile(db, customer_code, spec.name, findings, now=now)
+        run.opened, run.resolved = await store.reconcile(
+            db, customer_code, spec.name, findings, now=now,
+            reannounce_after=timedelta(hours=settings.teams_advisories_reannounce_hours))
         switch.last_result = {"opened": run.opened, "resolved": run.resolved, "found": len(findings), "error": None}
     except Exception as exc:  # noqa: BLE001 - the ledger keeps the reason
         logger.exception("advisory agent %s failed for %s", spec.name, customer_code)
@@ -92,21 +96,45 @@ def notification_for(row, customer_code: str, *, route: Route | None = None) -> 
     )
 
 
-async def notify(db: AsyncSession, customer_code: str, *, now: datetime, enqueue) -> int:
+async def _announce(enqueue, event: NotificationEvent, what: str) -> bool:
+    """Hand one card to the outbox; False (and a log line) when the outbox refused it, so one bad
+    card never stops the tick."""
+    try:
+        await enqueue(event)
+    except Exception:
+        logger.exception("%s not announced (%s)", what, event.dedup_key)
+        return False
+    return True
+
+
+async def notify(db: AsyncSession, customer_code: str, *, now: datetime, enqueue, tz: ZoneInfo | None = None) -> int:
     """Announce each new advisory to the channels of the groups that take its topic and severity
-    (step 12); an advisory no group takes is marked seen and goes nowhere. How many were sent."""
+    and still have room this hour (steps 12 and 13); an advisory no group takes is marked seen and
+    goes nowhere, one a group holds gets that group's notice once an hour, and a finished hour's
+    held findings go out as one summary per group. How many advisory cards were sent."""
+    tz = tz or timezone.utc
     sent = 0
+    # Step 1: Every new advisory is stamped on this tick whether sent or held, so a group made
+    # later never receives today's backlog and a held finding is never retried as new
     for row in await store.unnotified(db, customer_code):
-        route = await groups_store.routes_for(db, customer_code, routing.topic_of(row.agent), row.severity)
+        takers = await groups_store.takers(db, customer_code, routing.topic_of(row.agent), row.severity)
         row.notified_at = now
-        if route.is_empty or not route.channel_ids:
+        if not takers:
             continue
-        try:
-            await enqueue(notification_for(row, customer_code, route=route))
-        except Exception:
-            logger.exception("advisory %s not announced", row.id)
-            continue
-        sent += 1
+        admission = await caps.admit(db, customer_code, takers, row.id, now=now)
+        route = groups_store.route_of(admission.sent)
+        if route.channel_ids and await _announce(enqueue, notification_for(row, customer_code, route=route), f"advisory {row.id}"):
+            sent += 1
+        # Step 2: A group that just reached its cap says so once, otherwise its readers see the
+        # cards stop and do not know the findings continue on the tab
+        for view in admission.notice_due:
+            if view.channel_ids:
+                await _announce(enqueue, caps.notice_for(view, customer_code, now=now, tz=tz), f"cap notice {view.group.name}")
+    # Step 3: Once an hour is over, what each group held in it goes out as one card; the ledger
+    # line is written before the send, so a tick that dies here never repeats the summary
+    for summary in await caps.summaries_due(db, customer_code, now=now):
+        if summary.view.channel_ids:
+            await _announce(enqueue, caps.summary_for(summary, customer_code, tz=tz), f"cap summary {summary.view.group.name}")
     await db.flush()
     return sent
 
@@ -119,7 +147,7 @@ async def run_due(db: AsyncSession, customer_code: str, *, now: datetime, enqueu
     runs = [await run_agent(db, customer_code, switch, now=now, tz=tz)
             for switch in await due_agents(db, customer_code, now=now)]
     if enqueue is not None:
-        await notify(db, customer_code, now=now, enqueue=enqueue)
+        await notify(db, customer_code, now=now, enqueue=enqueue, tz=tz)
     return runs
 
 

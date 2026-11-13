@@ -6,7 +6,7 @@ Used by runner.py (findings in), actions.py (people acting) and mirror.py (the r
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,9 +20,10 @@ SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITIES)}
 
 
 async def reconcile(db: AsyncSession, customer_code: str, agent: str, findings: list[Finding], *,
-                    now: datetime) -> tuple[int, int]:
+                    now: datetime, reannounce_after: timedelta | None = None) -> tuple[int, int]:
     """Apply one run's findings: new ones open, repeated ones stay open and refresh, absent ones
-    resolve; how many opened and resolved.
+    resolve; how many opened and resolved. A finding back within `reannounce_after` of its last
+    announcement keeps its stamp (step 13), so a count that flaps is not a card every time.
 
     (2 findings, 1 already open, 1 other open row) -> (1, 1) ; (same findings again) -> (0, 0)
     """
@@ -48,7 +49,13 @@ async def reconcile(db: AsyncSession, customer_code: str, agent: str, findings: 
             else:
                 row.status, row.opened_at, row.resolved_at, row.resolved_reason = "open", now, None, None
                 row.acknowledged_by = row.assignee_object_id = row.assignee_name = None
-                row.snoozed_until = row.notified_at = None
+                row.snoozed_until = None
+                # Step 2b: Keep the stamp when the finding was announced recently, otherwise a count
+                # that flaps every run would be a card every run and the cap would fill with repeats
+                is_recent = (reannounce_after is not None and row.notified_at is not None
+                             and row.notified_at > now - reannounce_after)
+                if not is_recent:
+                    row.notified_at = None
             opened += 1
         # Step 3: Refresh the words and the severity every run, because the delivery's progress
         # and the count's gap move while the row stays open
