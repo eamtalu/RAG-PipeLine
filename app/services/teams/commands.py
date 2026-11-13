@@ -15,6 +15,7 @@ from app.services.analytics_at_risk import check_store
 from app.services.access import commands as access_commands
 from app.services.advisories import actions as advisory_actions
 from app.services.tasks import commands as task_commands
+from app.services.groups import commands as group_commands
 from app.services.teams.contracts import ACCESS_COMMAND_KINDS, QuestionJob
 
 
@@ -31,6 +32,9 @@ async def run_command(job: QuestionJob) -> str:
     command = job.command
     if command is None:
         raise ValueError("the job carries no command")
+    # the groups and channels (step 12) live with the groups service
+    if command.kind in group_commands.KINDS:
+        return await group_commands.run(job)  # a CommandOutcome: the line and the receipt
     # the Tasks tab's actions (step 10) live with the tasks service
     if command.kind in ("task_create", "task_update"):
         return await task_commands.run(job)  # a CommandOutcome: the line and the receipt

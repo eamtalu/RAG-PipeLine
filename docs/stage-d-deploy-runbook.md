@@ -172,3 +172,21 @@ PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT planned_a
 Expected: the reminder row with `next_fire_at` a few minutes ahead, then one ledger row `sent` within 30 s of that moment and the reminder `done`; a schedule row keeps `status active` and moves `next_fire_at` on.
 
 Rollback: the previous checkout and a restart; `alembic downgrade b7f2d5e8c943` drops the two tables.
+
+## D12: notification groups (routing by topic to channels and people)
+
+What it adds: migration `d9f4a7b1e265` (`notification_groups`, `notification_group_channels`, `notification_group_members`, and `teams_tasks.target_group_id`), `app/services/groups/` (the routing rules, the store with the one lookup the dispatchers make, the commands `group_set` / `group_delete` / `group_join` / `group_leave` / `channel_set` / `channel_delete` / `channel_test`, the `GROUPS` and `USER#<id>#GROUPS` mirror rows written by the access sweep every minute and after every command), the advisories runner announcing every new advisory only to the groups that take its topic and severity (nothing without a group, a new channel included), a schedule posting to the one group it names, the schedule form offering the groups.
+Contract 3.12 synced from the edge.
+The hotfix switch `TEAMS_ADVISORIES_TO_CHANNEL` is gone: routing decides.
+
+Deploy: `./deploy.sh` (the migration runs inside it).
+Then, once the edge step 12 image is live, in Teams as an Admin or an Ops manager open Admin, "Channels and groups": add the channel (paste the webhook from the Teams channel's "Post to a channel when a webhook request is received" flow; Test sends one card), make a group (topics, severity, the channel, members).
+From then on only what the group takes reaches that channel.
+Check on the server:
+
+```
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT name, topics, min_severity, enabled FROM notification_groups WHERE customer_code='tmp-live';"
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT event_type, count(*) FROM notification_events WHERE created_at > now() - interval '1 hour' GROUP BY 1;"
+```
+
+Rollback: the previous checkout and a restart; `alembic downgrade c8e3f6a9d054` drops the three tables and the column. Without groups nothing is posted, as with the hotfix.

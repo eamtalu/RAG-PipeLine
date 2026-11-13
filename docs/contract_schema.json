@@ -20,6 +20,11 @@
       "sk": "EXEC#HOME",
       "ttl_seconds": 7200
     },
+    "groups": {
+      "pk": "EYE#{customer_code}",
+      "sk": "GROUPS",
+      "ttl_seconds": null
+    },
     "history_turn": {
       "pk": "EYE#{customer_code}",
       "sk": "USER#{user_id}#TURN#{job_id}",
@@ -48,6 +53,11 @@
     "user_access": {
       "pk": "EYE#{customer_code}",
       "sk": "USER#{user_id}#ACCESS",
+      "ttl_seconds": null
+    },
+    "user_groups": {
+      "pk": "EYE#{customer_code}",
+      "sk": "USER#{user_id}#GROUPS",
       "ttl_seconds": null
     },
     "user_history": {
@@ -829,7 +839,14 @@
                 "access_undo",
                 "advisory_act",
                 "task_create",
-                "task_update"
+                "task_update",
+                "group_set",
+                "group_delete",
+                "group_join",
+                "group_leave",
+                "channel_set",
+                "channel_delete",
+                "channel_test"
               ],
               "title": "Kind",
               "type": "string"
@@ -990,5 +1007,5 @@
       "type": "object"
     }
   },
-  "revision": "3.11"
+  "revision": "3.12"
 }

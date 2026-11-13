@@ -16,10 +16,10 @@ from app.services.teams.contracts import FormBlock, FormField
 REPEATS = ["Just this once", "Every day at this time", "Every weekday at this time"]
 HOW_OFTEN = ["Every weekday (Mon – Fri)", "Every day", "Once a week", "Once only", "When fill rate drops below…"]
 WEEKDAY_OPTIONS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-SEND_TO = ["Me, in the app", "The customer's channel"]
+SEND_TO = ["Me, in the app"]  # plus one entry per group the person may send to (step 12)
 SHOW_AS = ["A table", "A graph", "A short summary"]
 SHOW_AS_CODES = {"A table": "table", "A graph": "chart", "A short summary": "summary"}
-SEND_TO_CODES = {"Me, in the app": "me", "The customer's channel": "channel"}
+SEND_TO_CODES = {"Me, in the app": "me"}
 
 
 def clock(text: str | None, default: str) -> str:
@@ -76,7 +76,7 @@ def reminder_form(args: Mapping[str, Any], *, now: datetime, tz: ZoneInfo, last_
 
 
 def schedule_form(args: Mapping[str, Any], *, now: datetime, tz: ZoneInfo, last_question: str | None,
-                  site_name: str | None) -> FormBlock:
+                  site_name: str | None, groups: list[tuple[str, str]] = ()) -> FormBlock:
     """The New schedule form, pre-filled from what the person said.
 
     ({"what": "the short products list", "how_often": "weekdays", "time": "4pm"}) -> FormBlock(
@@ -91,7 +91,9 @@ def schedule_form(args: Mapping[str, Any], *, now: datetime, tz: ZoneInfo, last_
     weekday = str(args.get("weekday") or "Monday").strip().capitalize()
     if weekday not in WEEKDAY_OPTIONS:
         weekday = "Monday"
-    target = SEND_TO[1] if "channel" in str(args.get("send_to") or "").lower() else SEND_TO[0]
+    options = [*SEND_TO, *(f"Group: {name}" for _, name in groups)]
+    said = str(args.get("send_to") or "").lower()
+    target = next((o for o in options[1:] if o[7:].lower() in said), options[0]) if said else options[0]
     show = (SHOW_AS[1] if "graph" in str(args.get("show_as") or "").lower() or "chart" in str(args.get("show_as") or "").lower()
             else SHOW_AS[2] if "summary" in str(args.get("show_as") or "").lower() else SHOW_AS[0])
     what = str(args.get("what") or "").strip() or (last_question or "")
@@ -105,7 +107,7 @@ def schedule_form(args: Mapping[str, Any], *, now: datetime, tz: ZoneInfo, last_
                   value=clock(args.get("time"), "08:00"), placeholder="HH:MM"),
         FormField(name="threshold", label="Fill rate below (%)", kind="number", required=False,
                   value=str(args.get("threshold") or "").strip() or None),
-        FormField(name="send_to", label="Send it to", kind="select", options=SEND_TO, value=target),
+        FormField(name="send_to", label="Send it to", kind="select", options=options, value=target),
         FormField(name="show_as", label="Show it as", kind="select", options=SHOW_AS, value=show),
         FormField(name="until", label="Keep going until", kind="date", required=False,
                   value=str(args.get("until") or "").strip() or None, placeholder="leave empty to keep going"),
@@ -138,7 +140,7 @@ def reminder_from_form(values: Mapping[str, Any], *, tz: ZoneInfo) -> dict[str, 
             "note": str(values.get("note") or "").strip() or None}
 
 
-def schedule_from_form(values: Mapping[str, Any], *, tz: ZoneInfo) -> dict[str, Any]:
+def schedule_from_form(values: Mapping[str, Any], *, tz: ZoneInfo, groups: list[tuple[str, str]] = ()) -> dict[str, Any]:
     """A confirmed New schedule form as the task_create payload's fields.
 
     >>> s = schedule_from_form({"what": "short products list", "how_often": "Every weekday (Mon – Fri)",
@@ -146,6 +148,9 @@ def schedule_from_form(values: Mapping[str, Any], *, tz: ZoneInfo) -> dict[str, 
     ...                        tz=ZoneInfo("Europe/London"))
     >>> s["kind"], s["when"], s["target"], s["show_as"]
     ('schedule', {'kind': 'recurring', 'weekdays': [0, 1, 2, 3, 4], 'time': '16:00'}, 'me', 'table')
+    >>> schedule_from_form({"what": "x", "send_to": "Group: Stock"}, tz=ZoneInfo("Europe/London"),
+    ...                    groups=[("g-1", "Stock")])["target_group_id"]
+    'g-1'
     """
     what = str(values.get("what") or "").strip()
     how = str(values.get("how_often") or HOW_OFTEN[0])
@@ -169,6 +174,8 @@ def schedule_from_form(values: Mapping[str, Any], *, tz: ZoneInfo) -> dict[str, 
     until = None
     if values.get("until") and how != HOW_OFTEN[3]:
         until = datetime.combine(date.fromisoformat(str(values["until"]).strip()), time(23, 59), tzinfo=tz).isoformat()
+    send_to = str(values.get("send_to") or "")
+    group_id = next((gid for gid, name in groups if send_to == f"Group: {name}"), None)
     return {"kind": "schedule", "title": what[:200], "when": when, "query_text": what,
-            "target": SEND_TO_CODES.get(str(values.get("send_to")), "me"),
+            "target": "channel" if group_id else "me", "target_group_id": group_id,
             "show_as": SHOW_AS_CODES.get(str(values.get("show_as")), "table"), "until": until}

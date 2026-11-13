@@ -17,14 +17,15 @@ from app.persistence.models.task import SHOW_AS, TARGETS, TASK_KINDS, TeamsTask,
 from app.services.tasks import specs
 
 ACTIONS = ("pause", "resume", "run_now", "done", "stop", "delete", "edit")
-EDITABLE = ("title", "note", "when", "query_text", "skip_if", "target", "show_as", "until", "site_id")
+EDITABLE = ("title", "note", "when", "query_text", "skip_if", "target", "show_as", "until", "site_id", "target_group_id")
 
 
 async def create(db: AsyncSession, customer_code: str, *, owner_object_id: str, owner_name: str | None,
                  kind: str, title: str, when: dict[str, Any], tz: ZoneInfo, now: datetime,
                  note: str | None = None, site_id: str | None = None, query_text: str | None = None,
                  skip_if: dict | None = None, target: str = "me", show_as: str = "table",
-                 until: datetime | None = None, created_via: str = "tab", source: dict | None = None) -> TeamsTask:
+                 until: datetime | None = None, created_via: str = "tab", source: dict | None = None,
+                 target_group_id=None) -> TeamsTask:
     """A new task with its first firing booked; ValueError for a spec or field that is wrong.
 
     (reminder "Check the 9 short lines", once 17:45) -> TeamsTask(next_fire_at 17:45 UTC)
@@ -48,7 +49,7 @@ async def create(db: AsyncSession, customer_code: str, *, owner_object_id: str, 
                      site_id=site_id, when=spec, status="active", next_fire_at=first,
                      query_text=(query_text or "").strip() or None, skip_if=skip_if, target=target,
                      show_as=show_as, until=until, created_via=created_via, source=dict(source or {}),
-                     created_at=now, updated_at=now)
+                     target_group_id=_uuid_or_none(target_group_id), created_at=now, updated_at=now)
     db.add(task)
     await db.flush()
     return task
@@ -146,6 +147,8 @@ def apply(task: TeamsTask, action: str, fields: dict[str, Any], *, now: datetime
                 value = datetime.fromisoformat(str(value).replace("Z", "+00:00")) if value else None
             if name == "title" and not str(value or "").strip():
                 raise ValueError("a task needs a title")
+            if name == "target_group_id":
+                value = _uuid_or_none(value)
             setattr(task, name, value.strip()[:200] if name == "title" else value)
     if "when" in fields and task.status == "active":
         task.next_fire_at = specs.next_fire(task.when, now, tz)
@@ -165,11 +168,21 @@ def task_payload(task: TeamsTask, tz: ZoneInfo) -> dict:
         "status": task.status, "when": dict(task.when), "when_text": specs.when_text(task.when, tz),
         "next_fire_at": _iso(task.next_fire_at), "last_fired_at": _iso(task.last_fired_at),
         "fire_count": task.fire_count, "query_text": task.query_text, "skip_if": task.skip_if,
-        "target": task.target, "show_as": task.show_as, "until": _iso(task.until),
+        "target": task.target, "target_group_id": str(task.target_group_id) if task.target_group_id else None,
+        "show_as": task.show_as, "until": _iso(task.until),
         "created_via": task.created_via, "source": dict(task.source or {}), "last_result": task.last_result,
         "created_at": _iso(task.created_at), "updated_at": _iso(task.updated_at), "done_at": _iso(task.done_at),
         "can_undo_until": _iso(task.created_at + timedelta(minutes=10)) if task.status == "active" else None,
     }
+
+
+def _uuid_or_none(value):
+    if not value:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except ValueError:
+        raise ValueError("target_group_id is not a group id")
 
 
 def _iso(value: datetime | None) -> str | None:

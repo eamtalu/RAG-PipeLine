@@ -521,10 +521,6 @@ class Settings(BaseSettings):
     # The advisories loop (step 9) ticks this often; each agent runs on its own cadence (the
     # advisory_agents table, seeded from the registry: delivery 5 min, stock 15, location 30).
     teams_advisories_tick_seconds: float = 30.0
-    # Whether a new HIGH advisory is posted to the customer's notification channels. Off since 13
-    # November 2026 (the first live day sent 73 cards to one channel in six hours); the groups step
-    # (D12) replaces this switch with routing by topic, where nothing goes out unless a group takes it.
-    teams_advisories_to_channel: bool = False
     # The tasks loop (step 10) ticks this often; a reminder or schedule missed while the consumer
     # was down fires once if it is under the catch-up window late, else it is skipped with a note.
     teams_tasks_tick_seconds: float = 30.0

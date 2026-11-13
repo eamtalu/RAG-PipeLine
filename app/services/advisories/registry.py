@@ -43,7 +43,7 @@ class AgentSpec:
     enabled_by_default: bool
     off_reason: str | None  # why it stays off, when it does
     run: AgentFn | None
-    routing: str  # how its findings reach people, as the roster says it
+    routing: str  # how its findings reach people, as the roster says it (step 12: through the groups)
 
 
 def _lazy(module: str, attr: str) -> AgentFn:
@@ -61,49 +61,49 @@ AGENTS: tuple[AgentSpec, ...] = (
         description="Learned ready time per route · warns before departure when lines will be left behind",
         cadence_seconds=300, enabled_by_default=True, off_reason=None,
         run=_lazy("app.services.advisories.agents.delivery", "run"),
-        routing="High → channel immediately · Medium → in app",
+        routing="Goes to the groups that take deliveries",
     ),
     AgentSpec(
         name="stock", label="Stock controller",
         description="Stock counts that disagree with the system, and items short on several releases this week",
         cadence_seconds=900, enabled_by_default=True, off_reason=None,
         run=_lazy("app.services.advisories.agents.stock", "run"),
-        routing="High → channel · Medium → in app",
+        routing="Goes to the groups that take stock",
     ),
     AgentSpec(
         name="location", label="Location",
         description="Locations that keep turning up empty on picks, and locations with repeated count variances",
         cadence_seconds=1800, enabled_by_default=True, off_reason=None,
         run=_lazy("app.services.advisories.agents.location", "run"),
-        routing="Medium → in app · Low → digest later",
+        routing="Goes to the groups that take locations",
     ),
     AgentSpec(
         name="forecast", label="Forecast",
         description="Compares forecast lines to rostered capacity, 7 days ahead",
         cadence_seconds=86400, enabled_by_default=False,
         off_reason="needs the rostered capacity per shift; no roster source exists",
-        run=None, routing="Medium → in app",
+        run=None, routing="Would go to the groups that take it",
     ),
     AgentSpec(
         name="shortage", label="Shortage",
         description="Watches stock against tomorrow's releases and supplier ETAs",
         cadence_seconds=900, enabled_by_default=False,
         off_reason="needs supplier purchase-order due dates; not in the data",
-        run=None, routing="High → channel immediately",
+        run=None, routing="Would go to the groups that take it",
     ),
     AgentSpec(
         name="data_quality", label="Data quality",
         description="Sealing lag above the threshold stamps every figure as provisional",
         cadence_seconds=1800, enabled_by_default=False,
         off_reason="the freshness stamp does this on every tile and answer already; an advisory is a later choice",
-        run=None, routing="Low → digest",
+        run=None, routing="Would go to the groups that take it",
     ),
     AgentSpec(
         name="access_watch", label="Access watch",
         description="Dormant accounts, role drift, approvals older than 24 h",
         cadence_seconds=86400, enabled_by_default=False,
         off_reason="arrives with the daily digest of step 11",
-        run=None, routing="Low → digest",
+        run=None, routing="Would go to the groups that take it",
     ),
 )
 
