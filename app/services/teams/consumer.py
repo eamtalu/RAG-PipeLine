@@ -79,16 +79,28 @@ class AnswerPoster(Protocol):
         ...
 
 
+class ProgressReporter(Protocol):
+    """Where the run's progress goes while a question is answered (step 6)."""
+
+    async def started(self) -> None: ...
+    async def finished(self) -> None: ...
+    def on_event(self, kind: str, data: dict) -> None: ...
+
+
 #: Runs the agent for a job with the conversation's earlier turns; the adapter in
-#: app/teams_consumer.py builds the request (who asked, where) from the job.
-AgentRunner = Callable[[QuestionJob, list[dict]], Awaitable[dict]]
-"""(customer_code, question, history) -> the agent's result dict ({"answer", "tool_calls", ...})."""
+#: app/teams_consumer.py builds the request (who asked, where) from the job. The reporter, when
+#: there is one, hears every tool call, model call and guard verdict as the run makes them.
+AgentRunner = Callable[[QuestionJob, list[dict], "ProgressReporter | None"], Awaitable[dict]]
+"""(job, history, progress) -> the agent's result dict ({"answer", "tool_calls", ...})."""
 
 HistoryLoader = Callable[[str, str], Awaitable[list[dict]]]
 """(conversation_id, customer_code) -> prior turns, oldest first."""
 
-ExchangeRecorder = Callable[[str, str, str, str, str], Awaitable[None]]
-"""(conversation_id, customer_code, question, answer, job_id) -> None."""
+ExchangeRecorder = Callable[[QuestionJob, AnswerPayload], Awaitable[None]]
+"""(job, the answer as posted) -> None: the turn stored for the agent's memory and the history."""
+
+#: Builds the progress reporter for one job, or None when progress goes nowhere (no mirror).
+ProgressFactory = Callable[[QuestionJob], "ProgressReporter | None"]
 
 #: The customer a Teams tenant id is bound to in Postgres, or None when the tenant is unbound,
 #: the binding is disabled or the customer is inactive. The job's own customer_code is not trusted.
@@ -163,8 +175,10 @@ class TeamsQuestionConsumer:
                  wait_seconds: int = 20, heartbeat_seconds: float | None = None,
                  clock: Callable[[], float] = time.monotonic, run_command: CommandRunner | None = None,
                  run_timeout_seconds: float | None = None, claim_run: RunClaimer | None = None,
-                 finish_run: RunFinisher | None = None, read_freshness: FreshnessReader | None = None):
+                 finish_run: RunFinisher | None = None, read_freshness: FreshnessReader | None = None,
+                 progress_factory: ProgressFactory | None = None):
         self._read_freshness = read_freshness
+        self._progress_factory = progress_factory
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
         if visibility_seconds < 30:
@@ -308,20 +322,32 @@ class TeamsQuestionConsumer:
                     logger.warning("Teams job %s: command %s refused: %s", job.job_id, job.command.kind, exc)
                     return AnswerPayload(**base, status="error", answer=f"Could not record that: {exc}")
             history = await self._load_history(job.conversation_id, job.customer_code)
-            result = await self._run_agent(job, history)
+            # Step 2: Report progress while the agent runs (step 6), so the page can show what is
+            # happening; a reporter that fails never delays or loses the answer.
+            progress = self._progress_factory(job) if self._progress_factory is not None else None
+            if progress is not None:
+                await progress.started()
+            try:
+                result = await self._run_agent(job, history, progress)
+            finally:
+                if progress is not None:
+                    await progress.finished()
             answer = (result.get("answer") or "").strip() or "I could not find anything to say about that."
-            await self._record(job.conversation_id, job.customer_code, job.question, answer, job.job_id)
-            # Step 2: Stamp the answer with its times and the figures' freshness (step 5), so the
+            # Step 3: Stamp the answer with its times and the figures' freshness (step 5), so the
             # page can say when it was asked, answered, and how settled the numbers are.
             fresh = await self._read_freshness(job.customer_code) if self._read_freshness else {}
-            return AnswerPayload(**base, status="ok", answer=answer,
-                                 cited_transaction_ids=cited_transaction_ids(result),
-                                 tool_call_count=len(result.get("tool_calls") or []),
-                                 evidence=result.get("evidence_data") or None,
-                                 blocks=list(result.get("blocks") or []),
-                                 asked_at=job.enqueued_at, answered_at=datetime.now(timezone.utc),
-                                 data_as_of=fresh.get("data_as_of"),
-                                 provisional=bool(fresh.get("provisional", False)))
+            payload = AnswerPayload(**base, status="ok", answer=answer,
+                                    cited_transaction_ids=cited_transaction_ids(result),
+                                    tool_call_count=len(result.get("tool_calls") or []),
+                                    evidence=result.get("evidence_data") or None,
+                                    blocks=list(result.get("blocks") or []),
+                                    asked_at=job.enqueued_at, answered_at=datetime.now(timezone.utc),
+                                    data_as_of=fresh.get("data_as_of"),
+                                    provisional=bool(fresh.get("provisional", False)))
+            # Step 4: Record the exchange as posted, so the agent's memory and the history (step 6)
+            # hold the same answer the person saw.
+            await self._record(job, payload)
+            return payload
         except Exception as exc:
             message = failure_message(exc)
             log = logger.critical if message == MODEL_UNAVAILABLE else logger.exception

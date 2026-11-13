@@ -54,3 +54,18 @@ Deploy:
 4. If the model draws a chart from nothing, the answer is withheld with the honest sentence (the same path as an invented number) and the journal says so; that is the guard working, not a fault.
 
 Rollback: remove the flag from `.env` and restart the consumer (answers go back to text plus card, nothing else changes); or `git checkout deployed-backend-<previous>` and restart the three units.
+
+## D6: the Ask history per person, the purge, the progress row
+
+What it adds: migration `e4c8a2b7d619` (seven nullable columns on `teams_conversation_turns` and the index `(customer_code, sender_object_id, created_at)`, built `CONCURRENTLY`); the consumer records every exchange with who asked, the site, the blocks and the times, then mirrors the person's last 30 days under `EYE#<customer>` (`USER#<id>#HISTORY`, one `USER#<id>#TURN#<job>` per answer, 31-day TTL); an hourly purge of turns older than `TEAMS_HISTORY_RETENTION_DAYS` (30); a `JOB#<id>#PROGRESS` row rewritten while a question runs.
+No flag. Settings `TEAMS_HISTORY_RETENTION_DAYS`, `TEAMS_HISTORY_ENTRIES` (100), `TEAMS_HISTORY_PURGE_SECONDS` (3600) have defaults.
+The consumer's IAM user already allows the `EYE#*` prefix.
+
+Deploy:
+
+1. `./deploy.sh` (pulls, migrates, restarts the three units). The index builds `CONCURRENTLY`; the table is small.
+2. Ask one question in Teams. Within a minute `EYE#tmp-live` / `USER#<your object id>#HISTORY` exists in the edge's table and lists it; the journal shows no `teams.history_mirror_failed` line.
+3. While a second question runs, `EYE#tmp-live` / `JOB#<job id>#PROGRESS` is rewritten a few times (`steps` with one `running`); the page shows the four steps.
+4. The purge logs `teams.history_purged rows=N` only when something is older than 30 days; nothing on the first day.
+
+Rollback: `git checkout deployed-backend-<previous>` and restart the three units; the columns and the index can stay (nullable, unused), the mirror rows expire.

@@ -40,7 +40,9 @@ from app.services.teams.home_snapshot import build_writer_from_settings
 from app.services.teams.home_snapshot import sweep_once as snapshot_sweep_once
 from app.services.teams.mirror import ChangeTracker, build_mirror_writer_from_settings
 from app.services.teams.freshness import freshness_for
+from app.services.teams import history
 from app.services.teams.memory import ConversationMemory
+from app.services.teams.progress import ProgressReporter
 from app.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -69,7 +71,7 @@ def _conversation_type(source: str) -> ConversationType:
     return "personal"  # "group" and "channel" arrive when the edge sends them (contract v3)
 
 
-async def _run_agent(job: QuestionJob, history: list[dict]) -> dict:
+async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> dict:
     """One Teams question answered under a context built from the job; the legacy result dict.
 
     (job for acme by u-7, earlier turns) -> {"answer", "stop_reason", "tool_calls", ...}
@@ -86,7 +88,8 @@ async def _run_agent(job: QuestionJob, history: list[dict]) -> dict:
     runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),
                             registry=_REGISTRY, router=_ROUTER)
     result = await run_request(request, runtime=runtime, prior_turns=tuple(history),
-                               trace_store=_TRACES, admission=_ADMISSION, usage_store=_USAGE)
+                               trace_store=_TRACES, admission=_ADMISSION, usage_store=_USAGE,
+                               on_event=progress.on_event if progress is not None else None)
     return result.to_legacy_dict()
 
 
@@ -106,11 +109,62 @@ async def _read_freshness(customer_code: str) -> dict:
     return {"data_as_of": fresh.data_as_of, "provisional": fresh.provisional}
 
 
-async def _record_exchange(conversation_id: str, customer_code: str, question: str, answer: str,
-                           job_id: str) -> None:
+async def _record_exchange(job: QuestionJob, payload: AnswerPayload) -> None:
+    """Store the exchange for the agent's memory and the history, then mirror the history rows.
+
+    (job j1 by u-7, payload) -> two turn rows ; USER#u-7#HISTORY and USER#u-7#TURN#j1 rewritten
+    """
+    now = history.utc_now()
     async with async_session() as db:
         await ConversationMemory(db, max_turns=settings.teams_history_turns).record(
-            conversation_id, customer_code, question=question, answer=answer, job_id=job_id)
+            job.conversation_id, job.customer_code, question=job.question, answer=payload.answer,
+            job_id=job.job_id, details=history.details_from(job, payload))
+        # the mirror is a nicety: a failed write is logged, the answer is already stored and posted
+        mirror = _mirror_writer()
+        if mirror is None:
+            return
+        try:
+            await history.mirror_turn(mirror, job, payload, now=now)
+            await history.mirror_user_history(
+                db, mirror, job.customer_code, job.sender_object_id, now=now,
+                retention_days=settings.teams_history_retention_days,
+                limit=settings.teams_history_entries)
+        except Exception:
+            logger.exception("teams.history_mirror_failed job=%s", job.job_id)
+
+
+_MIRROR: list = []  # the one mirror writer of this process, built on first use
+
+
+def _mirror_writer():
+    if not _MIRROR:
+        _MIRROR.append(build_mirror_writer_from_settings())
+    return _MIRROR[0]
+
+
+def _progress_factory(job: QuestionJob):
+    """A reporter writing the job's progress row, or None on an edge with no mirror table."""
+    mirror = _mirror_writer()
+    return ProgressReporter(mirror, job.customer_code, job.job_id) if mirror is not None else None
+
+
+async def _history_loop(stop: asyncio.Event) -> None:
+    """Purge turns older than the retention (step 6), a batch at a time, every hour."""
+    while not stop.is_set():
+        try:
+            while not stop.is_set():
+                async with async_session() as db:
+                    gone = await history.purge_once(
+                        db, now=history.utc_now(),
+                        retention_days=settings.teams_history_retention_days)
+                if not gone:
+                    break
+        except Exception:
+            logger.exception("teams history purge failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.teams_history_purge_seconds)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _claim_run(job: QuestionJob) -> Claim:
@@ -203,7 +257,8 @@ async def _amain() -> None:
         concurrency=settings.teams_consumer_concurrency,
         visibility_seconds=settings.teams_sqs_visibility_seconds, wait_seconds=settings.teams_sqs_wait_seconds,
         run_command=run_command, run_timeout_seconds=settings.analytics_agent_run_timeout_seconds,
-        claim_run=_claim_run, finish_run=_finish_run, read_freshness=_read_freshness)
+        claim_run=_claim_run, finish_run=_finish_run, read_freshness=_read_freshness,
+        progress_factory=_progress_factory)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -213,7 +268,8 @@ async def _amain() -> None:
         except NotImplementedError:
             pass
     try:
-        await asyncio.gather(consumer.run_forever(stop), _sweep_loop(stop), _snapshot_loop(stop))
+        await asyncio.gather(consumer.run_forever(stop), _sweep_loop(stop), _snapshot_loop(stop),
+                             _history_loop(stop))
     finally:
         await engine.dispose()
 

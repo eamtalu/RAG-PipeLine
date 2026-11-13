@@ -8,9 +8,15 @@ the backend's is copied from it, so keep it dependency-free apart from pydantic.
 envelope and lives under one key prefix, `EYE#<customer_code>`, so the consumer's IAM policy names
 one prefix and the key layout is a table in code rather than a convention in prose.
 
-Row types so far (stage D, step 4):
-- site_home: the Home snapshot for one site, or for the whole customer under the site id "all".
-- sites: the customer's site list for the switcher.
+Row types so far:
+- site_home (step 4): the Home snapshot for one site, or for the whole customer under "all".
+- sites (step 4): the customer's site list for the switcher.
+- user_history (step 6): one person's questions of the last 30 days, newest first, as summaries
+  (question, answer preview, kinds, times, data age); rebuilt from Postgres after every answer.
+- history_turn (step 6): one answered question in full (the AnswerPayload as posted), so the
+  history can reopen it without a backend call; expires with the retention.
+- job_progress (step 6): the steps of a run in progress, rewritten as the agent works; read by
+  the poll while the job is pending, expires within the hour.
 Later steps add their rows here, and the edge's `KEY_LAYOUT` test keeps the Terraform prefix list
 in step with this table.
 """
@@ -19,22 +25,38 @@ from pydantic import BaseModel, Field
 
 MIRROR_SCHEMA_VERSION = 1
 KEY_PREFIX = "EYE"
+#: History rows outlive the 30-day retention by a day, so the purge in Postgres always runs first.
+HISTORY_TTL = 31 * 24 * 3600
 
 
 class KeySpec(BaseModel):
-    """How one row type is keyed and how long it lives; patterns take customer_code and site_id."""
+    """How one row type is keyed and how long it lives; the patterns take customer_code and, per
+    row type, a site_id, a user_id (the Entra object id) or a job_id."""
 
     pk: str
     sk: str
     #: None means the row never expires: the mirror removes it when it is gone.
     ttl_seconds: int | None = None
 
-    def key(self, customer_code: str, *, site_id: str | None = None) -> tuple[str, str]:
-        """The concrete pk and sk for one customer (and site).
+    def key(
+        self,
+        customer_code: str,
+        *,
+        site_id: str | None = None,
+        user_id: str | None = None,
+        job_id: str | None = None,
+    ) -> tuple[str, str]:
+        """The concrete pk and sk for one customer and the ids the row type needs.
 
-        (site_home, "acme", site_id="BRI") -> ("EYE#acme", "SITE#BRI#HOME")
+        (site_home, "acme", site_id="BRI") -> ("EYE#acme", "SITE#BRI#HOME") ;
+        (history_turn, "acme", user_id="u-7", job_id="j1") -> ("EYE#acme", "USER#u-7#TURN#j1")
         """
-        values = {"customer_code": customer_code, "site_id": site_id or ""}
+        values = {
+            "customer_code": customer_code,
+            "site_id": site_id or "",
+            "user_id": user_id or "",
+            "job_id": job_id or "",
+        }
         return self.pk.format(**values), self.sk.format(**values)
 
 
@@ -43,6 +65,17 @@ KEY_LAYOUT: dict[str, KeySpec] = {
         pk=f"{KEY_PREFIX}#{{customer_code}}", sk="SITE#{site_id}#HOME", ttl_seconds=3600
     ),
     "sites": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="SITES", ttl_seconds=None),
+    "user_history": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USER#{user_id}#HISTORY", ttl_seconds=HISTORY_TTL
+    ),
+    "history_turn": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}",
+        sk="USER#{user_id}#TURN#{job_id}",
+        ttl_seconds=HISTORY_TTL,
+    ),
+    "job_progress": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}", sk="JOB#{job_id}#PROGRESS", ttl_seconds=3600
+    ),
 }
 
 

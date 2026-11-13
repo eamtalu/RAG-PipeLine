@@ -502,6 +502,11 @@ class Settings(BaseSettings):
     # to answer with typed blocks (step 5). Off = the namespace is registered with no tools.
     analytics_agent_presentation: bool = False
     teams_max_sites_per_customer: int = 3         # per-site snapshots computed per sweep, at most
+    # The Ask history (step 6): one person's own questions, kept this long in Postgres and
+    # mirrored per person to the edge; the consumer purges older turns in batches every so often.
+    teams_history_retention_days: int = 30
+    teams_history_entries: int = 100              # exchanges listed per person on the mirror row
+    teams_history_purge_seconds: float = 3600.0
 
     # --- HTTP API callers (app/api/service_auth.py). Every route under /api/v1 needs a bearer token
     # from this list, `name=token,name=token`; the name says which system is calling. Names listed

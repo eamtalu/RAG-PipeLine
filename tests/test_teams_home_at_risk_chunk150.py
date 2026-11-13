@@ -207,8 +207,8 @@ class _Harness:
         self.agent_calls = []
         self.recorded = []
 
-        async def run_agent(code, question, history):
-            self.agent_calls.append(question)
+        async def run_agent(job, history, progress=None):
+            self.agent_calls.append(job.question)
             return {"answer": "should not run"}
 
         async def load_history(conv, code):

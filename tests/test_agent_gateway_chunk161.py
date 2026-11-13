@@ -326,7 +326,7 @@ async def test_the_consumer_adapter_builds_the_request_from_the_job(monkeypatch)
     seen = {}
 
     async def spy(request, *, runtime, prior_turns=(), run_settings=None, trace_store=None,
-              admission=None, usage_store=None):
+              admission=None, usage_store=None, on_event=None):
         seen.update(request=request, runtime=runtime, prior_turns=prior_turns)
         assert trace_store is not None  # the consumer passes its trace store (step 14)
         assert admission is not None  # and its admission (step 16)

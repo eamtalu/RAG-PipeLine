@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import replace
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from app import log_context
 from app.agent.contracts import AgentRequest, AgentResult, ExecutionContext, RunSettings
@@ -40,6 +40,7 @@ async def run_request(
     trace_store: TraceStore | None = None,
     admission: Admission | None = None,
     usage_store: UsageStore | None = None,
+    on_event: Callable[[str, dict], None] | None = None,
 ) -> AgentResult:
     """Run one request through the runtime under a context built here and nowhere else.
 
@@ -68,8 +69,9 @@ async def run_request(
                 await _store(trace_store, context, result.trace.as_row())
                 return result
         # Step 5: The gateway owns the collector, so a run that raised still has every tool
-        # call and model call it made for the error row and the accounting.
-        trace = RunTrace()
+        # call and model call it made for the error row and the accounting; a channel that shows
+        # progress listens to it (step 6).
+        trace = RunTrace(listener=on_event)
         try:
             try:
                 result = await runtime.run(context, request, prior_turns, trace=trace)

@@ -2,7 +2,7 @@
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.persistence.repositories.teams_repository import TeamsConversationRepository
+from app.persistence.repositories.teams_repository import ExchangeDetails, TeamsConversationRepository
 
 
 class ConversationMemory:
@@ -15,6 +15,6 @@ class ConversationMemory:
         return await self._repo.recent_turns(conversation_id, customer_code, limit=self._max_turns)
 
     async def record(self, conversation_id: str, customer_code: str, *, question: str, answer: str,
-                     job_id: str | None) -> None:
+                     job_id: str | None, details: ExchangeDetails | None = None) -> None:
         await self._repo.append_exchange(conversation_id, customer_code, question=question,
-                                         answer=answer, job_id=job_id)
+                                         answer=answer, job_id=job_id, details=details)
