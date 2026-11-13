@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.14"
+CONTRACT_REVISION = "3.15"
 
 
 def _now() -> datetime:
@@ -38,7 +38,11 @@ def _now() -> datetime:
 #:   until?} (the Advisories tab's buttons; step 9).
 #: task_create {kind: reminder | schedule, title, when: spec, note?, site_id?, query_text?, skip_if?,
 #:   target?: me | channel, show_as?: table | chart | summary, until?, source?, via?} (step 10)
-#: task_update {task_id, action: pause | resume | run_now | done | stop | delete | edit, fields?}
+#: task_update {task_id, action: pause | resume | run_now | done | skip | stop | delete | edit | plan_again
+#:   | copy | repeat, fields?, note?, when?} (step 15: run_now runs the routine by hand and records the run;
+#:   done and skip record the person's own outcome with a note; plan_again books the same routine at a
+#:   new `when`; copy makes a new one from it with `fields` on top; repeat turns a one-off into a
+#:   recurring one with `when`)
 #: group_set {group_id?, name, topics, min_severity, channel_ids, members, max_per_hour?} (step 12;
 #:   max_per_hour 1..60 is step 13, the cards a group sends per clock hour) ; group_delete {group_id}
 #: group_join {group_id} ; group_leave {group_id}

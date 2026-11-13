@@ -22,7 +22,7 @@ from app.persistence.models.analytics_at_risk import AnalyticsAtRiskDelivery
 from app.persistence.models.task import TeamsTask, TeamsTaskRun
 from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.services.notifications.events import NotificationEvent
-from app.services.tasks import specs, store
+from app.services.tasks import store
 from app.services.tasks import mirror as tasks_mirror
 from app.services.groups import store as groups_store
 from app.services.groups.store import Route
@@ -84,7 +84,7 @@ async def fire(db: AsyncSession, task: TeamsTask, *, now: datetime, tz: ZoneInfo
     """Fire one due task: the ledger row, the skip check, the question, the delivery, the rebooking."""
     planned = task.next_fire_at or now
     run = TeamsTaskRun(id=uuid.uuid4(), task_id=task.id, customer_code=task.customer_code, planned_at=planned,
-                       started_at=now)
+                       started_at=now, trigger="time")
     db.add(run)
     await db.flush()  # the unique (task, planned) row is the lock against a second firing
     try:
@@ -113,13 +113,80 @@ async def fire(db: AsyncSession, task: TeamsTask, *, now: datetime, tz: ZoneInfo
         logger.exception("task %s failed to fire", task.id)
         run.outcome, run.error = "failed", f"{type(exc).__name__}: {exc}"[:2000]
     run.finished_at = datetime.now(timezone.utc)
-    task.last_result = {"at": now.isoformat(), "outcome": run.outcome, "text": run.text,
-                        "blocks": run.blocks or [], "error": run.error}
+    task.last_result = _last_result(run, now)
     # Step 2: Book the next firing from the planned time, not from now, so a late tick does not
     # drift the clock
     store.advance(task, fired_at=planned if planned > now - catch_up else now, tz=tz)
     await db.flush()
     return run
+
+
+def _last_result(run: TeamsTaskRun, now: datetime) -> dict[str, Any]:
+    return {"at": now.isoformat(), "outcome": run.outcome, "text": run.text, "blocks": run.blocks or [],
+            "error": run.error, "trigger": run.trigger, "note": run.note, "by_name": run.by_name}
+
+
+async def run_by_hand(db: AsyncSession, task: TeamsTask, *, actor_object_id: str, actor_name: str | None,
+                      now: datetime, run_query: RunQuery | None) -> TeamsTaskRun:
+    """Run a routine now because the person asked (step 15): the ledger row says so, the question
+    is answered as the owner, the clock is left alone (the next planned run still comes), and
+    nothing is posted to a channel (the answer is theirs to read here).
+
+    (check "short products today") -> run(trigger hand, outcome sent, the answer) ; (an action) -> run with its note
+    """
+    run = TeamsTaskRun(id=uuid.uuid4(), task_id=task.id, customer_code=task.customer_code, planned_at=now,
+                       started_at=now, trigger="hand", by_object_id=actor_object_id, by_name=actor_name)
+    db.add(run)
+    await db.flush()
+    try:
+        text, blocks = task.note or "", []
+        if task.query_text:
+            if run_query is None:
+                raise RuntimeError("no question runner is wired here")
+            answer = await run_query(task)
+            text = str(answer.get("answer") or "")
+            blocks = list(answer.get("blocks") or [])
+        run.outcome, run.text, run.blocks = "sent", text, blocks
+    except Exception as exc:  # noqa: BLE001 - the ledger keeps the reason
+        logger.exception("task %s failed to run by hand", task.id)
+        run.outcome, run.error = "failed", f"{type(exc).__name__}: {exc}"[:2000]
+    run.finished_at = datetime.now(timezone.utc)
+    task.last_result, task.updated_at = _last_result(run, now), now
+    await db.flush()
+    return run
+
+
+async def complete(db: AsyncSession, task: TeamsTask, *, actor_object_id: str, actor_name: str | None,
+                   outcome: str, note: str | None, now: datetime) -> TeamsTaskRun:
+    """Record the person's own outcome of a routine (step 15): done or skipped, with their note.
+    A one-off is finished by it; a repeating routine keeps its clock, the run is just logged.
+
+    (once action, "done", "moved Dan to Route 14") -> run(trigger tick, done) and the task done ;
+    (weekday check, "skipped", "bank holiday") -> run logged, the task still active
+    """
+    if outcome not in ("done", "skipped"):
+        raise ValueError("outcome must be done or skipped")
+    run = TeamsTaskRun(id=uuid.uuid4(), task_id=task.id, customer_code=task.customer_code, planned_at=now,
+                       started_at=now, finished_at=now, trigger="tick", by_object_id=actor_object_id,
+                       by_name=actor_name, outcome=outcome, text=(note or "").strip() or None, note=(note or "").strip() or None)
+    db.add(run)
+    task.last_result, task.updated_at = _last_result(run, now), now
+    if task.when.get("kind") != "recurring":
+        task.status, task.done_at, task.next_fire_at = "done", now, None
+    await db.flush()
+    return run
+
+
+async def purge_once(*, retention_days: int, session_factory=None, now: datetime | None = None) -> int:
+    """Drop the runs older than the retention (step 15); how many went."""
+    from app.config.database import async_session
+
+    factory = session_factory or async_session
+    now = now or datetime.now(timezone.utc)
+    async with factory() as db:
+        gone = await store.purge_runs_before(db, now - timedelta(days=retention_days))
+        await db.commit()
+    return gone
 
 
 

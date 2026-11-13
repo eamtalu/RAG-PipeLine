@@ -10,13 +10,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.task import SHOW_AS, TARGETS, TASK_KINDS, TeamsTask, TeamsTaskRun
 from app.services.tasks import specs
 
-ACTIONS = ("pause", "resume", "run_now", "done", "stop", "delete", "edit")
+ACTIONS = ("pause", "resume", "run_now", "done", "skip", "stop", "delete", "edit", "plan_again", "copy", "repeat")
+#: The actions the store applies to the row itself; run_now, done, skip, plan_again and copy are
+#: handled by the runner and commands.py (they write a ledger row or make a new task)
+ROW_ACTIONS = ("pause", "resume", "stop", "delete", "edit", "repeat")
 EDITABLE = ("title", "note", "when", "query_text", "skip_if", "target", "show_as", "until", "site_id", "target_group_id")
 
 
@@ -100,13 +103,24 @@ def advance(task: TeamsTask, *, fired_at: datetime, tz: ZoneInfo) -> None:
     task.next_fire_at = following
 
 
-def apply(task: TeamsTask, action: str, fields: dict[str, Any], *, now: datetime, tz: ZoneInfo) -> str:
-    """One change a person makes to their task; the line that says what happened.
+def shape_of(task: TeamsTask) -> str:
+    """What kind of routine a row is, from what it holds (step 15): a check runs a question, a
+    report sends one to a channel, an action is something the person does.
 
-    (active schedule, "pause") -> "paused · <title>" ; ("run_now") -> next_fire_at now ;
+    (query, target me) -> "check" ; (query, target channel) -> "report" ; (no query) -> "action"
+    """
+    if not (task.query_text or "").strip():
+        return "action"
+    return "report" if task.target == "channel" else "check"
+
+
+def apply(task: TeamsTask, action: str, fields: dict[str, Any], *, now: datetime, tz: ZoneInfo) -> str:
+    """One change a person makes to their task row; the line that says what happened.
+
+    (active schedule, "pause") -> "paused · <title>" ; ("repeat", {"when": weekdays 16:00}) -> rebooked ;
     ("edit", {"when": ...}) -> rebooked
     """
-    if action not in ACTIONS:
+    if action not in ROW_ACTIONS:
         raise ValueError(f"unknown task action {action!r}")
     task.updated_at = now
     if action == "pause":
@@ -118,14 +132,17 @@ def apply(task: TeamsTask, action: str, fields: dict[str, Any], *, now: datetime
         if task.next_fire_at is None:
             raise ValueError("that time has already passed; edit the task first")
         return f"resumed · {task.title}"
-    if action == "run_now":
-        if task.status != "active":
-            raise ValueError("resume the task before running it")
-        task.next_fire_at = now
-        return f"running now · {task.title}"
-    if action == "done":
-        task.status, task.done_at, task.next_fire_at = "done", now, None
-        return f"done · {task.title}"
+    if action == "repeat":
+        # Step 1: A one-off becomes a repeating routine: the same content on a recurring clock,
+        # active again even when it was done, so "do this every shift" needs no retyping
+        spec = specs.validate(fields.get("when") or {})
+        if spec.get("kind") != "recurring":
+            raise ValueError("repeat needs a recurring time (weekdays and a time)")
+        following = specs.next_fire(spec, now, tz)
+        if following is None:
+            raise ValueError("that time never comes")
+        task.when, task.status, task.done_at, task.next_fire_at = spec, "active", None, following
+        return f"repeats · {specs.when_text(spec, tz)} · {task.title}"
     if action in ("stop", "delete"):
         task.status, task.done_at, task.next_fire_at = "stopped", now, None
         return f"{'deleted' if action == 'delete' else 'stopped'} · {task.title}"
@@ -148,6 +165,57 @@ def apply(task: TeamsTask, action: str, fields: dict[str, Any], *, now: datetime
     return f"changed · {task.title}"
 
 
+async def copy_from(db: AsyncSession, task: TeamsTask, *, overrides: dict[str, Any], tz: ZoneInfo, now: datetime,
+                    created_via: str, source: dict | None = None) -> TeamsTask:
+    """A new task made from an old one (step 15: Plan again, Copy as new), the overrides on top;
+    ValueError for a spec that is wrong.
+
+    (done reminder, {"when": once tomorrow 05:30}) -> a new active reminder for tomorrow
+    """
+    fields: dict[str, Any] = {
+        "kind": task.kind, "title": task.title, "when": dict(task.when), "note": task.note, "site_id": task.site_id,
+        "query_text": task.query_text, "skip_if": task.skip_if, "target": task.target, "show_as": task.show_as,
+        "until": None, "target_group_id": task.target_group_id,
+    }
+    for name, value in overrides.items():
+        if name in EDITABLE:
+            if name == "until":
+                value = datetime.fromisoformat(str(value).replace("Z", "+00:00")) if value else None
+            fields[name] = value
+    return await create(db, task.customer_code, owner_object_id=task.owner_object_id, owner_name=task.owner_name,
+                        tz=tz, now=now, created_via=created_via, source={"task_id": str(task.id), **dict(source or {})},
+                        **fields)
+
+
+async def list_runs(db: AsyncSession, customer_code: str, owner_object_id: str, *, since: datetime,
+                    limit: int = 200) -> list[tuple[TeamsTaskRun, TeamsTask]]:
+    """One person's runs since a moment, newest first, each with its task (step 15, the History view)."""
+    rows = await db.execute(
+        select(TeamsTaskRun, TeamsTask).join(TeamsTask, TeamsTask.id == TeamsTaskRun.task_id)
+        .where(TeamsTaskRun.customer_code == customer_code, TeamsTask.owner_object_id == owner_object_id,
+               TeamsTaskRun.started_at >= since)
+        .order_by(TeamsTaskRun.started_at.desc()).limit(limit))
+    return [(run, task) for run, task in rows.all()]
+
+
+async def purge_runs_before(db: AsyncSession, cutoff: datetime) -> int:
+    """Drop the ledger rows older than the cutoff (step 15: 30 days); how many went."""
+    result = await db.execute(delete(TeamsTaskRun).where(TeamsTaskRun.started_at < cutoff))
+    return int(result.rowcount or 0)
+
+
+def run_payload(run: TeamsTaskRun, task: TeamsTask, tz: ZoneInfo, *, with_blocks: bool) -> dict:
+    """One run as the History view draws it (step 15)."""
+    text = (run.text or "").strip()
+    return {
+        "id": str(run.id), "task_id": str(task.id), "title": task.title, "kind": task.kind, "shape": shape_of(task),
+        "trigger": run.trigger, "by_name": run.by_name, "by_object_id": run.by_object_id,
+        "outcome": run.outcome, "text": text[:500], "note": run.note, "error": run.error,
+        "planned_at": _iso(run.planned_at), "started_at": _iso(run.started_at), "finished_at": _iso(run.finished_at),
+        "has_blocks": bool(run.blocks), **({"blocks": list(run.blocks or [])[:4]} if with_blocks else {}),
+    }
+
+
 async def recent_runs(db: AsyncSession, task_id: uuid.UUID, *, limit: int = 5) -> list[TeamsTaskRun]:
     return list((await db.execute(
         select(TeamsTaskRun).where(TeamsTaskRun.task_id == task_id)
@@ -156,8 +224,10 @@ async def recent_runs(db: AsyncSession, task_id: uuid.UUID, *, limit: int = 5) -
 
 def task_payload(task: TeamsTask, tz: ZoneInfo) -> dict:
     """One task as the tab draws it."""
+    last = task.last_result or {}
     return {
-        "id": str(task.id), "kind": task.kind, "title": task.title, "note": task.note, "site_id": task.site_id,
+        "id": str(task.id), "kind": task.kind, "shape": shape_of(task), "title": task.title, "note": task.note,
+        "site_id": task.site_id, "last_outcome": last.get("outcome"), "last_note": last.get("note"),
         "status": task.status, "when": dict(task.when), "when_text": specs.when_text(task.when, tz),
         "next_fire_at": _iso(task.next_fire_at), "last_fired_at": _iso(task.last_fired_at),
         "fire_count": task.fire_count, "query_text": task.query_text, "skip_if": task.skip_if,

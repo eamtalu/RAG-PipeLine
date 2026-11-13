@@ -65,6 +65,11 @@
       "sk": "USER#{user_id}#HISTORY",
       "ttl_seconds": 2678400
     },
+    "user_task_runs": {
+      "pk": "EYE#{customer_code}",
+      "sk": "USER#{user_id}#TASK_RUNS",
+      "ttl_seconds": null
+    },
     "user_tasks": {
       "pk": "EYE#{customer_code}",
       "sk": "USER#{user_id}#TASKS",
@@ -1225,5 +1230,5 @@
       "type": "object"
     }
   },
-  "revision": "3.14"
+  "revision": "3.15"
 }

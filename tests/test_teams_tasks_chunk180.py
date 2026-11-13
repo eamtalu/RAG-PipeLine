@@ -122,7 +122,7 @@ async def test_a_task_is_booked_claimed_fired_and_rebooked_from_the_planned_time
         assert {r.planned_at for r in runs} == {datetime(2026, 11, 13, 16, 0, tzinfo=timezone.utc), NOW + timedelta(hours=6, minutes=30)}
     # the owner's row was rewritten with the firing
     payload = json.loads(mirror.items[(f"EYE#{CC}", "USER#u-sup#TASKS")].payload_json)
-    assert payload["counts"] == {"todo": 1, "done_today": 1, "running": 1}
+    assert payload["counts"] == {"todo": 1, "done_today": 1, "running": 1, "due_today": 0}
     assert payload["coming_up"][0]["title"] == "Plan cover"
     # the same tick again fires nothing: the ledger and the rebooking hold
     assert await runner.tick(mirror, run_query=run_query, only=[CC], now=at) == {}
@@ -206,14 +206,14 @@ async def test_the_commands_make_pause_run_finish_and_delete_with_an_audit_line_
     outcome = await commands.run(_command("u-sup", "task_create", {
         "kind": "reminder", "title": "Check the 9 short lines", "when": {"kind": "once", "at": "2026-11-13T17:45:00+00:00"},
         "query_text": "which short lines were re-picked", "via": "ask"}), mirror=mirror, now=NOW)
-    assert outcome.text == "reminder set · Fri 13 Nov, 17:45 · Check the 9 short lines"
+    assert outcome.text == "added to your routines · Fri 13 Nov, 17:45 · Check the 9 short lines"
     receipt = outcome.blocks[0]
     task_id = receipt["reference"]
     assert receipt["undo"] == {"task_id": task_id, "action": "delete"} and receipt["undo_until"].startswith("2026-11-13T09:10")
     outcome = await commands.run(_command("u-sup", "task_create", {
         "kind": "schedule", "title": "Short products list", "query_text": "short products today",
         "when": {"kind": "recurring", "weekdays": [0, 1, 2, 3, 4], "time": "16:00"}, "target": "me"}), mirror=mirror, now=NOW)
-    assert outcome.text == "scheduled · Every weekday at 16:00 · Short products list"
+    assert outcome.text == "added to your routines · Every weekday at 16:00 · Short products list"
     schedule_id = outcome.blocks[0]["reference"]
     # a picker may not schedule questions (ask needs approval); another person may not touch Sam's
     with pytest.raises(access_commands.Refused, match="needs approval"):
@@ -223,10 +223,13 @@ async def test_the_commands_make_pause_run_finish_and_delete_with_an_audit_line_
         await commands.run(_command("u-pick", "task_update", {"task_id": schedule_id, "action": "pause"}), mirror=mirror, now=NOW)
     # pause, run now, done, delete
     assert (await commands.run(_command("u-sup", "task_update", {"task_id": schedule_id, "action": "pause"}), mirror=mirror, now=NOW)).text == "paused · Short products list"
-    with pytest.raises(access_commands.Refused, match="resume"):
-        await commands.run(_command("u-sup", "task_update", {"task_id": schedule_id, "action": "run_now"}), mirror=mirror, now=NOW)
     assert (await commands.run(_command("u-sup", "task_update", {"task_id": schedule_id, "action": "resume"}), mirror=mirror, now=NOW)).text == "resumed · Short products list"
-    assert (await commands.run(_command("u-sup", "task_update", {"task_id": schedule_id, "action": "run_now"}), mirror=mirror, now=NOW)).text == "running now · Short products list"
+
+    async def run_query(task):
+        return {"answer": "GINGER was short on 3 releases.", "blocks": []}
+
+    # step 15: Run now answers at once and records the run; the clock is untouched
+    assert (await commands.run(_command("u-sup", "task_update", {"task_id": schedule_id, "action": "run_now"}), mirror=mirror, now=NOW, run_query=run_query)).text == "ran · Short products list · GINGER was short on 3 releases."
     assert (await commands.run(_command("u-sup", "task_update", {"task_id": task_id, "action": "done"}), mirror=mirror, now=NOW)).text == "done · Check the 9 short lines"
     with pytest.raises(access_commands.Refused, match="window has passed"):
         await commands.run(_command("u-sup", "task_update", {"task_id": schedule_id, "action": "delete", "via": "undo"}), mirror=mirror, now=NOW + timedelta(minutes=11))
@@ -238,7 +241,7 @@ async def test_the_commands_make_pause_run_finish_and_delete_with_an_audit_line_
                    if e.action.startswith("task.")]
         assert sorted(actions) == sorted(["task.created.reminder", "task.created.schedule", "task.pause", "task.resume", "task.run_now", "task.done", "task.delete"])
     payload = json.loads(mirror.items[(f"EYE#{CC}", "USER#u-sup#TASKS")].payload_json)
-    assert payload["counts"] == {"todo": 0, "done_today": 1, "running": 0}
+    assert payload["counts"] == {"todo": 0, "done_today": 1, "running": 0, "due_today": 0}
     assert [r["status"] for r in payload["schedules"]] == ["stopped"]
 
 
@@ -251,7 +254,7 @@ async def test_a_confirmed_ask_form_makes_the_task_through_the_same_command():
         "form_id": "new_schedule",
         "values": {"what": "short products list", "how_often": "Every weekday (Mon – Fri)", "time": "16:00",
                    "send_to": "Group: Stock", "show_as": "A graph", "until": "2026-12-31"}}), mirror=mirror, now=NOW)
-    assert outcome.text == "scheduled · Every weekday at 16:00 · short products list"
+    assert outcome.text == "added to your routines · Every weekday at 16:00 · short products list"
     async with async_session() as db:
         row = (await db.execute(select(TeamsTask).where(TeamsTask.customer_code == CC))).scalar_one()
         assert row.target == "channel" and str(row.target_group_id) == group_id and row.show_as == "chart"
