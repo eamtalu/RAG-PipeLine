@@ -22,6 +22,7 @@ from app.config.database import async_session
 from app.persistence.models.access import AuditEvent
 from app.persistence.models.advisory import Advisory
 from app.persistence.models.customer import Customer
+from app.persistence.models.notification import CustomerNotificationChannel
 from app.persistence.models.task import TeamsTask, TeamsTaskRun
 from app.persistence.models.teams_conversation import TeamsConversation
 from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
@@ -30,6 +31,7 @@ from app.persistence.repositories.teams_repository import ExchangeDetails, Teams
 from app.services.access import commands as access_commands, users
 from app.services.advisories import store as advisories_store
 from app.services.advisories.registry import Finding
+from app.services.groups import store as groups_store
 from app.services.analytics_agent import action_tools
 from app.services.tasks import commands, forms, runner, specs, store
 from app.services.tasks import mirror as tasks_mirror
@@ -47,6 +49,7 @@ async def _wipe() -> None:
     async with async_session() as s:
         for model_ in (TeamsConversationTurn, TeamsConversation):
             await s.execute(delete(model_).where(model_.customer_code == CC))
+        await s.execute(delete(CustomerNotificationChannel).where(CustomerNotificationChannel.customer_code == CC))
         await s.execute(delete(Customer).where(Customer.customer_code == CC))
         await s.commit()
 
@@ -193,10 +196,22 @@ async def test_a_condition_schedule_fires_when_the_figure_crosses_and_then_waits
         assert row.status == "active" and row.fire_count == 2 and row.next_fire_at is None
 
 
-async def test_a_schedule_aimed_at_the_channel_goes_through_the_outbox():
+async def _group(db, name="Ops", topics=("schedule",)) -> tuple[str, str]:
+    channel = CustomerNotificationChannel(customer_code=CC, channel_type="teams", name=f"{name}-channel", config={})
+    db.add(channel)
+    await db.flush()
+    group = await groups_store.set_group(db, CC, group_id=None, name=name, topics=list(topics), min_severity="low",
+                                         channel_ids=[str(channel.id)], member_object_ids=["u-sup"],
+                                         actor_object_id="u-sup", now=NOW)
+    return str(group.id), str(channel.id)
+
+
+async def test_a_schedule_aimed_at_a_group_goes_through_the_outbox_to_its_channels():
     async with async_session() as db:
+        group_id, channel_id = await _group(db)
         await _reminder(db, kind="schedule", title="Weekly deliveries graph", query_text="deliveries per day this week",
-                        target="channel", show_as="chart", when={"kind": "recurring", "weekdays": [0], "time": "08:00"})
+                        target="channel", target_group_id=group_id, show_as="chart",
+                        when={"kind": "recurring", "weekdays": [0], "time": "08:00"})
         await db.commit()
     sent = []
 
@@ -211,6 +226,7 @@ async def test_a_schedule_aimed_at_the_channel_goes_through_the_outbox():
     assert await runner.tick(None, run_query=run_query, enqueue=enqueue, only=[CC], now=monday) == {CC: 1}
     assert len(sent) == 1 and sent[0].event_type == "schedule" and sent[0].title == "Weekly deliveries graph"
     assert sent[0].summary == "265 departures this week." and sent[0].payload["show_as"] == "chart"
+    assert sent[0].target_channel_ids == [channel_id] and sent[0].payload["groups"] == ["Ops"]
 
 
 # ==================================================== 2. people make and change their own tasks
@@ -257,14 +273,18 @@ async def test_the_commands_make_pause_run_finish_and_delete_with_an_audit_line_
 
 async def test_a_confirmed_ask_form_makes_the_task_through_the_same_command():
     mirror = InMemoryMirrorWriter()
+    async with async_session() as db:
+        group_id, _ = await _group(db, name="Stock")
+        await db.commit()
     outcome = await commands.run(_command("u-sup", "task_create", {
         "form_id": "new_schedule",
         "values": {"what": "short products list", "how_often": "Every weekday (Mon – Fri)", "time": "16:00",
-                   "send_to": "The customer's channel", "show_as": "A graph", "until": "2026-12-31"}}), mirror=mirror, now=NOW)
+                   "send_to": "Group: Stock", "show_as": "A graph", "until": "2026-12-31"}}), mirror=mirror, now=NOW)
     assert outcome.text == "scheduled · Every weekday at 16:00 · short products list"
     async with async_session() as db:
         row = (await db.execute(select(TeamsTask).where(TeamsTask.customer_code == CC))).scalar_one()
-        assert row.target == "channel" and row.show_as == "chart" and row.created_via == "ask"
+        assert row.target == "channel" and str(row.target_group_id) == group_id and row.show_as == "chart"
+        assert row.created_via == "ask"
         assert row.until == datetime(2026, 12, 31, 23, 59, tzinfo=TZ) and row.query_text == "short products list"
     # the edge routes task commands here; an edit from the tab's dialog arrives as form values
     assert (await run_command(_command("u-sup", "task_update", {"task_id": str(row.id), "action": "pause"}))).text == "paused · short products list"
@@ -298,6 +318,7 @@ async def test_the_assistant_proposes_the_two_forms_from_what_was_said():
         assert body["shown"] == "form" and body["block"]["form_id"] == "new_schedule"
         fields = {f["name"]: f["value"] for f in body["block"]["fields"]}
         assert fields["how_often"] == "Every weekday (Mon – Fri)" and fields["time"] == "16:00" and fields["send_to"] == "Me, in the app"
+        assert next(f["options"] for f in body["block"]["fields"] if f["name"] == "send_to") == ["Me, in the app"]
         assert "Brighton" in body["block"]["note"]
         raw = await action_tools.run_action_tool(db, CC, "u-sup", "BRI", "propose_reminder",
                                                  {"title": "check the 9 short lines were re-picked", "time": "17:45"})

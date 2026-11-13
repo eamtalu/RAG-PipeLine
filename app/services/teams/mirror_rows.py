@@ -101,6 +101,11 @@ KEY_LAYOUT: dict[str, KeySpec] = {
     "user_tasks": KeySpec(
         pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USER#{user_id}#TASKS", ttl_seconds=None
     ),
+    #: step 12: the customer's notification groups and channels, and one row per person with their groups
+    "groups": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="GROUPS", ttl_seconds=None),
+    "user_groups": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USER#{user_id}#GROUPS", ttl_seconds=None
+    ),
 }
 
 

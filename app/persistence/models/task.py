@@ -59,6 +59,9 @@ class TeamsTask(Base):
     #: {"kind": "advisory", "advisory_id": ...} | {"kind": "delivery", "delivery_number", "departure_date"}
     skip_if: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     target: Mapped[str] = mapped_column(String(16), nullable=False, default="me", server_default="me")
+    #: The group a schedule posts to (step 12); None for "me".
+    target_group_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("notification_groups.id", ondelete="SET NULL"), nullable=True)
     show_as: Mapped[str] = mapped_column(String(16), nullable=False, default="table", server_default="table")
     until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_via: Mapped[str] = mapped_column(String(16), nullable=False, default="tab", server_default="tab")

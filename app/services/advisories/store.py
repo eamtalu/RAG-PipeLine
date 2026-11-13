@@ -104,11 +104,11 @@ async def get(db: AsyncSession, customer_code: str, advisory_id: str) -> Advisor
     return await db.scalar(select(Advisory).where(Advisory.customer_code == customer_code, Advisory.id == key))
 
 
-async def unnotified_high(db: AsyncSession, customer_code: str) -> list[Advisory]:
-    """HIGH advisories nobody has been told about yet (open, not yet notified)."""
+async def unnotified(db: AsyncSession, customer_code: str) -> list[Advisory]:
+    """Open advisories nobody has been told about yet, oldest first (step 12 routes them by group)."""
     return list((await db.execute(
-        select(Advisory).where(Advisory.customer_code == customer_code, Advisory.severity == "high",
-                               Advisory.status == "open", Advisory.notified_at.is_(None))
+        select(Advisory).where(Advisory.customer_code == customer_code, Advisory.status == "open",
+                               Advisory.notified_at.is_(None))
         .order_by(Advisory.opened_at))).scalars())
 
 

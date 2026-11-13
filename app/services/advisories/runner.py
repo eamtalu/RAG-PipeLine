@@ -18,6 +18,9 @@ from app.persistence.models.advisory import AdvisoryAgent, AdvisoryAgentRun
 from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.services.advisories import registry, store
 from app.services.advisories import mirror as advisories_mirror
+from app.services.groups import routing
+from app.services.groups import store as groups_store
+from app.services.groups.store import Route
 from app.services.notifications.events import NotificationEvent
 from app.services.teams.mirror import ChangeTracker, MirrorWriter
 
@@ -70,31 +73,39 @@ async def run_agent(db: AsyncSession, customer_code: str, switch: AdvisoryAgent,
     return run
 
 
-def notification_for(row, customer_code: str) -> NotificationEvent:
-    """The channel message for a HIGH advisory: the title and the words the card carries.
+def notification_for(row, customer_code: str, *, route: Route | None = None) -> NotificationEvent:
+    """The channel message for an advisory: the title and the words the card carries, aimed at
+    the channels of the groups that took it (step 12).
 
-    (delivery row "Route R14 ... 24 lines behind") -> event advisory:<id>, severity warning
+    (delivery row "Route R14 ... 24 lines behind", route to ch1) -> event advisory:<id>, severity warning, target ch1
     """
     summary = " · ".join(p for p in (row.evidence, row.impact) if p)
     return NotificationEvent(
-        event_type="advisory", customer_code=customer_code, severity="warning",
+        event_type="advisory", customer_code=customer_code,
+        severity="warning" if row.severity == "high" else "info",
         title=f"{registry.spec(row.agent).label}: {row.title}", summary=summary or None,
         dedup_key=f"advisory:{row.id}",
+        target_channel_ids=list(route.channel_ids) if route is not None else None,
         payload={"advisory_id": str(row.id), "agent": row.agent, "severity": row.severity,
-                 "site_id": row.site_id, "recommended": row.recommended, "source": dict(row.source or {})},
+                 "site_id": row.site_id, "recommended": row.recommended, "source": dict(row.source or {}),
+                 "groups": list(route.group_names) if route is not None else []},
     )
 
 
-async def notify_high(db: AsyncSession, customer_code: str, *, now: datetime, enqueue) -> int:
-    """Tell the customer's channels about each HIGH advisory not yet announced; how many."""
+async def notify(db: AsyncSession, customer_code: str, *, now: datetime, enqueue) -> int:
+    """Announce each new advisory to the channels of the groups that take its topic and severity
+    (step 12); an advisory no group takes is marked seen and goes nowhere. How many were sent."""
     sent = 0
-    for row in await store.unnotified_high(db, customer_code):
+    for row in await store.unnotified(db, customer_code):
+        route = await groups_store.routes_for(db, customer_code, routing.topic_of(row.agent), row.severity)
+        row.notified_at = now
+        if route.is_empty or not route.channel_ids:
+            continue
         try:
-            await enqueue(notification_for(row, customer_code))
+            await enqueue(notification_for(row, customer_code, route=route))
         except Exception:
             logger.exception("advisory %s not announced", row.id)
             continue
-        row.notified_at = now
         sent += 1
     await db.flush()
     return sent
@@ -108,7 +119,7 @@ async def run_due(db: AsyncSession, customer_code: str, *, now: datetime, enqueu
     runs = [await run_agent(db, customer_code, switch, now=now, tz=tz)
             for switch in await due_agents(db, customer_code, now=now)]
     if enqueue is not None:
-        await notify_high(db, customer_code, now=now, enqueue=enqueue)
+        await notify(db, customer_code, now=now, enqueue=enqueue)
     return runs
 
 

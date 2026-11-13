@@ -25,6 +25,7 @@ from app.persistence.models.advisory import Advisory, AdvisoryAgent, AdvisoryAge
 from app.persistence.models.analytics_at_risk import AnalyticsAtRiskDelivery
 from app.persistence.models.analytics_fact import AnalyticsFact
 from app.persistence.models.customer import Customer
+from app.persistence.models.notification import CustomerNotificationChannel
 from app.persistence.models.teams_binding import TeamsTenantBinding
 from app.persistence.models.tenant_site import TenantSite
 from app.services.access import commands as access_commands, users
@@ -33,6 +34,7 @@ from app.services.advisories import mirror as advisories_mirror
 from app.services.advisories.agents import location as location_agent
 from app.services.advisories.agents import stock as stock_agent
 from app.services.advisories.registry import Finding
+from app.services.groups import store as groups_store
 from app.services.analytics_at_risk import RULE_VERSION
 from app.services.teams.commands import run_command
 from app.services.teams.contracts import Command, QuestionJob
@@ -48,6 +50,7 @@ async def _wipe() -> None:
     async with async_session() as s:
         for model_ in (AnalyticsAtRiskDelivery, AnalyticsFact):
             await s.execute(delete(model_).where(model_.customer_code == CC))
+        await s.execute(delete(CustomerNotificationChannel).where(CustomerNotificationChannel.customer_code == CC))
         await s.execute(delete(Customer).where(Customer.customer_code == CC))
         await s.commit()
 
@@ -248,6 +251,13 @@ async def test_the_runner_seeds_the_switches_runs_what_is_due_announces_high_onc
     async with async_session() as db:
         db.add(_at_risk("D-1", "at_risk"))
         db.add(TeamsTenantBinding(tenant_id="t-179", customer_code=CC, enabled=True))
+        # step 12: a group that takes HIGH delivery advisories on one channel; without it nothing is posted
+        channel = CustomerNotificationChannel(customer_code=CC, channel_type="teams", name="ops", config={})
+        db.add(channel)
+        await db.flush()
+        await groups_store.set_group(db, CC, group_id=None, name="Delivery desk", topics=["advisory:delivery"],
+                                     min_severity="high", channel_ids=[str(channel.id)], member_object_ids=["u-sup"],
+                                     actor_object_id="u-adm", now=NOW)
         await db.commit()
     # Step 1: the first tick seeds the switches from the registry and runs the three live agents
     ran = await runner.sweep_once(mirror, only=[CC], enqueue=enqueue, now=NOW)
@@ -270,6 +280,7 @@ async def test_the_runner_seeds_the_switches_runs_what_is_due_announces_high_onc
     assert event.event_type == "advisory" and event.customer_code == CC and event.severity == "warning"
     assert event.title == "Delivery: Route R14 (Hove Deli) likely to leave 24 lines behind"
     assert event.dedup_key == f"advisory:{row.id}" and event.payload["site_id"] == "BRI"
+    assert event.target_channel_ids == [str(channel.id)] and event.payload["groups"] == ["Delivery desk"]
     # Step 3: the ADVISORIES row the edge reads
     env = mirror.items[(f"EYE#{CC}", "ADVISORIES")]
     assert env.row_type == "advisories"
@@ -388,3 +399,26 @@ async def test_the_executive_home_counts_the_open_advisories():
     assert summary["open"] == 2 and summary["high"] == 1 and summary["medium"] == 1
     assert summary["by_site"] == {"BRI": {"open": 1, "high": 1}, "LON": {"open": 1, "high": 0}}
     assert summary["top"][0]["title"] == "Route R14 likely to leave 24 lines behind"
+
+
+async def test_an_advisory_no_group_takes_goes_nowhere_and_is_marked_seen():
+    announced = []
+
+    async def enqueue(event):
+        announced.append(event)
+        return [uuid.uuid4()]
+
+    async with async_session() as db:
+        db.add(_at_risk("D-1", "at_risk"))
+        channel = CustomerNotificationChannel(customer_code=CC, channel_type="teams", name="ops", config={})
+        db.add(channel)
+        await db.flush()
+        # a Stock group only: the delivery advisory has no taker
+        await groups_store.set_group(db, CC, group_id=None, name="Stock", topics=["advisory:stock"], min_severity="medium",
+                                     channel_ids=[str(channel.id)], member_object_ids=[], actor_object_id="u-adm", now=NOW)
+        await db.commit()
+    assert await runner.sweep_once(None, only=[CC], enqueue=enqueue, now=NOW) == {CC: 3}
+    assert announced == []
+    async with async_session() as db:
+        row = (await db.execute(select(Advisory).where(Advisory.customer_code == CC))).scalar_one()
+        assert row.notified_at == NOW  # seen, not sent; the next tick does not try again

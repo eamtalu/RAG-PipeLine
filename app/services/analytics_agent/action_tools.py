@@ -235,7 +235,10 @@ async def _propose_task(db: AsyncSession, customer_code: str, actor_object_id: s
     if name == PROPOSE_REMINDER:
         block = forms.reminder_form(args, now=now, tz=tz, last_question=None)
     else:
+        from app.services.tasks.commands import sendable_groups
+
         sites = await list_sites(db, customer_code)
         site_name = next((s.name for s in sites if s.site_id == actor_site_id), None)
-        block = forms.schedule_form(args, now=now, tz=tz, last_question=None, site_name=site_name)
+        block = forms.schedule_form(args, now=now, tz=tz, last_question=None, site_name=site_name,
+                                    groups=await sendable_groups(db, customer_code, actor_object_id))
     return json.dumps({"shown": "form", "requires_approval": False, "block": block.model_dump(mode="json")})

@@ -65,6 +65,14 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
         return CommandOutcome(text, (receipt(text, reference=str(task.id), now=now, undo=undo),))
 
 
+async def sendable_groups(db: AsyncSession, customer_code: str, object_id: str) -> list[tuple[str, str]]:
+    """The groups a schedule of this person may post to: every enabled group of the customer, as
+    (id, name) pairs by name (a schedule posts with its owner's access either way)."""
+    from app.services.groups import store as groups_store
+
+    return [(str(v.group.id), v.group.name) for v in await groups_store.list_groups(db, customer_code, include_disabled=False)]
+
+
 async def _create(db: AsyncSession, job: QuestionJob, record: records.AccessRecord, actor: users.Actor,
                   payload: dict, now: datetime, tz: ZoneInfo):
     # Step 1: A confirmed Ask form arrives as its field values under "form"; read it into the
@@ -73,7 +81,7 @@ async def _create(db: AsyncSession, job: QuestionJob, record: records.AccessReco
     if form_id in FORM_IDS:
         values = dict(payload.get("values") or {})
         fields = (forms.reminder_from_form(values, tz=tz) if form_id == "new_reminder"
-                  else forms.schedule_from_form(values, tz=tz))
+                  else forms.schedule_from_form(values, tz=tz, groups=await sendable_groups(db, job.customer_code, actor.object_id)))
         payload = {**payload, **fields, "via": payload.get("via") or "ask"}
     kind = str(payload.get("kind") or "reminder")
     site_id = payload.get("site_id") or job.site_id
@@ -90,7 +98,7 @@ async def _create(db: AsyncSession, job: QuestionJob, record: records.AccessReco
             title=str(payload.get("title") or ""), when=dict(payload.get("when") or {}), tz=tz, now=now,
             note=payload.get("note"), site_id=site_id, query_text=payload.get("query_text"),
             skip_if=payload.get("skip_if"), target=str(payload.get("target") or "me"),
-            show_as=str(payload.get("show_as") or "table"),
+            show_as=str(payload.get("show_as") or "table"), target_group_id=payload.get("target_group_id"),
             until=datetime.fromisoformat(str(until).replace("Z", "+00:00")) if until else None,
             created_via=str(payload.get("via") or "tab"), source=payload.get("source") or {})
     except ValueError as exc:
@@ -123,7 +131,7 @@ async def _update(db: AsyncSession, job: QuestionJob, record: records.AccessReco
     if fields.get("form_id") in FORM_IDS:
         values = dict(fields.get("values") or {})
         parsed = (forms.reminder_from_form(values, tz=tz) if fields["form_id"] == "new_reminder"
-                  else forms.schedule_from_form(values, tz=tz))
+                  else forms.schedule_from_form(values, tz=tz, groups=await sendable_groups(db, job.customer_code, actor.object_id)))
         fields = {k: v for k, v in parsed.items() if k in store.EDITABLE}
     try:
         text = store.apply(task, action, fields, now=now, tz=tz)

@@ -47,6 +47,7 @@ from app.services.access import mirror as access_mirror
 from app.services.access import records as access_records
 from app.services.access import users as access_users
 from app.services.advisories import runner as advisories_runner
+from app.services.groups import mirror as groups_mirror
 from app.services.notifications import dispatcher as notifications
 from app.services.tasks import mirror as tasks_mirror
 from app.services.tasks import runner as tasks_runner
@@ -327,6 +328,7 @@ async def _access_loop(stop: asyncio.Event) -> None:
                     pass
             written = await access_mirror.sweep_once(mirror, tracker=tracker)
             logger.debug("access rows written %s", written)
+            await groups_mirror.sweep_once(mirror, tracker=tracker)
         except Exception:
             logger.exception("access sweep failed")
         try:
@@ -365,9 +367,7 @@ async def _advisories_loop(stop: asyncio.Event) -> None:
     tracker = ChangeTracker(max_age_seconds=settings.teams_advisories_tick_seconds * 20)
     while not stop.is_set():
         try:
-            ran = await advisories_runner.sweep_once(
-                mirror, tracker=tracker,
-                enqueue=notifications.enqueue if settings.teams_advisories_to_channel else None)
+            ran = await advisories_runner.sweep_once(mirror, tracker=tracker, enqueue=notifications.enqueue)
             if any(ran.values()):
                 logger.info("advisory agents ran %s", ran)
         except Exception:

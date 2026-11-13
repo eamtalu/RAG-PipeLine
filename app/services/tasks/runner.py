@@ -25,6 +25,8 @@ from app.persistence.repositories.customer_repository import get_customer_timezo
 from app.services.notifications.events import NotificationEvent
 from app.services.tasks import specs, store
 from app.services.tasks import mirror as tasks_mirror
+from app.services.groups import store as groups_store
+from app.services.groups.store import Route
 from app.services.teams.mirror import ChangeTracker, MirrorWriter
 
 logger = logging.getLogger(__name__)
@@ -65,16 +67,18 @@ async def is_pointless(db: AsyncSession, task: TeamsTask) -> str | None:
     return None
 
 
-def notification_for(task: TeamsTask, text: str, blocks: list[dict]) -> NotificationEvent:
-    """The channel message for a schedule aimed at the channel.
+def notification_for(task: TeamsTask, text: str, blocks: list[dict], *, route: Route | None = None) -> NotificationEvent:
+    """The channel message for a schedule aimed at a group (step 12: its group's channels).
 
-    (schedule "Short products list") -> event schedule:<id>:<planned> with the answer as summary
+    (schedule "Short products list" to group Stock on ch1) -> event schedule:<id>:<planned>, target ch1
     """
     return NotificationEvent(
         event_type="schedule", customer_code=task.customer_code, severity="info", title=task.title,
         summary=text[:2000] or None, dedup_key=f"task:{task.id}:{task.next_fire_at.isoformat() if task.next_fire_at else ''}",
+        target_channel_ids=list(route.channel_ids) if route is not None else None,
         payload={"task_id": str(task.id), "owner_object_id": task.owner_object_id, "show_as": task.show_as,
-                 "blocks": blocks[:4], "site_id": task.site_id},
+                 "blocks": blocks[:4], "site_id": task.site_id,
+                 "groups": list(route.group_names) if route is not None else []},
     )
 
 
@@ -102,8 +106,12 @@ async def fire(db: AsyncSession, task: TeamsTask, *, now: datetime, tz: ZoneInfo
                     text = str(answer.get("answer") or "")
                     blocks = list(answer.get("blocks") or [])
                 run.outcome, run.text, run.blocks = "sent", text, blocks
+                # Step 1b: A schedule aimed at a group goes to that group's channels; a group
+                # that is gone or switched off means nothing is posted (the ledger still says sent)
                 if task.kind == "schedule" and task.target == "channel" and enqueue is not None:
-                    await enqueue(notification_for(task, text, blocks))
+                    route = await groups_store.group_route(db, task.customer_code, task.target_group_id)
+                    if route.channel_ids:
+                        await enqueue(notification_for(task, text, blocks, route=route))
     except Exception as exc:  # noqa: BLE001 - the ledger keeps the reason
         logger.exception("task %s failed to fire", task.id)
         run.outcome, run.error = "failed", f"{type(exc).__name__}: {exc}"[:2000]
