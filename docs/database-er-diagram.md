@@ -1361,6 +1361,7 @@ The binding's `customer_code` is an enforced foreign key: a binding to a missing
 The consumer computes the Home snapshot once for the whole customer and once per active site and mirrors them to the edge under one key prefix, `EYE#<customer_code>`; a site of a missing log space must fail at write time, so the key is an enforced foreign key too.
 The turns carry the soft tenant key like the log tables, so a tenant purge can remove them and a turn can never be replayed into another tenant's question.
 Since stage D step 6 the answer row also carries who asked, the site, the typed blocks and the times, so the same table is the Ask history of the Teams app: the consumer mirrors one person's last 30 days to the edge (`EYE#<customer>` / `USER#<object id>#HISTORY` and one `TURN` row per answer) and purges older turns every hour (`teams_history_retention_days`).
+`teams_conversations` (step 6b) is the header of each thread: the page starts a new conversation id whenever the person asks for one, the agent replays only that thread's turns, and the rail lists threads by title with their turns inside; the header is a soft reference to its turns by `conversation_id` and goes with them in the purge.
 `agent_runs` is the run ledger: the consumer inserts one row per edge job id before it runs the model, and the unique `request_id` decides who wins a redelivery.
 A row still `running` means another consumer has the question (unless `claimed_at` is older than the queue's visibility window, when the claim is taken over); a row that is `done` carries the posted answer in `result`, replayed as it is.
 `agent_traces` is what each run did, for audit and troubleshooting: the gateway stores one row per run from every channel (Teams and both web ask endpoints) after the answer exists.
@@ -1396,6 +1397,18 @@ erDiagram
         bool active "false hides the site from the switcher"
         datetime created_at
         datetime updated_at
+    }
+
+    teams_conversations {
+        uuid id PK
+        string customer_code "soft tenant key; unique with conversation_id"
+        string conversation_id "tab:<tenant>:<object id>[:<key>]"
+        string sender_object_id "who owns the thread; indexed with last_turn_at"
+        string title "the first question, cut to 200"
+        string site_id "nullable"
+        datetime started_at
+        datetime last_turn_at
+        int turn_count
     }
 
     teams_conversation_turns {
@@ -1488,6 +1501,8 @@ erDiagram
     customers ||--o{ teams_tenant_bindings : "is answered from"
     customers ||--o{ tenant_sites : "runs the sites"
     customers ||..o{ teams_conversation_turns : "tenant of"
+    customers ||..o{ teams_conversations : "tenant of"
+    teams_conversations ||..o{ teams_conversation_turns : "thread of (by conversation_id)"
     customers ||..o{ agent_runs : "tenant of"
     customers ||..o{ agent_traces : "tenant of"
     customers ||..o{ quota_windows : "tenant of"

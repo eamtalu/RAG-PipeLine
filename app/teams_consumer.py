@@ -23,7 +23,7 @@ from app.agent.runtime.grounded import GroundedAgent
 from app.background import setup_logging
 from app.config.database import async_session, engine
 from app.persistence.repositories.customer_repository import CustomerRepository
-from app.persistence.repositories.teams_repository import TeamsBindingRepository
+from app.persistence.repositories.teams_repository import TeamsBindingRepository, TeamsConversationRepository
 from app.services.agent_runs import claims
 from app.services.agent_runs.claims import Claim
 from app.services.agent_quotas.admission import PostgresAdmission, QuotaLimits
@@ -119,6 +119,10 @@ async def _record_exchange(job: QuestionJob, payload: AnswerPayload) -> None:
         await ConversationMemory(db, max_turns=settings.teams_history_turns).record(
             job.conversation_id, job.customer_code, question=job.question, answer=payload.answer,
             job_id=job.job_id, details=history.details_from(job, payload))
+        # the thread's header: created on the first question, bumped on every later one (step 6b)
+        await TeamsConversationRepository(db).touch_conversation(
+            job.customer_code, job.conversation_id, sender_object_id=job.sender_object_id,
+            title=job.question, site_id=job.site_id, now=now)
         # the mirror is a nicety: a failed write is logged, the answer is already stored and posted
         mirror = _mirror_writer()
         if mirror is None:
