@@ -69,3 +69,15 @@ Deploy:
 4. The purge logs `teams.history_purged rows=N` only when something is older than 30 days; nothing on the first day.
 
 Rollback: `git checkout deployed-backend-<previous>` and restart the three units; the columns and the index can stay (nullable, unused), the mirror rows expire.
+
+## D6b: conversations as the unit of the Ask history
+
+What it adds: `teams_conversations` (migration `f5d9b3c8e721`), the header of each thread, created on a thread's first question and bumped on every later one; the person's history row now lists conversations most recent first with their turns inside (the flat list stays), and a turn written before this change shows as a thread of its own. Headers go with their turns in the purge. No flag, no new setting.
+
+Deploy:
+
+1. `./deploy.sh` (pulls, migrates, restarts the three units).
+2. Ask a question in Teams, then a follow-up in the same conversation: `EYE#tmp-live` / `USER#<id>#HISTORY` lists one conversation with two turns; the journal shows no `teams.history_mirror_failed` line.
+3. Press "New conversation" on the page and ask again: a second conversation appears, and the agent's answer carries no memory of the first.
+
+Rollback: `git checkout deployed-backend-<previous>` and restart the three units; the table can stay.

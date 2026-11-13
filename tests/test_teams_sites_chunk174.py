@@ -73,8 +73,11 @@ def _fact(when: datetime, expected, picked, *, rep, warehouse, delivery="D1", it
 
 
 async def _plant_two_warehouses(now: datetime):
-    """Today: three releases at BRI and one at LON, all in the last two hours."""
-    t = now - timedelta(minutes=90)
+    """Today: three releases at BRI and one at LON, all in the last two hours (or, in the first
+    hour and a half after midnight, from the start of today, so they never fall on yesterday)."""
+    start_of_today = now.astimezone(ZoneInfo("Europe/London")).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    t = max(now - timedelta(minutes=90), start_of_today)
     facts = [
         _fact(t, 10, 10, rep="B1", warehouse="BRI"),
         _fact(t + timedelta(minutes=10), 4, 4, rep="B2", warehouse="BRI", user="DBOBOC"),
