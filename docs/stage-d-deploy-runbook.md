@@ -240,3 +240,21 @@ Check in Teams after the edge: Ask "Where is delivery <a live number>?" (chips p
 Rollback: the previous checkout and a restart (watches added through Ask stay and keep being checked).
 
 Deployed 13 November 2026 as `a35ffe8` (PR #23); the edge image `909b34d` followed.
+
+## D15a: routines (the Tasks tab becomes Routines: runs by hand, ticks with a note, history, reuse)
+
+What it adds: migration `a7c3e5f9b012` (`teams_task_runs` gains `trigger` time | hand | tick, `by_object_id`, `by_name`, `note`; outcome gains `done`), `store.shape_of` (check | report | action, from what the row holds; `kind` stays reminder | schedule in storage), `runner.run_by_hand` (Run now answers the question at once as the owner, writes the ledger row with the actor, leaves the clock alone, posts nothing), `runner.complete` (the person's own tick: done or skipped with a note; a one-off is finished by it, a repeating one keeps its clock), `store.copy_from` (Plan again and Copy as new make a new task from an old one, `source.task_id` naming it), the `repeat` row action (a one-off onto a weekday clock), `store.list_runs` and the new row `USER#<id>#TASK_RUNS` (the last 30 days newest first, blocks on the newest ten), the Today list and `counts.due_today` on `USER#<id>#TASKS`, `runner.purge_once` (hourly in `_tasks_loop`, setting `teams_task_runs_retention_days` 30), and `run_command(job, run_query=…)` so a Run now from the tab can answer a question (the consumer passes its agent runner).
+Contract 3.15 synced from the edge (the `task_update` actions run_now | done | skip | plan_again | copy | repeat and the new row).
+Behaviour change: `run_now` no longer moves the clock to now (it ran at once and is recorded); `done` on a repeating routine no longer ends it (the tick is logged, the clock stays).
+
+Deploy: `./deploy.sh` (the migration runs inside it), before the edge step 15b image (an older edge still draws the Tasks tab from the same row; the new keys are extra).
+Check on the server:
+
+```
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT version_num FROM alembic_version;" -c "SELECT trigger, outcome, count(*) FROM teams_task_runs GROUP BY 1,2 ORDER BY 1,2;"
+```
+
+Expected: `a7c3e5f9b012`; the existing runs all `time`.
+
+Rollback: the previous checkout and a restart; `alembic downgrade f1b6c9d3e487` drops the four columns (by-hand runs and ticks keep their rows as plain runs).
+

@@ -24,7 +24,11 @@ TASK_KINDS = ("reminder", "schedule")
 TASK_STATUSES = ("active", "paused", "done", "stopped")
 TARGETS = ("me", "channel")
 SHOW_AS = ("table", "chart", "summary")
-RUN_OUTCOMES = ("sent", "skipped", "missed", "failed")
+#: sent: the clock or a by-hand run delivered it; done | skipped: the person's own tick (step 15);
+#: missed: planned too long ago to send late; failed: the question or the delivery broke.
+RUN_OUTCOMES = ("sent", "done", "skipped", "missed", "failed")
+#: time: the clock; hand: "Run now"; tick: the person recording done or skipped (step 15).
+RUN_TRIGGERS = ("time", "hand", "tick")
 
 
 def _now() -> datetime:
@@ -92,3 +96,8 @@ class TeamsTaskRun(Base):
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     blocks: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # step 15: how the run was triggered, by whom, and the person's own note
+    trigger: Mapped[str] = mapped_column(String(8), nullable=False, default="time", server_default="time")
+    by_object_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)

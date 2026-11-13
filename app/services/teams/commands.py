@@ -30,7 +30,9 @@ def _departure_date(text: str | None) -> date | None:
         raise ValueError(f"departure_date {text!r} is not YYYY-MM-DD")
 
 
-async def run_command(job: QuestionJob) -> str:
+async def run_command(job: QuestionJob, *, run_query=None) -> str:
+    """Route one command to its service; `run_query` lets a routine's "Run now" answer its question
+    (step 15; the consumer passes its agent runner)."""
     command = job.command
     if command is None:
         raise ValueError("the job carries no command")
@@ -42,7 +44,7 @@ async def run_command(job: QuestionJob) -> str:
         return await group_commands.run(job)  # a CommandOutcome: the line and the receipt
     # the Tasks tab's actions (step 10) live with the tasks service
     if command.kind in ("task_create", "task_update"):
-        return await task_commands.run(job)  # a CommandOutcome: the line and the receipt
+        return await task_commands.run(job, run_query=run_query)  # a CommandOutcome: the line and the receipt
     # the Advisories tab's actions (step 9) live with the advisories service
     if command.kind == "advisory_act":
         return await advisory_actions.run(job)  # a CommandOutcome: the line and the receipt

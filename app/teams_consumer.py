@@ -7,6 +7,7 @@ coordinate. Scale by starting another instance.
 """
 
 import asyncio
+import functools
 import logging
 from decimal import Decimal
 import signal
@@ -415,6 +416,7 @@ async def _tasks_loop(stop: asyncio.Event) -> None:
         return
     tracker = ChangeTracker(max_age_seconds=settings.teams_tasks_tick_seconds * 20)
     last_sweep = 0.0
+    last_purge = 0.0
     while not stop.is_set():
         try:
             fired = await tasks_runner.tick(mirror, run_query=_run_task_query, enqueue=notifications.enqueue,
@@ -424,6 +426,12 @@ async def _tasks_loop(stop: asyncio.Event) -> None:
             if asyncio.get_running_loop().time() - last_sweep >= 60:
                 await tasks_mirror.sweep_once(mirror, tracker=tracker)
                 last_sweep = asyncio.get_running_loop().time()
+            # step 15: the run ledger keeps 30 days; once an hour the older rows go
+            if asyncio.get_running_loop().time() - last_purge >= 3600:
+                gone = await tasks_runner.purge_once(retention_days=settings.teams_task_runs_retention_days)
+                if gone:
+                    logger.info("task runs purged count=%s", gone)
+                last_purge = asyncio.get_running_loop().time()
         except Exception:
             logger.exception("tasks tick failed")
         try:
@@ -469,7 +477,8 @@ async def _amain() -> None:
         record_exchange=_record_exchange, resolve_customer=_resolve_customer,
         concurrency=settings.teams_consumer_concurrency,
         visibility_seconds=settings.teams_sqs_visibility_seconds, wait_seconds=settings.teams_sqs_wait_seconds,
-        run_command=run_command, run_timeout_seconds=settings.analytics_agent_run_timeout_seconds,
+        run_command=functools.partial(run_command, run_query=_run_task_query),
+        run_timeout_seconds=settings.analytics_agent_run_timeout_seconds,
         claim_run=_claim_run, finish_run=_finish_run, read_freshness=_read_freshness,
         progress_factory=_progress_factory, check_access=_check_access)
 

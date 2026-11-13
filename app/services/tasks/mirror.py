@@ -1,7 +1,9 @@
 """The `USER#<id>#TASKS` row the edge reads (stage D, step 10): one person's reminders and
 schedules, what is coming up next, the counts the tab shows, and the suggestions made from their
-own history (the same question at about the same time on most recent weekdays). Rewritten after
-every change and firing, and by the consumer's sweep every minute (unchanged rows are skipped).
+own history (the same question at about the same time on most recent weekdays). Since step 15
+also the Today list and, beside it, the `USER#<id>#TASK_RUNS` row with the runs of the last 30
+days. Rewritten after every change and firing, and by the consumer's sweep every minute
+(unchanged rows are skipped).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from app.persistence.repositories.customer_repository import get_customer_timezo
 from app.persistence.repositories.teams_repository import TeamsConversationRepository
 from app.services.tasks import store
 from app.services.teams.mirror import ChangeTracker, MirrorWriter, envelope, write_if_changed
+from app.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,8 @@ SUGGEST_DAYS = 7
 SUGGEST_MIN_DAYS = 4
 SUGGEST_WINDOW_MINUTES = 45
 COMING_UP = 6
+RUNS_WITH_BLOCKS = 10
+RUNS_LIMIT = 200
 
 
 def normalise(question: str) -> str:
@@ -81,6 +86,7 @@ async def user_payload(db: AsyncSession, customer_code: str, owner_object_id: st
     done_today = [r for r in reminders if r["status"] == "done" and r["done_at"]
                   and datetime.fromisoformat(r["done_at"]).astimezone(tz).date() == local_today]
     coming = sorted((r for r in rows if r["status"] == "active" and r["next_fire_at"]), key=lambda r: r["next_fire_at"])
+    today = today_list(rows, tz=tz, now=now)
     # Step 1: The suggestions come from the person's own last week of questions, so nothing is
     # suggested that they did not themselves ask
     repo = TeamsConversationRepository(db)
@@ -92,11 +98,51 @@ async def user_payload(db: AsyncSession, customer_code: str, owner_object_id: st
         "as_of": now.isoformat(),
         "timezone": str(tz),
         "counts": {"todo": sum(1 for r in reminders if r["status"] == "active"), "done_today": len(done_today),
-                   "running": sum(1 for r in schedules if r["status"] == "active")},
+                   "running": sum(1 for r in schedules if r["status"] == "active"),
+                   "due_today": sum(1 for t in today if not t["is_done"])},
         "reminders": reminders,
         "schedules": schedules,
         "coming_up": coming[:COMING_UP],
+        "today": today,
         "suggested": suggestions(asked, tz=tz, scheduled=scheduled),
+    }
+
+
+def today_list(rows: list[dict], *, tz: ZoneInfo, now: datetime) -> list[dict]:
+    """The Today view (step 15): every routine due today in time order, then the ones already
+    done or run today, each as {id, at, is_done, is_overdue}.
+
+    (active at 17:45 today, done at 09:10 today, active Monday) -> [17:45 row, 09:10 row done]
+    """
+    local_today = now.astimezone(tz).date()
+
+    def local(value: str | None) -> datetime | None:
+        return datetime.fromisoformat(value).astimezone(tz) if value else None
+
+    due, done = [], []
+    for r in rows:
+        next_at, last = local(r.get("next_fire_at")), r.get("last_result") or {}
+        last_at = local(last.get("at"))
+        if r["status"] == "active" and next_at is not None and next_at.date() == local_today:
+            due.append({"id": r["id"], "at": r["next_fire_at"], "is_done": False, "is_overdue": next_at < now.astimezone(tz)})
+        if last_at is not None and last_at.date() == local_today and last.get("outcome") in ("sent", "done", "skipped"):
+            done.append({"id": r["id"], "at": last.get("at"), "is_done": True, "is_overdue": False, "outcome": last.get("outcome")})
+    due.sort(key=lambda t: t["at"])
+    done.sort(key=lambda t: t["at"], reverse=True)
+    return due + done
+
+
+async def runs_payload(db: AsyncSession, customer_code: str, owner_object_id: str, *, now: datetime) -> dict:
+    """The USER#<id>#TASK_RUNS row (step 15): the person's runs of the retention window, newest
+    first; the newest few carry their blocks, the rest say they have some."""
+    tz = ZoneInfo(await get_customer_timezone(db, customer_code))
+    since = now - timedelta(days=settings.teams_task_runs_retention_days)
+    pairs = await store.list_runs(db, customer_code, owner_object_id, since=since, limit=RUNS_LIMIT)
+    return {
+        "owner_object_id": owner_object_id,
+        "as_of": now.isoformat(),
+        "retention_days": settings.teams_task_runs_retention_days,
+        "runs": [store.run_payload(run, task, tz, with_blocks=i < RUNS_WITH_BLOCKS) for i, (run, task) in enumerate(pairs)],
     }
 
 
@@ -107,7 +153,13 @@ async def mirror_user(db: AsyncSession, mirror: MirrorWriter, customer_code: str
     payload = await user_payload(db, customer_code, owner_object_id, now=now)
     env = envelope("user_tasks", customer_code, payload=payload, as_of=payload["as_of"], now=now.timestamp(),
                    user_id=owner_object_id)
-    return await write_if_changed(mirror, tracker, env, now=now.timestamp())
+    written = await write_if_changed(mirror, tracker, env, now=now.timestamp())
+    # step 15: the runs row travels with the tasks row, so History is never behind a change
+    runs = await runs_payload(db, customer_code, owner_object_id, now=now)
+    runs_env = envelope("user_task_runs", customer_code, payload=runs, as_of=runs["as_of"], now=now.timestamp(),
+                        user_id=owner_object_id)
+    await write_if_changed(mirror, tracker, runs_env, now=now.timestamp())
+    return written
 
 
 async def owners_with_tasks(db: AsyncSession, customer_code: str) -> list[str]:

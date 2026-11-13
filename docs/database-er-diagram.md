@@ -1372,7 +1372,7 @@ Held is recorded, not dropped, so which findings a summary covered stays answera
 The watchlist (stage D, step 14) is what a person chose to keep an eye on: `watches` holds one active watch per person and thing (a partial unique index on `customer_code`, `owner_object_id`, `kind`, `entity_id` where the status is active), with the kind (delivery, route, location, zone, product, measure), the reference the kind needs to find it again (`entity_ref`, such as a delivery's row id or a zone's locations), the alert rule, the live value and status the consumer's watches loop refreshes on the kind's cadence, and how and when it ended (stopped, delivered, until, access, swapped, not_found).
 `watch_events` is one line per status change (never per number moving), with a sequence unique per watch, whether the change is one the alert rule names, and when the person saw it; `watch_not_now` remembers a "Not now" to Ask's suggestion for a day.
 Conditions ("when fill rate drops below") are measure watches since this step; the migration stops any condition schedule that remained in `teams_tasks`.
-Tasks (stage D, step 10) are the reminders and schedules of the Tasks tab: `teams_tasks` holds both kinds (`kind` reminder | schedule) with the spec as JSON (`when`: once at a moment, recurring on weekdays at a time, or a condition such as fill rate below a line) and `next_fire_at`, the moment the consumer's loop acts, so a restart loses nothing; `teams_task_runs` is the ledger, one row per planned firing, unique on (`task_id`, `planned_at`), so a firing happens exactly once (outcomes sent, skipped, missed, failed).
+Tasks (stage D, step 10) are the reminders and schedules of the Tasks tab: `teams_tasks` holds both kinds (`kind` reminder | schedule) with the spec as JSON (`when`: once at a moment, recurring on weekdays at a time, or a condition such as fill rate below a line) and `next_fire_at`, the moment the consumer's loop acts, so a restart loses nothing; `teams_task_runs` is the ledger, one row per planned firing, unique on (`task_id`, `planned_at`), so a firing happens exactly once (outcomes sent, skipped, missed, failed; since step 15 also done, and each row says how it was triggered: by the clock, by hand, or by the person's own tick, with their note); runs older than 30 days are purged.
 A task belongs to one person (`owner_object_id`), runs its attached question with that person's access, and is audited in `audit_events` as `task.<action>`.
 `teams_conversations` (step 6b) is the header of each thread: the page starts a new conversation id whenever the person asks for one, the agent replays only that thread's turns, and the rail lists threads by title with their turns inside; the header is a soft reference to its turns by `conversation_id` and goes with them in the purge.
 `agent_runs` is the run ledger: the consumer inserts one row per edge job id before it runs the model, and the unique `request_id` decides who wins a redelivery.
@@ -1672,10 +1672,14 @@ erDiagram
         datetime planned_at
         datetime started_at
         datetime finished_at
-        string outcome "sent | skipped | missed | failed"
+        string outcome "sent | done | skipped | missed | failed"
         text text
         jsonb blocks
         text error
+        string trigger "time | hand | tick (step 15)"
+        string by_object_id "nullable; who ran or ticked it"
+        string by_name "nullable"
+        text note "nullable; the person's own note on done or skipped"
     }
 
     teams_conversations {
