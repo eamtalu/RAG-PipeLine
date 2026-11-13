@@ -20,6 +20,7 @@ from app.agent.capabilities.spec import Namespace, ToolSpec
 from app.agent.profiles import load_profile, read_profile
 from app.agent.runtime.grounded import GroundedAgent
 from app.services.analytics_agent import at_risk_tools
+from app.services.analytics_agent.action_tools import ACTION_TOOLS
 from app.services.analytics_agent.presentation_tools import PRESENTATION_TOOLS
 from app.services.analytics_agent.tools import RECIPES, RELEASE_TOOLS
 from app.services.log_feed.scope import describe, scope_from
@@ -89,7 +90,7 @@ def test_a_profile_only_gets_its_namespaces_tools_in_the_old_order():
     registry = tool_registry()
     # the analytics profile gained the presentation namespace in step 5 (chunk 171); its three
     # tools come after the seventeen data tools, which keep their old order
-    analytics_20 = ANALYTICS_17 + [t["name"] for t in PRESENTATION_TOOLS]
+    analytics_20 = ANALYTICS_17 + [t["name"] for t in PRESENTATION_TOOLS] + [t["name"] for t in ACTION_TOOLS]
     assert [s.name for s in registry.offered(load_profile("analytics").namespaces)] == analytics_20
     assert [s.name for s in registry.offered(load_profile("logspace").namespaces)] == LOGSPACE_6
     bound = registry.bind(context_for(CC), request_for(CC), load_profile("analytics").namespaces)
@@ -219,7 +220,7 @@ def test_the_loader_wants_a_non_empty_list_of_unique_namespaces(tmp_path, value)
 
 
 def test_the_profiles_list_their_namespaces():
-    assert load_profile("analytics").namespaces == ("logs", "analytics", "presentation")
+    assert load_profile("analytics").namespaces == ("logs", "analytics", "presentation", "actions")
     assert load_profile("logspace").namespaces == ("logspace",)
     for name in ("analytics", "logspace"):
         raw = yaml.safe_load((PROFILES / f"{name}.yaml").read_text())

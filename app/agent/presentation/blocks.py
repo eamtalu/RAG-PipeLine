@@ -8,10 +8,15 @@ read the same calls: every number in a chart or table must appear in a data tool
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
+from app.services.analytics_agent.action_tools import ACTION_TOOL_NAMES
 from app.services.analytics_agent.presentation_tools import PRESENTATION_TOOL_NAMES, block_from_call
+
+#: The calls that draw rather than read: the presentation tools and the action tools (step 8).
+DRAWING_TOOL_NAMES = PRESENTATION_TOOL_NAMES | ACTION_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +30,7 @@ def is_presentation_call(call: dict) -> bool:
     >>> is_presentation_call({"tool": "show_chart"}), is_presentation_call({"tool": "aggregate_releases"})
     (True, False)
     """
-    return call.get("tool") in PRESENTATION_TOOL_NAMES
+    return call.get("tool") in DRAWING_TOOL_NAMES
 
 
 def data_trace(trace: list[dict]) -> list[dict]:
@@ -55,12 +60,18 @@ def blocks_from_trace(trace: list[dict]) -> list[dict]:
         if not is_presentation_call(call) or _refused(call):
             continue
         try:
-            block = block_from_call(call["tool"], call.get("input") or {})
+            if call["tool"] in ACTION_TOOL_NAMES:
+                # an action tool's block is in its result: the runner built it from the records
+                block = json.loads(call.get("result") or "{}").get("block")
+                if not block:
+                    continue
+            else:
+                block = block_from_call(call["tool"], call.get("input") or {})
         except Exception as exc:  # noqa: BLE001 - a bad call is dropped and logged, never raised
             logger.warning("agent.block_dropped tool=%s reason=%s", call["tool"], str(exc)[:160])
             continue
         by_type[block["type"]] = block
-    ordered = [by_type[k] for k in ("table", "chart", "followups") if k in by_type]
+    ordered = [by_type[k] for k in ("table", "chart", "form", "followups") if k in by_type]
     return ordered[:MAX_BLOCKS]
 
 

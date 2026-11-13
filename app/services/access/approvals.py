@@ -172,6 +172,30 @@ def _date(value):
     return date.fromisoformat(value) if value else None
 
 
+async def withdraw(db: AsyncSession, customer_code: str, reference: str, *, by: str, by_name: str | None,
+                   now: datetime | None = None) -> AccessApproval:
+    """The requester takes a pending request back (a receipt's Undo, step 8); audited.
+
+    ("USR-1" by its requester) -> status withdrawn ; (someone else's, or decided) -> ValueError
+    """
+    now = now or datetime.now(timezone.utc)
+    row = (await db.execute(
+        select(AccessApproval).where(AccessApproval.customer_code == customer_code,
+                                     AccessApproval.reference == reference)
+    )).scalar_one_or_none()
+    if row is None or row.status != "pending":
+        raise ValueError(f"approval {reference!r} is not pending")
+    if row.requested_by != by:
+        raise ValueError(f"approval {reference!r} was not requested by you")
+    row.status, row.decided_by, row.decided_at = "withdrawn", by, now
+    await db.flush()
+    await audit.record_event(
+        db, customer_code, actor_object_id=by, actor_name=by_name, action=f"approval.withdrawn.{row.kind}",
+        decision="declined", subject_kind="approval", subject_id=row.reference,
+        text=f"{by_name or by} withdrew {row.reference} · {row.title}", at=now)
+    return row
+
+
 async def expire_once(db: AsyncSession, *, now: datetime | None = None) -> int:
     """Mark pending requests past their expiry as expired; how many. Audited as system."""
     now = now or datetime.now(timezone.utc)

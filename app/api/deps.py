@@ -28,7 +28,8 @@ from app.config.database import async_session
 from app.services.agent_quotas.admission import PostgresAdmission, QuotaLimits
 from app.services.agent_traces.store import PostgresTraceStore
 from app.services.agent_usage.store import PostgresUsageStore
-from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace, presentation_namespace
+from app.services.analytics_agent.namespaces import (actions_namespace, analytics_namespace, logs_namespace,
+                                                     presentation_namespace)
 from app.services.logspace_agent.namespaces import logspace_namespace
 from app.services.mnp_log_ingestion.timefmt import set_display_timezone
 from app.settings import settings
@@ -43,6 +44,7 @@ def tool_registry() -> ToolRegistry:
             analytics_namespace(),
             logspace_namespace(),
             presentation_namespace(settings.analytics_agent_presentation),
+            actions_namespace(settings.analytics_agent_presentation),
         ]
     )
 

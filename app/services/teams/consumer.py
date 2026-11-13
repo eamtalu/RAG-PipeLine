@@ -323,7 +323,12 @@ class TeamsQuestionConsumer:
                 if self._run_command is None:
                     return AnswerPayload(**base, status="error", answer=COMMAND_UNSUPPORTED)
                 try:
-                    return AnswerPayload(**base, status="ok", answer=await self._run_command(job))
+                    outcome = await self._run_command(job)
+                    # an access command (step 7c) answers with a line and a receipt (step 8)
+                    text = outcome if isinstance(outcome, str) else outcome.text
+                    blocks = [] if isinstance(outcome, str) else list(outcome.blocks)
+                    return AnswerPayload(**base, status="ok", answer=text, blocks=blocks,
+                                         answered_at=datetime.now(timezone.utc))
                 except Exception as exc:  # noqa: BLE001 - a refused command is a sentence, never a crash
                     logger.warning("Teams job %s: command %s refused: %s", job.job_id, job.command.kind, exc)
                     return AnswerPayload(**base, status="error", answer=f"Could not record that: {exc}")
