@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -120,9 +121,12 @@ async def test_the_stock_agent_flags_counts_that_disagree_with_the_system():
         db.add_all([
             # an early count says 4, a later one says 2 against a balance of 4: the latest counts
             _fact("ReportCount", NOW - timedelta(hours=3), item="104568",
-                  attributes={"Location": "A-01-02", "CountedQuantity": "4", "BalanceQuantity": "4"}),
+                  attributes={"Location": "A-01-02", "CountedQuantity": "4", "BalanceQuantity": "4.000000"}),
             _fact("ReportCount", NOW - timedelta(hours=1), item="104568",
-                  attributes={"Location": "A-01-02", "CountedQuantity": "2", "BalanceQuantity": "4"}),
+                  attributes={"Location": "A-01-02", "CountedQuantity": "2", "BalanceQuantity": "4.000000"}),
+            # one unit out: noise, not a finding
+            _fact("ReportCount", NOW - timedelta(minutes=40), item="600600",
+                  attributes={"Location": "E-01-01", "CountedQuantity": "8", "BalanceQuantity": "7"}),
             # counted empty against 13.33: HIGH
             _fact("ReportCount", NOW - timedelta(minutes=30), item="200100",
                   attributes={"Location": "B-07-01", "CountedQuantity": "0", "BalanceQuantity": "13.33"}),
@@ -143,6 +147,7 @@ async def test_the_stock_agent_flags_counts_that_disagree_with_the_system():
     assert by_key["count:104568:A-01-02"].severity == "high"  # half the balance is gone
     assert by_key["count:104568:A-01-02"].title == "Item 104568 at A-01-02: counted 2, system 4"
     assert by_key["count:104568:A-01-02"].evidence == "Quick Stock Count at 08:00 · gap -2 units · 50% of the balance"
+    assert by_key["count:200100:B-07-01"].evidence == "Quick Stock Count at 08:30 · gap -13.33 units · 100% of the balance"
     assert by_key["count:200100:B-07-01"].title == "Item 200100 at B-07-01 counted empty, system has 13.33"
     assert by_key["count:200100:B-07-01"].recommended == "Recount B-07-01 and adjust the balance for item 200100"
 
@@ -174,8 +179,10 @@ async def test_the_location_agent_counts_the_picks_that_found_a_slot_empty_today
 def test_the_thresholds_and_the_registry():
     assert stock_agent.variance_of("2", "4") == (-2, 0.5)
     assert stock_agent.variance_of("97.5", "97.5") is None
-    assert stock_agent.variance_of("4", "4.5") is None  # under a unit
+    assert stock_agent.variance_of("8", "7") is None  # one unit out is noise
     assert stock_agent.variance_of("95", "100") is None  # under a tenth
+    assert stock_agent.variance_of("0", "1") == (-1, 1)  # counted empty always counts
+    assert stock_agent.plain(Decimal("59.788000")) == "59.788"
     assert location_agent.severity_for(6) == "high" and location_agent.severity_for(2) is None
     assert [a.name for a in registry.AGENTS if a.enabled_by_default] == ["delivery", "stock", "location"]
     assert registry.spec("forecast").off_reason and registry.spec("forecast").run is None
