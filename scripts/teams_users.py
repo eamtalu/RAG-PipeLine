@@ -86,12 +86,19 @@ async def show_matrix(customer_code: str) -> None:
 
 
 async def _mirror(db, customer_code: str) -> None:
+    """Mirror the customer's access rows now; a failure is a line, never a crash, because the row
+    is already saved and the consumer's sweep mirrors it within a minute anyway."""
     mirror = build_mirror_writer_from_settings()
     if mirror is None:
-        print("(no mirror table configured; the edge rows were not written)")
+        print("(no mirror table configured; the consumer's sweep writes the edge rows)")
         return
-    written = await access_mirror.mirror_customer(db, mirror, customer_code)
-    await db.commit()
+    try:
+        written = await access_mirror.mirror_customer(db, mirror, customer_code)
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001 - the shell may lack the service's AWS credentials
+        print(f"saved; not mirrored from this shell ({type(exc).__name__}: {str(exc)[:120]}). "
+              "The consumer's sweep mirrors it within a minute.")
+        return
     print(f"mirrored {written} access row(s) to the edge")
 
 
