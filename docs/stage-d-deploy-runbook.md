@@ -118,3 +118,11 @@ What it adds: `app/services/teams/exec_home.py` computes, every `TEAMS_EXEC_HOME
 Deploy: `./deploy.sh`. Within five minutes `EYE#tmp-live` / `EXEC#HOME` exists; the journal shows no `executive home … failed` line. To see the page, give a test user the Executive role: `teams_users.py set tmp-live <object id> "<name>" --role executive --all-sites`.
 
 Rollback: the previous checkout and a restart; the row expires within two hours.
+
+## D8: create_user through Ask
+
+What it adds: the `actions` namespace on the analytics profile (one tool, `propose_create_user`, offered while `ANALYTICS_AGENT_PRESENTATION` is on), the form lifted off the trace, `access_set_user` answering with a receipt, the `access_undo` command, `TEAMS_UNDO_MINUTES` (10). Contract 3.8 synced from the edge. No migration, no new flag.
+
+Deploy: `./deploy.sh`. Then, once the edge step 8 image is live, ask "Create a user for Dan Roberts" in Teams as Admin: the form comes back pre-filled (the trace shows one `propose_create_user` call and no data call); confirm it with an Entra object id: the receipt says created, and `teams_users` has the row with `created_by` your object id; Undo within ten minutes deactivates it (audited as `access.user_deactivated`).
+
+Rollback: the previous checkout and a restart.
