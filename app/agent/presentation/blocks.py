@@ -62,8 +62,8 @@ def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list
     """The blocks the presentation calls describe, in order, at most MAX_BLOCKS, one per kind
     (the last chart wins, the last table wins, the last follow-ups win), plus the entities the
     data calls named (step 14c). With `only_grounded`, only the blocks whose numbers were copied
-    from a data result (a `chart_from_data` chart, the entities), the ones a withheld answer may
-    still carry (step 19).
+    from a data result (a `chart_from_data` chart, the shape the lift draws from the data, the
+    entities), the ones a withheld answer may still carry (step 19).
 
     >>> blocks_from_trace([{"tool": "suggest_followups", "input": {"items": ["Why?"]}, "result": "{}"}])
     [{'type': 'followups', 'items': ['Why?']}]
@@ -99,17 +99,18 @@ def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list
             logger.warning("agent.block_dropped tool=%s reason=%s", call["tool"], str(exc)[:160])
             continue
         by_type[block["type"]] = block
-    # the shape Python draws when the model drew none (step 19): a chart for a trend or a ranking,
-    # key figures for a single total; its numbers come from the data result, so the guards are
-    # already satisfied
-    # (these are drawn from the data result itself, so a withheld answer keeps them too)
-    drew = any(k in by_type for k in ("chart", "table", "heatmap"))
-    if latest is not None and not drew:
+    # The shape the data has wins (step 19, fix of 14 November): a day-by-hour grid is always a
+    # heat map, replacing a model's line of hours; a trend over time always gets its chart, beside
+    # a model's table; a ranking or a single total is drawn only when the model drew nothing.
+    # These come from the data result itself, so the guards hold and a withheld answer keeps them.
+    if latest is not None:
         heatmap = auto_heatmap(*latest)
         if heatmap is not None:
+            by_type.pop("chart", None)
             by_type["heatmap"] = heatmap.model_dump(mode="json")
-        else:
-            chart = auto_chart(*latest, asked_sort=latest_asked_sort)
+        elif "chart" not in by_type and "heatmap" not in by_type:
+            # with a model's table only a trend earns a chart; without one, a ranking does too
+            chart = auto_chart(*latest, asked_sort=latest_asked_sort and "table" not in by_type)
             if chart is not None:
                 by_type["chart"] = chart.model_dump(mode="json")
     if latest is not None and "kpis" not in by_type and not any(k in by_type for k in ("chart", "table", "heatmap")):
@@ -152,10 +153,14 @@ def presentation_figures(trace: list[dict]) -> str:
         args = call.get("input")
         if not isinstance(args, dict):
             continue
-        for key in ("series_values", "rows"):
-            for item in _items(args.get(key)):
-                for cell in _items(item):
-                    numbers.extend(_NUMBER.findall(str(cell)))
+        # chart values are numbers the model typed: each is checked exactly
+        for item in _items(args.get("series_values")):
+            for cell in _items(item):
+                numbers.extend(_NUMBER.findall(str(cell)))
+        # table cells are words, one per line, so "1,928" stays one figure and a date or a time is
+        # read as one (fix of 14 November: "1,928" was checked as "1" and "928" and withheld)
+        for row in _items(args.get("rows")):
+            lines.extend(str(cell) for cell in _items(row) if str(cell).strip())
         # the words of the key figures and the findings (step 19) go through whole, one per line
         for key in TEXT_KEYS:
             lines.extend(str(x) for x in _items(args.get(key)) if str(x).strip())

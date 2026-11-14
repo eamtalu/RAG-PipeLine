@@ -501,3 +501,36 @@ cases:
       stop_reason: end_turn
       tools: [wms_activity, chart_from_data]
       blocks: [chart]
+
+  # ---------------------------------------------------------------- fix of 14 November: the data's shape wins
+  # The live model drew a table for users per day (21:27) and a line of hours for users per hour
+  # (21:19); the chart and the heat map must still come.
+
+  - name: users_per_day_with_the_models_table_still_gets_the_trend_chart
+    question: How many different users were active each day in the week to 18 September 2026?
+    replies:
+      - tool: wms_activity
+        args: {grain: day, start: "2026-09-11", end: "2026-09-18"}
+      - tool: show_table
+        args:
+          title: "Users active per day"
+          columns: [day, users, devices, calls]
+          rows: [["2026-09-16", "2", "2", "3"], ["2026-09-17", "2", "2", "2"], ["2026-09-18", "3", "3", "5"]]
+      - text: "At most 3 users were active, on 2026-09-18; 2 on each of the two days before."
+    expect:
+      stop_reason: end_turn
+      tools: [wms_activity, show_table]
+      blocks: [chart, table]
+
+  - name: users_per_hour_with_the_models_line_still_gets_the_heat_map
+    question: Show active users per hour in the week to 18 September 2026
+    replies:
+      - tool: wms_activity
+        args: {grain: hour, start: "2026-09-11", end: "2026-09-18"}
+      - tool: chart_from_data
+        args: {measure: users}
+      - text: "Users were active between 06:00 and 09:00 on the three days with activity."
+    expect:
+      stop_reason: end_turn
+      tools: [wms_activity, chart_from_data]
+      blocks: [heatmap]
