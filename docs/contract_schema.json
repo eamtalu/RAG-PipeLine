@@ -460,6 +460,89 @@
           "title": "EvidenceColumn",
           "type": "object"
         },
+        "Finding": {
+          "description": "One thing the data shows (step 19): the fact, why it matters, and the tool it came from.",
+          "properties": {
+            "reasoning": {
+              "anyOf": [
+                {
+                  "maxLength": 300,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reasoning"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Source"
+            },
+            "text": {
+              "maxLength": 300,
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "title": "Finding",
+          "type": "object"
+        },
+        "FindingsBlock": {
+          "description": "What the data shows, what to do about it and what it cannot say (step 19).",
+          "properties": {
+            "findings": {
+              "items": {
+                "$ref": "#/$defs/Finding"
+              },
+              "maxItems": 6,
+              "minItems": 1,
+              "title": "Findings",
+              "type": "array"
+            },
+            "limitations": {
+              "items": {
+                "maxLength": 200,
+                "type": "string"
+              },
+              "maxItems": 4,
+              "title": "Limitations",
+              "type": "array"
+            },
+            "recommendations": {
+              "items": {
+                "$ref": "#/$defs/Recommendation"
+              },
+              "maxItems": 4,
+              "title": "Recommendations",
+              "type": "array"
+            },
+            "type": {
+              "const": "findings",
+              "default": "findings",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "findings"
+          ],
+          "title": "FindingsBlock",
+          "type": "object"
+        },
         "FollowupsBlock": {
           "properties": {
             "items": {
@@ -646,6 +729,96 @@
           "title": "FormField",
           "type": "object"
         },
+        "KpiItem": {
+          "description": "One headline figure of an analyst answer (step 19): the value is already formatted.",
+          "properties": {
+            "caption": {
+              "anyOf": [
+                {
+                  "maxLength": 80,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Caption"
+            },
+            "label": {
+              "maxLength": 40,
+              "title": "Label",
+              "type": "string"
+            },
+            "tone": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "good",
+                    "medium",
+                    "high",
+                    "neutral"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tone"
+            },
+            "value": {
+              "maxLength": 24,
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "value"
+          ],
+          "title": "KpiItem",
+          "type": "object"
+        },
+        "KpisBlock": {
+          "description": "The headline figures of an analyst answer (step 19), drawn as small tiles.",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/$defs/KpiItem"
+              },
+              "maxItems": 6,
+              "minItems": 1,
+              "title": "Items",
+              "type": "array"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "maxLength": 120,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Title"
+            },
+            "type": {
+              "const": "kpis",
+              "default": "kpis",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "title": "KpisBlock",
+          "type": "object"
+        },
         "ReceiptBlock": {
           "description": "What happened after a confirmation, with a reference and a time-limited undo.",
           "properties": {
@@ -710,6 +883,33 @@
             "text"
           ],
           "title": "ReceiptBlock",
+          "type": "object"
+        },
+        "Recommendation": {
+          "properties": {
+            "reason": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            },
+            "text": {
+              "maxLength": 200,
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "title": "Recommendation",
           "type": "object"
         },
         "TableBlock": {
@@ -964,8 +1164,10 @@
                 "chart": "#/$defs/ChartBlock",
                 "choice": "#/$defs/ChoiceBlock",
                 "entities": "#/$defs/EntitiesBlock",
+                "findings": "#/$defs/FindingsBlock",
                 "followups": "#/$defs/FollowupsBlock",
                 "form": "#/$defs/FormBlock",
+                "kpis": "#/$defs/KpisBlock",
                 "receipt": "#/$defs/ReceiptBlock",
                 "table": "#/$defs/TableBlock",
                 "text": "#/$defs/TextBlock",
@@ -1004,6 +1206,12 @@
               },
               {
                 "$ref": "#/$defs/TopicsBlock"
+              },
+              {
+                "$ref": "#/$defs/KpisBlock"
+              },
+              {
+                "$ref": "#/$defs/FindingsBlock"
               }
             ]
           },
@@ -1388,5 +1596,5 @@
       "type": "object"
     }
   },
-  "revision": "3.17"
+  "revision": "3.18"
 }

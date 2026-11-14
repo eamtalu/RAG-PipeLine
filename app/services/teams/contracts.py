@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.17"
+CONTRACT_REVISION = "3.18"
 
 
 def _now() -> datetime:
@@ -395,6 +395,45 @@ class TopicsBlock(BaseModel):
     topics: list[Topic] = Field(..., max_length=12)
 
 
+class KpiItem(BaseModel):
+    """One headline figure of an analyst answer (step 19): the value is already formatted."""
+
+    label: str = Field(..., max_length=40)
+    value: str = Field(..., max_length=24)
+    caption: str | None = Field(default=None, max_length=80)
+    tone: Literal["good", "medium", "high", "neutral"] | None = None
+
+
+class KpisBlock(BaseModel):
+    """The headline figures of an analyst answer (step 19), drawn as small tiles."""
+
+    type: Literal["kpis"] = "kpis"
+    title: str | None = Field(default=None, max_length=120)
+    items: list[KpiItem] = Field(..., min_length=1, max_length=6)
+
+
+class Finding(BaseModel):
+    """One thing the data shows (step 19): the fact, why it matters, and the tool it came from."""
+
+    text: str = Field(..., max_length=300)
+    reasoning: str | None = Field(default=None, max_length=300)
+    source: str | None = Field(default=None, max_length=40)
+
+
+class Recommendation(BaseModel):
+    text: str = Field(..., max_length=200)
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class FindingsBlock(BaseModel):
+    """What the data shows, what to do about it and what it cannot say (step 19)."""
+
+    type: Literal["findings"] = "findings"
+    findings: list[Finding] = Field(..., min_length=1, max_length=6)
+    recommendations: list[Recommendation] = Field(default_factory=list, max_length=4)
+    limitations: list[Annotated[str, Field(max_length=200)]] = Field(default_factory=list, max_length=4)
+
+
 Block = Annotated[
     TextBlock
     | TableBlock
@@ -405,7 +444,9 @@ Block = Annotated[
     | EntitiesBlock
     | WatchSuggestionBlock
     | ChoiceBlock
-    | TopicsBlock,
+    | TopicsBlock
+    | KpisBlock
+    | FindingsBlock,
     Field(discriminator="type"),
 ]
 
