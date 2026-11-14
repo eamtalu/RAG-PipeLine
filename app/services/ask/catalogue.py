@@ -51,7 +51,8 @@ TOPICS: tuple[TopicSpec, ...] = (
         ),
     ),
     TopicSpec(
-        "deliveries", "Deliveries and vans", "What left, what is at risk, and which vans run late.", "delivery",
+        "deliveries", "Deliveries and vans",
+        "What left, what is at risk, and which vans run late.", "delivery",
         (
             QuestionSpec("How many deliveries and lines were picked today?"),
             QuestionSpec("Which deliveries are at risk of leaving late today?"),

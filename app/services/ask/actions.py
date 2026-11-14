@@ -340,7 +340,8 @@ async def run(db: AsyncSession, customer_code: str, actor_object_id: str, actor_
         spec = _BY_ID.get(str(args.get("action_id") or ""))
         if spec is None or spec.mode != DEMO:
             known = ", ".join(DEMO_IDS)
-            return json.dumps({"problems": [f"unknown demo action {args.get('action_id')!r}; one of {known}"]})
+            problem = f"unknown demo action {args.get('action_id')!r}; one of {known}"
+            return json.dumps({"problems": [problem]})
         args = dict(args.get("fields") or {})
     else:
         spec = _BY_TOOL.get(name)
@@ -369,5 +370,6 @@ async def run(db: AsyncSession, customer_code: str, actor_object_id: str, actor_
     except ValueError as exc:
         return json.dumps({"problems": [str(exc)]})
     block = block.model_copy(update={"command_kind": spec.command_kind, "mode": spec.mode})
-    return json.dumps({"shown": "form", "demo": spec.mode == DEMO, "requires_approval": block.requires_approval,
+    return json.dumps({"shown": "form", "demo": spec.mode == DEMO,
+                       "requires_approval": block.requires_approval,
                        "block": block.model_dump(mode="json")})
