@@ -30,15 +30,17 @@ A case is:
 | `history` | earlier turns, optional |
 | `gate` | `true` when the topic gate runs; the first reply is then its one-word verdict |
 | `replies` | the scripted model's turns in order: `{tool, args}` or `{text}` |
-| `expect` | `stop_reason` and `tools` (the calls behind the final answer), and optionally `declined`, `retries`, `evidence`, `withheld_figures`, `answer_contains`, `answer_excludes`, `allow_failed_calls` |
+| `expect` | `stop_reason` and `tools` (the calls behind the final answer), and optionally `declined`, `retries`, `evidence`, `withheld_figures`, `answer_contains`, `answer_excludes`, `allow_failed_calls`, `blocks` (the block kinds in order; step 19) |
 
-The data every case runs on is `tests/golden/plant.py`: the release facts of chunk 124 (18 September 2026) and the log records of chunk 132 (30 September 2026), the same rows those tests have always planted.
+The data every case runs on is `tests/golden/plant.py`: the release facts of chunk 124 (18 September 2026) and the log records of chunk 132 (30 September 2026), the same rows those tests have always planted; the golden runs plant with `week=True`, which adds one clean release on each of 16 and 17 September so a question by day has a trend to draw (step 19).
 
 `tests/test_golden_questions_chunk165.py` runs one test per case through the gateway with the scripted model and checks every expectation, plus that every recorded tool call succeeded unless the case allows a failed one.
 Two more tests hold the files: unique names, and every tool a case names is offered by the profile's namespaces.
 A change to the runtime, the guards, the tools or the presentation that alters an answer fails one named case.
 
-`scripts/golden_questions.py --profile <name> --tenant <code> [--plant]` asks the real model (the configured `ANALYTICS_AGENT_MODEL`, with the gate) the same questions and checks only what the model's words cannot change: the stop reason, the decline, the tools as "must include", and the forbidden text.
+`scripts/golden_questions.py --profile <name> --tenant <code> [--plant]` asks the real model (the configured `ANALYTICS_AGENT_MODEL`, with the gate) the same questions and checks only what the model's words cannot change: the stop reason, the decline, the tools and the block kinds as "must include", and the forbidden text.
+It prints one line per case with the tools called and the blocks drawn, and ends with `<profile>: N of M cases pass`, the score the presentation policy is measured by (step 19).
+On the Matrix server it runs against the live model: `cd /opt/RAG-Pipeline/RAG-PipeLine && PYTHONPATH=. venv/bin/python scripts/golden_questions.py --profile analytics --tenant golden --plant`.
 With `--plant` it plants the test dataset for the tenant first, which is what the nightly job does on its empty database.
 A prompt edit that makes the real model stop calling a tool, answer an off-topic question, or quote a secret fails the nightly run; that is the regression the snapshot test cannot see.
 
@@ -50,4 +52,5 @@ Until they exist the job prints a notice and passes.
 ## Adding a case
 
 Write the question, the replies the scripted model should give, and the expectations; run `pytest tests/test_golden_questions_chunk165.py -k <name>`.
+The fifteen step 19 cases at the end of `analytics.yaml` are the questions people actually asked in Teams in the first two days, each with the shape the policy expects (a chart with findings, key figures, a table, a limitation named instead of a cause).
 A case should describe behaviour the agent has, not behaviour you wish it had: the file is the record, the chunk tests are the proof.

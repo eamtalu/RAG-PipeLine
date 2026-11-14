@@ -161,15 +161,21 @@ async def register_analytics_tenant(cc: str) -> None:
         await db.commit()
 
 
-async def plant_analytics_facts(cc: str) -> None:
+async def plant_analytics_facts(cc: str, *, week: bool = False) -> None:
     """Release 540551 (nine calls, one accepted), a clean release, and two short ones on another
-    item; then the pick_release settlement over them."""
+    item; then the pick_release settlement over them. With `week`, one clean release on each of
+    the two days before (step 19), so a question by day has a trend to draw."""
     facts = [fact(cc, 0, 10, 9)] + [fact(cc, 7 + i, 1, 1, status="error") for i in range(8)]
     facts += [
         fact(cc, 30, 4, 4, rep="A1", item="100606", user="DBOBOC"),
         fact(cc, 40, 7, 4, rep="B1", delivery="25810", item="100230", user="DBOBOC"),
         fact(cc, 50, 7, 0, rep="B2", delivery="25810", item="100230", user="DBOBOC"),
     ]
+    if week:
+        facts += [
+            fact(cc, -2 * 1440 + 30, 3, 3, rep="C1", delivery="25811", item="100606", user="DBOBOC"),
+            fact(cc, -1440 + 30, 5, 5, rep="C2", delivery="25812", item="100606"),
+        ]
     async with async_session() as db:
         for f in facts:
             db.add(f)
@@ -177,11 +183,11 @@ async def plant_analytics_facts(cc: str) -> None:
         await api.create_settlement(body=BODY, backfill=True, customer=cc, db=db)
 
 
-async def plant_analytics(cc: str) -> None:
+async def plant_analytics(cc: str, *, week: bool = False) -> None:
     """A clean tenant with the facts and the settlement: wipe, register, plant."""
     await wipe_analytics(cc)
     await register_analytics_tenant(cc)
-    await plant_analytics_facts(cc)
+    await plant_analytics_facts(cc, week=week)
 
 
 async def plant_logspace(cc: str) -> None:
