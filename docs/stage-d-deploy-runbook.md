@@ -324,3 +324,19 @@ Deployed 14 November 2026 at 20:15 UTC as `d9fe52c` (main, PR #27), after the ed
 composed at version `375506244fa1` with the fragment in its prompt. The score run needs the dev
 requirements in the server venv (`venv/bin/pip install -r requirements-dev.txt`, owner's step);
 without them `tests/golden/plant.py` fails on `import pytest`.
+
+## D19c: the presentation policy tuned after the first live score
+
+What it adds: the fragment calls for `chart_from_data` straight after the data call when a chart, graph or trend is asked for, and forbids the model's own arithmetic (a total, an average, a difference, a share); the fifteen step 19 golden questions name their date so the live run targets the planted day; a withheld answer keeps the blocks drawn from the data itself (the `chart_from_data` chart, the entities) and says so, instead of dropping a chart the model never typed. Snapshots regenerated (every profile's version changes).
+Why: the first live score was 8 of 25 with most misses on empty November data, and the one live Teams chart question of the evening was withheld because the model totalled the rows by hand and skipped the chart tool.
+No migration.
+
+Deploy: `./deploy.sh`, then restart the three units. Then the score:
+
+```
+cd /opt/RAG-Pipeline/RAG-PipeLine && PYTHONPATH=. venv/bin/python scripts/golden_questions.py --profile analytics --tenant golden --plant 2>&1 | tail -30
+```
+
+Expected: the step 19 cases call `chart_from_data`, `show_kpis` or `state_findings` and draw their blocks; the score line well above 8 of 25. In Teams, "Show deliveries per day this week as a chart" draws the line chart with findings and no withheld sentence.
+
+Rollback: the previous checkout and a restart.

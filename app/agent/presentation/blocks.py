@@ -15,7 +15,11 @@ import re
 from app.agent.presentation.charts import usable_result
 from app.agent.presentation.entities import entities_from_trace
 from app.services.analytics_agent.action_tools import ACTION_TOOL_NAMES
-from app.services.analytics_agent.presentation_tools import PRESENTATION_TOOL_NAMES, block_from_call
+from app.services.analytics_agent.presentation_tools import (
+    CHART_FROM_DATA,
+    PRESENTATION_TOOL_NAMES,
+    block_from_call,
+)
 
 #: The calls that draw rather than read: the presentation tools and the action tools (step 8).
 DRAWING_TOOL_NAMES = PRESENTATION_TOOL_NAMES | ACTION_TOOL_NAMES
@@ -54,14 +58,18 @@ def _refused(call: dict) -> bool:
     return str(call.get("result", call.get("result_preview", ""))).lstrip().startswith('{"problems"')
 
 
-def blocks_from_trace(trace: list[dict]) -> list[dict]:
+def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list[dict]:
     """The blocks the presentation calls describe, in order, at most MAX_BLOCKS, one per kind
     (the last chart wins, the last table wins, the last follow-ups win), plus the entities the
-    data calls named (step 14c).
+    data calls named (step 14c). With `only_grounded`, only the blocks whose numbers were copied
+    from a data result (a `chart_from_data` chart, the entities), the ones a withheld answer may
+    still carry (step 19).
 
     >>> blocks_from_trace([{"tool": "suggest_followups", "input": {"items": ["Why?"]}, "result": "{}"}])
     [{'type': 'followups', 'items': ['Why?']}]
     >>> blocks_from_trace([{"tool": "aggregate_releases", "input": {}, "result": "{}"}])
+    []
+    >>> blocks_from_trace([{"tool": "suggest_followups", "input": {"items": ["Why?"]}, "result": "{}"}], only_grounded=True)
     []
     """
     by_type: dict[str, dict] = {}
@@ -75,7 +83,7 @@ def blocks_from_trace(trace: list[dict]) -> list[dict]:
             if not _refused(call) and not str(call.get("result", "")).lstrip().startswith('{"error"'):
                 called.add(str(call.get("tool")))
             continue
-        if _refused(call):
+        if _refused(call) or (only_grounded and call["tool"] != CHART_FROM_DATA):
             continue
         try:
             if call["tool"] in ACTION_TOOL_NAMES:
@@ -119,3 +127,12 @@ def presentation_figures(trace: list[dict]) -> str:
         for key in TEXT_KEYS:
             lines.extend(str(x) for x in args.get(key) or [] if str(x).strip())
     return " ".join(numbers) + ("\n" + "\n".join(lines) if lines else "")
+
+
+def grounded_blocks_from_trace(trace: list[dict]) -> list[dict]:
+    """The blocks a withheld answer may still carry: those drawn from the data itself.
+
+    >>> grounded_blocks_from_trace([{"tool": "show_table", "input": {"title": "t", "columns": ["a"], "rows": [["1"]]}, "result": "{}"}])
+    []
+    """
+    return blocks_from_trace(trace, only_grounded=True)

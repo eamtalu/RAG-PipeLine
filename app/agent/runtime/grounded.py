@@ -334,9 +334,17 @@ class GroundedAgent:
             if table:
                 answer = (self.presentation.strip(answer) + "\n\n" + table).strip()
                 data = self.presentation.structured(calls, context.public_base_url)
-            # the typed blocks the presentation calls asked for (step 5); a withheld answer has none
+            # the typed blocks the presentation calls asked for (step 5); a withheld answer keeps
+            # only those drawn from the data itself (step 19), and says so
             if stop_reason != "withheld":
                 blocks = self.presentation.blocks(calls)
+            else:
+                blocks = self.presentation.grounded_blocks(calls)
+                if any(b.get("type") == "chart" for b in blocks):
+                    answer = answer.replace(
+                        "Ask again more narrowly, or ask me to show the rows.",
+                        "The chart below is drawn from the data itself.",
+                    )
         result = AgentResult(
             answer=redact_secrets(answer), stop_reason=stop_reason, model=model_name,
             tool_calls=tuple(ToolCall(t["tool"], t["input"]) for t in calls),

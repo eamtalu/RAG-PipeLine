@@ -53,4 +53,5 @@ Until they exist the job prints a notice and passes.
 
 Write the question, the replies the scripted model should give, and the expectations; run `pytest tests/test_golden_questions_chunk165.py -k <name>`.
 The fifteen step 19 cases at the end of `analytics.yaml` are the questions people actually asked in Teams in the first two days, each with the shape the policy expects (a chart with findings, key figures, a table, a limitation named instead of a cause).
+A question for the live run must say its date ("on 18 September 2026"): the real model runs on the real calendar, and "today" or "this week" would point at days the planted data does not cover.
 A case should describe behaviour the agent has, not behaviour you wish it had: the file is the record, the chunk tests are the proof.
