@@ -164,3 +164,279 @@ cases:
       stop_reason: end_turn
       tools: []
       answer_contains: ["Hello"]
+
+  # ---------------------------------------------------------------- step 19: the presentation policy
+  # The data with `week=True` (tests/golden/plant.py): one clean release on 16 September (C1,
+  # delivery 25811) and one on 17 September (C2, delivery 25812) before the four of the 18th.
+
+  - name: deliveries_per_day_line_chart_with_findings
+    question: Show deliveries per day this week as a chart
+    replies:
+      - tool: aggregate_releases
+        args: {group_by: [day], start: "2026-09-11T00:00:00+00:00", end: "2026-09-19T00:00:00+00:00"}
+      - tool: chart_from_data
+        args: {measure: deliveries, kind: auto}
+      - tool: state_findings
+        args:
+          findings: ["Deliveries peaked on 2026-09-18 with 2; the two earlier days had 1 each"]
+          reasoning: ["the last day carries both deliveries of the window"]
+          sources: [aggregate_releases]
+      - text: "Deliveries rose to 2 on 2026-09-18 from 1 on each of the two days before."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, chart_from_data, state_findings]
+      blocks: [chart, findings]
+      answer_contains: ["Deliveries rose to 2"]
+
+  - name: lines_per_day_line_chart
+    question: Show lines per day this week
+    replies:
+      - tool: aggregate_releases
+        args: {group_by: [day], start: "2026-09-11T00:00:00+00:00", end: "2026-09-19T00:00:00+00:00"}
+      - tool: chart_from_data
+        args: {measure: lines}
+      - text: "Lines per day were 1, 1 and 4 over the three days with releases."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, chart_from_data]
+      blocks: [chart]
+
+  - name: deliveries_by_volume_in_a_graph
+    question: show deliveries by volume in a graph
+    replies:
+      - tool: aggregate_releases
+        args:
+          group_by: [delivery_number]
+          sort: picked
+          start: "2026-09-18T04:44:42+00:00"
+          end: "2026-09-18T07:44:42+00:00"
+      - tool: chart_from_data
+        args: {measure: picked}
+      - text: "Delivery 27907 took 9 units and 25810 took 4."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, chart_from_data]
+      blocks: [entities, chart]
+
+  - name: which_products_were_short_today_with_findings
+    question: Which products were short today, and by how many units?
+    replies:
+      - tool: aggregate_releases
+        args:
+          group_by: [item_number]
+          where: ["shortfall<0"]
+          sort: units_short
+          start: "2026-09-18T04:44:42+00:00"
+          end: "2026-09-18T07:44:42+00:00"
+      - tool: state_findings
+        args:
+          findings: ["100230 was short by 10 units on 2 releases", "104568 was short by 1 unit"]
+          reasoning: ["the biggest gap of the day", "one release"]
+          sources: [aggregate_releases, aggregate_releases]
+      - text: "Across 4 releases, two items were short: 100230 by 10 units and 104568 by 1."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, state_findings]
+      blocks: [entities, findings]
+      evidence: true
+      answer_excludes: ["| item | short |"]
+
+  - name: pickers_most_units_bar_chart
+    question: Which pickers picked the most units today?
+    replies:
+      - tool: aggregate_releases
+        args:
+          group_by: [user_name]
+          sort: picked
+          start: "2026-09-18T04:44:42+00:00"
+          end: "2026-09-18T07:44:42+00:00"
+      - tool: chart_from_data
+        args: {measure: picked}
+      - tool: state_findings
+        args:
+          findings: ["FNACHONLEO picked 9 units on 1 release; DBOBOC 8 over 3"]
+          sources: [aggregate_releases]
+      - text: "FNACHONLEO picked the most, 9 units on one release; DBOBOC picked 8 over 3."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, chart_from_data, state_findings]
+      blocks: [chart, findings]
+
+  - name: how_many_picked_yesterday_kpis
+    question: how many picked yesterday
+    replies:
+      - tool: aggregate_releases
+        args: {start: "2026-09-18T04:44:42+00:00", end: "2026-09-18T07:44:42+00:00"}
+      - tool: show_kpis
+        args:
+          labels: [Releases, Units picked, Deliveries]
+          values: ["4", "17", "2"]
+          captions: ["on 2026-09-18"]
+      - text: "4 releases, 17 units picked, 2 deliveries on 2026-09-18."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, show_kpis]
+      blocks: [kpis]
+
+  - name: deliveries_and_lines_today_kpis
+    question: How many deliveries and lines were picked today?
+    replies:
+      - tool: aggregate_releases
+        args: {start: "2026-09-18T04:44:42+00:00", end: "2026-09-18T07:44:42+00:00"}
+      - tool: show_kpis
+        args: {labels: [Deliveries, Lines], values: ["2", "4"]}
+      - text: "2 deliveries and 4 lines were picked on 2026-09-18."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, show_kpis]
+      blocks: [kpis]
+      answer_contains: ["2 deliveries and 4 lines"]
+
+  - name: todays_deliveries_table
+    question: todays deliveries
+    replies:
+      - tool: aggregate_releases
+        args:
+          group_by: [delivery_number]
+          start: "2026-09-18T04:44:42+00:00"
+          end: "2026-09-18T07:44:42+00:00"
+      - tool: show_table
+        args:
+          title: "Deliveries on 2026-09-18"
+          columns: [delivery, releases, picked]
+          rows: [["27907", "1", "9"], ["25810", "2", "4"]]
+      - text: "Two deliveries: 27907 with 1 release and 25810 with 2."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, show_table]
+      blocks: [entities, table]
+
+  - name: who_are_the_pickers_today_table
+    question: who are the pickers today
+    replies:
+      - tool: aggregate_releases
+        args:
+          group_by: [user_name]
+          start: "2026-09-18T04:44:42+00:00"
+          end: "2026-09-18T07:44:42+00:00"
+      - tool: show_table
+        args:
+          title: "Pickers on 2026-09-18"
+          columns: [picker, releases, units picked]
+          rows: [["FNACHONLEO", "1", "9"], ["DBOBOC", "3", "8"]]
+      - text: "Two pickers today: FNACHONLEO and DBOBOC."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, show_table]
+      blocks: [table]
+
+  - name: share_of_releases_per_picker_pie
+    question: share of releases per picker today as a pie
+    replies:
+      - tool: aggregate_releases
+        args:
+          group_by: [user_name]
+          start: "2026-09-18T04:44:42+00:00"
+          end: "2026-09-18T07:44:42+00:00"
+      - tool: chart_from_data
+        args: {measure: releases, kind: pie}
+      - text: "DBOBOC had 3 of the 4 releases, FNACHONLEO 1."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, chart_from_data]
+      blocks: [chart]
+
+  - name: items_short_on_several_releases_this_week
+    question: Which items were short on several releases this week?
+    replies:
+      - tool: aggregate_releases
+        args:
+          group_by: [item_number]
+          where: ["shortfall<0"]
+          sort: rows
+          start: "2026-09-11T00:00:00+00:00"
+          end: "2026-09-19T00:00:00+00:00"
+      - tool: state_findings
+        args:
+          findings: ["100230 was short on 2 releases this week; 104568 on 1"]
+          sources: [aggregate_releases]
+      - text: "One item was short on more than one release this week: 100230, on 2 releases."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, state_findings]
+      blocks: [entities, findings]
+      evidence: true
+
+  - name: a_zero_pick_without_a_cause_names_the_limitation
+    question: Why was item 100230 zero-picked today?
+    replies:
+      - tool: aggregate_releases
+        args:
+          group_by: [item_number]
+          where: ["picked==0"]
+          start: "2026-09-18T04:44:42+00:00"
+          end: "2026-09-18T07:44:42+00:00"
+      - tool: state_findings
+        args:
+          findings: ["Item 100230 was zero-picked once on 2026-09-18: expected 7, picked 0"]
+          sources: [aggregate_releases]
+          limitations: ["The release data does not record a cause; a stock count or the handheld log would"]
+      - text: "Item 100230 was zero-picked once on 2026-09-18, with 7 expected and 0 picked. The release data does not say why."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, state_findings]
+      blocks: [entities, findings]
+      answer_excludes: ["because stock"]
+
+  - name: a_finding_sourced_to_an_uncalled_tool_is_dropped
+    question: which products were short today?
+    replies:
+      - tool: aggregate_releases
+        args:
+          group_by: [item_number]
+          where: ["shortfall<0"]
+          start: "2026-09-18T04:44:42+00:00"
+          end: "2026-09-18T07:44:42+00:00"
+      - tool: state_findings
+        args:
+          findings: ["100230 was short by 10 units"]
+          sources: [at_risk_board]
+      - text: "Two items were short: 100230 by 10 units and 104568 by 1."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, state_findings]
+      blocks: [entities]
+      retries: 0
+
+  - name: a_kpi_no_tool_returned_is_withheld_then_the_retry_answers_in_words
+    question: how many units were picked today?
+    replies:
+      - tool: aggregate_releases
+        args: {start: "2026-09-18T04:44:42+00:00", end: "2026-09-18T07:44:42+00:00"}
+      - tool: show_kpis
+        args: {labels: [Units picked], values: ["9999"]}
+      - text: "See the cards."
+      - tool: aggregate_releases
+        args: {start: "2026-09-18T04:44:42+00:00", end: "2026-09-18T07:44:42+00:00"}
+      - text: "17 units were picked on 2026-09-18 across 4 releases."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases]
+      retries: 1
+      blocks: []
+      answer_excludes: ["9999"]
+      answer_contains: ["17 units were picked"]
+
+  - name: an_unknown_measure_drops_the_chart_not_the_answer
+    question: lines per day as a chart
+    replies:
+      - tool: aggregate_releases
+        args: {group_by: [day], start: "2026-09-11T00:00:00+00:00", end: "2026-09-19T00:00:00+00:00"}
+      - tool: chart_from_data
+        args: {measure: nope}
+      - text: "Lines per day were 1, 1 and 4."
+    expect:
+      stop_reason: end_turn
+      tools: [aggregate_releases, chart_from_data]
+      retries: 0
+      blocks: []

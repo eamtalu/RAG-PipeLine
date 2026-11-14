@@ -79,7 +79,7 @@ def presentation_namespace(enabled: bool) -> Namespace:
     """The three presentation tools (chart, table, follow-ups), or an empty namespace while the
     `ANALYTICS_AGENT_PRESENTATION` switch is off, so the profile may always list it.
 
-    (True) -> Namespace("presentation", 3 specs) ; (False) -> Namespace("presentation", no specs)
+    (True) -> Namespace("presentation", 6 specs) ; (False) -> Namespace("presentation", no specs)
     """
 
     async def run(

@@ -23,7 +23,12 @@ from app.agent.contracts import AgentRequest, Principal
 from app.agent.gateway import run_request
 from app.agent.profiles import load_profile
 from app.agent.runtime.grounded import GroundedAgent
-from app.services.analytics_agent.namespaces import analytics_namespace, logs_namespace
+from app.services.analytics_agent.namespaces import (
+    actions_namespace,
+    analytics_namespace,
+    logs_namespace,
+    presentation_namespace,
+)
 from app.services.logspace_agent.namespaces import logspace_namespace
 from tests.golden import plant
 from tests.golden.harness import Case, load_cases, mismatches
@@ -52,12 +57,20 @@ async def main(profile: str, tenant: str, do_plant: bool) -> int:
     # same rows the scripted cases run on.
     if do_plant:
         if profile == "analytics":
-            await plant.plant_analytics(tenant)
+            await plant.plant_analytics(tenant, week=True)
         else:
             await plant.plant_logspace(tenant)
     # Step 2: One registry and one runtime, composed as the channels compose them, with the real
     # model and the gate from the context.
-    registry = ToolRegistry([logs_namespace(), analytics_namespace(), logspace_namespace()])
+    registry = ToolRegistry(
+        [
+            logs_namespace(),
+            analytics_namespace(),
+            logspace_namespace(),
+            presentation_namespace(True),
+            actions_namespace(True),
+        ]
+    )
     runtime = GroundedAgent(tenant, profile=load_profile(profile), registry=registry)
     failed = 0
     for case in load_cases(profile):
@@ -66,14 +79,17 @@ async def main(profile: str, tenant: str, do_plant: bool) -> int:
         )
         missed = mismatches(case, result, scripted=False)
         called = [t.tool for t in result.tool_calls]
+        kinds = [b["type"] for b in result.blocks]
         status = "ok  " if not missed else "FAIL"
-        print(f"{status} {profile}:{case.name} stop={result.stop_reason} tools={called}")
+        print(f"{status} {profile}:{case.name} stop={result.stop_reason} tools={called} blocks={kinds}")
         for line in missed:
             print(f"       {line}")
         if missed:
             failed += 1
             print(f"       answer: {result.answer[:300]!r}")
-    print(f"{profile}: {failed} of {len(load_cases(profile))} cases missed an expectation")
+    total = len(load_cases(profile))
+    print(f"{profile}: {failed} of {total} cases missed an expectation")
+    print(f"{profile}: {total - failed} of {total} cases pass")
     return 1 if failed else 0
 
 

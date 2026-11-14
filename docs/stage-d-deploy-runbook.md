@@ -300,3 +300,21 @@ Deployed 14 November 2026 at 17:42 UTC as `797a9f0` (main, PR #26): no migration
 `fastapirag`, `fastapirag-worker` and `fastapirag-teams-consumer` active, health 200, the
 `ASK_CATALOGUE` row written for tmp-live (version 18.1, 7 topics, 9 actions, 3 shortcuts). The edge
 step 18b went live as image `31fb5df` right after.
+
+## D19: the presentation policy (the shared fragment, chart_from_data, kpis and findings, the golden set)
+
+What it adds: `app/agent/profiles/fragments/presentation.md`, the presentation and communication policy every profile includes through the new optional `includes` key (the loader composes it into the prompt and versions the profile over its file plus its fragments; `scripts/profile_snapshots.py` regenerates the snapshots); `analytics.yaml` loses its inline "Presenting the answer" block; `chart_from_data` (`app/agent/presentation/charts.py`: the chart is drawn from the last data call's own result at answer time, the kind from the shape of the data, so no chart number is ever retyped); `show_kpis` and `state_findings` (the `kpis` and `findings` blocks, read by the figure guards, a finding's source held to the tools that answered); blocks in reading order with the cap at eight; `strip_tables` keeps bullets that carry fewer than two figures; the golden harness gains a `blocks` expectation and fifteen cases from the questions asked in Teams, `plant_analytics(week=True)` adds two earlier days, and `scripts/golden_questions.py` registers the presentation and actions namespaces (it raised before) and ends with a score line.
+Contract 3.18 synced from the edge: `KpisBlock`, `FindingsBlock`.
+No migration. Behaviour change: answers may carry `kpis` and `findings` blocks and a `## ` heading or bullets in the text; every profile's version changes (the prompt did).
+
+Deploy: AFTER the edge step 19a image (an older edge drops the two blocks on arrival and stores the answer without them). `./deploy.sh`, then restart the three units.
+Check on the server:
+
+```
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT profile_version, count(*) FROM agent_traces WHERE created_at > now() - interval '1 day' GROUP BY 1 ORDER BY 2 DESC;"
+```
+
+Expected: a new `profile_version` on every trace after the restart. Then in Teams, "Show deliveries per day this week as a chart" draws a line chart whose numbers equal the table's, with a findings block; "How many deliveries and lines were picked today?" shows key-figure tiles.
+Score: `cd /opt/RAG-Pipeline/RAG-PipeLine && PYTHONPATH=. venv/bin/python scripts/golden_questions.py --profile analytics --tenant golden --plant` prints `analytics: N of 25 cases pass` (about 25 live questions of model cost); record N in the handoff.
+
+Rollback: the previous checkout and a restart; nothing in the schema changed.

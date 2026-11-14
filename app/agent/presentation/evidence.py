@@ -135,12 +135,21 @@ def _cell(value) -> str:
 
 
 def strip_tables(text: str) -> str:
-    """The model's own markdown tables and ranked lists, removed; the sentences around them stay.
-    When the rows are rendered from the data, a list the model wrote from the same rows is at best
-    a duplicate and, on the first Web Chat run, contradicted the table's order."""
-    out = _TABLE_LINE.sub("", text)
-    out = _LIST_LINE.sub("", out)
-    return re.sub(r"\n{3,}", "\n\n", out).strip()
+    """The model's own markdown tables and row-like lists, removed; the sentences and the reasoning
+    bullets around them stay. When the rows are rendered from the data, a list the model wrote from
+    the same rows is at best a duplicate and, on the first Web Chat run, contradicted the table's
+    order; a bullet that carries fewer than two figures is a point, not a row (step 19).
+
+    >>> strip_tables("a\\n- GINGER 125 units (2 releases)\\n- the night shift slipped\\nb")
+    'a\\n- the night shift slipped\\nb'
+    """
+    kept = [
+        line
+        for line in text.split("\n")
+        if not _TABLE_LINE.match(line)
+        and not (_LIST_LINE.match(line) and len(_RESULT_NUMBER.findall(line)) >= 2)
+    ]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
 DEFAULT_ROWS = 10

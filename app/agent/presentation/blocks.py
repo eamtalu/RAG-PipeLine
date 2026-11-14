@@ -12,6 +12,7 @@ import json
 import logging
 import re
 
+from app.agent.presentation.charts import usable_result
 from app.agent.presentation.entities import entities_from_trace
 from app.services.analytics_agent.action_tools import ACTION_TOOL_NAMES
 from app.services.analytics_agent.presentation_tools import PRESENTATION_TOOL_NAMES, block_from_call
@@ -21,7 +22,13 @@ DRAWING_TOOL_NAMES = PRESENTATION_TOOL_NAMES | ACTION_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
 
-MAX_BLOCKS = 6
+MAX_BLOCKS = 8  # equal to the wire contract's cap; one block per kind keeps the bound
+#: The blocks in reading order: who it is about, the key figures, the picture, the records, what
+#: it means, then the things to act on and the follow-ups.
+ORDER = ("entities", "kpis", "chart", "table", "findings", "form", "receipt", "choice", "followups")
+#: The presentation arguments whose words the figure guards read (step 19), as whole strings so
+#: `evidence.figures` keeps its own comma, date and ordinal handling.
+TEXT_KEYS = ("values", "findings", "reasoning", "recommendations", "reasons", "limitations")
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 
@@ -58,8 +65,17 @@ def blocks_from_trace(trace: list[dict]) -> list[dict]:
     []
     """
     by_type: dict[str, dict] = {}
+    latest: tuple[str, dict] | None = None  # the last usable data result so far (step 19)
+    called: set[str] = set()  # the data tools that answered before this point, for a finding's source
     for call in trace:
-        if not is_presentation_call(call) or _refused(call):
+        if not is_presentation_call(call):
+            usable = usable_result(call)
+            if usable is not None:
+                latest = (str(call.get("tool")), usable)
+            if not _refused(call) and not str(call.get("result", "")).lstrip().startswith('{"error"'):
+                called.add(str(call.get("tool")))
+            continue
+        if _refused(call):
             continue
         try:
             if call["tool"] in ACTION_TOOL_NAMES:
@@ -68,7 +84,7 @@ def blocks_from_trace(trace: list[dict]) -> list[dict]:
                 if not block:
                     continue
             else:
-                block = block_from_call(call["tool"], call.get("input") or {})
+                block = block_from_call(call["tool"], call.get("input") or {}, data=latest, called=frozenset(called))
         except Exception as exc:  # noqa: BLE001 - a bad call is dropped and logged, never raised
             logger.warning("agent.block_dropped tool=%s reason=%s", call["tool"], str(exc)[:160])
             continue
@@ -77,7 +93,7 @@ def blocks_from_trace(trace: list[dict]) -> list[dict]:
     entities = entities_from_trace(trace)
     if entities is not None and "entities" not in by_type:
         by_type["entities"] = entities
-    ordered = [by_type[k] for k in ("entities", "table", "chart", "form", "receipt", "choice", "followups") if k in by_type]
+    ordered = [by_type[k] for k in ORDER if k in by_type]
     return ordered[:MAX_BLOCKS]
 
 
@@ -86,8 +102,11 @@ def presentation_figures(trace: list[dict]) -> str:
 
     >>> presentation_figures([{"tool": "show_chart", "input": {"labels": ["Mon"], "series_values": [[41, 3.5]]}}])
     '41 3.5'
+    >>> presentation_figures([{"tool": "show_kpis", "input": {"labels": ["Lines"], "values": ["1,375"]}}])
+    '\\n1,375'
     """
     numbers: list[str] = []
+    lines: list[str] = []
     for call in trace:
         if not is_presentation_call(call):
             continue
@@ -96,4 +115,7 @@ def presentation_figures(trace: list[dict]) -> str:
             for item in args.get(key) or []:
                 for cell in item if isinstance(item, (list, tuple)) else [item]:
                     numbers.extend(_NUMBER.findall(str(cell)))
-    return " ".join(numbers)
+        # the words of the key figures and the findings (step 19) go through whole, one per line
+        for key in TEXT_KEYS:
+            lines.extend(str(x) for x in args.get(key) or [] if str(x).strip())
+    return " ".join(numbers) + ("\n" + "\n".join(lines) if lines else "")

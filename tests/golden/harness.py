@@ -32,6 +32,7 @@ EXPECT_KEYS = frozenset(
         "answer_contains",
         "answer_excludes",
         "allow_failed_calls",
+        "blocks",
     }
 )
 CASE_KEYS = frozenset({"name", "question", "history", "gate", "replies", "expect"})
@@ -107,7 +108,7 @@ def mismatches(case: Case, result: AgentResult, *, scripted: bool) -> list[str]:
 
     (case expecting end_turn, result declined) -> ["stop_reason: expected 'end_turn', got
     'declined'"] ; scripted=False -> only the model-independent checks (stop reason, decline, the
-    tools as "must include", the forbidden text)
+    tools and the blocks as "must include", the forbidden text)
     """
     expect = case.expect
     out: list[str] = []
@@ -128,6 +129,15 @@ def mismatches(case: Case, result: AgentResult, *, scripted: bool) -> list[str]:
     for text in expect.get("answer_excludes") or ():
         if text in result.answer:
             out.append(f"answer must not contain {text!r}")
+    # the block kinds (step 19): exact when scripted, "must include" with the real model
+    kinds = [b["type"] for b in result.blocks]
+    if "blocks" in expect:
+        if scripted and kinds != list(expect["blocks"]):
+            out.append(f"blocks: expected {list(expect['blocks'])}, got {kinds}")
+        elif not scripted:
+            missing = [k for k in expect["blocks"] if k not in kinds]
+            if missing:
+                out.append(f"blocks: {missing} were not drawn; drawn {kinds}")
     if not scripted:
         return out
     # Step 2: The checks that only hold with the scripted replies, because they depend on the

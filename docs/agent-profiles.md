@@ -19,11 +19,20 @@ There is one runtime, `GroundedAgent(customer, profile=..., registry=...)`; the 
 | `question_frame` | the text around the question, with `{today}`, `{scope_description}` and `{question}` |
 | `retry_nudge` | appended to the question when a draft had figures with no data call |
 | `ungrounded_nudge` | appended when a draft had figures no tool returned, with `{figures}` |
-| `system_prompt` | the instructions, verbatim |
+| `system_prompt` | the instructions, verbatim; the included fragments are appended at load |
+| `includes` | optional (step 19): the shared fragments under `app/agent/profiles/fragments/` composed into the prompt, in order; `[presentation]` for both profiles |
 
 The loader (`app/agent/profiles/__init__.py`) refuses an unknown or missing key, a blank value, a name that differs from the file, a frame without `{question}`, a nudge without `{figures}`, and a presentation that does not exist.
 An unknown namespace or guard name is refused when the runtime is built, not at the first question.
 A later step that needs a new key (limits, memory) adds it to the loader on purpose.
+
+## Fragments: the prose every profile shares
+
+`app/agent/profiles/fragments/<name>.md` is text more than one profile needs word for word; today one fragment, `presentation.md`, the presentation and communication policy (step 19: lead with the finding, one shape for the data, findings with their reasoning, facts apart from interpretation, plain English, never repeat the rows, every number from a tool).
+A profile names its fragments in `includes`; `compose_prompt` appends each after one blank line, so `Profile.system_prompt` is what the model reads and the snapshot pins it composed.
+`Profile.version` hashes the profile file followed by its fragments (`source_bytes`), so a fragment edit changes every profile that includes it.
+An unknown fragment name is refused by name.
+The fragment says "the tools named apply only when they are offered", so the logspace profile, which has no presentation tools, reads it without harm.
 
 ## Writing the text
 
@@ -35,12 +44,12 @@ A later step that needs a new key (limits, memory) adds it to the loader on purp
 ## The review gate: snapshots
 
 `tests/profile_snapshots/<name>.json` holds the five prose fields byte for byte as they were when the profile was created, and `tests/test_agent_profiles_chunk162.py` asserts equality.
-A prompt edit must update the snapshot in the same commit, so every change to what the model is told is a named, reviewed diff of two files.
+A prompt or fragment edit must update the snapshot in the same commit, so every change to what the model is told is a named, reviewed diff of two files; `PYTHONPATH=. .venv/bin/python scripts/profile_snapshots.py` prints the drift and `--write` regenerates both files.
 The golden questions (`tests/golden/<name>.yaml`, `docs/ci-and-golden-questions.md`) are the second layer: what the agent does per question, run in CI with the scripted model and nightly against the real model.
 
 ## Versions on the trace
 
-`Profile.version` is the sha256 of the file (12 hex); `code_version()` is `git rev-parse --short HEAD`, read once per process, `unknown` without git.
+`Profile.version` is the sha256 of the file followed by its fragments (12 hex); `code_version()` is `git rev-parse --short HEAD`, read once per process, `unknown` without git.
 Both are on every `AgentResult` (`profile_version`, `code_version`; not in the legacy dict the channels return) and on the gateway's `agent.run` log line.
 Since step 14 both are also on the `agent_traces` row of every run, so an answer can always be tied to the prompt that produced it.
 

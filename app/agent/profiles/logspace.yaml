@@ -19,6 +19,7 @@ namespaces: [logspace]
 guards: [manipulation, topic_gate, fabrication, ungrounded]
 model: {tools: true, context_tokens: 16000, gate: cheap}
 presentation: logspace
+includes: [presentation]
 question_frame: "(Today is {today}. The records fetched: {scope_description}.)\n\n{question}"
 retry_nudge: >-
   (Your draft answered with figures without calling a data tool in this turn, so it was discarded.

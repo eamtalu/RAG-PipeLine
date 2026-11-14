@@ -29,7 +29,7 @@ The model is a setting; nothing else changes when it does.
 On Bedrock the credentials are the same IAM user the Teams consumer uses (`/etc/fastapirag/teams-consumer.env`, read by both the consumer and the web service units), granted `bedrock:InvokeModel` on that one model by the edge Terraform.
 Qwen3 235B A22B 2507 is the instruct version, so it answers without a thinking preamble; London (`eu-west-2`) keeps the data in the UK region.
 
-On Ollama, `ANALYTICS_AGENT_THINK=false` (the default) stops Qwen3 reasoning at length before every reply, and `ANALYTICS_AGENT_CONTEXT_TOKENS=16384` gives the twelve tool schemas and a grouped read room.
+On Ollama, `ANALYTICS_AGENT_THINK=false` (the default) stops Qwen3 reasoning at length before every reply, and `ANALYTICS_AGENT_CONTEXT_TOKENS=16384` gives the fifteen tool schemas and a grouped read room.
 The model must support tool calling; every hosted model above does, and Qwen3 and Llama 3.1 do on Ollama.
 
 ## Guards, and the one retry
@@ -64,6 +64,13 @@ curl -s -X POST http://localhost:8000/api/v1/analytics/agent/ask -H "X-Customer-
 - For a "top N" question the ranked table is rendered from the tool's own rows in the server's order, and the model's own table is dropped.
 - The full tool trace is logged per question, so any answer can be audited from the consumer or web log.
 These live in `app/agent/presentation/evidence.py` and `app/services/analytics_agent/agent.py`, and they apply to every provider.
+
+### The presentation policy (step 19)
+
+- One fragment, `app/agent/profiles/fragments/presentation.md`, tells every profile how to present: lead with the finding, one shape for the data, findings with their reasoning, facts apart from interpretation, plain English, never repeat the rows.
+- `chart_from_data` draws a chart from the last data call's own result: the model names a measure (and at most a kind); `app/agent/presentation/charts.py` copies the labels and values, picks line for a time bucket, bar for groups, pie for 2 to 8 shares, and titles it. The model never retypes a chart number; a measure the rows lack drops the chart with a logged reason, never the answer. `show_chart` stays for compatibility.
+- `show_kpis` turns 1 to 6 labelled values into the `kpis` block; `state_findings` turns findings with reasoning and source, recommendations with reasons and limitations into the `findings` block. The figure guards read their words as they read the answer, and a finding whose source names a data tool that did not answer in the turn is dropped.
+- Blocks come in reading order: entities, kpis, chart, table, findings, form, receipt, choice, followups; at most eight.
 
 ## Rules the agent is held to
 
