@@ -16,6 +16,7 @@ import yaml
 from langchain_core.messages import AIMessage
 
 from app.agent.contracts import AgentResult
+from app.agent.presentation.blocks import DRAWING_TOOL_NAMES
 
 GOLDEN_DIR = Path(__file__).parent
 PROFILES = ("analytics", "logspace")
@@ -123,7 +124,12 @@ def mismatches(case: Case, result: AgentResult, *, scripted: bool) -> list[str]:
         if called != list(expect["tools"]):
             out.append(f"tools: expected {list(expect['tools'])}, got {called}")
     else:
-        missing = [t for t in expect["tools"] if t not in called]
+        # a live case that names its blocks is judged by what a person sees: its data tools must be
+        # called, while the drawing route (a table, tiles, the lift's own chart) is the model's own
+        expected = list(expect["tools"])
+        if "blocks" in expect:
+            expected = [t for t in expected if t not in DRAWING_TOOL_NAMES]
+        missing = [t for t in expected if t not in called]
         if missing:
             out.append(f"tools: {missing} were not called; called {called}")
     for text in expect.get("answer_excludes") or ():

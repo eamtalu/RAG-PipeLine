@@ -39,6 +39,7 @@ Two more tests hold the files: unique names, and every tool a case names is offe
 A change to the runtime, the guards, the tools or the presentation that alters an answer fails one named case.
 
 `scripts/golden_questions.py --profile <name> --tenant <code> [--plant]` asks the real model (the configured `ANALYTICS_AGENT_MODEL`, with the gate) the same questions and checks only what the model's words cannot change: the stop reason, the decline, the tools and the block kinds as "must include", and the forbidden text.
+A case that names `blocks` is judged live by those blocks and by its data tools only (the drawing route, a table or tiles or the lift's own chart, is the model's choice); a case without `blocks` keeps the tool check, and scripted runs stay exact.
 It prints one line per case with the tools called and the blocks drawn, and ends with `<profile>: N of M cases pass`, the score the presentation policy is measured by (step 19).
 On the Matrix server it runs against the live model: `cd /opt/RAG-Pipeline/RAG-PipeLine && PYTHONPATH=. venv/bin/python scripts/golden_questions.py --profile analytics --tenant golden --plant`.
 With `--plant` it plants the test dataset for the tenant first, which is what the nightly job does on its empty database.

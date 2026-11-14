@@ -13,7 +13,7 @@ import json
 from typing import Any, Mapping
 
 from app.agent.presentation.evidence import _cell, _label
-from app.services.teams.contracts import ChartBlock, ChartSeries, HeatmapBlock, KpisBlock
+from app.services.teams.contracts import ChartBlock, ChartSeries, EvidenceColumn, HeatmapBlock, KpisBlock, TableBlock
 
 TIME_BUCKETS = ("day", "hour", "hour_start", "week", "business_date", "month")
 #: A measure the model may name that the rows spell differently: (row key, sign).
@@ -248,6 +248,10 @@ def auto_measure(result: dict) -> str | None:
     """
     rows = result.get("rows") or []
     first = rows[0] if rows and isinstance(rows[0], dict) else {}
+    # a series asked with a device or user cut beside it is about that thing per bucket
+    cut = {"device": "devices", "user": "users"}.get(str(result.get("breakdown_by") or ""))
+    if cut and cut in first:
+        return cut
     by = str((result.get("sort") or {}).get("by") or "")
     key = ALIASES.get(by, (by, 1))[0]
     if by and by not in TIME_BUCKETS and key in first:
@@ -355,3 +359,36 @@ def auto_heatmap(tool: str, result: dict) -> HeatmapBlock | None:
         )
     except (ValueError, TypeError):
         return None
+
+
+def auto_people_table(tool: str, result: dict) -> TableBlock | None:
+    """The table of who was active, from the activity tool's own list of people: each person's
+    user name, name, first and last call (the time only), calls and devices, busiest first.
+
+    >>> auto_people_table("wms_activity", {"people": [{"user": "BCHAM", "employee": "Bo Cham", "first_at": "2026-09-18 06:15",
+    ...     "last_at": "2026-09-18 07:15", "calls": 2, "devices": 1}], "window": {"start": "2026-09-18T00:00:00+01:00"}}).rows
+    [['BCHAM', 'Bo Cham', '06:15', '07:15', '2', '1']]
+    >>> auto_people_table("aggregate_releases", {"people": []}) is None
+    True
+    """
+    people = result.get("people")
+    if tool != "wms_activity" or not isinstance(people, list) or not people:
+        return None
+
+    def clock(value: object) -> str:
+        text = str(value or "")
+        return text[11:16] if len(text) >= 16 else text
+
+    rows = [
+        [str(p.get("user") or ""), str(p.get("employee") or ""), clock(p.get("first_at")), clock(p.get("last_at")),
+         str(p.get("calls") or 0), str(p.get("devices") or 0)]
+        for p in people[:25]
+        if isinstance(p, dict)
+    ]
+    day = str((result.get("window") or {}).get("start") or "")[:10]
+    names = [("user", "left"), ("name", "left"), ("first call", "left"), ("last call", "left"), ("calls", "right"), ("devices", "right")]
+    return TableBlock(
+        title=f"Who was active · {day}" if day else "Who was active",
+        columns=[EvidenceColumn(name=n, align=a) for n, a in names],
+        rows=rows,
+    )
