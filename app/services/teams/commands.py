@@ -15,6 +15,7 @@ from app.config.database import async_session
 from app.services.analytics_at_risk import check_store
 from app.services.access import commands as access_commands
 from app.services.advisories import actions as advisory_actions
+from app.services.ask import demo as demo_actions
 from app.services.tasks import commands as task_commands
 from app.services.groups import commands as group_commands
 from app.services.watchlist import commands as watch_commands
@@ -48,6 +49,9 @@ async def run_command(job: QuestionJob, *, run_query=None) -> str:
     # the Advisories tab's actions (step 9) live with the advisories service
     if command.kind == "advisory_act":
         return await advisory_actions.run(job)  # a CommandOutcome: the line and the receipt
+    # a confirmed demo form (step 18) is recorded as a demo and changes nothing
+    if command.kind == "demo_act":
+        return await demo_actions.run(job)  # a CommandOutcome: the demo line and its receipt
     # the Admin tab's actions (step 7c) live with the access service
     if command.kind in ACCESS_COMMAND_KINDS:
         return await access_commands.run(job)  # a CommandOutcome: the line and the receipt

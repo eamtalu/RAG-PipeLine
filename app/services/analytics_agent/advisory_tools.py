@@ -14,9 +14,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.advisories import explain as advisory_explain
 
 EXPLAIN_ADVISORY = "explain_advisory"
-ADVISORY_TOOL_NAMES = frozenset({EXPLAIN_ADVISORY})
+FIND_ADVISORY = "find_advisory"
+ADVISORY_TOOL_NAMES = frozenset({EXPLAIN_ADVISORY, FIND_ADVISORY})
+MAX_MATCHES = 5
 
 ADVISORY_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": FIND_ADVISORY,
+        "description": (
+            "The open advisories about a thing named in words: an item ('Ginger', '104568'), a location "
+            "('M02B'), a route ('R14'), or words of a title. Call it when the person asks why something is "
+            "empty, short, late or at risk without an advisory id ('why is M02B empty?'); then call "
+            "explain_advisory with the one match's id, or, when several match, ask which one by title."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"words": {"type": "string", "description": "The item, location, route or title words."}},
+            "required": ["words"],
+            "additionalProperties": False,
+        },
+    },
     {
         "name": EXPLAIN_ADVISORY,
         "description": (
@@ -37,11 +54,43 @@ ADVISORY_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-async def run_advisory_tool(db: AsyncSession, customer_code: str, name: str, args: Mapping[str, Any]) -> str:
-    """Run the advisory tool: the explanation as JSON, or an error the model can read.
+async def find_advisory(db: AsyncSession, customer_code: str, words: str, *, limit: int = MAX_MATCHES) -> list[dict]:
+    """The live advisories whose title, or the item, location or route they are about, contain the
+    words; newest first, at most `limit`.
 
-    ("explain_advisory", {"advisory_id": "…"}) -> '{"advisory": {...}, "facts": {...}, "note": "…"}'
+    ("M02B") -> [{"id": …, "title": "Location M02B turned up empty 32 times today", "kind": "empty_location", …}] ;
+    ("nothing like it") -> []
     """
+    from sqlalchemy import or_, select
+
+    from app.persistence.models.advisory import Advisory
+    from app.services.advisories.store import OPEN_STATUSES
+
+    needle = f"%{words.strip()}%"
+    rows = (await db.execute(
+        select(Advisory).where(
+            Advisory.customer_code == customer_code, Advisory.status.in_(OPEN_STATUSES),
+            or_(Advisory.title.ilike(needle), Advisory.about["label"].astext.ilike(needle),
+                Advisory.about["id"].astext.ilike(needle), Advisory.about["where"].astext.ilike(needle)))
+        .order_by(Advisory.opened_at.desc()).limit(limit))).scalars()
+    return [{"id": str(r.id), "title": r.title, "kind": r.kind, "severity": r.severity, "status": r.status,
+             "about": dict(r.about or {}), "opened_at": r.opened_at.isoformat()} for r in rows]
+
+
+async def run_advisory_tool(db: AsyncSession, customer_code: str, name: str, args: Mapping[str, Any]) -> str:
+    """Run an advisory tool: the explanation, or the matches, as JSON, or an error the model can read.
+
+    ("explain_advisory", {"advisory_id": "…"}) -> '{"advisory": {...}, "facts": {...}, "note": "…"}' ;
+    ("find_advisory", {"words": "M02B"}) -> '{"matches": [...]}'
+    """
+    if name == FIND_ADVISORY:
+        words = str(args.get("words") or "").strip()
+        if len(words) < 2:
+            return json.dumps({"error": "words is required: the item, location, route or title words to look for"})
+        matches = await find_advisory(db, customer_code, words)
+        return json.dumps({"matches": matches, "note": ("none open match those words" if not matches else
+                                                       "one match: call explain_advisory with its id" if len(matches) == 1 else
+                                                       "several match: ask which one, naming each by its title")}, default=str)
     if name != EXPLAIN_ADVISORY:
         return json.dumps({"error": f"unknown advisory tool {name!r}"})
     advisory_id = str(args.get("advisory_id") or "").strip()

@@ -13,14 +13,17 @@ from typing import Any, Mapping
 from app.agent.capabilities.spec import Namespace, ToolSpec
 from app.agent.contracts import AgentRequest, ExecutionContext
 from app.config.database import SessionFactory, async_session
-from app.services.analytics_agent import action_tools, advisory_tools, at_risk_tools, presentation_tools
+from app.services.analytics_agent import (
+    action_tools, advisory_tools, at_risk_tools, forecast_tools, presentation_tools, usage_tools,
+)
 from app.services.analytics_agent.tools import RECIPES, RELEASE_TOOLS, run_release_tool
 from app.services.log_agent import tools as log_tools
 
 #: The schemas and recipes as text, exactly as the analytics agent has always been given them:
 #: a figure that appears here was given to the model, not invented. The log tools are not in it.
 ANALYTICS_TOOL_TEXT = json.dumps(
-    [RELEASE_TOOLS, RECIPES, at_risk_tools.AT_RISK_TOOLS, at_risk_tools.RECIPES], default=str
+    [RELEASE_TOOLS, RECIPES, at_risk_tools.AT_RISK_TOOLS, at_risk_tools.RECIPES,
+     forecast_tools.FORECAST_TOOLS, forecast_tools.RECIPES], default=str
 )
 _AT_RISK_NAMES = frozenset(spec["name"] for spec in at_risk_tools.AT_RISK_TOOLS)
 
@@ -43,9 +46,10 @@ def logs_namespace(session_factory: SessionFactory = async_session) -> Namespace
 
 
 def analytics_namespace(session_factory: SessionFactory = async_session) -> Namespace:
-    """The four release tools and the five at-risk tools, with their schemas and recipes as text.
+    """The four release tools, the five at-risk tools, the two advisory tools, the forecast tool
+    and the usage tool (step 18), with their schemas and recipes as text.
 
-    () -> Namespace("analytics", 9 specs, runner on the app pool, tool_text=ANALYTICS_TOOL_TEXT)
+    () -> Namespace("analytics", 13 specs, runner on the app pool, tool_text=ANALYTICS_TOOL_TEXT)
     """
 
     async def run(
@@ -56,11 +60,17 @@ def analytics_namespace(session_factory: SessionFactory = async_session) -> Name
                 return await at_risk_tools.run_at_risk_tool(name, dict(args), db, context.tenant)
             if name in advisory_tools.ADVISORY_TOOL_NAMES:
                 return await advisory_tools.run_advisory_tool(db, context.tenant, name, args)
+            if name in forecast_tools.FORECAST_TOOL_NAMES:
+                return await forecast_tools.run_forecast_tool(db, context.tenant, name, args)
+            if name in usage_tools.USAGE_TOOL_NAMES:
+                # the usage figures name people, so the asker's own record decides
+                return await usage_tools.run_usage_tool(db, context.tenant, request.principal.object_id, name, args)
             return await run_release_tool(name, dict(args), db, context.tenant)
 
     specs = tuple(
         ToolSpec.from_dict("analytics", s)
-        for s in (*RELEASE_TOOLS, *at_risk_tools.AT_RISK_TOOLS, *advisory_tools.ADVISORY_TOOLS)
+        for s in (*RELEASE_TOOLS, *at_risk_tools.AT_RISK_TOOLS, *advisory_tools.ADVISORY_TOOLS,
+                  *forecast_tools.FORECAST_TOOLS, *usage_tools.USAGE_TOOLS)
     )
     return Namespace(name="analytics", specs=specs, runner=run, tool_text=ANALYTICS_TOOL_TEXT)
 
@@ -86,11 +96,12 @@ def presentation_namespace(enabled: bool) -> Namespace:
 
 
 def actions_namespace(enabled: bool, session_factory: SessionFactory = async_session) -> Namespace:
-    """The action tools (step 8: the three propose tools; step 14c: watch_now and stop_watching), or
-    an empty namespace while the presentation switch is off, so the profile may always list it.
-    The runner reads the asker's own record.
+    """The action tools (step 8 and step 18: one propose tool per real action and one demo tool,
+    from the registry; step 14c: watch_now and stop_watching), or an empty namespace while the
+    presentation switch is off, so the profile may always list it. The runner reads the asker's
+    own record.
 
-    (True) -> Namespace("actions", 5 specs) ; (False) -> Namespace("actions", no specs)
+    (True) -> Namespace("actions", 9 specs) ; (False) -> Namespace("actions", no specs)
     """
 
     async def run(

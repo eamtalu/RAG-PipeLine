@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.database import async_session
 from app.persistence.models.notification import CustomerNotificationChannel
 from app.services.access import audit, records, users
+from app.services.ask import forms as ask_forms
 from app.services.access.commands import CommandOutcome, Refused, receipt
 from app.services.groups import store
 from app.services.groups import mirror as groups_mirror
@@ -54,7 +55,8 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
             decision = records.decide(record, "configure_agents")
             if not decision.is_allowed:
                 raise Refused(decision.reason or "managing groups and channels needs configure_agents")
-        payload = dict(command.payload)
+        # a confirmed form from Ask (step 18) arrives as {form_id, values, via}; its own fields come out
+        payload = ask_forms.unwrap(dict(command.payload))
         handler = _HANDLERS[command.kind]
         try:
             text, subject_kind, subject_id, detail = await handler(db, job, actor, payload, now)

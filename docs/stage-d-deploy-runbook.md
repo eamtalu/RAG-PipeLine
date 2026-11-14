@@ -278,3 +278,20 @@ Expected: `c4d8e2a7f531`; every row a kind other than `other` (count_gap, chroni
 Rollback: the previous checkout and a restart; `alembic downgrade a7c3e5f9b012` drops the two columns (an edge at step 17b then shows every advisory under "Other findings").
 
 Deployed 14 November 2026 as `aedffcb` (PR #25): migration `c4d8e2a7f531` at head, three units active, health 200, the open rows backfilled (37 count gaps, 10 chronic shorts, 15 empty locations); the edge image `17b0340` followed.
+
+## D18a: Ask as a guided assistant (the catalogue, the action registry, demo actions, forecast and usage)
+
+What it adds: `app/services/ask/` (the words and the wiring of Ask in one place: `catalogue.py` with the seven topics and their starters, filtered per record by `visible_topics`, and the "What can I ask" answer; `actions.py`, the registry of nine actions from which the agent's tools are generated, one `propose_<id>` per real action and one `demo_action` for the three demo stubs, each required argument with the question asked back when it is missing; `forms.py`, every form builder and `unwrap`, which turns a confirmed form `{form_id, values, via}` into its command's own fields; `slash.py`, the composer's commands read on the backend into the words the model sees; `demo.py`, the `demo_act` command that writes one audit line marked demo and changes nothing; `mirror.py`, the `ASK_CATALOGUE` row written with the access rows), the real actions change_user (`access_set_user`), decide_request (`access_decide`) and set_group (`group_set`), the forecast tool `forecast_ahead` (the Home card's figures as rows), the usage tool `app_usage` (people active, questions per day, top askers, actions, acknowledgements; for records that manage users or approve), `find_advisory` (an open advisory by the words of what it is about), the consumer answering "what can I ask" and slash commands before the model, and the profile's Actions, Advisories and Planning rules (snapshot regenerated once).
+Contract 3.17 synced from the edge: the `topics` block, `FormField.labels`, `FormBlock.command_kind` and `mode`, the receipt status `demo`, the `demo_act` command, the `ask_catalogue` row.
+No migration. Behaviour change: a confirmed form may arrive wrapped; the three step 8 and 10 proposers answer exactly as before.
+
+Deploy: `./deploy.sh`, before the edge step 18b image (an older edge ignores the new block and the new fields; its forms still arrive unwrapped and are read as before). The consumer writes the catalogue row on its first access sweep.
+Check on the server:
+
+```
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT action, decision, count(*) FROM audit_events WHERE action LIKE 'demo.%' GROUP BY 1,2;"
+```
+
+Expected: no rows until someone confirms a demo form; afterwards `demo.<action>` with decision `demo` only.
+
+Rollback: the previous checkout and a restart; nothing in the schema changed.

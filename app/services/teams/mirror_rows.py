@@ -97,6 +97,9 @@ KEY_LAYOUT: dict[str, KeySpec] = {
     "audit": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="AUDIT", ttl_seconds=None),
     "exec_home": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="EXEC#HOME", ttl_seconds=7200),
     "advisories": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="ADVISORIES", ttl_seconds=None),
+    #: step 18: the Ask catalogue (topics, starters, actions, slash commands), unfiltered; the edge
+    #: filters it per record. Written with the access rows.
+    "ask_catalogue": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="ASK_CATALOGUE", ttl_seconds=None),
     #: step 10: one row per person with their reminders, schedules, what is coming up and the suggestions
     "user_tasks": KeySpec(
         pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USER#{user_id}#TASKS", ttl_seconds=None
