@@ -344,3 +344,13 @@ Rollback: the previous checkout and a restart.
 Deployed 14 November 2026 at 20:50 UTC as `b78b564` (main, PR #28): three units active, health 200,
 profile version `aa0de2ab87bc`. Live score: `analytics: 17 of 25 cases pass`, from 8 of 25 before the
 tuning; the remaining misses are read in the handoff's D19c paragraph.
+
+## D19e: written-out calls lifted, the shape drawn by the lift
+
+What it adds: `app/agent/presentation/written_calls.py` lifts a presentation call the model wrote as text (`state_findings findings: [...]`, `suggest_followups items: [...]`, `chart_from_data title: ... measure: ...`) off the answer into the trace, so it is validated, guarded and drawn as a real call and the reader never sees raw arguments; `charts.auto_chart` and `charts.auto_kpis` draw the shape when the model drew none: a line for a trend of three or more points, a bar for a ranking the model asked for (2 to 12 groups), key-figure tiles for a single total. Golden expectations that gain a chart or tiles updated.
+Why: the owner's two observations on 14 November: a chart should appear without asking for one when the data has a shape, and the findings arrived as raw text (the live model wrote the calls as prose after the chart).
+No migration.
+
+Deploy: `./deploy.sh`, then the score command of D19c. Expected: "show me the top 10 pickers" (no "chart" in the words) draws the bar chart; a written-out `state_findings` becomes the findings block; the score above 17 of 25.
+
+Rollback: the previous checkout and a restart.

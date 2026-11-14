@@ -13,7 +13,7 @@ import json
 from typing import Any, Mapping
 
 from app.agent.presentation.evidence import _cell, _label
-from app.services.teams.contracts import ChartBlock, ChartSeries
+from app.services.teams.contracts import ChartBlock, ChartSeries, KpisBlock
 
 TIME_BUCKETS = ("day", "hour", "hour_start", "week", "business_date", "month")
 #: A measure the model may name that the rows spell differently: (row key, sign).
@@ -207,3 +207,97 @@ def chart_from_result(tool: str, result: dict, args: Mapping[str, Any]) -> Chart
         series=[ChartSeries(name=measure.replace("_", " "), values=values[:MAX_POINTS])],
         unit=UNITS.get(measure),
     )
+
+
+#: The measures an automatic chart prefers when the result is not ranked by one, in order.
+AUTO_MEASURES = ("deliveries", "picked", "rows")
+MIN_TREND_POINTS = 3
+MAX_AUTO_GROUPS = 12
+#: The words a key figure wears when Python draws it from a single total.
+KPI_WORDS = {
+    "rows": "Releases",
+    "deliveries": "Deliveries",
+    "picked": "Units picked",
+    "expected": "Units expected",
+    "shortfall": "Shortfall",
+    "refused": "Refused calls",
+}
+
+
+def auto_measure(result: dict) -> str | None:
+    """The measure an automatic chart draws: what the rows are ranked by, else the first of
+    deliveries, picked, rows the rows carry.
+
+    >>> auto_measure({"sort": {"by": "units_short"}, "rows": [{"dimensions": ["a"], "shortfall": -1}]})
+    'units_short'
+    >>> auto_measure({"sort": {"by": "day"}, "rows": [{"dimensions": ["d"], "rows": 3, "deliveries": 1}]})
+    'deliveries'
+    """
+    rows = result.get("rows") or []
+    first = rows[0] if rows and isinstance(rows[0], dict) else {}
+    by = str((result.get("sort") or {}).get("by") or "")
+    key = ALIASES.get(by, (by, 1))[0]
+    if by and by not in TIME_BUCKETS and key in first:
+        return by
+    return next((m for m in AUTO_MEASURES if m in first), None)
+
+
+def auto_chart(tool: str, result: dict, *, asked_sort: bool = False) -> ChartBlock | None:
+    """The chart Python draws when the model drew none and the data has a shape: a trend of three
+    or more points, or a ranking the model asked for (`asked_sort`) of 2 to 12 groups; None for
+    anything else, because a plain list of groups is not a comparison the person asked to see.
+
+    >>> auto_chart("aggregate_releases", {"group_by": ["day"], "sort": {"by": "day", "dir": "asc"}, "rows": [
+    ...     {"dimensions": [f"2026-09-1{i}"], "rows": i, "deliveries": 1} for i in range(6, 9)]}).kind
+    'line'
+    >>> auto_chart("aggregate_releases", {"group_by": [], "rows": [{"rows": 4}]}) is None
+    True
+    """
+    if tool != "aggregate_releases":
+        return None
+    rows = result.get("rows") or []
+    group_by = [str(g) for g in result.get("group_by") or []]
+    if not group_by or not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        return None
+    is_trend = group_by[0] in TIME_BUCKETS
+    is_ranked = asked_sort and bool((result.get("sort") or {}).get("by")) and not is_trend
+    if is_trend and len(rows) < MIN_TREND_POINTS:
+        return None
+    if not is_trend and (not is_ranked or not 2 <= len(rows) <= MAX_AUTO_GROUPS):
+        return None
+    measure = auto_measure(result)
+    if measure is None:
+        return None
+    try:
+        return chart_from_result(tool, result, {"measure": measure, "kind": "auto"})
+    except (ValueError, TypeError):
+        return None
+
+
+def auto_kpis(tool: str, result: dict) -> KpisBlock | None:
+    """The key figures Python draws from a single total (an aggregate with no groups): the
+    releases, deliveries, units picked and expected, the shortfall, as the row carries them.
+
+    >>> auto_kpis("aggregate_releases", {"group_by": [], "rows": [{"rows": 4, "picked": 17, "deliveries": 2}]}).items[1].value
+    '2'
+    >>> auto_kpis("aggregate_releases", {"group_by": ["day"], "rows": [{"dimensions": ["d"], "rows": 4}]}) is None
+    True
+    """
+    if tool != "aggregate_releases" or result.get("group_by"):
+        return None
+    rows = result.get("rows") or []
+    if len(rows) != 1 or not isinstance(rows[0], dict):
+        return None
+    row = rows[0]
+    items = [
+        {"label": words, "value": _cell(row[key])[:24]}
+        for key, words in KPI_WORDS.items()
+        if key in row and row[key] is not None and _cell(row[key]) != ""
+    ]
+    if not items:
+        return None
+    window = result.get("window") or {}
+    start, end = str(window.get("start") or "")[:10], str(window.get("end") or "")[:10]
+    if start and end:
+        items[0]["caption"] = start if start == end else f"{start} to {end}"
+    return KpisBlock(items=items[:6])

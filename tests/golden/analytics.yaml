@@ -239,7 +239,7 @@ cases:
     expect:
       stop_reason: end_turn
       tools: [aggregate_releases, state_findings]
-      blocks: [entities, findings]
+      blocks: [entities, chart, findings]  # the ranking asked for is drawn by the lift itself
       evidence: true
       answer_excludes: ["| item | short |"]
 
@@ -366,7 +366,7 @@ cases:
     expect:
       stop_reason: end_turn
       tools: [aggregate_releases, state_findings]
-      blocks: [entities, findings]
+      blocks: [entities, chart, findings]  # ranked by releases, so the lift draws the bar chart
       evidence: true
 
   - name: a_zero_pick_without_a_cause_names_the_limitation
@@ -425,11 +425,11 @@ cases:
       stop_reason: end_turn
       tools: [aggregate_releases]
       retries: 1
-      blocks: []
+      blocks: [kpis]  # the single total's key figures, drawn by the lift itself
       answer_excludes: ["9999"]
       answer_contains: ["17 units were picked"]
 
-  - name: an_unknown_measure_drops_the_chart_not_the_answer
+  - name: an_unknown_measure_is_dropped_and_the_lift_draws_the_trend
     question: lines per day in the week to 18 September 2026 as a chart
     replies:
       - tool: aggregate_releases
@@ -441,4 +441,4 @@ cases:
       stop_reason: end_turn
       tools: [aggregate_releases, chart_from_data]
       retries: 0
-      blocks: []
+      blocks: [chart]  # the model's "nope" is dropped; the trend by day is drawn by the lift itself

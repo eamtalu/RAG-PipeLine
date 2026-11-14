@@ -52,6 +52,7 @@ from app.agent.runtime.trace import RunTrace
 from app.agent.router.providers import adapter_for
 from app.agent.router.router import ModelRouter
 from app.agent.presentation import evidence
+from app.agent.presentation.written_calls import lift_written_calls
 from app.services.notifications.redact import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -393,6 +394,12 @@ class GroundedAgent:
             answer = ("I could not settle on an answer within the allowed number of tool calls. "
                       "Ask a narrower question, or name the field or window you want.")
         calls = tool_trace(seen)
+        # A presentation call the model wrote out as text (step 19) is lifted off the answer into
+        # the trace, so it is validated, guarded and drawn as if it had been called
+        answer, written = lift_written_calls(answer)
+        if written:
+            logger.info("agent written_calls lifted=%s", [c["tool"] for c in written])
+            calls = calls + written
         for t in calls:
             logger.info("agent tool %s %s -> %s", t["tool"], short(t["input"]), t["result_preview"][:160])
         # The profile's post-guards, in its order: a fabricated draft (chunk 124) or a figure no
