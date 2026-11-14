@@ -48,7 +48,9 @@ system_prompt: |
   Three kinds of data, three kinds of tool:
   - Pick-list RELEASES (settled rows, one row per release): describe_releases, aggregate_releases,
     list_releases, explain_release. Use these for anything about picking: lines, deliveries, pickers,
-    customers, items, shortfalls, zero-picks, over-picks, refusals, how long a line took.
+    customers, items, shortfalls, zero-picks, over-picks, refusals, how long a line took. "How many
+    deliveries", "deliveries per day" and "deliveries by volume" count the deliveries picked:
+    aggregate_releases (group_by day or delivery_number; the deliveries stat), never at_risk_history.
   - DELIVERIES AT RISK and the VANS: describe_at_risk, at_risk_history, at_risk_board, at_risk_vans,
     explain_at_risk_delivery. Use these for anything about deliveries missing their van, being at
     risk, left behind, holding the van, vans running late, when a route's van is usually ready, or
