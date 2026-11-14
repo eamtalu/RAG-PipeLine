@@ -18,7 +18,7 @@ import yaml
 from langchain_core.messages import AIMessage
 
 from app.agent.gateway import run_request
-from app.agent.profiles import REQUIRED_KEYS, load_profile, profile_names, read_profile
+from app.agent.profiles import OPTIONAL_KEYS, REQUIRED_KEYS, load_profile, profile_names, read_profile, source_bytes
 from app.agent.profiles.version import code_version, file_version
 from app.agent.runtime.grounded import GroundedAgent, frame_question
 from app.settings import settings
@@ -41,7 +41,7 @@ def test_both_profiles_load_with_exactly_the_required_keys():
     assert profile_names() == ("analytics", "logspace")
     for name in profile_names():
         raw = yaml.safe_load((PROFILES / f"{name}.yaml").read_text())
-        assert set(raw) == set(REQUIRED_KEYS)
+        assert set(raw) - set(OPTIONAL_KEYS) == set(REQUIRED_KEYS)
         profile = load_profile(name)
         assert profile.name == name and profile.presentation == name
         expected = {"analytics": ("logs", "analytics", "presentation", "actions"), "logspace": ("logspace",)}
@@ -110,7 +110,7 @@ def test_a_name_that_differs_from_the_file_stem_is_refused(tmp_path):
 
 def test_the_profile_version_is_the_hash_of_the_file(tmp_path):
     path = PROFILES / "analytics.yaml"
-    assert load_profile("analytics").version == file_version(path.read_bytes())
+    assert load_profile("analytics").version == file_version(source_bytes(path))
     copy = tmp_path / "analytics.yaml"
     copy.write_bytes(path.read_bytes().replace(b"warehouse", b"Warehouse", 1))
     assert read_profile(copy).version != load_profile("analytics").version
