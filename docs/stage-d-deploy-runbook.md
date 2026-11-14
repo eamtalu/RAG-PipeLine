@@ -344,3 +344,12 @@ Rollback: the previous checkout and a restart.
 Deployed 14 November 2026 at 20:50 UTC as `b78b564` (main, PR #28): three units active, health 200,
 profile version `aa0de2ab87bc`. Live score: `analytics: 17 of 25 cases pass`, from 8 of 25 before the
 tuning; the remaining misses are read in the handoff's D19c paragraph.
+
+## D19d: the routing sentence and the tools named as calls
+
+What it adds: one sentence in the analytics profile ("how many deliveries", "deliveries per day", "deliveries by volume" count the deliveries picked: `aggregate_releases`, never `at_risk_history`), and the fragment names each shape's tool as a call and says a tool is called, never written out. Snapshots regenerated; no code change, no migration.
+Why: the second live score was 17 of 25; two misses and the owner's own Teams chart question went to the at-risk tool, and once the model wrote `show_kpis` as prose.
+
+Deploy: `./deploy.sh`, then the score command of D19c. Expected: "Show deliveries per day … as a chart" calls `aggregate_releases` then `chart_from_data`; the score above 17 of 25.
+
+Rollback: the previous checkout and a restart.
