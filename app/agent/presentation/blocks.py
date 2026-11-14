@@ -124,6 +124,18 @@ def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list
     return ordered[:MAX_BLOCKS]
 
 
+def _items(value) -> list:
+    """An argument as a list: a list or tuple as it is, nothing as empty, any single value as one
+    item, so a model that sends `rows: 5` is read, never crashes the run.
+
+    >>> _items([1, 2]), _items(None), _items(5), _items("x")
+    ([1, 2], [], [5], ['x'])
+    """
+    if value is None or value == "":
+        return []
+    return list(value) if isinstance(value, (list, tuple)) else [value]
+
+
 def presentation_figures(trace: list[dict]) -> str:
     """Every number a presentation call carries, as one text the figure guards can read.
 
@@ -137,14 +149,16 @@ def presentation_figures(trace: list[dict]) -> str:
     for call in trace:
         if not is_presentation_call(call):
             continue
-        args = call.get("input") or {}
+        args = call.get("input")
+        if not isinstance(args, dict):
+            continue
         for key in ("series_values", "rows"):
-            for item in args.get(key) or []:
-                for cell in item if isinstance(item, (list, tuple)) else [item]:
+            for item in _items(args.get(key)):
+                for cell in _items(item):
                     numbers.extend(_NUMBER.findall(str(cell)))
         # the words of the key figures and the findings (step 19) go through whole, one per line
         for key in TEXT_KEYS:
-            lines.extend(str(x) for x in args.get(key) or [] if str(x).strip())
+            lines.extend(str(x) for x in _items(args.get(key)) if str(x).strip())
     return " ".join(numbers) + ("\n" + "\n".join(lines) if lines else "")
 
 
