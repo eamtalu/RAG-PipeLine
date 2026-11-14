@@ -12,6 +12,7 @@ import json
 import logging
 import re
 
+from app.agent.presentation.charts import usable_result
 from app.agent.presentation.entities import entities_from_trace
 from app.services.analytics_agent.action_tools import ACTION_TOOL_NAMES
 from app.services.analytics_agent.presentation_tools import PRESENTATION_TOOL_NAMES, block_from_call
@@ -58,8 +59,14 @@ def blocks_from_trace(trace: list[dict]) -> list[dict]:
     []
     """
     by_type: dict[str, dict] = {}
+    latest: tuple[str, dict] | None = None  # the last usable data result so far (step 19)
     for call in trace:
-        if not is_presentation_call(call) or _refused(call):
+        if not is_presentation_call(call):
+            usable = usable_result(call)
+            if usable is not None:
+                latest = (str(call.get("tool")), usable)
+            continue
+        if _refused(call):
             continue
         try:
             if call["tool"] in ACTION_TOOL_NAMES:
@@ -68,7 +75,7 @@ def blocks_from_trace(trace: list[dict]) -> list[dict]:
                 if not block:
                     continue
             else:
-                block = block_from_call(call["tool"], call.get("input") or {})
+                block = block_from_call(call["tool"], call.get("input") or {}, data=latest)
         except Exception as exc:  # noqa: BLE001 - a bad call is dropped and logged, never raised
             logger.warning("agent.block_dropped tool=%s reason=%s", call["tool"], str(exc)[:160])
             continue

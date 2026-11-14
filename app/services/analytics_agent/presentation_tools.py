@@ -1,6 +1,7 @@
 """The presentation tools (stage D, step 5): how the model asks for a chart, a table or follow-ups.
 
-The model never emits HTML. After it has fetched data it may call `show_chart`, `show_table` or
+The model never emits HTML. After it has fetched data it may call `chart_from_data` (step 19: the
+numbers are copied from the data call's own result at answer time), `show_chart`, `show_table` or
 `suggest_followups` with the numbers exactly as the data tools returned them; the arguments are
 schema-checked by the model library, validated here against the wire contract, and lifted off the
 trace into typed blocks by `app/agent/presentation/blocks.py`. Arguments are flat (lists of
@@ -16,14 +17,38 @@ from typing import Any, Mapping
 
 from pydantic import ValidationError
 
+from app.agent.presentation import charts
 from app.services.teams.contracts import ChartBlock, ChartSeries, EvidenceColumn, FollowupsBlock, TableBlock
 
 SHOW_CHART = "show_chart"
 SHOW_TABLE = "show_table"
 SUGGEST_FOLLOWUPS = "suggest_followups"
-PRESENTATION_TOOL_NAMES = frozenset({SHOW_CHART, SHOW_TABLE, SUGGEST_FOLLOWUPS})
+CHART_FROM_DATA = "chart_from_data"
+CHART_KINDS = ("auto", "bar", "line", "pie")
+PRESENTATION_TOOL_NAMES = frozenset({SHOW_CHART, SHOW_TABLE, SUGGEST_FOLLOWUPS, CHART_FROM_DATA})
 
 PRESENTATION_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": CHART_FROM_DATA,
+        "description": (
+            "Draw a chart from the rows the last data call in this turn returned: you name the measure, "
+            "the numbers are copied from that result, never retyped. measure: a value the rows carry "
+            "(picked, expected, shortfall, units_short, rows, calls, deliveries, refused, late_min, held, "
+            "missed) or 'counts' / 'summary' for the at-risk totals. kind 'auto' picks line for a trend "
+            "over days or hours, bar for groups, pie for 2 to 8 shares; or name one. At most once per "
+            "answer, then write your sentences."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "measure": {"type": "string", "maxLength": 40, "description": "The value the rows carry to draw."},
+                "kind": {"type": "string", "enum": list(CHART_KINDS), "description": "auto unless the person asked for one."},
+                "title": {"type": "string", "maxLength": 120, "description": "Optional; a title is made from the data when absent."},
+            },
+            "required": ["measure"],
+            "additionalProperties": False,
+        },
+    },
     {
         "name": SHOW_CHART,
         "description": (
@@ -131,11 +156,17 @@ def _numeric(cell: str) -> bool:
     return bool(cell) and all(ch in "0123456789.,%-" for ch in cell.strip())
 
 
-def block_from_call(name: str, args: Mapping[str, Any]) -> dict:
-    """The validated block for one presentation call, as a plain dict; raises on a bad call.
+def block_from_call(name: str, args: Mapping[str, Any], *, data: tuple[str, dict] | None = None) -> dict:
+    """The validated block for one presentation call, as a plain dict; raises on a bad call. `data`
+    is the last usable data call of the turn (tool, result), which `chart_from_data` draws from.
 
-    ("show_chart", {...}) -> {"type": "chart", ...} ; ("show_table", {...}) -> {"type": "table", ...}
+    ("show_chart", {...}) -> {"type": "chart", ...} ; ("show_table", {...}) -> {"type": "table", ...} ;
+    ("chart_from_data", {"measure": "deliveries"}, data=("aggregate_releases", {...})) -> {"type": "chart", ...}
     """
+    if name == CHART_FROM_DATA:
+        if data is None:
+            raise ValueError("chart_from_data needs a data call before it in this turn")
+        return charts.chart_from_result(data[0], data[1], args).model_dump(mode="json")
     if name == SHOW_CHART:
         return chart_from_args(args).model_dump(mode="json")
     if name == SHOW_TABLE:
@@ -150,6 +181,16 @@ async def run_presentation_tool(name: str, args: Mapping[str, Any]) -> str:
 
     ("show_chart", valid) -> '{"shown": "chart", "points": 7}' ; (series too short) -> '{"problems": [...]}'
     """
+    # Step 1: A chart from the data is drawn at answer time from the trace, so the call itself
+    # only checks its shape and acknowledges; a measure the rows lack drops the chart at the lift
+    if name == CHART_FROM_DATA:
+        measure = str(args.get("measure") or "").strip()
+        kind = str(args.get("kind") or "auto")
+        if not measure:
+            return json.dumps({"problems": ["measure is required: the value the rows carry to draw"]})
+        if kind not in CHART_KINDS:
+            return json.dumps({"problems": [f"kind must be one of {', '.join(CHART_KINDS)}"]})
+        return json.dumps({"shown": "chart", "measure": measure, "note": "drawn from the last data call at answer time"})
     try:
         block = block_from_call(name, args)
     except (ValidationError, ValueError, TypeError) as exc:
@@ -159,4 +200,6 @@ async def run_presentation_tool(name: str, args: Mapping[str, Any]) -> str:
         return json.dumps({"shown": "chart", "points": len(block["labels"])})
     if block["type"] == "table":
         return json.dumps({"shown": "table", "rows": len(block["rows"])})
-    return json.dumps({"shown": "followups", "items": len(block["items"])})
+    if block["type"] == "followups":
+        return json.dumps({"shown": "followups", "items": len(block["items"])})
+    return json.dumps({"shown": block["type"]})
