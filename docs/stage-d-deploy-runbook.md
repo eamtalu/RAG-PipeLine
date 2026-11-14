@@ -381,3 +381,13 @@ No migration, no contract change, no edge change.
 Deploy: `./deploy.sh`. Check in Teams: "How many different users were active each day in the last 2 weeks?" gives the line chart (and a table if the model draws one); "Show active users per hour for the last 2 weeks" gives the heat map every time. Then the score command of D19c.
 
 Rollback: the previous checkout and a restart.
+
+## D20c: devices per day, the people table, the live score judged by what a person sees
+
+What it changes: `wms_activity` keeps the series by time when a grain is asked together with a cut and returns the cut as `breakdown`; the tool description names "devices per day: grain day, no by"; `charts.auto_measure` charts devices for a device cut; `charts.auto_people_table` and the lift draw the people table from the tool's list when the model drew none; `tests/golden/harness.py` judges a live case that names its blocks by those blocks and its data tools.
+Why: the live check of 14 November: "devices per day" answered with a total twice; "who was active today" sometimes came as bullets; the score counted another route to the same picture as a miss.
+No migration, no contract or edge change.
+
+Deploy: `./deploy.sh`. Check in Teams: "How many devices were in use per day in the last month?" draws the line of devices per day; "Who was active today, and when did each person start and finish?" draws the people table. Then the score command of D19c.
+
+Rollback: the previous checkout and a restart.

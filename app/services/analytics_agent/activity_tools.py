@@ -55,7 +55,11 @@ ACTIVITY_TOOLS: list[dict[str, Any]] = [
             "devices, from the transaction log: how many different users per hour, per day or per week, "
             "or by user, device, warehouse or method; with who started and finished when. Call it for "
             "'how many users were active', 'users per hour', 'who was active today', 'devices in use', "
-            "'logged in'. Window: days back (14 when not said, up to 92), or start and end, or one day. "
+            "'logged in'. For users or devices per day use grain 'day' and no by: every row carries the "
+            "users and the devices of its day (devices per day is grain 'day', measure devices); by is for "
+            "comparing users, devices, warehouses or methods with each other, and with a grain it comes "
+            "back as the breakdown beside the days. Window: days back (14 when not said, up to 92), or "
+            "start and end, or one day. "
             "grain 'hour' over several days also returns the day-by-hour matrix the heat map is drawn "
             "from. Answer only with the counts it returns."
         ),
@@ -216,27 +220,34 @@ async def activity_rows(db: AsyncSession, customer_code: str, args: Mapping[str,
         func.max(T.started_at).label("last_at"),
     )
     # Step 1: The rows per time bucket, or per group when the person cut by user, device,
-    # warehouse or method, so the chooser reads a trend or a comparison from the same shape
-    if by == "none":
+    # warehouse or method, so the chooser reads a trend or a comparison from the same shape. A
+    # grain asked for together with a cut keeps the series by time and returns the cut beside it,
+    # because "devices per day" came as {grain: day, by: device} and lost its days (14 November)
+    asked_grain = bool(str(args.get("grain") or "").strip())
+    time_rows: list[dict] | None = None
+    cut_rows: list[dict] | None = None
+    if by == "none" or asked_grain:
         bucket = func.date_trunc(grain, local).label("bucket")
         q = select(bucket, *measures).where(*where).group_by(bucket).order_by(bucket)
-        group_by = [grain]
-        rows = [
+        time_rows = [
             {"dimensions": [_bucket_label(r.bucket, grain)], "users": r.users, "devices": r.devices,
              "calls": r.calls, "errors": r.errors or 0,
              "first_at": _local_iso(r.first_at, tz), "last_at": _local_iso(r.last_at, tz)}
             for r in (await db.execute(q)).all()
         ]
-    else:
+    if by != "none":
         column = {"user": T.user_name, "device": T.device_name, "warehouse": T.warehouse, "method": T.method}[by]
         q = (select(column.label("cut"), *measures).where(*where).group_by(column)
              .order_by(func.count().desc()).limit(limit))
-        group_by = [by]
-        rows = [
+        cut_rows = [
             {"dimensions": [str(r.cut or "unknown")], "users": r.users, "devices": r.devices, "calls": r.calls,
              "errors": r.errors or 0, "first_at": _local_iso(r.first_at, tz), "last_at": _local_iso(r.last_at, tz)}
             for r in (await db.execute(q)).all()
         ]
+    if time_rows is not None:
+        group_by, rows = [grain], time_rows
+    else:
+        group_by, rows = [by], cut_rows or []
     # Step 2: The totals over the window, so a single figure never has to be added up by hand
     total_row = (await db.execute(select(*measures[:4]).where(*where))).one()
     total = {"users": total_row.users, "devices": total_row.devices, "calls": total_row.calls, "errors": total_row.errors or 0}
@@ -245,10 +256,12 @@ async def activity_rows(db: AsyncSession, customer_code: str, args: Mapping[str,
         "grain": grain, "by": by, "group_by": group_by, "rows": rows, "groups": len(rows), "total": total,
         "grain_note": GRAIN_NOTE,
     }
+    if time_rows is not None and cut_rows is not None:
+        out["breakdown_by"], out["breakdown"] = by, cut_rows
     # Step 3: The day-by-hour matrix for an hour grain over several days, which the heat map is
     # drawn from, filled for every day of the window so a quiet day is a row of zeros
-    if by == "none" and grain == "hour":
-        day_col = cast(local, func.date()).label("d") if False else func.date_trunc("day", local).label("d")
+    if time_rows is not None and grain == "hour":
+        day_col = func.date_trunc("day", local).label("d")
         hour_col = cast(func.extract("hour", local), Integer).label("h")
         mq = (select(day_col, hour_col, func.count(func.distinct(T.user_name)).label("users"))
               .where(*where).group_by(day_col, hour_col))

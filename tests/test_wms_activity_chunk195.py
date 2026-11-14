@@ -122,7 +122,7 @@ async def test_the_lift_draws_the_heat_map_the_line_or_the_tiles_from_the_activi
     assert line[0]["series"] == [{"name": "users", "values": [2.0, 2.0, 3.0]}] and line[0]["unit"] == "users"
     assert line[0]["title"] == "Users per day · 2026-09-11 to 2026-09-19"
     tiles = blocks.blocks_from_trace([_call("wms_activity", people)])
-    assert [b["type"] for b in tiles] == ["kpis"]
+    assert [b["type"] for b in tiles] == ["kpis", "table"]  # the people table since chunk 198
     assert [(i["label"], i["value"]) for i in tiles[0]["items"]] == [("People active", "3"), ("Devices", "3"), ("Transactions", "5"), ("Errors", "1")]
     # the model's own chart over the days wins, and devices is a measure the rows carry
     devices = charts.chart_from_result("wms_activity", daily, {"measure": "devices"})

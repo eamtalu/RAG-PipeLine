@@ -12,7 +12,7 @@ import json
 import logging
 import re
 
-from app.agent.presentation.charts import auto_chart, auto_heatmap, auto_kpis, usable_result
+from app.agent.presentation.charts import auto_chart, auto_heatmap, auto_kpis, auto_people_table, usable_result
 from app.agent.presentation.entities import entities_from_trace
 from app.services.analytics_agent.action_tools import ACTION_TOOL_NAMES
 from app.services.analytics_agent.presentation_tools import (
@@ -117,6 +117,12 @@ def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list
         kpis = auto_kpis(*latest)
         if kpis is not None:
             by_type["kpis"] = kpis.model_dump(mode="json")
+    # who was active and when (fix of 14 November): the people from the tool's own list, when the
+    # model wrote them as bullets instead of drawing a table; the totals above stay beside it
+    if latest is not None and "table" not in by_type:
+        people = auto_people_table(*latest)
+        if people is not None:
+            by_type["table"] = people.model_dump(mode="json")
     # the watchable things the data calls named (step 14c), read from the results, never the text
     entities = entities_from_trace(trace)
     if entities is not None and "entities" not in by_type:

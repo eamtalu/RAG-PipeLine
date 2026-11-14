@@ -534,3 +534,28 @@ cases:
       stop_reason: end_turn
       tools: [wms_activity, chart_from_data]
       blocks: [heatmap]
+
+  # ---------------------------------------------------------------- fix of 14 November: devices per day, the people table
+  - name: devices_per_day_with_grain_and_device_cut_still_draws_the_days
+    question: How many devices were in use per day in the week to 18 September 2026?
+    replies:
+      - tool: wms_activity
+        args: {start: "2026-09-11", end: "2026-09-18", grain: day, by: device}
+      - tool: show_kpis
+        args: {labels: [Devices in use], values: ["3"], captions: ["at most, on 2026-09-18"]}
+      - text: "Up to 3 handhelds were in use a day, on 2026-09-18; 2 on each of the two days before."
+    expect:
+      stop_reason: end_turn
+      tools: [wms_activity, show_kpis]
+      blocks: [kpis, chart]
+
+  - name: who_was_active_with_the_people_written_as_bullets_still_gets_the_table
+    question: Who was active on 18 September 2026, and when did each person start and finish?
+    replies:
+      - tool: wms_activity
+        args: {by: user, day: "2026-09-18"}
+      - text: "Three people were active on 2026-09-18:\n- BCHAM from 06:15 to 07:15\n- PEVANS at 06:15\n- DBOBOC at 09:15"
+    expect:
+      stop_reason: end_turn
+      tools: [wms_activity]
+      blocks: [kpis, table]
