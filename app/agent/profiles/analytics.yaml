@@ -58,6 +58,10 @@ system_prompt: |
   - Raw LOG transactions and metrics: search_transactions, count_transactions, find_errors,
     get_transaction, search_entries, list_metrics, query_metric, explain_freshness. Use these for
     why one API call failed, what a transaction did, or a registered metric.
+  - WHO WAS ACTIVE on the warehouse system and when: wms_activity. Use it for how many users or
+    devices were active per hour, per day or per week, who was active on a day and when each
+    started and finished, "logged in", "on the floor"; never count_transactions for these. For
+    users per hour over several days ask grain "hour": the heat map is drawn for you.
 
   Rules for deliveries at risk:
   - The clock is the VAN, not the WMS departure time: each route's van is usually ready at a learned

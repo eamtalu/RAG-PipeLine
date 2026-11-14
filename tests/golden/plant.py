@@ -18,6 +18,7 @@ from app.persistence.models.analytics_fact import AnalyticsFact
 from app.persistence.models.analytics_field_registry import AnalyticsFieldRegistry
 from app.persistence.models.analytics_lookup import AnalyticsLookup, AnalyticsLookupValue
 from app.persistence.models.agent_in_flight import AgentInFlight
+from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.persistence.models.agent_trace import AgentTrace
 from app.persistence.models.analytics_settlement import AnalyticsSettledRow, AnalyticsSettlement
 from app.persistence.models.customer import Customer
@@ -35,6 +36,7 @@ __all__ = [
     "LOGSPACE_TZ",
     "T0",
     "fact",
+    "plant_activity",
     "plant_analytics",
     "plant_analytics_facts",
     "plant_logspace",
@@ -135,10 +137,12 @@ def fact(
 
 
 async def wipe_analytics(cc: str) -> None:
-    """Remove every analytics and agent row and the customer row of the tenant."""
+    """Remove every analytics and agent row, the activity rows and the customer row of the tenant."""
     async with async_session() as db:
         for model in _ANALYTICS_MODELS:
             await db.execute(delete(model).where(model.customer_code == cc))
+        await db.execute(delete(LogTransaction).where(LogTransaction.customer_code == cc))
+        await db.execute(delete(Job).where(Job.customer_code == cc))
         await db.execute(delete(Customer).where(Customer.customer_code == cc))
         await db.commit()
 
@@ -188,6 +192,41 @@ async def plant_analytics(cc: str, *, week: bool = False) -> None:
     await wipe_analytics(cc)
     await register_analytics_tenant(cc)
     await plant_analytics_facts(cc, week=week)
+    if week:
+        await plant_activity(cc)
+
+
+#: The WMS activity of step 20: (day offset from the 18th, UTC hour, user, employee, device, method, ok)
+ACTIVITY = [
+    (-2, 5, "PEVANS", "Pat Evans", "HH-01", "ConfirmPickLine", True),
+    (-2, 6, "PEVANS", "Pat Evans", "HH-01", "ConfirmPickLine", True),
+    (-2, 6, "BCHAM", "Bo Cham", "HH-02", "GetNextDeliveryByRoute", False),
+    (-1, 5, "PEVANS", "Pat Evans", "HH-01", "ConfirmPickLine", True),
+    (-1, 7, "DBOBOC", "Dee Boboc", "HH-03", "ReportCount", True),
+    (0, 5, "PEVANS", "Pat Evans", "HH-01", "ConfirmPickLine", True),
+    (0, 5, "BCHAM", "Bo Cham", "HH-02", "ConfirmPickLine", True),
+    (0, 6, "BCHAM", "Bo Cham", "HH-02", "LoadDeliveryPackage", True),
+    (0, 8, "DBOBOC", "Dee Boboc", "HH-03", "ConfirmPickLine", True),
+    (0, 8, "DBOBOC", "Dee Boboc", "HH-03", "ConfirmPickLine", False),
+]
+
+
+async def plant_activity(cc: str) -> None:
+    """Ten WMS transactions over 16 to 18 September 2026 (UTC hours 5 to 8, London 6 to 9) for
+    three users on three handhelds, so `wms_activity` has users per day and per hour to count."""
+    async with async_session() as db:
+        job = Job(customer_code=cc, filename="activity.log", storage_key="k")
+        db.add(job)
+        await db.flush()
+        for offset, hour, user, employee, device, method, ok in ACTIVITY:
+            when = (T0 + timedelta(days=offset)).replace(hour=hour, minute=15, second=0, microsecond=0)
+            db.add(LogTransaction(
+                customer_code=cc, job_id=job.id, started_at=when, ended_at=when, date=when.date(),
+                user_name=user, employee_name=employee, device_name=device, device_id=device,
+                warehouse="BRI", method=method, reqid=f"{user}-{offset}-{hour}",
+                status=LogTransactionStatus.success if ok else LogTransactionStatus.error,
+            ))
+        await db.commit()
 
 
 async def plant_logspace(cc: str) -> None:

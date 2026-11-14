@@ -13,7 +13,7 @@ import json
 from typing import Any, Mapping
 
 from app.agent.presentation.evidence import _cell, _label
-from app.services.teams.contracts import ChartBlock, ChartSeries, KpisBlock
+from app.services.teams.contracts import ChartBlock, ChartSeries, HeatmapBlock, KpisBlock
 
 TIME_BUCKETS = ("day", "hour", "hour_start", "week", "business_date", "month")
 #: A measure the model may name that the rows spell differently: (row key, sign).
@@ -25,6 +25,10 @@ ALIASES: dict[str, tuple[str, int]] = {
     "units_expected": ("expected", 1),
 }
 UNITS = {
+    "users": "users",
+    "devices": "devices",
+    "calls": "calls",
+    "errors": "calls",
     "shortfall": "units",
     "units_short": "units",
     "picked": "units",
@@ -43,7 +47,9 @@ UNITS = {
 MAX_PIE = 8
 MAX_POINTS = 48
 #: The result keys that make a data call usable as the source of a chart.
-SOURCE_KEYS = ("rows", "counts", "summary", "vans")
+SOURCE_KEYS = ("rows", "counts", "summary", "vans", "matrix")
+#: The tools whose grouped rows the automatic shape may draw.
+GROUPED_TOOLS = ("aggregate_releases", "wms_activity")
 
 
 def last_data_result(trace: list[dict]) -> tuple[str, dict] | None:
@@ -210,7 +216,7 @@ def chart_from_result(tool: str, result: dict, args: Mapping[str, Any]) -> Chart
 
 
 #: The measures an automatic chart prefers when the result is not ranked by one, in order.
-AUTO_MEASURES = ("deliveries", "picked", "rows")
+AUTO_MEASURES = ("users", "deliveries", "picked", "rows")
 MIN_TREND_POINTS = 3
 MAX_AUTO_GROUPS = 12
 #: The words a key figure wears when Python draws it from a single total.
@@ -253,7 +259,7 @@ def auto_chart(tool: str, result: dict, *, asked_sort: bool = False) -> ChartBlo
     >>> auto_chart("aggregate_releases", {"group_by": [], "rows": [{"rows": 4}]}) is None
     True
     """
-    if tool != "aggregate_releases":
+    if tool not in GROUPED_TOOLS or result.get("matrix"):
         return None
     rows = result.get("rows") or []
     group_by = [str(g) for g in result.get("group_by") or []]
@@ -283,6 +289,18 @@ def auto_kpis(tool: str, result: dict) -> KpisBlock | None:
     >>> auto_kpis("aggregate_releases", {"group_by": ["day"], "rows": [{"dimensions": ["d"], "rows": 4}]}) is None
     True
     """
+    if tool == "wms_activity" and isinstance(result.get("total"), dict):
+        total = result["total"]
+        items = [
+            {"label": words, "value": _cell(total[key])[:24]}
+            for key, words in (("users", "People active"), ("devices", "Devices"), ("calls", "Transactions"), ("errors", "Errors"))
+            if key in total and total[key] is not None
+        ]
+        window = result.get("window") or {}
+        start, end = str(window.get("start") or "")[:10], str(window.get("end") or "")[:10]
+        if items and start and end:
+            items[0]["caption"] = start if start == end else f"{start} to {end}"
+        return KpisBlock(items=items[:6]) if items else None
     if tool != "aggregate_releases" or result.get("group_by"):
         return None
     rows = result.get("rows") or []
@@ -301,3 +319,32 @@ def auto_kpis(tool: str, result: dict) -> KpisBlock | None:
     if start and end:
         items[0]["caption"] = start if start == end else f"{start} to {end}"
     return KpisBlock(items=items[:6])
+
+
+def auto_heatmap(tool: str, result: dict) -> HeatmapBlock | None:
+    """The heat map a result's day-by-hour matrix draws (step 20), validated by the contract.
+
+    >>> auto_heatmap("wms_activity", {"matrix": {"rows": ["Fri 18 Sep"], "columns": ["00", "01"], "values": [[0, 3]],
+    ...     "unit": "users", "scale": [1, 2, 4, 9], "outside": None}, "window": {"start": "2026-09-18T00:00:00+01:00", "end": "2026-09-19T00:00:00+01:00"}}).title
+    'Active users by hour · 2026-09-18 to 2026-09-19'
+    >>> auto_heatmap("wms_activity", {"rows": []}) is None
+    True
+    """
+    matrix = result.get("matrix")
+    if not isinstance(matrix, dict) or not matrix.get("rows"):
+        return None
+    window = result.get("window") or {}
+    start, end = str(window.get("start") or "")[:10], str(window.get("end") or "")[:10]
+    title = "Active users by hour" + (f" · {start} to {end}" if start and end else "")
+    try:
+        return HeatmapBlock(
+            title=title[:120],
+            rows=[str(r)[:40] for r in matrix["rows"]][:62],
+            columns=[str(c)[:16] for c in matrix.get("columns") or []][:48],
+            values=[[float(v) for v in row] for row in matrix.get("values") or []][:62],
+            unit=matrix.get("unit") or "users",
+            scale=matrix.get("scale") or [1, 2, 4, 9],
+            outside=matrix.get("outside"),
+        )
+    except (ValueError, TypeError):
+        return None

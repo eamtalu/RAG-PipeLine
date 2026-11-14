@@ -13,7 +13,7 @@ from typing import Any
 from app.services.access import records
 
 #: Bumped when the words change, so the mirror rewrites every customer's row.
-CATALOGUE_VERSION = "18.1"
+CATALOGUE_VERSION = "20.1"
 
 QUESTION, ACTION, DEMO = "question", "action", "demo"
 
@@ -87,6 +87,17 @@ TOPICS: tuple[TopicSpec, ...] = (
             QuestionSpec("Tell me if fill rate drops below 95%", ACTION),
             QuestionSpec("Remind me at 5 to check Route 14", ACTION),
             QuestionSpec("Every weekday at 4pm send me the short products list", ACTION),
+        ),
+    ),
+    TopicSpec(
+        "people", "People and devices", "Who was active on the floor, when, and on which devices.", "picker",
+        (
+            QuestionSpec("How many different users were active each day in the last 2 weeks?"),
+            QuestionSpec("Show active users per hour for the last 2 weeks"),
+            QuestionSpec("Who was active today, and when did each person start and finish?"),
+            QuestionSpec("How many devices were in use per day in the last month?"),
+            QuestionSpec("Which hours had the most users on the floor this month?"),
+            QuestionSpec("Who was active on Saturday, and how many transactions did each run?"),
         ),
     ),
     TopicSpec(

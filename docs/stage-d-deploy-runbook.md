@@ -360,3 +360,14 @@ No migration.
 Deploy: `./deploy.sh`, then the score command of D19c. Expected: "show me the top 10 pickers" (no "chart" in the words) draws the bar chart; a written-out `state_findings` becomes the findings block; the score above 17 of 25.
 
 Rollback: the previous checkout and a restart.
+
+## D20: who was active, when (the wms_activity tool, the heat map, the People and devices topic)
+
+What it adds: `app/services/analytics_agent/activity_tools.py`, the `wms_activity` tool over `log_transactions` on the tenant's clock (distinct users, devices, calls and errors per hour, day or week, or by user, device, warehouse or method; first and last call per person; the day-by-hour matrix for an hour grain over up to 62 days), with five recipes in the tool text; the chooser reads its rows (measures users, devices, calls, errors), `charts.auto_heatmap` draws the heat map from its matrix and `auto_kpis` the totals as tiles; `heatmap` sits after `chart` in the reading order, and a withheld answer keeps the shapes the lift draws from the data; the analytics profile sends "who was active", "users per hour", "devices in use", "logged in" to it and the fragment names the heat map (snapshots regenerated); the catalogue gains "People and devices" (six starters, open to everybody), version 20.1; four golden cases over `plant_activity`.
+Contract 3.19 synced from the edge: `HeatmapBlock`.
+No migration. The queries read `log_transactions` by `customer_code` and `started_at` (both indexed); a 92-day window on tmp-live is about 650,000 rows grouped in Postgres.
+
+Deploy: AFTER the edge step 20a image (an older edge drops the heat map on arrival). `./deploy.sh`. The consumer writes the catalogue row 20.1 on its next access sweep.
+Check: in Teams, "Show active users per hour for the last 2 weeks" draws the heat map; "How many different users were active each day in the last 2 weeks?" the line with findings; "Who was active today, and when did each person start and finish?" a table; Browse shows "People and devices". Then the score command of D19c.
+
+Rollback: the previous checkout and a restart.

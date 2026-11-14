@@ -12,7 +12,7 @@ import json
 import logging
 import re
 
-from app.agent.presentation.charts import auto_chart, auto_kpis, usable_result
+from app.agent.presentation.charts import auto_chart, auto_heatmap, auto_kpis, usable_result
 from app.agent.presentation.entities import entities_from_trace
 from app.services.analytics_agent.action_tools import ACTION_TOOL_NAMES
 from app.services.analytics_agent.presentation_tools import (
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 MAX_BLOCKS = 8  # equal to the wire contract's cap; one block per kind keeps the bound
 #: The blocks in reading order: who it is about, the key figures, the picture, the records, what
 #: it means, then the things to act on and the follow-ups.
-ORDER = ("entities", "kpis", "chart", "table", "findings", "form", "receipt", "choice", "followups")
+ORDER = ("entities", "kpis", "chart", "heatmap", "table", "findings", "form", "receipt", "choice", "followups")
 #: The presentation arguments whose words the figure guards read (step 19), as whole strings so
 #: `evidence.figures` keeps its own comma, date and ordinal handling.
 TEXT_KEYS = ("values", "findings", "reasoning", "recommendations", "reasons", "limitations")
@@ -102,11 +102,17 @@ def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list
     # the shape Python draws when the model drew none (step 19): a chart for a trend or a ranking,
     # key figures for a single total; its numbers come from the data result, so the guards are
     # already satisfied
-    if not only_grounded and latest is not None and "chart" not in by_type and "table" not in by_type:
-        chart = auto_chart(*latest, asked_sort=latest_asked_sort)
-        if chart is not None:
-            by_type["chart"] = chart.model_dump(mode="json")
-    if not only_grounded and latest is not None and "kpis" not in by_type and "chart" not in by_type and "table" not in by_type:
+    # (these are drawn from the data result itself, so a withheld answer keeps them too)
+    drew = any(k in by_type for k in ("chart", "table", "heatmap"))
+    if latest is not None and not drew:
+        heatmap = auto_heatmap(*latest)
+        if heatmap is not None:
+            by_type["heatmap"] = heatmap.model_dump(mode="json")
+        else:
+            chart = auto_chart(*latest, asked_sort=latest_asked_sort)
+            if chart is not None:
+                by_type["chart"] = chart.model_dump(mode="json")
+    if latest is not None and "kpis" not in by_type and not any(k in by_type for k in ("chart", "table", "heatmap")):
         kpis = auto_kpis(*latest)
         if kpis is not None:
             by_type["kpis"] = kpis.model_dump(mode="json")

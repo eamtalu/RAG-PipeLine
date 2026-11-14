@@ -18,7 +18,6 @@ from typing import Any, Mapping
 
 from pydantic import ValidationError
 
-from app.agent.presentation import charts
 from app.services.teams.contracts import (
     ChartBlock,
     ChartSeries,
@@ -293,6 +292,9 @@ def block_from_call(
     ("chart_from_data", {"measure": "deliveries"}, data=("aggregate_releases", {...})) -> {"type": "chart", ...}
     """
     if name == CHART_FROM_DATA:
+        # imported here: the presentation package imports this module for the lift (no cycle)
+        from app.agent.presentation import charts
+
         if data is None:
             raise ValueError("chart_from_data needs a data call before it in this turn")
         return charts.chart_from_result(data[0], data[1], args).model_dump(mode="json")

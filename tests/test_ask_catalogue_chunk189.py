@@ -93,24 +93,24 @@ def test_the_catalogue_is_honest_and_its_tools_are_named_apart():
     assert {"propose_create_user", "propose_reminder", "propose_schedule", "watch_now", "demo_action"} <= set(
         t["name"] for t in action_tools.ACTION_TOOLS)
     row = ask_mirror.catalogue_payload()
-    assert row["version"] == catalogue.CATALOGUE_VERSION and len(row["topics"]) == 7 and len(row["actions"]) == 9
+    assert row["version"] == catalogue.CATALOGUE_VERSION and len(row["topics"]) == 8 and len(row["actions"]) == 9
     assert row["shortcuts"] == ["/graph", "/chart", "/table"]
 
 
 async def test_the_catalogue_is_filtered_by_what_a_record_may_do():
     picker, exec_, admin = await _record("u-pick"), await _record("u-exec"), await _record("u-adm")
-    assert [t.id for t in catalogue.visible_topics(picker)] == ["stock", "deliveries", "pickers", "planning", "watch"]
+    assert [t.id for t in catalogue.visible_topics(picker)] == ["stock", "deliveries", "pickers", "planning", "watch", "people"]
     seen_by_exec = {t.id: t for t in catalogue.visible_topics(exec_)}
     assert "usage" in seen_by_exec and "admin" not in seen_by_exec  # approve yes, run_actions no
     seen_by_admin = {t.id: t for t in catalogue.visible_topics(admin)}
-    assert len(seen_by_admin) == 7
+    assert len(seen_by_admin) == 8
     assert [q.kind for q in seen_by_admin["admin"].questions].count(catalogue.DEMO) == 3
     # a supervisor runs actions (so sees the demo starters) but may not manage users without approval: kept
     sup = await _record("u-sup")
     admin_topic = {t.id: t for t in catalogue.visible_topics(sup)}["admin"]
     assert any(q.text.startswith("Create a user") for q in admin_topic.questions)
     assert not any(q.text.startswith("Approve") for q in admin_topic.questions)
-    assert catalogue.visible_topics(None)[0].id == "stock" and len(catalogue.visible_topics(None)) == 5
+    assert catalogue.visible_topics(None)[0].id == "stock" and len(catalogue.visible_topics(None)) == 6
 
 
 async def test_what_can_i_ask_is_answered_from_the_catalogue_without_the_model():
@@ -119,7 +119,7 @@ async def test_what_can_i_ask_is_answered_from_the_catalogue_without_the_model()
     text, direct = await teams_consumer._before_the_model(job)
     assert direct is not None and direct["model"] == "catalogue"
     assert direct["answer"].startswith("I can help with stock and locations, deliveries and vans")
-    assert direct["blocks"][0]["type"] == "topics" and [t["id"] for t in direct["blocks"][0]["topics"]][-1] == "watch"
+    assert direct["blocks"][0]["type"] == "topics" and [t["id"] for t in direct["blocks"][0]["topics"]][-1] == "people"
     # a data question goes to the model as before
     job2 = QuestionJob(**{**job.model_dump(), "question": "What was short today?"})
     text, direct = await teams_consumer._before_the_model(job2)
