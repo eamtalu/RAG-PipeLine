@@ -318,3 +318,9 @@ Expected: a new `profile_version` on every trace after the restart. Then in Team
 Score: `cd /opt/RAG-Pipeline/RAG-PipeLine && PYTHONPATH=. venv/bin/python scripts/golden_questions.py --profile analytics --tenant golden --plant` prints `analytics: N of 25 cases pass` (about 25 live questions of model cost); record N in the handoff.
 
 Rollback: the previous checkout and a restart; nothing in the schema changed.
+
+Deployed 14 November 2026 at 20:15 UTC as `d9fe52c` (main, PR #27), after the edge step 19a image
+`d852963`: no migration (head `c4d8e2a7f531`), three units active, health 200, the analytics profile
+composed at version `375506244fa1` with the fragment in its prompt. The score run needs the dev
+requirements in the server venv (`venv/bin/pip install -r requirements-dev.txt`, owner's step);
+without them `tests/golden/plant.py` fails on `import pytest`.
