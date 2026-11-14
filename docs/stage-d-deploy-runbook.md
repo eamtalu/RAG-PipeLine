@@ -340,3 +340,7 @@ cd /opt/RAG-Pipeline/RAG-PipeLine && PYTHONPATH=. venv/bin/python scripts/golden
 Expected: the step 19 cases call `chart_from_data`, `show_kpis` or `state_findings` and draw their blocks; the score line well above 8 of 25. In Teams, "Show deliveries per day this week as a chart" draws the line chart with findings and no withheld sentence.
 
 Rollback: the previous checkout and a restart.
+
+Deployed 14 November 2026 at 20:50 UTC as `b78b564` (main, PR #28): three units active, health 200,
+profile version `aa0de2ab87bc`. Live score: `analytics: 17 of 25 cases pass`, from 8 of 25 before the
+tuning; the remaining misses are read in the handoff's D19c paragraph.
