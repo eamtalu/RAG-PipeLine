@@ -45,6 +45,7 @@ from app.services.teams.freshness import freshness_for
 from app.services.access import approvals as access_approvals
 from app.services.access import audit as access_audit
 from app.services.access import mirror as access_mirror
+from app.services.access import records
 from app.services.access import records as access_records
 from app.services.access import users as access_users
 from app.services.advisories import runner as advisories_runner
@@ -116,13 +117,19 @@ async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> di
 
     (job for acme by u-7, earlier turns) -> {"answer", "stop_reason", "tool_calls", ...}
     """
+    # Step 0: Two kinds of message never need the model (step 18): "what can I ask" is answered from
+    # the catalogue for the asker's record, and a slash command is turned into the words the model
+    # reads, or answered with the commands the asker may use
+    text, direct = await _before_the_model(job)
+    if direct is not None:
+        return direct
     # Step 1: Build the request from the job, so that who asked and where is fixed before any
     # model runs; the gateway builds the context and the runtime never reads settings.
     request = AgentRequest(
         request_id=job.job_id, tenant=job.customer_code,
         principal=Principal(tenant=job.customer_code, object_id=job.sender_object_id,
                             display_name=job.sender_name),
-        profile="analytics", text=framed_question(job), conversation_id=job.conversation_id,
+        profile="analytics", text=text, conversation_id=job.conversation_id,
         conversation_type=_conversation_type(job.source), site_id=job.site_id)
     # Step 2: Name the profile; it lists its namespaces, and the registry binds their tools.
     runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),
@@ -133,6 +140,39 @@ async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> di
     # Step 3: Mark the answer's entities as watched or not and add the one suggestion the
     # watchlist's rules allow (step 14c); a failure here never costs the answer
     return await ask_hooks.decorate_safely(result.to_legacy_dict(), job)
+
+
+def _direct_answer(text: str, blocks: list[dict]) -> dict:
+    """A result dict the consumer treats like the agent's, for an answer that needed no model.
+
+    >>> sorted(_direct_answer("Pick a topic", [{"type": "topics", "topics": []}]))[:3]
+    ['answer', 'blocks', 'evidence']
+    """
+    return {"answer": text, "stop_reason": "end_turn", "tool_calls": [], "iterations": 0, "retries": 0,
+            "model": "catalogue", "evidence": None, "evidence_data": None, "withheld_figures": [], "blocks": blocks}
+
+
+async def _before_the_model(job: QuestionJob) -> tuple[str, dict | None]:
+    """The words the model reads, or a direct answer: the catalogue for "what can I ask", the
+    commands for a slash the asker may not use, the framed words for a slash they may.
+
+    ("What can I ask you about?") -> ("…", the topics answer) ; ("/graph fill rate") -> ("Show fill rate as a chart", None) ;
+    ("How many deliveries?") -> (the framed question, None)
+    """
+    from app.services.ask import catalogue, slash
+
+    question = job.question or ""
+    if not (slash.parse(question) or catalogue.is_capability_question(question)):
+        return framed_question(job), None
+    async with async_session() as db:
+        record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
+    if catalogue.is_capability_question(question):
+        text, block = catalogue.capability_answer(record)
+        return question, _direct_answer(text, [block])
+    resolved = slash.resolve(question, record)
+    if resolved is not None and resolved.answer is not None:
+        return question, _direct_answer(resolved.answer, [])
+    return resolved.text if resolved is not None else framed_question(job), None
 
 
 async def _load_history(conversation_id: str, customer_code: str) -> list[dict]:

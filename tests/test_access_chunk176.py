@@ -187,7 +187,7 @@ async def test_the_access_rows_are_written_per_person_and_per_customer():
         await db.commit()
         written = await access_mirror.mirror_customer(db, mirror, CC, now=NOW)
         await db.commit()
-    assert written == 5  # one record, roles, users, approvals, audit
+    assert written == 6  # one record, roles, users, approvals, audit, and the Ask catalogue (step 18)
     access = json.loads(mirror.items[(f"EYE#{CC}", "USER#u-sup#ACCESS")].payload_json)
     assert access["role"] == "supervisor" and access["site_ids"] == ["BRI"]
     assert access["capabilities"]["approve"] == NO and access["status"] == "active"

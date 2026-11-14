@@ -18,6 +18,7 @@ from app.config.database import async_session
 from app.services.access import approvals, records, users
 from app.services.access import matrix as matrix_file
 from app.services.access import mirror as access_mirror
+from app.services.ask import forms as ask_forms
 from app.services.teams.contracts import ACCESS_COMMAND_KINDS, QuestionJob, ReceiptBlock
 from app.services.teams.mirror import MirrorWriter, build_mirror_writer_from_settings
 from app.settings import settings
@@ -72,7 +73,8 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
         record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
         if record is None or not record.is_active:
             raise Refused("you have no active access record")
-        payload = dict(command.payload)
+        # a confirmed form from Ask (step 18) arrives as {form_id, values, via}; its own fields come out
+        payload = ask_forms.unwrap(dict(command.payload))
         handler = _HANDLERS[command.kind]
         outcome = await handler(db, job, record, actor, payload, now)
         if isinstance(outcome, str):

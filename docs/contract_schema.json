@@ -10,6 +10,11 @@
       "sk": "APPROVALS",
       "ttl_seconds": null
     },
+    "ask_catalogue": {
+      "pk": "EYE#{customer_code}",
+      "sk": "ASK_CATALOGUE",
+      "ttl_seconds": null
+    },
     "audit": {
       "pk": "EYE#{customer_code}",
       "sk": "AUDIT",
@@ -482,6 +487,19 @@
         "FormBlock": {
           "description": "A form the person confirms before anything changes (step 8 builds the submit).",
           "properties": {
+            "command_kind": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Command Kind"
+            },
             "fields": {
               "items": {
                 "$ref": "#/$defs/FormField"
@@ -494,6 +512,15 @@
             "form_id": {
               "pattern": "^[a-z][a-z0-9_]{0,31}$",
               "title": "Form Id",
+              "type": "string"
+            },
+            "mode": {
+              "default": "real",
+              "enum": [
+                "real",
+                "demo"
+              ],
+              "title": "Mode",
               "type": "string"
             },
             "note": {
@@ -558,6 +585,14 @@
               "maxLength": 80,
               "title": "Label",
               "type": "string"
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 24,
+              "title": "Labels",
+              "type": "array"
             },
             "name": {
               "pattern": "^[a-z][a-z0-9_]{0,31}$",
@@ -629,7 +664,7 @@
             },
             "status": {
               "default": "done",
-              "pattern": "^(done|needs_approval|refused)$",
+              "pattern": "^(done|needs_approval|refused|demo)$",
               "title": "Status",
               "type": "string"
             },
@@ -739,6 +774,124 @@
           "title": "TextBlock",
           "type": "object"
         },
+        "Topic": {
+          "description": "One topic card of the Ask catalogue (step 18).",
+          "properties": {
+            "blurb": {
+              "maxLength": 120,
+              "title": "Blurb",
+              "type": "string"
+            },
+            "icon": {
+              "maxLength": 24,
+              "title": "Icon",
+              "type": "string"
+            },
+            "id": {
+              "pattern": "^[a-z][a-z0-9_]{0,31}$",
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "maxLength": 40,
+              "title": "Label",
+              "type": "string"
+            },
+            "needs": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs"
+            },
+            "questions": {
+              "items": {
+                "$ref": "#/$defs/TopicQuestion"
+              },
+              "maxItems": 12,
+              "minItems": 1,
+              "title": "Questions",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "blurb",
+            "icon",
+            "questions"
+          ],
+          "title": "Topic",
+          "type": "object"
+        },
+        "TopicQuestion": {
+          "description": "One starter of a topic (step 18): the sentence to tap, and whether it asks or acts.",
+          "properties": {
+            "kind": {
+              "default": "question",
+              "enum": [
+                "question",
+                "action",
+                "demo"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "needs": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs"
+            },
+            "text": {
+              "maxLength": 160,
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "title": "TopicQuestion",
+          "type": "object"
+        },
+        "TopicsBlock": {
+          "description": "The \"What can I ask\" answer (step 18): the topics the asker may use, drawn as cards.",
+          "properties": {
+            "topics": {
+              "items": {
+                "$ref": "#/$defs/Topic"
+              },
+              "maxItems": 12,
+              "title": "Topics",
+              "type": "array"
+            },
+            "type": {
+              "const": "topics",
+              "default": "topics",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "topics"
+          ],
+          "title": "TopicsBlock",
+          "type": "object"
+        },
         "WatchSuggestionBlock": {
           "description": "At most one per answer: an offer to watch the thing the question was about.",
           "properties": {
@@ -816,6 +969,7 @@
                 "receipt": "#/$defs/ReceiptBlock",
                 "table": "#/$defs/TableBlock",
                 "text": "#/$defs/TextBlock",
+                "topics": "#/$defs/TopicsBlock",
                 "watch_suggestion": "#/$defs/WatchSuggestionBlock"
               },
               "propertyName": "type"
@@ -847,6 +1001,9 @@
               },
               {
                 "$ref": "#/$defs/ChoiceBlock"
+              },
+              {
+                "$ref": "#/$defs/TopicsBlock"
               }
             ]
           },
@@ -1056,6 +1213,7 @@
                 "access_request",
                 "access_undo",
                 "advisory_act",
+                "demo_act",
                 "task_create",
                 "task_update",
                 "group_set",
@@ -1230,5 +1388,5 @@
       "type": "object"
     }
   },
-  "revision": "3.16"
+  "revision": "3.17"
 }

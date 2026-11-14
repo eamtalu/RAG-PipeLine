@@ -19,7 +19,7 @@ from app.agent.capabilities.registry import ToolRegistry
 from app.agent.capabilities.spec import Namespace, ToolSpec
 from app.agent.profiles import load_profile, read_profile
 from app.agent.runtime.grounded import GroundedAgent
-from app.services.analytics_agent import at_risk_tools
+from app.services.analytics_agent import at_risk_tools, forecast_tools, usage_tools
 from app.services.analytics_agent.action_tools import ACTION_TOOLS
 from app.services.analytics_agent.advisory_tools import ADVISORY_TOOLS
 from app.services.analytics_agent.presentation_tools import PRESENTATION_TOOLS
@@ -91,8 +91,10 @@ def test_a_profile_only_gets_its_namespaces_tools_in_the_old_order():
     registry = tool_registry()
     # the analytics profile gained the presentation namespace in step 5 (chunk 171); its three
     # tools come after the seventeen data tools, which keep their old order
-    # the advisory tool (13 November) sits with the analytics data tools, before the presentation ones
-    analytics_20 = (ANALYTICS_17 + [t["name"] for t in ADVISORY_TOOLS] + [t["name"] for t in PRESENTATION_TOOLS]
+    # the advisory tools (13 November), the forecast tool and the usage tool (step 18) sit with the
+    # analytics data tools, before the presentation ones
+    analytics_20 = (ANALYTICS_17 + [t["name"] for t in ADVISORY_TOOLS] + [t["name"] for t in forecast_tools.FORECAST_TOOLS]
+                    + [t["name"] for t in usage_tools.USAGE_TOOLS] + [t["name"] for t in PRESENTATION_TOOLS]
                     + [t["name"] for t in ACTION_TOOLS])
     assert [s.name for s in registry.offered(load_profile("analytics").namespaces)] == analytics_20
     assert [s.name for s in registry.offered(load_profile("logspace").namespaces)] == LOGSPACE_6
@@ -159,8 +161,10 @@ async def test_a_tool_call_runs_for_the_context_tenant_never_an_argument():
 
 def test_the_tool_text_per_profile_is_byte_for_byte_what_it_was():
     registry = tool_registry()
+    # step 18: the forecast tool and its recipes join the text the model reads
     analytics = json.dumps(
-        [RELEASE_TOOLS, RECIPES, at_risk_tools.AT_RISK_TOOLS, at_risk_tools.RECIPES], default=str
+        [RELEASE_TOOLS, RECIPES, at_risk_tools.AT_RISK_TOOLS, at_risk_tools.RECIPES,
+         forecast_tools.FORECAST_TOOLS, forecast_tools.RECIPES], default=str
     )
     assert registry.tool_text(("logs", "analytics")) == analytics
     assert registry.tool_text(("logspace",)) == json.dumps(LOGSPACE_TOOLS)

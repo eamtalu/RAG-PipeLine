@@ -88,7 +88,8 @@ async def test_the_form_is_filled_from_the_asker_and_marked_for_approval_when_th
     sup_fields = {f["name"]: f for f in sup["block"]["fields"]}
     assert sup_fields["role"]["value"] == "shift_lead" and sup_fields["site_id"]["value"] == "LON"
     assert "Needs approval" in sup["block"]["note"]
-    assert picker["problems"][0].startswith("you cannot create users")
+    # step 18: one gate in the registry refuses before any builder runs, with one wording
+    assert picker["problems"][0].startswith("you cannot do that: manage_users is not allowed")
     assert "display_name is required" in empty["problems"][0]
 
 

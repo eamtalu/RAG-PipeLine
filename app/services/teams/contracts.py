@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.16"
+CONTRACT_REVISION = "3.17"
 
 
 def _now() -> datetime:
@@ -53,6 +53,9 @@ def _now() -> datetime:
 #:   end_of_day | 7_days | iso, swap_watch_id?, via?} (step 14; a full list answers with a choice block
 #:   whose options carry the swap) ; watch_update {watch_id, action: set_alert | resume, alert?, until?}
 #: watch_stop {watch_id, via?} ; watch_seen {event_ids?} ; watch_not_now {kind, entity_id}
+#: demo_act {action_id, form_id, values} (step 18: a confirmed demo form; one audit line marked demo,
+#:   nothing else changes, the receipt's status is "demo"). A confirmed form of any kind may also
+#:   arrive as {form_id, values, via}: the service unwraps it into its own fields (step 18).
 ACCESS_COMMAND_KINDS = (
     "access_set_user",
     "access_deactivate_user",
@@ -61,6 +64,7 @@ ACCESS_COMMAND_KINDS = (
     "access_request",
     "access_undo",
     "advisory_act",
+    "demo_act",
     "task_create",
     "task_update",
     "group_set",
@@ -95,6 +99,7 @@ class Command(BaseModel):
         "access_request",
         "access_undo",
         "advisory_act",
+        "demo_act",
         "task_create",
         "task_update",
         "group_set",
@@ -276,6 +281,9 @@ class FormField(BaseModel):
     label: str = Field(..., max_length=80)
     kind: Literal["text", "number", "date", "select", "checkbox"] = "text"
     options: list[str] = Field(default_factory=list, max_length=24)
+    #: The words shown for each option (step 18), when the options themselves are ids; same length
+    #: as options or empty.
+    labels: list[str] = Field(default_factory=list, max_length=24)
     required: bool = True
     placeholder: str | None = Field(default=None, max_length=80)
     value: str | None = Field(default=None, max_length=200)  # what the assistant pre-filled
@@ -291,6 +299,11 @@ class FormBlock(BaseModel):
     requires_approval: bool = False
     submit_label: str = Field(default="Submit", max_length=40)
     note: str | None = Field(default=None, max_length=300)
+    #: The command a confirmed form becomes (step 18), sent as {form_id, values, via}; absent on a
+    #: form from before, which the page maps by its form_id as it always did.
+    command_kind: str | None = Field(default=None, max_length=32)
+    #: A demo form (step 18) changes nothing when confirmed; the page says so beside its title.
+    mode: Literal["real", "demo"] = "real"
 
 
 class ReceiptBlock(BaseModel):
@@ -299,7 +312,7 @@ class ReceiptBlock(BaseModel):
     type: Literal["receipt"] = "receipt"
     text: str = Field(..., max_length=300)
     reference: str | None = Field(default=None, max_length=40)
-    status: str = Field(default="done", pattern=r"^(done|needs_approval|refused)$")
+    status: str = Field(default="done", pattern=r"^(done|needs_approval|refused|demo)$")
     undo_until: datetime | None = None
     #: What the page sends as the `access_undo` command's payload while undo_until has not passed
     #: (step 8); absent when nothing can be undone.
@@ -356,6 +369,32 @@ class ChoiceBlock(BaseModel):
     allow_typed: bool = True
 
 
+class TopicQuestion(BaseModel):
+    """One starter of a topic (step 18): the sentence to tap, and whether it asks or acts."""
+
+    text: str = Field(..., max_length=160)
+    kind: Literal["question", "action", "demo"] = "question"
+    needs: str | None = Field(default=None, max_length=32)
+
+
+class Topic(BaseModel):
+    """One topic card of the Ask catalogue (step 18)."""
+
+    id: str = Field(..., pattern=_NAME)
+    label: str = Field(..., max_length=40)
+    blurb: str = Field(..., max_length=120)
+    icon: str = Field(..., max_length=24)
+    needs: str | None = Field(default=None, max_length=32)
+    questions: list[TopicQuestion] = Field(..., min_length=1, max_length=12)
+
+
+class TopicsBlock(BaseModel):
+    """The "What can I ask" answer (step 18): the topics the asker may use, drawn as cards."""
+
+    type: Literal["topics"] = "topics"
+    topics: list[Topic] = Field(..., max_length=12)
+
+
 Block = Annotated[
     TextBlock
     | TableBlock
@@ -365,7 +404,8 @@ Block = Annotated[
     | FollowupsBlock
     | EntitiesBlock
     | WatchSuggestionBlock
-    | ChoiceBlock,
+    | ChoiceBlock
+    | TopicsBlock,
     Field(discriminator="type"),
 ]
 
