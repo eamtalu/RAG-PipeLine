@@ -79,7 +79,7 @@ def test_blocks_come_off_the_trace_in_a_fixed_order_and_a_refused_call_is_not_a_
     out = blocks.blocks_from_trace(trace)
     assert [b["type"] for b in out] == ["chart", "table", "followups"]
     assert out[0]["series"] == [{"name": "units short", "values": [10.0, 1.0]}]
-    assert blocks.presentation_figures(trace) == "1 10 1 100230"
+    assert blocks.presentation_figures(trace) == "1 10 1\n100230"  # table cells are lines since chunk 197
     assert blocks.blocks_from_trace([_call("show_chart", {"kind": "bar"})]) == []
 
 

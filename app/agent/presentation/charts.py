@@ -206,11 +206,18 @@ def chart_from_result(tool: str, result: dict, args: Mapping[str, Any]) -> Chart
     labels, values, label_kind = series_from_result(tool, result, measure)
     kind = choose_kind(label_kind, values, str(args.get("kind") or "auto").strip().lower())
     title = str(args.get("title") or "").strip() or chart_title(tool, result, measure, label_kind)
+    # Step 1: A series longer than the contract allows keeps its newest points and says so in the
+    # title, because cutting the tail silently drew the first 48 of 336 hours (fix of 14 November)
+    total = len(labels)
+    if total > MAX_POINTS:
+        note = f" (latest {MAX_POINTS} of {total})"
+        labels, values = labels[-MAX_POINTS:], values[-MAX_POINTS:]
+        title = title[: 120 - len(note)] + note
     return ChartBlock(
         kind=kind,
         title=title[:120],
-        labels=labels[:MAX_POINTS],
-        series=[ChartSeries(name=measure.replace("_", " "), values=values[:MAX_POINTS])],
+        labels=labels,
+        series=[ChartSeries(name=measure.replace("_", " "), values=values)],
         unit=UNITS.get(measure),
     )
 

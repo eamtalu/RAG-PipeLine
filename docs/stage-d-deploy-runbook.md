@@ -371,3 +371,13 @@ Deploy: AFTER the edge step 20a image (an older edge drops the heat map on arriv
 Check: in Teams, "Show active users per hour for the last 2 weeks" draws the heat map; "How many different users were active each day in the last 2 weeks?" the line with findings; "Who was active today, and when did each person start and finish?" a table; Browse shows "People and devices". Then the score command of D19c.
 
 Rollback: the previous checkout and a restart.
+
+## D20b: the data's shape wins; a formatted number is one figure
+
+What it changes: `presentation_figures` passes table cells to the guards as whole words, one per line, so "1,928" is one figure (it was "1" and "928" and withheld correct answers); `blocks_from_trace` draws the heat map for any day-by-hour grid (replacing a model's chart of hours) and the trend chart for any time series of three or more points (beside a model's table), while rankings and totals still wait for the model to draw nothing; `charts.chart_from_result` keeps a long series' newest 48 points and marks the title "(latest 48 of N)".
+Why: three live answers on tmp-live on 14 November (21:17 withheld for a comma, 21:27 a table with no chart, 21:19 a 48-hour line instead of the heat map), replayed over the production result before and after.
+No migration, no contract change, no edge change.
+
+Deploy: `./deploy.sh`. Check in Teams: "How many different users were active each day in the last 2 weeks?" gives the line chart (and a table if the model draws one); "Show active users per hour for the last 2 weeks" gives the heat map every time. Then the score command of D19c.
+
+Rollback: the previous checkout and a restart.

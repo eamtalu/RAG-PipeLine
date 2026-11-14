@@ -19,7 +19,9 @@ def test_a_scalar_where_a_list_was_expected_is_read_as_one_item():
         _call("show_chart", series_values=7),
     ]
     text = blocks.presentation_figures(trace)
-    assert text.split("\n")[0] == "5 7"
+    lines = text.split("\n")
+    assert lines[0] == "7"  # the chart value, checked exactly
+    assert "5" in lines[1:]  # the table cell, read as a line since chunk 197
     assert "1,375" in text and "Picked 17 units" in text
 
 
