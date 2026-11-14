@@ -295,3 +295,8 @@ PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT action, d
 Expected: no rows until someone confirms a demo form; afterwards `demo.<action>` with decision `demo` only.
 
 Rollback: the previous checkout and a restart; nothing in the schema changed.
+
+Deployed 14 November 2026 at 17:42 UTC as `797a9f0` (main, PR #26): no migration (head `c4d8e2a7f531`),
+`fastapirag`, `fastapirag-worker` and `fastapirag-teams-consumer` active, health 200, the
+`ASK_CATALOGUE` row written for tmp-live (version 18.1, 7 topics, 9 actions, 3 shortcuts). The edge
+step 18b went live as image `31fb5df` right after.
