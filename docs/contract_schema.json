@@ -729,6 +729,110 @@
           "title": "FormField",
           "type": "object"
         },
+        "HeatmapBlock": {
+          "description": "A grid of counts over two labelled axes (step 20): days down, hours across, the number of\ndifferent users active in each cell; `scale` holds the band thresholds, `outside` marks the\ncells beyond the window asked for.",
+          "properties": {
+            "columns": {
+              "items": {
+                "maxLength": 16,
+                "type": "string"
+              },
+              "maxItems": 48,
+              "minItems": 1,
+              "title": "Columns",
+              "type": "array"
+            },
+            "outside": {
+              "anyOf": [
+                {
+                  "items": {
+                    "items": {
+                      "type": "boolean"
+                    },
+                    "type": "array"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Outside"
+            },
+            "rows": {
+              "items": {
+                "maxLength": 40,
+                "type": "string"
+              },
+              "maxItems": 62,
+              "minItems": 1,
+              "title": "Rows",
+              "type": "array"
+            },
+            "scale": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 6,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Scale"
+            },
+            "title": {
+              "maxLength": 120,
+              "title": "Title",
+              "type": "string"
+            },
+            "type": {
+              "const": "heatmap",
+              "default": "heatmap",
+              "title": "Type",
+              "type": "string"
+            },
+            "unit": {
+              "anyOf": [
+                {
+                  "maxLength": 24,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unit"
+            },
+            "values": {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "maxItems": 62,
+              "minItems": 1,
+              "title": "Values",
+              "type": "array"
+            }
+          },
+          "required": [
+            "title",
+            "rows",
+            "columns",
+            "values"
+          ],
+          "title": "HeatmapBlock",
+          "type": "object"
+        },
         "KpiItem": {
           "description": "One headline figure of an analyst answer (step 19): the value is already formatted.",
           "properties": {
@@ -1167,6 +1271,7 @@
                 "findings": "#/$defs/FindingsBlock",
                 "followups": "#/$defs/FollowupsBlock",
                 "form": "#/$defs/FormBlock",
+                "heatmap": "#/$defs/HeatmapBlock",
                 "kpis": "#/$defs/KpisBlock",
                 "receipt": "#/$defs/ReceiptBlock",
                 "table": "#/$defs/TableBlock",
@@ -1212,6 +1317,9 @@
               },
               {
                 "$ref": "#/$defs/FindingsBlock"
+              },
+              {
+                "$ref": "#/$defs/HeatmapBlock"
               }
             ]
           },
@@ -1596,5 +1704,5 @@
       "type": "object"
     }
   },
-  "revision": "3.18"
+  "revision": "3.19"
 }

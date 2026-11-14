@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.18"
+CONTRACT_REVISION = "3.19"
 
 
 def _now() -> datetime:
@@ -431,7 +431,44 @@ class FindingsBlock(BaseModel):
     type: Literal["findings"] = "findings"
     findings: list[Finding] = Field(..., min_length=1, max_length=6)
     recommendations: list[Recommendation] = Field(default_factory=list, max_length=4)
-    limitations: list[Annotated[str, Field(max_length=200)]] = Field(default_factory=list, max_length=4)
+    limitations: list[Annotated[str, Field(max_length=200)]] = Field(
+        default_factory=list, max_length=4
+    )
+
+
+class HeatmapBlock(BaseModel):
+    """A grid of counts over two labelled axes (step 20): days down, hours across, the number of
+    different users active in each cell; `scale` holds the band thresholds, `outside` marks the
+    cells beyond the window asked for."""
+
+    type: Literal["heatmap"] = "heatmap"
+    title: str = Field(..., max_length=120)
+    rows: list[Annotated[str, Field(max_length=40)]] = Field(..., min_length=1, max_length=62)
+    columns: list[Annotated[str, Field(max_length=16)]] = Field(..., min_length=1, max_length=48)
+    values: list[list[float]] = Field(..., min_length=1, max_length=62)
+    unit: str | None = Field(default=None, max_length=24)
+    scale: list[float] | None = Field(default=None, min_length=2, max_length=6)
+    outside: list[list[bool]] | None = None
+
+    @model_validator(mode="after")
+    def _shape_holds(self) -> "HeatmapBlock":
+        """The values are one list per row with one number per column, none negative; the scale
+        rises; `outside`, when given, has the same shape.
+
+        (2 rows, 3 columns, values 2x3) -> ok ; (values 2x2) -> ValueError ; (scale [4, 1]) -> ValueError
+        """
+        width = len(self.columns)
+        if len(self.values) != len(self.rows) or any(len(r) != width for r in self.values):
+            raise ValueError("values must be one list per row with one number per column")
+        if any(v < 0 for r in self.values for v in r):
+            raise ValueError("a heat map holds counts, never a negative value")
+        if self.scale is not None and any(b <= a for a, b in zip(self.scale, self.scale[1:])):
+            raise ValueError("scale must rise")
+        if self.outside is not None and (
+            len(self.outside) != len(self.rows) or any(len(r) != width for r in self.outside)
+        ):
+            raise ValueError("outside must have the shape of values")
+        return self
 
 
 Block = Annotated[
@@ -446,7 +483,8 @@ Block = Annotated[
     | ChoiceBlock
     | TopicsBlock
     | KpisBlock
-    | FindingsBlock,
+    | FindingsBlock
+    | HeatmapBlock,
     Field(discriminator="type"),
 ]
 
