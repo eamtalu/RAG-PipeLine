@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.analytics_fact import AnalyticsFact
+from app.services.advisories import kinds
 from app.services.advisories.registry import Finding
 
 PICK_METHOD = "ConfirmPickLine"
@@ -84,5 +85,6 @@ async def run(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo)
                          else f"Check {row['location']}: stock missing, mis-slotted or the balance wrong; recount it"),
             site_id=row["warehouse"],
             source={"kind": "location", "location": row["location"]},
+            kind="empty_location", about=kinds.about_location(str(row["location"]), is_staging=staging),
         ))
     return findings

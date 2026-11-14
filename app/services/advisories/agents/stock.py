@@ -16,7 +16,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.analytics_fact import AnalyticsFact
+from app.services.advisories import kinds
 from app.services.advisories.registry import Finding
+from app.services.analytics import lookup_store
 from app.services.analytics.settle_reads import ReadProblem, UnknownSettlement
 from app.services.analytics_agent.tools import aggregate_releases
 
@@ -27,6 +29,7 @@ MIN_GAP_SHARE = Decimal("0.10")
 HIGH_GAP_SHARE = Decimal("0.25")
 CHRONIC_RELEASES = 3
 ITEM_GROUP = ["item_number", "lookup:item description.ItemDescription", "warehouse"]
+DESCRIPTION_LOOKUP, DESCRIPTION_ATTRIBUTE = "item description", "ItemDescription"
 
 
 def _dec(value) -> Decimal | None:
@@ -104,10 +107,31 @@ async def chronic_shorts(db: AsyncSession, customer_code: str, now: datetime) ->
     return out
 
 
+async def descriptions_of(db: AsyncSession, customer_code: str, items: set[str], at: datetime) -> dict[str, str]:
+    """The item descriptions the lookups know, by item number; items without one are absent.
+
+    (items {"104568", "999"}, lookup knows 104568 = Ginger) -> {"104568": "Ginger"}
+    """
+    if not items:
+        return {}
+    resolver = await lookup_store.resolver(db, customer_code, {DESCRIPTION_LOOKUP: items},
+                                           attributes=[(DESCRIPTION_LOOKUP, DESCRIPTION_ATTRIBUTE)])
+    out = {}
+    for item in items:
+        value = resolver.value(DESCRIPTION_LOOKUP, item, DESCRIPTION_ATTRIBUTE, at)
+        if value:
+            out[item] = value
+    return out
+
+
 async def run(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo) -> list[Finding]:
     findings: list[Finding] = []
-    # Step 1: Count variances, from the latest count per item and location in the last day
-    for c in await latest_counts(db, customer_code, now - timedelta(hours=LOOKBACK_HOURS)):
+    # Step 1: Count variances, from the latest count per item and location in the last day; the
+    # items are named in words where the description lookup knows them, because a supervisor
+    # reads "Ginger (104568)" and not a number
+    counts = await latest_counts(db, customer_code, now - timedelta(hours=LOOKBACK_HOURS))
+    names = await descriptions_of(db, customer_code, {str(c["item"]) for c in counts}, now)
+    for c in counts:
         v = variance_of(c["counted"], c["balance"])
         if v is None:
             continue
@@ -116,11 +140,12 @@ async def run(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo)
         empty = counted == 0 and (balance or 0) > 0
         severity = "high" if empty or (share is not None and share >= HIGH_GAP_SHARE) else "medium"
         when = c["at"].astimezone(tz).strftime("%H:%M")
+        about = kinds.about_item(str(c["item"]), names.get(str(c["item"])), where=c["location"])
         findings.append(Finding(
             dedup_key=f"count:{c['item']}:{c['location']}",
             severity=severity,
-            title=(f"Item {c['item']} at {c['location']} counted empty, system has {plain(balance)}" if empty
-                   else f"Item {c['item']} at {c['location']}: counted {plain(counted)}, system {plain(balance)}"),
+            title=(f"{about['label']} at {c['location']} counted empty, system has {plain(balance)}" if empty
+                   else f"{about['label']} at {c['location']}: counted {plain(counted)}, system {plain(balance)}"),
             evidence=f"Quick Stock Count at {when} · gap {'+' if gap > 0 else '-'}{plain(abs(gap))} units"
                      + (f" · {share * 100:.0f}% of the balance" if share is not None else ""),
             impact="Picks from this location will be short until the balance is corrected"
@@ -128,6 +153,7 @@ async def run(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo)
             recommended=f"Recount {c['location']} and adjust the balance for item {c['item']}",
             site_id=c["warehouse"],
             source={"kind": "count", "item": c["item"], "location": c["location"]},
+            kind="count_gap", about=about,
         ))
     # Step 2: Items short on several releases this week
     for s in await chronic_shorts(db, customer_code, now):
@@ -141,6 +167,7 @@ async def run(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo)
             impact="Customers on tomorrow's releases of this item are likely to be short again",
             recommended="Check the stock and the replenishment of this item before tomorrow's picks",
             source={"kind": "item", "item": s["item"]},
+            kind="chronic_short", about=kinds.about_item(str(s["item"]), s["description"] or None),
         ))
     return findings
 

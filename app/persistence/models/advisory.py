@@ -53,6 +53,9 @@ class Advisory(Base):
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     dedup_key: Mapped[str] = mapped_column(String(200), nullable=False)
     source: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)  # what it points at
+    # step 17: the kind of finding (kinds.py) and what it is about, in words, for the tab's groups
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="other", server_default="other")
+    about: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
     actions: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)  # the buttons it offers
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
