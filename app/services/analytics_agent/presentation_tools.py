@@ -182,13 +182,13 @@ def chart_from_args(args: Mapping[str, Any]) -> ChartBlock:
 
     ({"kind": "bar", "title": "t", "labels": ["a"], "series_names": ["s"], "series_values": [[1]]}) -> ChartBlock
     """
-    names = list(args.get("series_names") or [])
-    values = list(args.get("series_values") or [])
+    names = list(_items(args.get("series_names")))
+    values = list(_items(args.get("series_values")))
     if len(names) != len(values):
         raise ValueError(f"{len(names)} series names for {len(values)} value lists")
     return ChartBlock(
         kind=str(args.get("kind", "")), title=str(args.get("title", "")),
-        labels=[str(x) for x in args.get("labels") or []],
+        labels=[str(x) for x in _items(args.get("labels"))],
         series=[ChartSeries(name=str(n), values=[float(v) for v in vals]) for n, vals in zip(names, values)],
         unit=args.get("unit") or None, stacked=bool(args.get("stacked", False)))
 
@@ -198,16 +198,28 @@ def table_from_args(args: Mapping[str, Any]) -> TableBlock:
 
     ({"title": "t", "columns": ["item", "short"], "rows": [["A", "1.5"]]}) -> TableBlock
     """
-    rows = [[str(c) for c in row] for row in args.get("rows") or []]
-    columns = [str(c) for c in args.get("columns") or []]
+    rows = [[str(c) for c in _items(row)] for row in _items(args.get("rows"))]
+    columns = [str(c) for c in _items(args.get("columns"))]
     aligns = ["right" if rows and all(_numeric(r[i]) for r in rows if i < len(r)) else "left"
               for i in range(len(columns))]
     return TableBlock(title=str(args.get("title", "")),
                       columns=[EvidenceColumn(name=c, align=a) for c, a in zip(columns, aligns)], rows=rows)
 
 
+def _items(value: Any) -> list:
+    """An argument as a list: a list or tuple as it is, nothing as empty, a single value as one
+    item, so `findings: "x"` is one finding, never one per letter.
+
+    >>> _items(["a"]), _items(None), _items("abc"), _items(3)
+    (['a'], [], ['abc'], [3])
+    """
+    if value is None or value == "":
+        return []
+    return list(value) if isinstance(value, (list, tuple)) else [value]
+
+
 def followups_from_args(args: Mapping[str, Any]) -> FollowupsBlock:
-    return FollowupsBlock(items=[str(x) for x in args.get("items") or []])
+    return FollowupsBlock(items=[str(x) for x in _items(args.get("items"))])
 
 
 def _aligned(args: Mapping[str, Any], key: str, count: int, what: str) -> list[str | None]:
@@ -215,7 +227,7 @@ def _aligned(args: Mapping[str, Any], key: str, count: int, what: str) -> list[s
 
     ({"captions": ["a"]}, "captions", 2) -> ["a", None] ; ({"captions": ["a", "b", "c"]}, 2) -> ValueError
     """
-    values = [str(x) for x in args.get(key) or []]
+    values = [str(x) for x in _items(args.get(key))]
     if len(values) > count:
         raise ValueError(f"{len(values)} {key} for {count} {what}")
     return values + [None] * (count - len(values))
@@ -227,8 +239,8 @@ def kpis_from_args(args: Mapping[str, Any]) -> KpisBlock:
     ({"labels": ["Lines"], "values": ["312"]}) -> KpisBlock(items=[{label "Lines", value "312"}]) ;
     (two labels, three values) -> ValueError
     """
-    labels = [str(x) for x in args.get("labels") or []]
-    values = [str(x) for x in args.get("values") or []]
+    labels = [str(x) for x in _items(args.get("labels"))]
+    values = [str(x) for x in _items(args.get("values"))]
     if len(labels) != len(values):
         raise ValueError(f"{len(labels)} labels for {len(values)} values")
     captions = _aligned(args, "captions", len(labels), "labels")
@@ -249,7 +261,7 @@ def findings_from_args(args: Mapping[str, Any], called: frozenset[str] | None = 
     ({"findings": ["x"], "sources": ["aggregate_releases"]}, called={"aggregate_releases"}) -> FindingsBlock ;
     (sources ["at_risk_board"], called={"aggregate_releases"}) -> ValueError
     """
-    texts = [str(x) for x in args.get("findings") or []]
+    texts = [str(x) for x in _items(args.get("findings"))]
     reasoning = _aligned(args, "reasoning", len(texts), "findings")
     sources = _aligned(args, "sources", len(texts), "findings")
     findings = []
@@ -260,12 +272,12 @@ def findings_from_args(args: Mapping[str, Any], called: frozenset[str] | None = 
         findings.append({"text": text, "reasoning": why or None, "source": source or None})
     if texts and not findings:
         raise ValueError("no finding names a tool that was called in this turn")
-    recommendations = [str(x) for x in args.get("recommendations") or []]
+    recommendations = [str(x) for x in _items(args.get("recommendations"))]
     reasons = _aligned(args, "reasons", len(recommendations), "recommendations")
     return FindingsBlock(
         findings=findings,
         recommendations=[{"text": t, "reason": r or None} for t, r in zip(recommendations, reasons)],
-        limitations=[str(x) for x in args.get("limitations") or []],
+        limitations=[str(x) for x in _items(args.get("limitations"))],
     )
 
 

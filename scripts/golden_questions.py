@@ -74,9 +74,14 @@ async def main(profile: str, tenant: str, do_plant: bool) -> int:
     runtime = GroundedAgent(tenant, profile=load_profile(profile), registry=registry)
     failed = 0
     for case in load_cases(profile):
-        result = await run_request(
-            _request(case, tenant), runtime=runtime, prior_turns=case.history
-        )
+        try:
+            result = await run_request(
+                _request(case, tenant), runtime=runtime, prior_turns=case.history
+            )
+        except Exception as exc:  # noqa: BLE001 - one broken case is a miss, never the end of the run
+            failed += 1
+            print(f"FAIL {profile}:{case.name} crashed: {type(exc).__name__}: {str(exc)[:200]}")
+            continue
         missed = mismatches(case, result, scripted=False)
         called = [t.tool for t in result.tool_calls]
         kinds = [b["type"] for b in result.blocks]
