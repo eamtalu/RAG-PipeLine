@@ -351,5 +351,12 @@ What it adds: one sentence in the analytics profile ("how many deliveries", "del
 Why: the second live score was 17 of 25; two misses and the owner's own Teams chart question went to the at-risk tool, and once the model wrote `show_kpis` as prose.
 
 Deploy: `./deploy.sh`, then the score command of D19c. Expected: "Show deliveries per day … as a chart" calls `aggregate_releases` then `chart_from_data`; the score above 17 of 25.
+## D19e: written-out calls lifted, the shape drawn by the lift
+
+What it adds: `app/agent/presentation/written_calls.py` lifts a presentation call the model wrote as text (`state_findings findings: [...]`, `suggest_followups items: [...]`, `chart_from_data title: ... measure: ...`) off the answer into the trace, so it is validated, guarded and drawn as a real call and the reader never sees raw arguments; `charts.auto_chart` and `charts.auto_kpis` draw the shape when the model drew none: a line for a trend of three or more points, a bar for a ranking the model asked for (2 to 12 groups), key-figure tiles for a single total. Golden expectations that gain a chart or tiles updated.
+Why: the owner's two observations on 14 November: a chart should appear without asking for one when the data has a shape, and the findings arrived as raw text (the live model wrote the calls as prose after the chart).
+No migration.
+
+Deploy: `./deploy.sh`, then the score command of D19c. Expected: "show me the top 10 pickers" (no "chart" in the words) draws the bar chart; a written-out `state_findings` becomes the findings block; the score above 17 of 25.
 
 Rollback: the previous checkout and a restart.

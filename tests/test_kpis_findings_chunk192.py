@@ -138,10 +138,11 @@ async def test_a_scripted_run_shows_the_key_figures_and_the_findings_from_the_fe
     )
     result = await ask(analytics_runtime(CC, model=model), "which products were short?")
     assert result["retries"] == 0
-    assert [b["type"] for b in result["blocks"]] == ["entities", "kpis", "findings"]
+    # the ranking the model asked for is drawn by the lift itself (chunk 194), between the kpis and the findings
+    assert [b["type"] for b in result["blocks"]] == ["entities", "kpis", "chart", "findings"]
     assert result["blocks"][1]["items"][0] == {"label": "Items short", "value": "2", "caption": "this morning", "tone": None}
-    assert result["blocks"][2]["findings"][0]["source"] == "aggregate_releases"
-    assert result["blocks"][2]["recommendations"][0]["reason"] == "the same item was short on both releases"
+    assert result["blocks"][3]["findings"][0]["source"] == "aggregate_releases"
+    assert result["blocks"][3]["recommendations"][0]["reason"] == "the same item was short on both releases"
 
 
 async def test_a_kpi_value_no_tool_returned_is_withheld_then_the_retry_answers_in_words():

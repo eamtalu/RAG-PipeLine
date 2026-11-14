@@ -12,7 +12,7 @@ import json
 import logging
 import re
 
-from app.agent.presentation.charts import usable_result
+from app.agent.presentation.charts import auto_chart, auto_kpis, usable_result
 from app.agent.presentation.entities import entities_from_trace
 from app.services.analytics_agent.action_tools import ACTION_TOOL_NAMES
 from app.services.analytics_agent.presentation_tools import (
@@ -74,12 +74,14 @@ def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list
     """
     by_type: dict[str, dict] = {}
     latest: tuple[str, dict] | None = None  # the last usable data result so far (step 19)
+    latest_asked_sort = False  # whether the model asked that result for a ranking
     called: set[str] = set()  # the data tools that answered before this point, for a finding's source
     for call in trace:
         if not is_presentation_call(call):
             usable = usable_result(call)
             if usable is not None:
                 latest = (str(call.get("tool")), usable)
+                latest_asked_sort = bool((call.get("input") or {}).get("sort"))
             if not _refused(call) and not str(call.get("result", "")).lstrip().startswith('{"error"'):
                 called.add(str(call.get("tool")))
             continue
@@ -97,6 +99,17 @@ def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list
             logger.warning("agent.block_dropped tool=%s reason=%s", call["tool"], str(exc)[:160])
             continue
         by_type[block["type"]] = block
+    # the shape Python draws when the model drew none (step 19): a chart for a trend or a ranking,
+    # key figures for a single total; its numbers come from the data result, so the guards are
+    # already satisfied
+    if not only_grounded and latest is not None and "chart" not in by_type and "table" not in by_type:
+        chart = auto_chart(*latest, asked_sort=latest_asked_sort)
+        if chart is not None:
+            by_type["chart"] = chart.model_dump(mode="json")
+    if not only_grounded and latest is not None and "kpis" not in by_type and "chart" not in by_type and "table" not in by_type:
+        kpis = auto_kpis(*latest)
+        if kpis is not None:
+            by_type["kpis"] = kpis.model_dump(mode="json")
     # the watchable things the data calls named (step 14c), read from the results, never the text
     entities = entities_from_trace(trace)
     if entities is not None and "entities" not in by_type:
