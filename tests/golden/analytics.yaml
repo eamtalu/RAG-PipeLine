@@ -168,9 +168,11 @@ cases:
   # ---------------------------------------------------------------- step 19: the presentation policy
   # The data with `week=True` (tests/golden/plant.py): one clean release on 16 September (C1,
   # delivery 25811) and one on 17 September (C2, delivery 25812) before the four of the 18th.
+  # The questions are the ones people asked in Teams, with the date said out loud: the live run
+  # asks the real model on a real calendar, and "today" would point at an empty day.
 
   - name: deliveries_per_day_line_chart_with_findings
-    question: Show deliveries per day this week as a chart
+    question: Show deliveries per day in the week to 18 September 2026 as a chart
     replies:
       - tool: aggregate_releases
         args: {group_by: [day], start: "2026-09-11T00:00:00+00:00", end: "2026-09-19T00:00:00+00:00"}
@@ -189,7 +191,7 @@ cases:
       answer_contains: ["Deliveries rose to 2"]
 
   - name: lines_per_day_line_chart
-    question: Show lines per day this week
+    question: Show lines per day in the week to 18 September 2026
     replies:
       - tool: aggregate_releases
         args: {group_by: [day], start: "2026-09-11T00:00:00+00:00", end: "2026-09-19T00:00:00+00:00"}
@@ -202,7 +204,7 @@ cases:
       blocks: [chart]
 
   - name: deliveries_by_volume_in_a_graph
-    question: show deliveries by volume in a graph
+    question: show deliveries by volume on 18 September 2026 in a graph
     replies:
       - tool: aggregate_releases
         args:
@@ -219,7 +221,7 @@ cases:
       blocks: [entities, chart]
 
   - name: which_products_were_short_today_with_findings
-    question: Which products were short today, and by how many units?
+    question: Which products were short on 18 September 2026, and by how many units?
     replies:
       - tool: aggregate_releases
         args:
@@ -242,7 +244,7 @@ cases:
       answer_excludes: ["| item | short |"]
 
   - name: pickers_most_units_bar_chart
-    question: Which pickers picked the most units today?
+    question: Which pickers picked the most units on 18 September 2026?
     replies:
       - tool: aggregate_releases
         args:
@@ -263,7 +265,7 @@ cases:
       blocks: [chart, findings]
 
   - name: how_many_picked_yesterday_kpis
-    question: how many picked yesterday
+    question: how many picked on 18 September 2026
     replies:
       - tool: aggregate_releases
         args: {start: "2026-09-18T04:44:42+00:00", end: "2026-09-18T07:44:42+00:00"}
@@ -279,7 +281,7 @@ cases:
       blocks: [kpis]
 
   - name: deliveries_and_lines_today_kpis
-    question: How many deliveries and lines were picked today?
+    question: How many deliveries and lines were picked on 18 September 2026?
     replies:
       - tool: aggregate_releases
         args: {start: "2026-09-18T04:44:42+00:00", end: "2026-09-18T07:44:42+00:00"}
@@ -293,7 +295,7 @@ cases:
       answer_contains: ["2 deliveries and 4 lines"]
 
   - name: todays_deliveries_table
-    question: todays deliveries
+    question: deliveries on 18 September 2026
     replies:
       - tool: aggregate_releases
         args:
@@ -312,7 +314,7 @@ cases:
       blocks: [entities, table]
 
   - name: who_are_the_pickers_today_table
-    question: who are the pickers today
+    question: who were the pickers on 18 September 2026
     replies:
       - tool: aggregate_releases
         args:
@@ -331,7 +333,7 @@ cases:
       blocks: [table]
 
   - name: share_of_releases_per_picker_pie
-    question: share of releases per picker today as a pie
+    question: share of releases per picker on 18 September 2026 as a pie
     replies:
       - tool: aggregate_releases
         args:
@@ -347,7 +349,7 @@ cases:
       blocks: [chart]
 
   - name: items_short_on_several_releases_this_week
-    question: Which items were short on several releases this week?
+    question: Which items were short on several releases in the week to 18 September 2026?
     replies:
       - tool: aggregate_releases
         args:
@@ -368,7 +370,7 @@ cases:
       evidence: true
 
   - name: a_zero_pick_without_a_cause_names_the_limitation
-    question: Why was item 100230 zero-picked today?
+    question: Why was item 100230 zero-picked on 18 September 2026?
     replies:
       - tool: aggregate_releases
         args:
@@ -389,7 +391,7 @@ cases:
       answer_excludes: ["because stock"]
 
   - name: a_finding_sourced_to_an_uncalled_tool_is_dropped
-    question: which products were short today?
+    question: which products were short on 18 September 2026?
     replies:
       - tool: aggregate_releases
         args:
@@ -409,7 +411,7 @@ cases:
       retries: 0
 
   - name: a_kpi_no_tool_returned_is_withheld_then_the_retry_answers_in_words
-    question: how many units were picked today?
+    question: how many units were picked on 18 September 2026?
     replies:
       - tool: aggregate_releases
         args: {start: "2026-09-18T04:44:42+00:00", end: "2026-09-18T07:44:42+00:00"}
@@ -428,7 +430,7 @@ cases:
       answer_contains: ["17 units were picked"]
 
   - name: an_unknown_measure_drops_the_chart_not_the_answer
-    question: lines per day as a chart
+    question: lines per day in the week to 18 September 2026 as a chart
     replies:
       - tool: aggregate_releases
         args: {group_by: [day], start: "2026-09-11T00:00:00+00:00", end: "2026-09-19T00:00:00+00:00"}

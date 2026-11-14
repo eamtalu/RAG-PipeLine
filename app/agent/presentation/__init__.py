@@ -24,6 +24,8 @@ class Presentation:
     structured: Callable[[list[dict], str], dict | None]  # (trace, public_base_url)
     strip: Callable[[str], str]
     blocks: Callable[[list[dict]], list[dict]] = lambda trace: []
+    #: the blocks a withheld answer keeps: only those whose numbers came from a data result (step 19)
+    grounded_blocks: Callable[[list[dict]], list[dict]] = lambda trace: []
 
 
 def _analytics_structured(trace: list[dict], public_base_url: str) -> dict | None:
@@ -39,6 +41,7 @@ _PRESENTATIONS = {
         _analytics_structured,
         evidence.strip_tables,
         answer_blocks.blocks_from_trace,
+        answer_blocks.grounded_blocks_from_trace,
     ),
     "logspace": Presentation(
         "logspace",

@@ -34,7 +34,7 @@ def test_both_profiles_include_the_presentation_fragment_once_at_the_end():
 
 def test_the_fragment_is_short_and_names_the_tools_as_offered_only():
     lines = [line for line in FRAGMENT.splitlines() if line.strip()]
-    assert len(lines) <= 22
+    assert len(lines) <= 26  # the budget: about 500 tokens on a 16k context
     assert "apply only when they are offered" in FRAGMENT
     for tool in ("chart_from_data", "show_table", "show_kpis", "state_findings", "suggest_followups"):
         assert tool in FRAGMENT
