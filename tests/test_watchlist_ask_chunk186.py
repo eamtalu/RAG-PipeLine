@@ -12,7 +12,7 @@ choice whose options carry the ready command; "stop watching 33188" stops it.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -172,7 +172,9 @@ async def test_a_confirmed_form_becomes_the_watch_and_stop_watching_finds_it_by_
     values = {"what": "Fill rate · Brighton", "kind": "Measure", "tell_me_when": "Drops below this level", "level": "95",
               "until": "7 days from now"}
     text = (await run_command(_command("u-sup", "watch_add", {"form_id": forms.FORM_ID, "values": values, "via": "ask"}))).text
-    assert text.startswith("Watching · Fill rate · Brighton · Tells you if it drops below 95% · 1 of 10 places used · until Fri 20 Nov")
+    # "7 days from now" is read from the real clock, so the expected day is too
+    until = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%a %-d %b")
+    assert text.startswith(f"Watching · Fill rate · Brighton · Tells you if it drops below 95% · 1 of 10 places used · until {until}")
     async with async_session() as s:
         watch = (await s.execute(select(Watch).where(Watch.customer_code == CC, Watch.status == "active"))).scalar_one()
         assert watch.kind == "measure" and watch.alert == {"rule": "below", "level": 0.95, "band": 0.005}

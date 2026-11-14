@@ -30,7 +30,9 @@ from app.teams_consumer import framed_question
 
 CC = "test_c182"
 TZ = ZoneInfo("Europe/London")
-NOW = datetime(2026, 11, 13, 13, 0, tzinfo=timezone.utc)
+# today at 13:00 UTC: the explain tool reads "today" from the real clock, so a fixed date would
+# only pass on the day it was written
+NOW = datetime.now(timezone.utc).replace(hour=13, minute=0, second=0, microsecond=0)
 
 
 async def _wipe() -> None:

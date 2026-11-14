@@ -383,7 +383,7 @@ def test_the_snooze_end_is_bounded():
 async def test_the_payload_shape_is_stable_for_the_edge():
     async with async_session() as db:
         payload = await advisories_mirror.advisories_payload(db, CC, now=NOW)
-    assert set(payload) == {"as_of", "counts", "by_site", "live", "recent", "roster"}
+    assert set(payload) == {"as_of", "counts", "by_site", "kinds", "live", "recent", "roster"}
     assert payload["as_of"] == NOW.isoformat() and payload["live"] == [] and len(payload["roster"]) == 7
 
 

@@ -62,6 +62,7 @@ async def reconcile(db: AsyncSession, customer_code: str, agent: str, findings: 
         row.site_id, row.severity, row.title = f.site_id, f.severity, f.title[:200]
         row.evidence, row.impact, row.recommended = f.evidence, f.impact, f.recommended
         row.confidence, row.due_at, row.source, row.actions = f.confidence, f.due_at, dict(f.source), list(f.actions)
+        row.kind, row.about = f.kind, dict(f.about)
         row.last_seen_at = row.updated_at = now
         # Step 4: A snooze ends early when the finding worsens, so a HIGH never hides behind a snooze
         if row.status == "snoozed" and f.severity == "high" and row.snoozed_until and row.snoozed_until > now:
@@ -124,6 +125,7 @@ def advisory_payload(row: Advisory) -> dict:
     assert row.status in ADVISORY_STATUSES
     return {
         "id": str(row.id), "agent": row.agent, "severity": row.severity, "status": row.status,
+        "kind": row.kind or "other", "about": dict(row.about or {}),
         "site_id": row.site_id, "title": row.title, "evidence": row.evidence, "impact": row.impact,
         "recommended": row.recommended, "confidence": row.confidence,
         "assignee": ({"object_id": row.assignee_object_id, "name": row.assignee_name}

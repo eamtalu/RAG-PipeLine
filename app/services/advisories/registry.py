@@ -29,6 +29,10 @@ class Finding:
     due_at: datetime | None = None
     source: dict[str, Any] = field(default_factory=dict)
     actions: tuple[str, ...] = ("ask_why", "acknowledge", "assign", "snooze")
+    #: step 17: what kind of finding this is (app/services/advisories/kinds.py) and what it is
+    #: about ({kind, id, label, where, area}), so the tab groups without parsing the words
+    kind: str = "other"
+    about: dict[str, Any] = field(default_factory=dict)
 
 
 AgentFn = Callable[[AsyncSession, str, datetime, ZoneInfo], Awaitable[list[Finding]]]

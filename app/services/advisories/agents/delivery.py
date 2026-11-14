@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.advisories import kinds
 from app.services.advisories.registry import Finding
 from app.services.analytics_at_risk import delivery_store
 from app.services.teams import home_at_risk
@@ -73,5 +74,6 @@ async def run(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo)
                     "departure_date": row.departure_date.isoformat(), "route": row.route,
                     "lines_picked": row.lines_picked, "lines_expected": row.lines_expected},
             actions=("ask_why", "acknowledge", "assign", "snooze"),
+            kind="delivery_at_risk", about=kinds.about_delivery(row.delivery_number, row.route, row.customer_name),
         ))
     return findings

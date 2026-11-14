@@ -259,3 +259,20 @@ Expected: `a7c3e5f9b012`; the existing runs all `time`.
 Rollback: the previous checkout and a restart; `alembic downgrade f1b6c9d3e487` drops the four columns (by-hand runs and ticks keep their rows as plain runs).
 
 Deployed 13 November 2026 as `f8fb4cf` (PR #24); the edge image `87af592` followed.
+
+## D17a: advisory kinds (the Advisories tab becomes a grouped list; batch actions)
+
+What it adds: migration `c4d8e2a7f531` (`advisories.kind` count_gap | chronic_short | empty_location | delivery_at_risk | other, and `advisories.about` {kind, id, label, where, area}; both backfilled from `source` so the open rows group on the first read), `app/services/advisories/kinds.py` (the kinds with their label and one-sentence meaning, `area_of`, the `about_*` builders, `kinds_payload`), the three agents naming their kind and subject (count findings name the item in words where the `item description` lookup knows it: "Ginger (104568) at A-01-02: counted 2, system 4"; unknown items keep their number), `store.reconcile` copying both, `advisory_payload` carrying `kind` and `about`, the ADVISORIES row's `kinds` list (label, meaning, open, high per kind with a live row), and `advisory_act` taking `advisory_ids` (up to 50; each advisory checked against the actor's sites and audited on its own; the answer "acknowledged 11 · 1 not yours to change"; a single id answers as before).
+Contract 3.16 synced from the edge (the `advisory_act` payload doc; `minutes` named, which the doc had called `until`).
+Behaviour change: count titles gain the item's description where one is known; nothing else changes for an older edge, which ignores the new keys.
+
+Deploy: `./deploy.sh` (the migration runs inside it), before the edge step 17b image.
+Check on the server:
+
+```
+PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT version_num FROM alembic_version;" -c "SELECT kind, count(*) FILTER (WHERE status='open') AS open, count(*) AS total FROM advisories GROUP BY 1 ORDER BY 1;" -c "SELECT about->>'label' AS label, about->>'area' AS area FROM advisories WHERE status='open' ORDER BY opened_at DESC LIMIT 5;"
+```
+
+Expected: `c4d8e2a7f531`; every row a kind other than `other` (count_gap, chronic_short, empty_location; delivery_at_risk among the resolved); labels "Item <number>" until the next stock run names them.
+
+Rollback: the previous checkout and a restart; `alembic downgrade a7c3e5f9b012` drops the two columns (an edge at step 17b then shows every advisory under "Other findings").

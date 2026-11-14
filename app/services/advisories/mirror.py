@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.advisory import AdvisoryAgent
-from app.services.advisories import registry, store
+from app.services.advisories import kinds, registry, store
 from app.services.teams.mirror import ChangeTracker, MirrorWriter, envelope, write_if_changed
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,7 @@ async def advisories_payload(db: AsyncSession, customer_code: str, *, now: datet
         "as_of": now.isoformat(),
         "counts": counts,
         "by_site": by_site,
+        "kinds": kinds.kinds_payload(live),
         "live": [store.advisory_payload(r) for r in live],
         "recent": [store.advisory_payload(r) for r in closed],
         "roster": await roster_payload(db, customer_code),

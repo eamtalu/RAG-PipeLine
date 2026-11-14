@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.15"
+CONTRACT_REVISION = "3.16"
 
 
 def _now() -> datetime:
@@ -34,8 +34,9 @@ def _now() -> datetime:
 #: access_decide {reference, approve: bool, changes?, note?};
 #: access_request {capability} or {site_ids} (the person asking for more, for themselves);
 #: access_undo {reference} or {object_id} (a receipt's undo, within its window; step 8);
-#: advisory_act {advisory_id, action: acknowledge | assign | snooze | dismiss | resolve, assignee?,
-#:   until?} (the Advisories tab's buttons; step 9).
+#: advisory_act {advisory_id | advisory_ids: [..50], action: acknowledge | assign | snooze | dismiss |
+#:   resolve, assignee?, minutes? | until?} (the Advisories tab's buttons; step 9; step 17 acts on a
+#:   selection or a group at once, each advisory checked and audited on its own).
 #: task_create {kind: reminder | schedule, title, when: spec, note?, site_id?, query_text?, skip_if?,
 #:   target?: me | channel, show_as?: table | chart | summary, until?, source?, via?} (step 10)
 #: task_update {task_id, action: pause | resume | run_now | done | skip | stop | delete | edit | plan_again
