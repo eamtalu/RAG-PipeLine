@@ -442,3 +442,62 @@ cases:
       tools: [aggregate_releases, chart_from_data]
       retries: 0
       blocks: [chart]  # the model's "nope" is dropped; the trend by day is drawn by the lift itself
+
+  # ---------------------------------------------------------------- step 20: who was active, when
+  # The WMS activity rows of tests/golden/plant.py (`plant_activity`): ten transactions over 16 to
+  # 18 September 2026 for PEVANS, BCHAM and DBOBOC on three handhelds, London hours 06 to 09.
+
+  - name: users_per_day_in_the_week_as_a_line_with_findings
+    question: How many different users were active each day in the week to 18 September 2026?
+    replies:
+      - tool: wms_activity
+        args: {grain: day, start: "2026-09-11", end: "2026-09-18"}
+      - tool: state_findings
+        args:
+          findings: ["3 users were active on 2026-09-18, the most of the three days with activity; 2 on each of the two days before"]
+          sources: [wms_activity]
+      - text: "Three users were active in the week, at most 3 on 2026-09-18 and 2 on each of 2026-09-16 and 2026-09-17."
+    expect:
+      stop_reason: end_turn
+      tools: [wms_activity, state_findings]
+      blocks: [chart, findings]
+
+  - name: users_per_hour_as_a_heat_map
+    question: Show active users per hour in the week to 18 September 2026
+    replies:
+      - tool: wms_activity
+        args: {grain: hour, start: "2026-09-11", end: "2026-09-18"}
+      - text: "Three users were active, between 06:00 and 09:00 on the three days with activity; the heat map shows each hour."
+    expect:
+      stop_reason: end_turn
+      tools: [wms_activity]
+      blocks: [heatmap]
+
+  - name: who_was_active_on_a_day_with_first_and_last_call
+    question: Who was active on 18 September 2026, and when did each person start and finish?
+    replies:
+      - tool: wms_activity
+        args: {by: user, day: "2026-09-18"}
+      - tool: show_table
+        args:
+          title: "Active on 2026-09-18"
+          columns: [user, first call, last call, calls]
+          rows: [["BCHAM", "06:15", "07:15", "2"], ["DBOBOC", "09:15", "09:15", "2"], ["PEVANS", "06:15", "06:15", "1"]]
+      - text: "Three people were active on 2026-09-18: BCHAM from 06:15 to 07:15, PEVANS at 06:15 and DBOBOC at 09:15."
+    expect:
+      stop_reason: end_turn
+      tools: [wms_activity, show_table]
+      blocks: [table]
+
+  - name: devices_per_day_as_a_chart
+    question: How many devices were in use per day in the week to 18 September 2026?
+    replies:
+      - tool: wms_activity
+        args: {grain: day, start: "2026-09-11", end: "2026-09-18"}
+      - tool: chart_from_data
+        args: {measure: devices}
+      - text: "Three handhelds were in use on 2026-09-18 and two on each of the two days before."
+    expect:
+      stop_reason: end_turn
+      tools: [wms_activity, chart_from_data]
+      blocks: [chart]

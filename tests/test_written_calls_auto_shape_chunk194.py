@@ -112,8 +112,8 @@ def test_the_lift_draws_a_chart_for_a_trend_or_a_ranking_when_the_model_drew_non
     assert blocks.blocks_from_trace([_call("aggregate_releases", two)]) == []
     with_table = [_call("aggregate_releases", BY_ITEM, sort="units_short"), _call("show_table", "{}", title="t", columns=["item"], rows=[["100230"]])]
     assert [b["type"] for b in blocks.blocks_from_trace(with_table)] == ["entities", "table"]
-    # never for a withheld answer's grounded blocks
-    assert [b["type"] for b in blocks.grounded_blocks_from_trace([_call("aggregate_releases", BY_ITEM, sort="units_short")])] == ["entities"]
+    # a withheld answer keeps the shape the lift draws, since its numbers are the data's
+    assert [b["type"] for b in blocks.grounded_blocks_from_trace([_call("aggregate_releases", BY_ITEM, sort="units_short")])] == ["entities", "chart"]
 
 
 def test_the_lift_draws_key_figures_for_a_single_total():

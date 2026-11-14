@@ -5,7 +5,8 @@ How to present an answer (the tools named apply only when they are offered):
   never written out in the answer): a trend over days or hours, call chart_from_data with kind
   "line"; a comparison across groups, "bar"; 2 to 8 shares of one whole, "pie"; the records
   themselves (releases, deliveries, pickers), call show_table; 1 to 6 key numbers with no groups
-  (a total, a count, a rate), call show_kpis; a simple question, a plain sentence and no block.
+  (a total, a count, a rate), call show_kpis; users by hour over several days, the heat map
+  (wms_activity with grain "hour" draws it for you); a simple question, a plain sentence and no block.
   When the person asks for a chart, a graph or a trend, call chart_from_data straight after the
   data call, before you write: name the measure, never retype the numbers. One chart or one table
   per answer.
