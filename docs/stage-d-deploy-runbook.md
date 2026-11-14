@@ -276,3 +276,5 @@ PGPASSWORD=rag psql -h localhost -U rag -d rag -P pager=off -c "SELECT version_n
 Expected: `c4d8e2a7f531`; every row a kind other than `other` (count_gap, chronic_short, empty_location; delivery_at_risk among the resolved); labels "Item <number>" until the next stock run names them.
 
 Rollback: the previous checkout and a restart; `alembic downgrade a7c3e5f9b012` drops the two columns (an edge at step 17b then shows every advisory under "Other findings").
+
+Deployed 14 November 2026 as `aedffcb` (PR #25): migration `c4d8e2a7f531` at head, three units active, health 200, the open rows backfilled (37 count gaps, 10 chronic shorts, 15 empty locations); the edge image `17b0340` followed.
