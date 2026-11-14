@@ -13,19 +13,35 @@ correct it; nothing is drawn from it.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Mapping
 
 from pydantic import ValidationError
 
 from app.agent.presentation import charts
-from app.services.teams.contracts import ChartBlock, ChartSeries, EvidenceColumn, FollowupsBlock, TableBlock
+from app.services.teams.contracts import (
+    ChartBlock,
+    ChartSeries,
+    EvidenceColumn,
+    FindingsBlock,
+    FollowupsBlock,
+    KpisBlock,
+    TableBlock,
+)
 
 SHOW_CHART = "show_chart"
 SHOW_TABLE = "show_table"
 SUGGEST_FOLLOWUPS = "suggest_followups"
 CHART_FROM_DATA = "chart_from_data"
+SHOW_KPIS = "show_kpis"
+STATE_FINDINGS = "state_findings"
 CHART_KINDS = ("auto", "bar", "line", "pie")
-PRESENTATION_TOOL_NAMES = frozenset({SHOW_CHART, SHOW_TABLE, SUGGEST_FOLLOWUPS, CHART_FROM_DATA})
+TONES = ("good", "medium", "high", "neutral")
+PRESENTATION_TOOL_NAMES = frozenset(
+    {SHOW_CHART, SHOW_TABLE, SUGGEST_FOLLOWUPS, CHART_FROM_DATA, SHOW_KPIS, STATE_FINDINGS}
+)
+
+logger = logging.getLogger(__name__)
 
 PRESENTATION_TOOLS: list[dict[str, Any]] = [
     {
@@ -99,6 +115,54 @@ PRESENTATION_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": SHOW_KPIS,
+        "description": (
+            "Show 1 to 6 key numbers as cards when the answer is a few figures with no groups (a total, a "
+            "count, a rate). Each value exactly as a tool returned it, with its unit. Call it at most once, "
+            "then write your sentences."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "labels": {"type": "array", "items": {"type": "string", "maxLength": 40}, "minItems": 1, "maxItems": 6},
+                "values": {"type": "array", "items": {"type": "string", "maxLength": 24}, "minItems": 1, "maxItems": 6,
+                           "description": "One per label, as the tool returned it, e.g. '312' or '88%'."},
+                "captions": {"type": "array", "items": {"type": "string", "maxLength": 80}, "maxItems": 6,
+                             "description": "One line under each value, e.g. the window or the comparison; optional."},
+                "tones": {"type": "array", "items": {"type": "string", "enum": list(TONES)}, "maxItems": 6,
+                          "description": "good, medium, high or neutral per value; optional."},
+                "title": {"type": "string", "maxLength": 120},
+            },
+            "required": ["labels", "values"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": STATE_FINDINGS,
+        "description": (
+            "State what the data shows: each finding a fact a tool returned in this turn, with its reasoning "
+            "(what it is compared with, why it matters) and the data tool it came from; a recommendation only "
+            "when the data points to one, with its reason; a limitation when the window, the sample or a failed "
+            "call narrows what can be said. Call it once, after the data and the chart or table."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "findings": {"type": "array", "items": {"type": "string", "maxLength": 300}, "minItems": 1, "maxItems": 6},
+                "reasoning": {"type": "array", "items": {"type": "string", "maxLength": 300}, "maxItems": 6,
+                              "description": "One per finding, or empty."},
+                "sources": {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 6,
+                            "description": "The data tool each finding comes from, one per finding, or empty."},
+                "recommendations": {"type": "array", "items": {"type": "string", "maxLength": 200}, "maxItems": 4},
+                "reasons": {"type": "array", "items": {"type": "string", "maxLength": 200}, "maxItems": 4,
+                            "description": "One per recommendation, or empty."},
+                "limitations": {"type": "array", "items": {"type": "string", "maxLength": 200}, "maxItems": 4},
+            },
+            "required": ["findings"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": SUGGEST_FOLLOWUPS,
         "description": (
             "Offer up to four short follow-up questions the person might ask next, as buttons under the "
@@ -147,6 +211,65 @@ def followups_from_args(args: Mapping[str, Any]) -> FollowupsBlock:
     return FollowupsBlock(items=[str(x) for x in args.get("items") or []])
 
 
+def _aligned(args: Mapping[str, Any], key: str, count: int, what: str) -> list[str | None]:
+    """A parallel list padded with None, or a ValueError when it is neither empty nor as long.
+
+    ({"captions": ["a"]}, "captions", 2) -> ["a", None] ; ({"captions": ["a", "b", "c"]}, 2) -> ValueError
+    """
+    values = [str(x) for x in args.get(key) or []]
+    if len(values) > count:
+        raise ValueError(f"{len(values)} {key} for {count} {what}")
+    return values + [None] * (count - len(values))
+
+
+def kpis_from_args(args: Mapping[str, Any]) -> KpisBlock:
+    """The key-figure cards a `show_kpis` call describes, validated by the wire contract.
+
+    ({"labels": ["Lines"], "values": ["312"]}) -> KpisBlock(items=[{label "Lines", value "312"}]) ;
+    (two labels, three values) -> ValueError
+    """
+    labels = [str(x) for x in args.get("labels") or []]
+    values = [str(x) for x in args.get("values") or []]
+    if len(labels) != len(values):
+        raise ValueError(f"{len(labels)} labels for {len(values)} values")
+    captions = _aligned(args, "captions", len(labels), "labels")
+    tones = _aligned(args, "tones", len(labels), "labels")
+    return KpisBlock(
+        title=str(args.get("title") or "").strip() or None,
+        items=[
+            {"label": lab, "value": val, "caption": cap or None, "tone": tone or None}
+            for lab, val, cap, tone in zip(labels, values, captions, tones)
+        ],
+    )
+
+
+def findings_from_args(args: Mapping[str, Any], called: frozenset[str] | None = None) -> FindingsBlock:
+    """The findings block a `state_findings` call describes; with `called` (the data tools that ran
+    before it), a finding sourced to a tool that did not run is dropped, and none left is an error.
+
+    ({"findings": ["x"], "sources": ["aggregate_releases"]}, called={"aggregate_releases"}) -> FindingsBlock ;
+    (sources ["at_risk_board"], called={"aggregate_releases"}) -> ValueError
+    """
+    texts = [str(x) for x in args.get("findings") or []]
+    reasoning = _aligned(args, "reasoning", len(texts), "findings")
+    sources = _aligned(args, "sources", len(texts), "findings")
+    findings = []
+    for text, why, source in zip(texts, reasoning, sources):
+        if called is not None and source and source not in called:
+            logger.warning("agent.finding_dropped source=%s reason=not_called", source)
+            continue
+        findings.append({"text": text, "reasoning": why or None, "source": source or None})
+    if texts and not findings:
+        raise ValueError("no finding names a tool that was called in this turn")
+    recommendations = [str(x) for x in args.get("recommendations") or []]
+    reasons = _aligned(args, "reasons", len(recommendations), "recommendations")
+    return FindingsBlock(
+        findings=findings,
+        recommendations=[{"text": t, "reason": r or None} for t, r in zip(recommendations, reasons)],
+        limitations=[str(x) for x in args.get("limitations") or []],
+    )
+
+
 def _numeric(cell: str) -> bool:
     """Whether a cell reads as a number.
 
@@ -156,7 +279,13 @@ def _numeric(cell: str) -> bool:
     return bool(cell) and all(ch in "0123456789.,%-" for ch in cell.strip())
 
 
-def block_from_call(name: str, args: Mapping[str, Any], *, data: tuple[str, dict] | None = None) -> dict:
+def block_from_call(
+    name: str,
+    args: Mapping[str, Any],
+    *,
+    data: tuple[str, dict] | None = None,
+    called: frozenset[str] | None = None,
+) -> dict:
     """The validated block for one presentation call, as a plain dict; raises on a bad call. `data`
     is the last usable data call of the turn (tool, result), which `chart_from_data` draws from.
 
@@ -167,6 +296,10 @@ def block_from_call(name: str, args: Mapping[str, Any], *, data: tuple[str, dict
         if data is None:
             raise ValueError("chart_from_data needs a data call before it in this turn")
         return charts.chart_from_result(data[0], data[1], args).model_dump(mode="json")
+    if name == SHOW_KPIS:
+        return kpis_from_args(args).model_dump(mode="json")
+    if name == STATE_FINDINGS:
+        return findings_from_args(args, called).model_dump(mode="json")
     if name == SHOW_CHART:
         return chart_from_args(args).model_dump(mode="json")
     if name == SHOW_TABLE:
