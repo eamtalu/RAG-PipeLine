@@ -559,3 +559,18 @@ cases:
       stop_reason: end_turn
       tools: [wms_activity]
       blocks: [kpis, table]
+
+  # ---------------------------------------------------------------- step 21: the story of one delivery
+  # `plant_delivery_story`: delivery 25899 on 18 September 2026, BCHAM, a soft error on the first
+  # package call, three picks (two exact, one over), a package and a photo.
+
+  - name: the_details_of_one_delivery_come_from_its_story
+    question: give me the details of delivery 25899 on 18 September 2026
+    replies:
+      - tool: delivery_story
+        args: {value: "25899", day: "2026-09-18"}
+      - text: "Delivery 25899 was picked by BCHAM between 07:10 and 07:20: 3 lines, 2 exact and 1 over (item 104441, 4.08 against 4). The first package call returned a soft error, then the package and its photo were recorded."
+    expect:
+      stop_reason: end_turn
+      tools: [delivery_story]
+      blocks: [kpis, table]

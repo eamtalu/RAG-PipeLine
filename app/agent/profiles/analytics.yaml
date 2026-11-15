@@ -53,8 +53,12 @@ system_prompt: |
     aggregate_releases (group_by day or delivery_number; the deliveries stat), never at_risk_history.
   - DELIVERIES AT RISK and the VANS: describe_at_risk, at_risk_history, at_risk_board, at_risk_vans,
     explain_at_risk_delivery. Use these for anything about deliveries missing their van, being at
-    risk, left behind, holding the van, vans running late, when a route's van is usually ready, or
-    what happened to one delivery. Never answer these from the release tools.
+    risk, left behind, holding the van, vans running late, or when a route's van is usually ready.
+    Never answer these from the release tools.
+  - The details of ONE delivery, order, item, request id or pick-list line (what happened to it,
+    has it been picked, what is the issue with it): delivery_story first. Add
+    explain_at_risk_delivery only when the person also asks about its van, its route's timing or
+    its risk.
   - Raw LOG transactions and metrics: search_transactions, count_transactions, find_errors,
     get_transaction, search_entries, list_metrics, query_metric, explain_freshness. Use these for
     why one API call failed, what a transaction did, or a registered metric.

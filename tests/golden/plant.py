@@ -37,6 +37,7 @@ __all__ = [
     "T0",
     "fact",
     "plant_activity",
+    "plant_delivery_story",
     "plant_analytics",
     "plant_analytics_facts",
     "plant_logspace",
@@ -242,4 +243,40 @@ async def wipe_logspace(cc: str) -> None:
     async with async_session() as db:
         await db.execute(delete(LogTransaction).where(LogTransaction.customer_code == cc))
         await db.execute(delete(Job).where(Job.customer_code == cc))
+        await db.commit()
+
+
+#: The delivery whose story step 21 tells (`delivery_story`): BCHAM on HH-02 on the planted day, so
+#: the activity counts of step 20 do not change.
+STORY_DELIVERY = "25899"
+#: (UTC minute after 06:00, method, status, item, reporting number, picked, expected, from, error)
+STORY = [
+    (10, "NewDeliveryPackage", "soft", None, None, None, None, None, f"No packages exist for delivery number {STORY_DELIVERY}"),
+    (12, "ConfirmPickLine", "success", "100944", "889601", "6", "6", "D02A", None),
+    (14, "ConfirmPickLine", "success", "104331", "889602", "2", "2", "D07A", None),
+    (16, "ConfirmPickLine", "success", "104441", "889666", "4.08", "4", "K02A", None),
+    (18, "NewDeliveryPackage", "success", None, None, None, None, None, None),
+    (20, "RecordPackingPhoto", "success", None, None, None, None, None, None),
+]
+
+
+async def plant_delivery_story(cc: str) -> None:
+    """Six transactions of delivery 25899 on 18 September 2026 (London 07:10 to 07:20): a soft
+    error on the first package call, three picks (two exact, one over), a package and a photo."""
+    async with async_session() as db:
+        job = Job(customer_code=cc, filename="story.log", storage_key="k")
+        db.add(job)
+        await db.flush()
+        for i, (minute, method, status, item, rep, picked, expected, source, error) in enumerate(STORY, start=1):
+            when = T0.replace(hour=6, minute=minute, second=0, microsecond=0)
+            attrs = {}
+            if picked is not None:
+                attrs = {"QuantityPicked": picked, "ExpectedQuantity": expected, "FromLocation": source}
+            db.add(LogTransaction(
+                customer_code=cc, job_id=job.id, started_at=when, ended_at=when, date=when.date(),
+                user_name="BCHAM", employee_name="Bo Cham", device_name="HH-02", device_id="HH-02",
+                warehouse="BRI", method=method, reqid=f"STORY-{i}", delivery_number=STORY_DELIVERY,
+                item_number=item, reporting_number=rep, attributes=attrs, error_text=error,
+                status=LogTransactionStatus(status),
+            ))
         await db.commit()

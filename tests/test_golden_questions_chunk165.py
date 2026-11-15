@@ -29,6 +29,7 @@ async def _plant(profile: str) -> str:
     cc = TENANT[profile]
     if profile == "analytics":
         await plant.plant_analytics(cc, week=True)
+        await plant.plant_delivery_story(cc)
     else:
         await plant.plant_logspace(cc)
     return cc

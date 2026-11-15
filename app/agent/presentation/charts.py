@@ -300,6 +300,17 @@ def auto_kpis(tool: str, result: dict) -> KpisBlock | None:
     >>> auto_kpis("aggregate_releases", {"group_by": ["day"], "rows": [{"dimensions": ["d"], "rows": 4}]}) is None
     True
     """
+    if tool == "delivery_story" and result.get("found") and isinstance(result.get("picks"), dict):
+        picks = result["picks"]
+        items = [{"label": "Lines picked", "value": str(picks.get("lines", 0))},
+                 {"label": "Exact", "value": str(picks.get("exact", 0))}]
+        for key, words in (("over", "Over"), ("partial", "Partial"), ("zero_pick", "Zero-pick")):
+            if picks.get(key):
+                items.append({"label": words, "value": str(picks[key]), "tone": "medium" if key == "over" else "high"})
+        items.append({"label": "Packages", "value": str(result.get("packages") or 0)})
+        if result.get("issues"):
+            items.append({"label": "Issues", "value": str(len(result["issues"])), "tone": "medium"})
+        return KpisBlock(items=items[:6])
     if tool == "wms_activity" and isinstance(result.get("total"), dict):
         total = result["total"]
         items = [
@@ -392,3 +403,35 @@ def auto_people_table(tool: str, result: dict) -> TableBlock | None:
         columns=[EvidenceColumn(name=n, align=a) for n, a in names],
         rows=rows,
     )
+
+
+STORY_COLUMNS = [("time", "left"), ("method", "left"), ("status", "left"), ("user", "left"), ("item", "left"),
+                 ("picked", "right"), ("expected", "right"), ("outcome", "left"), ("from", "left"), ("request", "left")]
+
+
+def auto_story_table(tool: str, result: dict) -> TableBlock | None:
+    """The table of one delivery's transactions (step 21), from the story tool's own rows: time,
+    method, status, user, item, picked, expected, outcome, the location picked from and the
+    request id as text; the first 25 in time order, the title saying how many there are.
+
+    >>> auto_story_table("delivery_story", {"found": True, "key": "delivery_number", "value": "1", "total": 1,
+    ...     "transactions": [{"time": "07:12:00", "method": "ConfirmPickLine", "status": "success", "user": "B",
+    ...     "item_number": "9", "QuantityPicked": "6", "ExpectedQuantity": "6", "pick_outcome": "exact",
+    ...     "FromLocation": "D02A", "reqid": "R2"}]}).rows
+    [['07:12:00', 'ConfirmPickLine', 'success', 'B', '9', '6', '6', 'exact', 'D02A', 'R2']]
+    """
+    rows = result.get("transactions")
+    if tool != "delivery_story" or not result.get("found") or not isinstance(rows, list) or not rows:
+        return None
+    keys = ("time", "method", "status", "user", "item_number", "QuantityPicked", "ExpectedQuantity", "pick_outcome", "FromLocation", "reqid")
+    # quantities as a person reads them ("4.000000" -> "4"), the rest as the log has it
+    quantity = ("QuantityPicked", "ExpectedQuantity")
+    body = [[_cell(t.get(k)) if k in quantity and t.get(k) not in (None, "") else str(t.get(k) or "") for k in keys]
+            for t in rows[:25] if isinstance(t, dict)]
+    total = int(result.get("total") or len(rows))
+    words = {"delivery_number": "Delivery", "order_number": "Order", "item_number": "Item", "reqid": "Request",
+             "reporting_number": "Pick-list line"}.get(str(result.get("key")), "")
+    title = f"{words} {result.get('value')} · {total} transaction{'s' if total != 1 else ''}"
+    if total > len(body):
+        title += f" (first {len(body)} shown)"
+    return TableBlock(title=title[:120], columns=[EvidenceColumn(name=n, align=a) for n, a in STORY_COLUMNS], rows=body)
