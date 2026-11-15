@@ -180,8 +180,14 @@ PRESENTATION_TOOLS: list[dict[str, Any]] = [
 def chart_from_args(args: Mapping[str, Any]) -> ChartBlock:
     """The chart block a `show_chart` call describes, validated by the wire contract.
 
-    ({"kind": "bar", "title": "t", "labels": ["a"], "series_names": ["s"], "series_values": [[1]]}) -> ChartBlock
+    ({"kind": "bar", "title": "t", "labels": ["a", "b"], "series_names": ["s"], "series_values": [[1, 2]]}) -> ChartBlock ;
+    (one label) -> ValueError
     """
+    # imported here: the presentation package imports this module for the lift (no cycle)
+    from app.agent.presentation.charts import MIN_CHART_POINTS, TOO_FEW_POINTS
+
+    if len(_items(args.get("labels"))) < MIN_CHART_POINTS:
+        raise ValueError(TOO_FEW_POINTS)
     names = list(_items(args.get("series_names")))
     values = list(_items(args.get("series_values")))
     if len(names) != len(values):

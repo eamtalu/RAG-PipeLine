@@ -411,3 +411,13 @@ No migration, no contract change. Deploy after D21 (it is cut from D21). The edg
 Deploy: `./deploy.sh`. Check in Teams: "How long does a line take per picker today?" answers with a lead sentence and up to four bullets beside the table, and calls the smallest median the shortest.
 
 Rollback: the previous checkout and a restart.
+
+## D23: answer polish (no one-point chart, no follow-ups in the text, facts and labels)
+
+What it changes: a chart needs at least two points, both for `chart_from_data` (dropped at the lift) and for `show_chart` (refused with a reason the model can act on); the follow-up questions the chips carry are taken off the answer text, with their lead-in ("**Follow-up questions:**", "You could ask:") and a rule line above it; the policy fragment asks that each bullet is a fact from the data, not a note on the method, that each count goes by its own label (packages are not photos), and that follow-ups are never also written in the text; snapshots regenerated.
+Why: the owner's live check of 15 November found a one-bar chart (only BCHAM settled on a Sunday), follow-up questions written as text beside the chips, a bullet that only described the measurement, and "9 packages" for delivery 33330 where the data has 8 packages and 9 photos.
+No migration, no contract change, no edge change.
+
+Deploy: `./deploy.sh`. Check in Teams: "How long does a line take per picker today?" with one picker settled shows no chart; "Show deliveries per day this week as a chart" shows the chart and the follow-ups only as chips; "give me the details of this delivery number 33330" says 8 packages and 9 photos.
+
+Rollback: the previous checkout and a restart.

@@ -575,6 +575,34 @@ cases:
       tools: [delivery_story]
       blocks: [kpis, table]
 
+  # ---------------------------------------------------------------- step 23: counts by their label, no follow-ups in the text
+  # The live answer of 15 November said "9 packages" for delivery 33330 (8 packages, 9 photos).
+  - name: each_count_of_a_delivery_goes_by_its_own_label
+    question: how many packages and photos does delivery 25899 have on 18 September 2026?
+    replies:
+      - tool: delivery_story
+        args: {value: "25899", day: "2026-09-18"}
+      - text: "Delivery 25899 has 1 package and 1 photo, recorded after a soft error on the first package call."
+    expect:
+      stop_reason: end_turn
+      tools: [delivery_story]
+      answer_contains: ["1 package and 1 photo"]
+      answer_excludes: ["2 packages", "2 photos"]
+
+  - name: follow_ups_on_chips_are_not_also_written_in_the_text
+    question: give me the details of delivery 25899 on 18 September 2026
+    replies:
+      - tool: delivery_story
+        args: {value: "25899", day: "2026-09-18"}
+      - tool: suggest_followups
+        args: {items: ["Which items were over-picked?", "Who picked it?"]}
+      - text: "Delivery 25899 was picked by BCHAM between 07:10 and 07:20: 3 lines, 2 exact and 1 over.\n\nWhich items were over-picked?\nWho picked it?"
+    expect:
+      stop_reason: end_turn
+      tools: [delivery_story, suggest_followups]
+      answer_contains: ["3 lines, 2 exact and 1 over."]
+      answer_excludes: ["Which items were over-picked?", "Who picked it?"]
+
   # ---------------------------------------------------------------- step 22: facts as bullets, the order named
   - name: fact_bullets_survive_beside_the_rendered_table
     question: Which products were short on 18 September 2026, and by how much?

@@ -25,6 +25,7 @@ from app.services.analytics_agent.action_tools import ACTION_TOOL_NAMES
 from app.services.analytics_agent.presentation_tools import (
     CHART_FROM_DATA,
     PRESENTATION_TOOL_NAMES,
+    SUGGEST_FOLLOWUPS,
     block_from_call,
 )
 
@@ -188,3 +189,86 @@ def grounded_blocks_from_trace(trace: list[dict]) -> list[dict]:
     []
     """
     return blocks_from_trace(trace, only_grounded=True)
+
+
+_LIST_MARK = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+_RULE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+
+
+def _previous_line(lines: list[str], index: int) -> int | None:
+    """The index of the last non-blank line before `index`, or None.
+
+    >>> _previous_line(["a", "", "b"], 2), _previous_line(["", "b"], 1)
+    (0, None)
+    """
+    return next((i for i in range(index - 1, -1, -1) if lines[i].strip()), None)
+
+
+def _is_followup_lead(line: str) -> bool:
+    """Whether a line only introduces a list of follow-ups: a lead-in ending with a colon, or a
+    heading that names follow-ups.
+
+    >>> _is_followup_lead("**Follow-up questions:**"), _is_followup_lead("## Follow-ups"), _is_followup_lead("- a:")
+    (True, True, False)
+    """
+    if _LIST_MARK.match(line):
+        return False
+    text = line.strip().lstrip("#").strip().strip("*_`").strip()
+    return text.endswith(":") or (line.lstrip().startswith("#") and "follow" in text.lower())
+
+
+def _followup_key(line: str) -> str:
+    """A line as a follow-up compares: no list mark, no emphasis, no end mark, lower case.
+
+    >>> _followup_key("- **Which picker was fastest today?**  ")
+    'which picker was fastest today'
+    """
+    text = _LIST_MARK.sub("", line).strip().strip("*_`").strip()
+    return " ".join(text.rstrip("?.! ").lower().split())
+
+
+def strip_followup_lines(text: str, trace: list[dict]) -> str:
+    """The answer text without the follow-up questions the chips already carry (step 23): the
+    lines that repeat a `suggest_followups` item, and a closing run of them with its lead-in.
+
+    >>> t = [{"tool": "suggest_followups", "input": {"items": ["Show by route"]}, "result": "{}"}]
+    >>> strip_followup_lines("5 late.\\n\\nYou could ask:\\n- Show by route\\n- Why so late?", t)
+    '5 late.'
+    >>> strip_followup_lines("5 late.\\n\\nWant the same for May?", t)
+    '5 late.\\n\\nWant the same for May?'
+    """
+    # Step 1: Only an answer whose chips carry follow-ups loses any text, otherwise a question the
+    # model asks the person (with no chip to tap) would vanish
+    chips = {_followup_key(str(item)) for call in trace if call.get("tool") == SUGGEST_FOLLOWUPS
+             for item in _items((call.get("input") or {}).get("items"))}
+    chips.discard("")
+    if not chips:
+        return text
+    lines = text.split("\n")
+    is_chip = [bool(line.strip()) and _followup_key(line) in chips for line in lines]
+    # Step 2: The closing block of follow-ups (chip lines and questions) goes as a whole when it
+    # repeats a chip or has two or more lines, so a reworded chip does not stay behind
+    block: list[int] = []
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+        if not line:
+            continue
+        if is_chip[i] or line.endswith("?"):
+            block.append(i)
+            continue
+        break
+    dropped = {i for i, chip in enumerate(is_chip) if chip}
+    if block and (len(block) >= 2 or any(is_chip[i] for i in block)):
+        dropped.update(block)
+        # Step 3: Its lead-in ("You could ask:", "**Follow-up questions:**", "## Follow-ups") and
+        # a rule above it go with it, because alone they point at nothing
+        lead = _previous_line(lines, min(block))
+        if lead is not None and _is_followup_lead(lines[lead]):
+            dropped.add(lead)
+            rule = _previous_line(lines, lead)
+            if rule is not None and _RULE.match(lines[rule]):
+                dropped.add(rule)
+    if not dropped:
+        return text
+    kept = "\n".join(line for i, line in enumerate(lines) if i not in dropped)
+    return re.sub(r"\n{3,}", "\n\n", kept).strip()

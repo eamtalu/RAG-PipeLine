@@ -46,6 +46,9 @@ UNITS = {
 }
 MAX_PIE = 8
 MAX_POINTS = 48
+#: A chart of one point is one value: it is said in words or shown as a tile (step 23).
+MIN_CHART_POINTS = 2
+TOO_FEW_POINTS = "a chart needs at least two points; say the one value in words or show_kpis"
 #: The result keys that make a data call usable as the source of a chart.
 SOURCE_KEYS = ("rows", "counts", "summary", "vans", "matrix")
 #: The tools whose grouped rows the automatic shape may draw.
@@ -198,12 +201,14 @@ def chart_from_result(tool: str, result: dict, args: Mapping[str, Any]) -> Chart
     """The chart block a `chart_from_data` call draws from a data result, validated by the contract.
 
     ("aggregate_releases", {group_by [day], rows ...}, {"measure": "deliveries"}) -> ChartBlock(kind "line", ...) ;
-    (measure the rows lack) -> ValueError naming what they carry
+    (measure the rows lack) -> ValueError naming what they carry ; (one group) -> ValueError
     """
     measure = str(args.get("measure") or "").strip().lower().replace(" ", "_")
     if not measure:
         raise ValueError("measure is required: the value the rows carry to draw")
     labels, values, label_kind = series_from_result(tool, result, measure)
+    if len(labels) < MIN_CHART_POINTS:
+        raise ValueError(TOO_FEW_POINTS)
     kind = choose_kind(label_kind, values, str(args.get("kind") or "auto").strip().lower())
     title = str(args.get("title") or "").strip() or chart_title(tool, result, measure, label_kind)
     # Step 1: A series longer than the contract allows keeps its newest points and says so in the
