@@ -109,7 +109,9 @@ def test_strip_tables_keeps_text_bullets_and_drops_row_like_lines():
         "| item | short |\n|---|---|\n| GINGER | 125 |\n"
         "So the gap sits with two items."
     )
-    out = strip_tables(text)
+    # the rendered table the stripper compares with (step 22: a bullet that copies a whole row goes)
+    table = "| item | releases | short |\n|---|---|---|\n| GINGER | 2 | 125 |\n| PARSLEY | 2 | 11 |"
+    out = strip_tables(text, table)
     assert "125 units short" not in out and "PARSLEY 11" not in out and "| item |" not in out
     assert "- The night shift carried the slip" in out
     assert "- 15 left behind on Thursday" in out

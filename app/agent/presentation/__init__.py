@@ -22,7 +22,7 @@ class Presentation:
     name: str
     render: Callable[[list[dict]], str | None]
     structured: Callable[[list[dict], str], dict | None]  # (trace, public_base_url)
-    strip: Callable[[str], str]
+    strip: Callable[[str, str | None], str]  # (answer, the rendered table)
     blocks: Callable[[list[dict]], list[dict]] = lambda trace: []
     #: the blocks a withheld answer keeps: only those whose numbers came from a data result (step 19)
     grounded_blocks: Callable[[list[dict]], list[dict]] = lambda trace: []

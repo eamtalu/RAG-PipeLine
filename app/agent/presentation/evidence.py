@@ -134,21 +134,92 @@ def _cell(value) -> str:
     return str(value)
 
 
-def strip_tables(text: str) -> str:
-    """The model's own markdown tables and row-like lists, removed; the sentences and the reasoning
-    bullets around them stay. When the rows are rendered from the data, a list the model wrote from
-    the same rows is at best a duplicate and, on the first Web Chat run, contradicted the table's
-    order; a bullet that carries fewer than two figures is a point, not a row (step 19).
+#: The most fact bullets an answer keeps beside a rendered table (step 22); a longer list is a dump
+#: of the rows the table already shows.
+MAX_FACT_BULLETS = 4
+_SUB_POINT = re.compile(r"^\s{2,}(?:\d+\.|[-*•])\s+")
 
-    >>> strip_tables("a\\n- GINGER 125 units (2 releases)\\n- the night shift slipped\\nb")
+
+def _table_rows(table: str | None) -> list[list[str]]:
+    """The data rows of a rendered markdown table, as cell lists; the header and the rule left out.
+
+    >>> _table_rows("From the data: x\\n\\n| a | b |\\n|---|---|\\n| GINGER | 125 |")
+    [['GINGER', '125']]
+    """
+    lines = [ln for ln in (table or "").split("\n") if _TABLE_LINE.match(ln)]
+    rows = [[c.strip() for c in ln.strip().strip("|").split("|")] for ln in lines
+            if not re.fullmatch(r"[|\s:-]+", ln.strip())]
+    return rows[1:] if rows else []
+
+
+#: A bullet with more than this many words of its own besides a row's cells says something the
+#: table does not, so it is a fact, not a copy.
+MAX_COPY_WORDS = 3
+_WORD = re.compile(r"[A-Za-z][A-Za-z'-]+")
+
+
+def _copies_a_row(line: str, rows: list[list[str]]) -> bool:
+    """Whether a bullet only repeats a table row: every cell of a row of up to three cells, or all but
+    one cell of a longer row, appears in it (a number by its value, a word as written), and it has
+    almost no words of its own besides them.
+
+    ("- GINGER 2 125", [["GINGER", "2", "125"]]) -> True ;
+    ("- GINGER, 125 short on 2 releases, the worst by far", same) -> False
+    """
+    numbers = {d for d in (_decimal(f) for f in _RESULT_NUMBER.findall(line)) if d is not None}
+    lowered = line.lower()
+    for row in rows:
+        cells = [c for c in row if c]
+        if not cells:
+            continue
+        hits = 0
+        for cell in cells:
+            value = _decimal(cell)
+            if value is not None:
+                hits += value in numbers
+            else:
+                hits += cell.lower() in lowered
+        if hits < (len(cells) if len(cells) <= 3 else len(cells) - 1):
+            continue
+        cell_words = {w.lower() for c in cells for w in _WORD.findall(c)}
+        own = [w for w in _WORD.findall(line) if w.lower() not in cell_words]
+        if len(own) <= MAX_COPY_WORDS:
+            return True
+    return False
+
+
+def strip_tables(text: str, table: str | None = None) -> str:
+    """The model's own markdown tables removed, and with them the lists that only repeat the rendered
+    table's rows: a list of more than four points, or a bullet that copies a whole row. Up to four
+    short fact bullets stay, with their sub-points (step 22: the owner asked for one bullet per fact).
+
+    >>> strip_tables("a\\n- GINGER 2 125\\n- the night shift slipped\\nb", "| item | n | short |\\n|---|---|---|\\n| GINGER | 2 | 125 |")
     'a\\n- the night shift slipped\\nb'
     """
-    kept = [
-        line
-        for line in text.split("\n")
-        if not _TABLE_LINE.match(line)
-        and not (_LIST_LINE.match(line) and len(_RESULT_NUMBER.findall(line)) >= 2)
-    ]
+    rows = _table_rows(table)
+    lines = text.split("\n")
+    kept: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _TABLE_LINE.match(line):
+            i += 1
+            continue
+        if not _LIST_LINE.match(line):
+            kept.append(line)
+            i += 1
+            continue
+        # Step 1: Gather the whole list (its points and their sub-points), because the rule is about
+        # the list: more than four points is a dump of the rows the table already shows
+        j = i
+        while j < len(lines) and _LIST_LINE.match(lines[j]):
+            j += 1
+        run = lines[i:j]
+        points = [ln for ln in run if not _SUB_POINT.match(ln)]
+        # Step 2: Keep a short list, without the bullets that copy a whole row of the table
+        if len(points) <= MAX_FACT_BULLETS:
+            kept.extend(ln for ln in run if not _copies_a_row(ln, rows))
+        i = j
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 

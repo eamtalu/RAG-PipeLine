@@ -70,9 +70,14 @@ def test_a_listing_is_rendered_too():
 
 
 def test_the_models_own_table_and_ranked_list_are_dropped_and_the_sentences_kept():
-    text = ("Here are the top 5:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n1. **LA PIAZZA** - Shortfall: -2 units\n"
-            "2. **VIOS** - Shortfall: -1 unit\n\nThese had the largest shortfalls.")
+    # step 22: a ranked list of more than four points is a dump of the rows and goes; up to four
+    # fact bullets stay (chunk 200)
+    ranked = "".join(f"{i}. **CUSTOMER {i}** - Shortfall: -{i} units\n" for i in range(1, 6))
+    text = ("Here are the top 5:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n" + ranked +
+            "\nThese had the largest shortfalls.")
     assert ev.strip_tables(text) == "Here are the top 5:\n\nThese had the largest shortfalls."
+    short = "Two stand out:\n\n1. **LA PIAZZA** - Shortfall: -2 units\n2. **VIOS** - Shortfall: -1 unit"
+    assert ev.strip_tables(short) == short
 
 
 def test_the_table_shows_the_n_the_model_asked_for_else_ten():
