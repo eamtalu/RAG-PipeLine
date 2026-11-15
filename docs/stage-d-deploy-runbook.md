@@ -401,3 +401,13 @@ No migration, no contract or edge change.
 Deploy: `./deploy.sh`. Check in Teams: "give me the details of this delivery number 33330" answers with the picks, the over-picks, the soft error, the tiles and the transaction table; "is delivery 33330 at risk" still answers from the at-risk board.
 
 Rollback: the previous checkout and a restart.
+
+## D22: facts as bullets, the order named as sorted
+
+What it changes: the table stripper receives the rendered table and keeps up to four fact bullets (with their sub-points), removing only a longer list or a bullet that only repeats a whole table row; the policy fragment asks for a lead sentence and one bullet per fact, at most four, and to name the order the tool sorted in; snapshots regenerated.
+Why: the owner asked for facts as bullets instead of one paragraph (15 November); the old stripper would have deleted any bullet with two figures beside a table; a live answer called the shortest time "the longest".
+No migration, no contract change. Deploy after D21 (it is cut from D21). The edge's nested-bullet rendering may go before or after; an older edge draws a nested bullet at the first level.
+
+Deploy: `./deploy.sh`. Check in Teams: "How long does a line take per picker today?" answers with a lead sentence and up to four bullets beside the table, and calls the smallest median the shortest.
+
+Rollback: the previous checkout and a restart.

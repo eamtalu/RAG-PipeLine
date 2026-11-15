@@ -69,6 +69,6 @@ def render(trace: list[dict]) -> str | None:
     return None
 
 
-def strip_own_tables(text: str) -> str:
+def strip_own_tables(text: str, table: str | None = None) -> str:
     """The model's own markdown tables removed (its bullet points, the advice, stay)."""
     return re.sub(r"\n{3,}", "\n\n", _TABLE_LINE.sub("", text)).strip()

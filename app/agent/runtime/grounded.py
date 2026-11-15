@@ -333,7 +333,7 @@ class GroundedAgent:
         if draft["problem"] != "fabricated":
             table = self.presentation.render(calls)
             if table:
-                answer = (self.presentation.strip(answer) + "\n\n" + table).strip()
+                answer = (self.presentation.strip(answer, table) + "\n\n" + table).strip()
                 data = self.presentation.structured(calls, context.public_base_url)
             # the typed blocks the presentation calls asked for (step 5); a withheld answer keeps
             # only those drawn from the data itself (step 19), and says so
