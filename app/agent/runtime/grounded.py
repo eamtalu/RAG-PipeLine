@@ -30,7 +30,6 @@ from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
 
 from app.agent.contracts import (AgentRequest, AgentResult, ExecutionContext, ModelSettings,
@@ -52,6 +51,7 @@ from app.agent.runtime.trace import RunTrace
 from app.agent.router.providers import adapter_for
 from app.agent.router.router import ModelRouter
 from app.agent.presentation import evidence
+from app.agent.presentation.blocks import strip_followup_lines
 from app.agent.presentation.written_calls import lift_written_calls
 from app.services.notifications.redact import redact_secrets
 
@@ -331,6 +331,9 @@ class GroundedAgent:
             stop_reason = "withheld"
         blocks: list[dict] = []
         if draft["problem"] != "fabricated":
+            # the follow-ups the chips carry are not written twice (step 23)
+            if stop_reason != "withheld":
+                answer = strip_followup_lines(answer, calls)
             table = self.presentation.render(calls)
             if table:
                 answer = (self.presentation.strip(answer, table) + "\n\n" + table).strip()

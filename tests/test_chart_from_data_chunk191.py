@@ -156,7 +156,8 @@ async def test_an_unknown_measure_drops_the_chart_and_keeps_the_answer():
 
 
 async def test_show_chart_still_works_as_before():
-    chart = pt.chart_from_args({"kind": "bar", "title": "t", "labels": ["a"], "series_names": ["s"], "series_values": [[1]]})
-    assert chart.kind == "bar"
-    ok = json.loads(await pt.run_presentation_tool("show_chart", {"kind": "bar", "title": "t", "labels": ["a"], "series_names": ["s"], "series_values": [[1]]}))
-    assert ok == {"shown": "chart", "points": 1}
+    # two points since step 23: a one-point chart is refused (tests/test_answer_polish_chunk201.py)
+    two = {"kind": "bar", "title": "t", "labels": ["a", "b"], "series_names": ["s"], "series_values": [[1, 2]]}
+    assert pt.chart_from_args(two).kind == "bar"
+    ok = json.loads(await pt.run_presentation_tool("show_chart", two))
+    assert ok == {"shown": "chart", "points": 2}
