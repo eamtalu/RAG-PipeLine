@@ -421,3 +421,5 @@ No migration, no contract change, no edge change.
 Deploy: `./deploy.sh`. Check in Teams: "How long does a line take per picker today?" with one picker settled shows no chart; "Show deliveries per day this week as a chart" shows the chart and the follow-ups only as chips; "give me the details of this delivery number 33330" says 8 packages and 9 photos.
 
 Rollback: the previous checkout and a restart.
+
+Deployed 15 November 2026 23:30 as `c9ddb1c`; live check passed for the three questions above; four follow-up observations are recorded in the handoff as step 24.
