@@ -12,7 +12,14 @@ import json
 import logging
 import re
 
-from app.agent.presentation.charts import auto_chart, auto_heatmap, auto_kpis, auto_people_table, usable_result
+from app.agent.presentation.charts import (
+    auto_chart,
+    auto_heatmap,
+    auto_kpis,
+    auto_people_table,
+    auto_story_table,
+    usable_result,
+)
 from app.agent.presentation.entities import entities_from_trace
 from app.services.analytics_agent.action_tools import ACTION_TOOL_NAMES
 from app.services.analytics_agent.presentation_tools import (
@@ -120,9 +127,10 @@ def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list
     # who was active and when (fix of 14 November): the people from the tool's own list, when the
     # model wrote them as bullets instead of drawing a table; the totals above stay beside it
     if latest is not None and "table" not in by_type:
-        people = auto_people_table(*latest)
-        if people is not None:
-            by_type["table"] = people.model_dump(mode="json")
+        # ...and the story of one delivery (step 21): its transactions in time order
+        table = auto_people_table(*latest) or auto_story_table(*latest)
+        if table is not None:
+            by_type["table"] = table.model_dump(mode="json")
     # the watchable things the data calls named (step 14c), read from the results, never the text
     entities = entities_from_trace(trace)
     if entities is not None and "entities" not in by_type:

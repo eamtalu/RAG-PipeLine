@@ -58,6 +58,7 @@ async def main(profile: str, tenant: str, do_plant: bool) -> int:
     if do_plant:
         if profile == "analytics":
             await plant.plant_analytics(tenant, week=True)
+            await plant.plant_delivery_story(tenant)
         else:
             await plant.plant_logspace(tenant)
     # Step 2: One registry and one runtime, composed as the channels compose them, with the real

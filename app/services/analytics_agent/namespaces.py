@@ -15,6 +15,7 @@ from app.agent.contracts import AgentRequest, ExecutionContext
 from app.config.database import SessionFactory, async_session
 from app.services.analytics_agent import (
     activity_tools,
+    story_tools,
     action_tools, advisory_tools, at_risk_tools, forecast_tools, presentation_tools, usage_tools,
 )
 from app.services.analytics_agent.tools import RECIPES, RELEASE_TOOLS, run_release_tool
@@ -24,7 +25,8 @@ from app.services.log_agent import tools as log_tools
 #: a figure that appears here was given to the model, not invented. The log tools are not in it.
 ANALYTICS_TOOL_TEXT = json.dumps(
     [RELEASE_TOOLS, RECIPES, at_risk_tools.AT_RISK_TOOLS, at_risk_tools.RECIPES,
-     forecast_tools.FORECAST_TOOLS, forecast_tools.RECIPES, activity_tools.ACTIVITY_TOOLS, activity_tools.RECIPES],
+     forecast_tools.FORECAST_TOOLS, forecast_tools.RECIPES, activity_tools.ACTIVITY_TOOLS, activity_tools.RECIPES,
+     story_tools.STORY_TOOLS, story_tools.RECIPES],
     default=str
 )
 _AT_RISK_NAMES = frozenset(spec["name"] for spec in at_risk_tools.AT_RISK_TOOLS)
@@ -49,9 +51,10 @@ def logs_namespace(session_factory: SessionFactory = async_session) -> Namespace
 
 def analytics_namespace(session_factory: SessionFactory = async_session) -> Namespace:
     """The four release tools, the five at-risk tools, the two advisory tools, the forecast tool,
-    the usage tool (step 18) and the activity tool (step 20), with their schemas and recipes as text.
+    the usage tool (step 18), the activity tool (step 20) and the story tool (step 21), with their
+    schemas and recipes as text.
 
-    () -> Namespace("analytics", 14 specs, runner on the app pool, tool_text=ANALYTICS_TOOL_TEXT)
+    () -> Namespace("analytics", 15 specs, runner on the app pool, tool_text=ANALYTICS_TOOL_TEXT)
     """
 
     async def run(
@@ -69,12 +72,15 @@ def analytics_namespace(session_factory: SessionFactory = async_session) -> Name
                 return await usage_tools.run_usage_tool(db, context.tenant, request.principal.object_id, name, args)
             if name in activity_tools.ACTIVITY_TOOL_NAMES:
                 return await activity_tools.run_activity_tool(db, context.tenant, name, args)
+            if name in story_tools.STORY_TOOL_NAMES:
+                return await story_tools.run_story_tool(db, context.tenant, name, args)
             return await run_release_tool(name, dict(args), db, context.tenant)
 
     specs = tuple(
         ToolSpec.from_dict("analytics", s)
         for s in (*RELEASE_TOOLS, *at_risk_tools.AT_RISK_TOOLS, *advisory_tools.ADVISORY_TOOLS,
-                  *forecast_tools.FORECAST_TOOLS, *usage_tools.USAGE_TOOLS, *activity_tools.ACTIVITY_TOOLS)
+                  *forecast_tools.FORECAST_TOOLS, *usage_tools.USAGE_TOOLS, *activity_tools.ACTIVITY_TOOLS,
+                  *story_tools.STORY_TOOLS)
     )
     return Namespace(name="analytics", specs=specs, runner=run, tool_text=ANALYTICS_TOOL_TEXT)
 

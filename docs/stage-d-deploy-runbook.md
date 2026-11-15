@@ -391,3 +391,13 @@ No migration, no contract or edge change.
 Deploy: `./deploy.sh`. Check in Teams: "How many devices were in use per day in the last month?" draws the line of devices per day; "Who was active today, and when did each person start and finish?" draws the people table. Then the score command of D19c.
 
 Rollback: the previous checkout and a restart.
+
+## D21: the story of one delivery in Teams Ask (delivery_story)
+
+What it adds: `delivery_story` in the analytics namespace (`app/services/analytics_agent/story_tools.py`), the log explorer's `trace` for one delivery, order, item, request id or pick-list line on the warehouse's clock, with the picks by outcome, the picks not exact, the issues with their message, the packages and the photos, and no LAN links; the lift draws the tiles and the transaction table from its rows (`charts.auto_story_table`, `auto_kpis`); the analytics profile routes "the details of ONE delivery …" to it first and keeps the at-risk tools for the van, the timing and the risk (snapshots regenerated).
+Why: on 15 November "give me the details of this delivery number 33330" told the full story in the log explorer (logspace profile, `trace`) and only the at-risk status in Teams (analytics profile, `explain_at_risk_delivery`).
+No migration, no contract or edge change.
+
+Deploy: `./deploy.sh`. Check in Teams: "give me the details of this delivery number 33330" answers with the picks, the over-picks, the soft error, the tiles and the transaction table; "is delivery 33330 at risk" still answers from the at-risk board.
+
+Rollback: the previous checkout and a restart.
