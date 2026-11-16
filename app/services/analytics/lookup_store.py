@@ -27,7 +27,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Mapping, Sequence
 
-from sqlalchemy import select, text
+from sqlalchemy import and_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -288,6 +288,13 @@ async def backfill(db: AsyncSession, customer_code: str, declared: lk.Lookup, *,
     return {**stats, "facts_read": len(facts), "methods": methods}
 
 
+#: Calls whose response entries one backfill query reads (chunk 211b). Measured live on 16 November 2026
+#: over 45 days: 9,186 calls in 19 queries, the slowest 3.0 s against the 30 s statement timeout.
+LIST_ENTRY_BATCH = 500
+#: How far an entry's time may sit from its call's start; a pick-list call lasts seconds.
+LIST_ENTRY_MARGIN = timedelta(hours=1)
+
+
 async def _harvest_lists_from_entries(db: AsyncSession, customer_code: str, declared: lk.Lookup,
                                       facts: Sequence[Mapping]) -> list[lk.Observation]:
     """Chunk 129: a list source's values live in the response entries, which the facts do not keep.
@@ -296,19 +303,27 @@ async def _harvest_lists_from_entries(db: AsyncSession, customer_code: str, decl
     from app.persistence.models.log_entry import LogEntry
     from app.persistence.models.log_entry_assignment import LogEntryAssignment
 
+    # Step 1: The list calls in time order, so each batch covers a short span of the partitioned tables
     list_methods = {src.method for a in declared.attributes for src in a.sources if src.list}
-    rows = [{"id": f["source_transaction_id"], "method": f["method"], "event_time": f["event_time"]}
-            for f in facts if f.get("method") in list_methods and f.get("source_transaction_id")]
+    rows = sorted(({"id": f["source_transaction_id"], "method": f["method"], "event_time": f["event_time"]}
+                   for f in facts if f.get("method") in list_methods and f.get("source_transaction_id")
+                   and f.get("event_time") is not None), key=lambda r: r["event_time"])
     out: list[lk.Observation] = []
-    for i in range(0, len(rows), 2000):
-        chunk = rows[i:i + 2000]
+    for i in range(0, len(rows), LIST_ENTRY_BATCH):
+        chunk = rows[i:i + LIST_ENTRY_BATCH]
         ids = [r["id"] for r in chunk]
+        lo = chunk[0]["event_time"] - LIST_ENTRY_MARGIN
+        hi = chunk[-1]["event_time"] + LIST_ENTRY_MARGIN
+        # Step 2: Join on the entry's id AND time and bound both tables by the batch's span, otherwise
+        # Postgres scans every entry partition (live: past the 30 s statement timeout; bounded: 3 s worst)
         entries: dict = {}
         for txn_id, fields in (await db.execute(
                 select(LogEntryAssignment.transaction_id, LogEntry.fields)
-                .join(LogEntry, LogEntry.id == LogEntryAssignment.entry_id)
+                .join(LogEntry, and_(LogEntry.id == LogEntryAssignment.entry_id,
+                                     LogEntry.timestamp == LogEntryAssignment.entry_ts))
                 .where(LogEntryAssignment.customer_code == customer_code,
                        LogEntryAssignment.transaction_id.in_(ids),
+                       LogEntryAssignment.entry_ts.between(lo, hi), LogEntry.timestamp.between(lo, hi),
                        LogEntry.entry_type == "response"))).all():
             entries.setdefault(txn_id, []).append(("response", fields))
         out += lk.harvest_lists(chunk, entries, [declared])
