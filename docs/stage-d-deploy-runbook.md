@@ -424,6 +424,18 @@ Rollback: the previous checkout and a restart.
 
 Deployed 15 November 2026 23:30 as `c9ddb1c`; live check passed for the three questions above; four follow-up observations are recorded in the handoff as step 24.
 
+## D24: answer integrity (finished answers kept, figures read right, totals from the tool)
+
+What it changes: the step limit lets ten tool rounds end with an answer; a closing remark with no figure gives way to the answer written beside the last drawing call; the figure guard reads "1,042" in a result whole, ignores the year of a written date and checks a figure before a full stop; a bulleted follow-up lead-in, a dangling one above the table and "[… chart …]" placeholder lines are removed; a grouped aggregate returns `overall` (sums over all groups) with a note; the follow-up acknowledgement ends the turn and a run that only repeats presentation calls after it keeps its answer; the delivery story gives each not-exact pick its difference.
+Why: the live check of 15 November and the live scores after D23 (answers lost at the limit or to a remark, forecast answers wrongly withheld, totals the model added up, tool loops).
+No migration, no contract change, no edge change. Merge the D23b hotfix (PR #38) first, or this PR alone, which contains it.
+
+Deploy: `./deploy.sh`. Check in Teams: "Which products were short today, and by how many units?" gives the total from the tool and is not withheld; "What is coming tomorrow?" is not withheld; "give me the details of this delivery number 33330" answers in full; "what is available?" answers.
+
+Rollback: the previous checkout and a restart.
+
+Deployed 16 November 2026 09:07 GMT together with D25 as `e884752` (main; PR #39 merged as `124940c`, PR #40 as `e884752`): three units active, health 200; live check through the real model on tmp-live, twice each, all ended normally with no retry, none withheld.
+
 ## D25: the ranking keeps its chart, all-groups stats from the tool
 
 What it changes: the auto chart is drawn from the last grouped result, so reading the release list after a ranking keeps the ranking's chart; a grouped aggregate's `overall` also carries each stat asked for (a median over all rows, not a median of the groups' medians).
@@ -434,13 +446,5 @@ Deploy: `./deploy.sh`. Check in Teams: "Which products were short today?" shows 
 
 Rollback: the previous checkout and a restart.
 
-## D24: answer integrity (finished answers kept, figures read right, totals from the tool)
-
-What it changes: the step limit lets ten tool rounds end with an answer; a closing remark with no figure gives way to the answer written beside the last drawing call; the figure guard reads "1,042" in a result whole, ignores the year of a written date and checks a figure before a full stop; a bulleted follow-up lead-in, a dangling one above the table and "[… chart …]" placeholder lines are removed; a grouped aggregate returns `overall` (sums over all groups) with a note; the follow-up acknowledgement ends the turn and a run that only repeats presentation calls after it keeps its answer; the delivery story gives each not-exact pick its difference.
-Why: the live check of 15 November and the live scores after D23 (answers lost at the limit or to a remark, forecast answers wrongly withheld, totals the model added up, tool loops).
-No migration, no contract change, no edge change. Merge the D23b hotfix (PR #38) first, or this PR alone, which contains it.
-
-Deploy: `./deploy.sh`. Check in Teams: "Which products were short today, and by how many units?" gives the total from the tool and is not withheld; "What is coming tomorrow?" is not withheld; "give me the details of this delivery number 33330" answers in full; "what is available?" answers.
-
-Rollback: the previous checkout and a restart.
+Deployed 16 November 2026 09:07 GMT as `e884752` with D24. Live: line time per picker on 13 November gave 51.1 s as the median across all pickers 2 of 2; products short on 13 November 2 of 2 answered, one quoting the 352-unit total from the tool; golden 30 of 39 with no run out of tool calls, the short-products case drawn.
 
