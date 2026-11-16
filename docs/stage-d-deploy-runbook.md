@@ -483,3 +483,15 @@ Deploy: `./deploy.sh` (it restarts the Teams consumer, which starts the loop). C
 Rollback: the previous checkout and a restart.
 
 Deployed 16 November 2026 13:04 GMT as `5209c82` (main, PR #43) with edge `1780ac8`: three units active, health 200; the four forecast rows of tmp-live written in about 22 s (255 to 260 KB) and rewritten five minutes later; Overview's rows unaffected.
+
+## D31: the Teams Pick releases page's row
+
+What it changes: the detail loop also writes one `site_releases` row per site and for "all" every five minutes, with three windows computed by a Python port of the web Pick releases page's arithmetic; contract 3.21.
+Why: the edge's Pick releases page (edge step 25), opened from Overview's shape of the day, reads it.
+No migration. Deploy before or with edge step 25: an edge without the row says "no pick releases page yet"; rows without the edge are simply unread.
+
+Deploy: `./deploy.sh`. Check: after five minutes `SITE#all#RELEASES` exists for tmp-live, and the consumer log has no `teams.releases_detail_failed`.
+After a change to the arithmetic, run the parity check in `scripts/releases_parity/README.md`.
+
+Rollback: the previous checkout and a restart.
+
