@@ -53,6 +53,7 @@ from app.agent.router.router import ModelRouter
 from app.agent.presentation import evidence
 from app.agent.presentation.blocks import DRAWING_TOOL_NAMES, drop_followup_lead, strip_followup_lines
 from app.agent.presentation.written_calls import lift_written_calls, strip_placeholders
+from app.services.analytics_agent.presentation_tools import PRESENTATION_TOOL_NAMES, SUGGEST_FOLLOWUPS
 from app.services.notifications.redact import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,24 @@ def answer_from_draft(new: Sequence[BaseMessage]) -> str:
     # such as "No products were short today." is never swapped for an earlier draft
     beside = [t for t in (text_of(m) for m in ai[last_data + 1:] if m.tool_calls) if evidence.figures(t)]
     return max(beside, key=len) if beside else closing
+
+
+def is_settled_loop(new: Sequence[BaseMessage]) -> bool:
+    """Whether a draft that ran out of tool calls had in fact finished: it offered follow-ups and
+    after that only repeated presentation calls, reading no data and proposing no action.
+
+    (data; findings; follow-ups; findings; follow-ups …) -> True ; (… follow-ups; data call …) -> False ;
+    (no follow-ups) -> False
+    """
+    # Step 1: The follow-ups are the last step of an answer, so a run that never offered them
+    # never finished
+    ai = [m for m in new if isinstance(m, AIMessage) and m.tool_calls]
+    first = next((i for i, m in enumerate(ai) if any(c["name"] == SUGGEST_FOLLOWUPS for c in m.tool_calls)), None)
+    if first is None:
+        return False
+    # Step 2: Anything but a presentation call after them (a data read, a proposed action) means
+    # the model was still working, so the run stays out of tool calls
+    return all(c["name"] in PRESENTATION_TOOL_NAMES for m in ai[first:] for c in m.tool_calls)
 
 
 def short(value: Any, n: int = 200) -> str:
@@ -417,6 +436,11 @@ class GroundedAgent:
         except GraphRecursionError:
             stop_reason = "max_iterations"
         answer = answer_from_draft(seen[len(messages):])
+        # A run that only repeated its drawing calls after offering follow-ups had finished: its
+        # answer is kept (step 24; live on 16 November it repeated findings and follow-ups)
+        if stop_reason == "max_iterations" and answer and is_settled_loop(seen[len(messages):]):
+            logger.info("agent settled_loop kept the answer written before the repeats")
+            stop_reason = "end_turn"
         # A draft that ran out of tool rounds is not trusted, even when the model wrote a sentence:
         # on 13 November it ended an "Ask why" with words about a reminder form nobody asked for
         if stop_reason == "max_iterations":

@@ -209,3 +209,44 @@ async def test_a_grouped_aggregate_with_no_rows_has_an_overall_of_zeros_and_no_n
     async with async_session() as db:
         out = await agent_tools.aggregate_releases(db, {"group_by": ["item_number"], "where": ["shortfall<-1000"], **plant.window()}, CC)
     assert out["groups"] == 0 and out["overall"] == {"rows": 0, "deliveries": 0}
+
+
+# ==================================================== 6. the turn ends after the follow-ups
+
+
+FINISH = "this was the last step: now reply with your answer as plain text and call no more tools"
+
+
+async def test_the_follow_up_acknowledgement_tells_the_model_to_end_its_turn():
+    from app.services.analytics_agent import presentation_tools as pt
+    assert json.loads(await pt.run_presentation_tool("suggest_followups", {"items": ["Why?"]})) == {
+        "shown": "followups", "items": 1, "next": FINISH}
+
+
+def _repeat_after_followups(rounds: int, *, data_in_loop: bool = False) -> list[AIMessage]:
+    # the live loop of 16 November: the answer beside state_findings, then the pair again and again
+    window = {"group_by": ["user_name"], **plant.window()}
+    msgs = [AIMessage(content="", tool_calls=[{"id": "d0", "name": "aggregate_releases", "args": window}])]
+    for i in range(rounds):
+        msgs.append(AIMessage(content="DBOBOC handled 3 of 4 releases (75%) and FNACHONLEO 1.",
+                              tool_calls=[{"id": f"s{i}", "name": "state_findings",
+                                           "args": {"findings": ["DBOBOC handled 3 of 4 releases"], "sources": ["aggregate_releases"]}}]))
+        msgs.append(AIMessage(content="", tool_calls=[{"id": f"f{i}", "name": "suggest_followups", "args": {"items": ["Why?"]}}]))
+        if data_in_loop:
+            msgs.append(AIMessage(content="", tool_calls=[{"id": f"x{i}", "name": "aggregate_releases", "args": window}]))
+    return msgs
+
+
+async def test_a_run_that_only_repeats_drawing_calls_after_its_follow_ups_keeps_its_answer():
+    await plant.plant_analytics(CC)
+    result = await ask(analytics_runtime(CC, model=_scripted(*_repeat_after_followups(6))), "share of releases per picker")
+    assert result["stop_reason"] == "end_turn"
+    assert result["answer"].startswith("DBOBOC handled 3 of 4 releases (75%)")
+
+
+async def test_a_run_that_reads_data_again_after_its_follow_ups_is_still_out_of_tool_calls():
+    await plant.plant_analytics(CC)
+    looping = _scripted(*_repeat_after_followups(4, data_in_loop=True))
+    assert (await ask(analytics_runtime(CC, model=looping), "share of releases per picker"))["stop_reason"] == "max_iterations"
+    # and a run that never offered follow-ups is out of tool calls as before
+    assert (await ask(analytics_runtime(CC, model=_scripted(*_rounds(12))), "what is available?"))["stop_reason"] == "max_iterations"

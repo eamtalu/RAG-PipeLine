@@ -35,6 +35,7 @@ CHART_FROM_DATA = "chart_from_data"
 SHOW_KPIS = "show_kpis"
 STATE_FINDINGS = "state_findings"
 CHART_KINDS = ("auto", "bar", "line", "pie")
+FOLLOWUPS_NEXT = "this was the last step: now reply with your answer as plain text and call no more tools"
 TONES = ("good", "medium", "high", "neutral")
 PRESENTATION_TOOL_NAMES = frozenset(
     {SHOW_CHART, SHOW_TABLE, SUGGEST_FOLLOWUPS, CHART_FROM_DATA, SHOW_KPIS, STATE_FINDINGS}
@@ -354,5 +355,7 @@ async def run_presentation_tool(name: str, args: Mapping[str, Any]) -> str:
     if block["type"] == "table":
         return json.dumps({"shown": "table", "rows": len(block["rows"])})
     if block["type"] == "followups":
-        return json.dumps({"shown": "followups", "items": len(block["items"])})
+        # the follow-ups are the last step: without saying so the model repeated the findings and
+        # the follow-ups until it ran out of tool calls (live, 16 November)
+        return json.dumps({"shown": "followups", "items": len(block["items"]), "next": FOLLOWUPS_NEXT})
     return json.dumps({"shown": block["type"]})

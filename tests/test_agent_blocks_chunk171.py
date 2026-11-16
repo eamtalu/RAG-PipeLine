@@ -59,7 +59,9 @@ async def test_the_tool_answers_an_acknowledgement_or_the_problems():
     assert ok == {"shown": "chart", "points": 2}
     bad = json.loads(await pt.run_presentation_tool("show_chart", {**CHART_ARGS, "series_values": [[1]]}))
     assert "problems" in bad and bad["problems"]
-    assert json.loads(await pt.run_presentation_tool("suggest_followups", {"items": ["Why?"]})) == {"shown": "followups", "items": 1}
+    # step 24: the acknowledgement also says the turn is over
+    assert json.loads(await pt.run_presentation_tool("suggest_followups", {"items": ["Why?"]})) == {
+        "shown": "followups", "items": 1, "next": pt.FOLLOWUPS_NEXT}
 
 
 # ==================================================== 2. blocks from the trace
