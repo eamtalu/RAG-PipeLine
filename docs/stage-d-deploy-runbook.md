@@ -457,3 +457,5 @@ No migration, no contract change, no edge change; the log explorer is unchanged.
 Deploy: `./deploy.sh`. Check in Teams: "give me the details of this delivery number 33330" tells both the picking of 15 November and the loading of 16 November; "give me the details of delivery 33330 on 15 November 2026" keeps to that day.
 
 Rollback: the previous checkout and a restart.
+
+Deployed 16 November 2026 10:10 GMT as `cd3191c` (main, PR #41): three units active, health 200; live check passed (33330 tells both days; a day named keeps to it; the at-risk question uses the at-risk tool).
