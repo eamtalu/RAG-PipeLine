@@ -173,9 +173,13 @@ async def test_a_scripted_answer_quoting_the_overall_shortfall_is_not_withheld()
     assert result["stop_reason"] == "end_turn" and result["retries"] == 0
 
 
-def test_the_profile_tells_the_model_where_the_total_is():
+def test_the_tool_tells_the_model_where_the_total_is_and_the_profile_stays_as_it_was():
+    # in the system prompt the same sentence made the model answer "what is available?" from the
+    # instructions without a tool (4 of 4 live runs), so it lives on the tool
+    aggregate = next(t for t in agent_tools.RELEASE_TOOLS if t["name"] == "aggregate_releases")
+    assert "`overall`: the same counts and sums over ALL groups" in aggregate["description"]
     prompt = " ".join(load_profile("analytics").system_prompt.split())
-    assert "quote `overall`" in prompt
+    assert "overall" not in prompt
 
 
 async def test_a_follow_up_lead_left_alone_after_the_table_stripper_is_removed_and_a_plain_lead_stays():

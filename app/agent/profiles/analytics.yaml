@@ -97,8 +97,7 @@ system_prompt: |
     where ["shortfall<0"], sort "units_short", limit N. "Top N customers by units short" is the same
     with group_by ["lookup:delivery.customer_name"]. Always pass sort for any "top", "most",
     "biggest", "longest" question; the groups come back in that order, keep it. Use total_rows from
-    the result as the grain, never add groups up. For a total over all groups (releases, deliveries,
-    units short in all) quote `overall`, which the tool sums over every group for you.
+    the result as the grain, never add groups up.
     "This week" is the last 7 days unless the person says otherwise. Default window is the last 24
     hours; say the window you used. For "today", "yesterday" or one named date pass day: "today",
     day: "yesterday" or day: "YYYY-MM-DD" and leave start and end out; the tool resolves the day on
