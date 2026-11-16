@@ -173,13 +173,16 @@ async def test_a_scripted_answer_quoting_the_overall_shortfall_is_not_withheld()
     assert result["stop_reason"] == "end_turn" and result["retries"] == 0
 
 
-def test_the_tool_tells_the_model_where_the_total_is_and_the_profile_stays_as_it_was():
-    # in the system prompt the same sentence made the model answer "what is available?" from the
-    # instructions without a tool (4 of 4 live runs), so it lives on the tool
+async def test_the_result_tells_the_model_where_the_total_is_and_the_prompt_does_not():
+    # in the system prompt or the tool description the same sentence made the model answer "what
+    # is available?" without calling a tool (8 of 8 live runs), so it travels with the result
+    await plant.plant_analytics(CC)
+    async with async_session() as db:
+        out = await agent_tools.aggregate_releases(db, {"group_by": ["item_number"], **plant.window()}, CC)
+    assert out["overall_note"].startswith("overall = the counts and sums over ALL groups; quote it for a total")
     aggregate = next(t for t in agent_tools.RELEASE_TOOLS if t["name"] == "aggregate_releases")
-    assert "`overall`: the same counts and sums over ALL groups" in aggregate["description"]
-    prompt = " ".join(load_profile("analytics").system_prompt.split())
-    assert "overall" not in prompt
+    assert "overall" not in aggregate["description"]
+    assert "overall" not in " ".join(load_profile("analytics").system_prompt.split())
 
 
 async def test_a_follow_up_lead_left_alone_after_the_table_stripper_is_removed_and_a_plain_lead_stays():

@@ -88,9 +88,7 @@ RELEASE_TOOLS: list[dict] = [
             "'how many / how much / what share, by X'. EVERY call returns per group, without asking: "
             "rows (how many releases), deliveries (distinct deliveries), calls, and the SUM of every "
             "settled value (expected, picked, "
-            "shortfall, is_short, refused, empty_visits, duration_s), and `overall`: the same counts and "
-            "sums over ALL groups, for a total (\"short by how many units in all\"); quote it, never add "
-            "the groups up. Do NOT put sum:… or count:… in "
+            "shortfall, is_short, refused, empty_visits, duration_s). Do NOT put sum:… or count:… in "
             "stat; stat is only for median, p90, p95, p99, mean, min, max and distinct. Ratios are "
             "yours to compute from one call's numbers: zero-pick rate = rows with picked==0 (a second "
             "call with that filter) over rows. Never add zero-pick and partial together."
@@ -368,7 +366,10 @@ async def aggregate_releases(db: AsyncSession, args: dict, customer_code: str) -
     out["stats"] = ["deliveries" if x == "distinct_delivery_number" else x for x in out.get("stats", [])]
     out["grain"] = "one row = one pick-list release; every figure is over releases, not calls"
     if group_by:
+        # the note travels with the result, not the prompt: in the prompt or the tool description
+        # it made the model answer "what is available?" without calling a tool (step 24)
         out["overall"] = await _overall(db, customer_code, name, since, until, where)
+        out["overall_note"] = "overall = the counts and sums over ALL groups; quote it for a total, never add the groups up"
     if notes:
         out["notes"] = notes
     return out
