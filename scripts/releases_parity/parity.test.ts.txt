@@ -1,0 +1,97 @@
+// TEMPORARY (step 31 parity, not committed): the web Pick releases page's own code on the live rows the
+// Teams backend dumped, written out for comparison with the Python port.
+import { readFileSync, writeFileSync } from "fs";
+import { toRelease, windowFor, fetchRangeFor, baselineRangeFor, TX_ORDER, type Release } from "@/lib/pickReleases";
+import {
+  activePickers, buckets, customerShortfall, customerVolume, deliveries, deliveriesIncomplete, deltaPct, distinct, durationStats,
+  finishedSince, inRange, outcomeSplit, perPicker, refusals, zeroPickFeed,
+} from "@/lib/pickReleaseStats";
+import {
+  baselineAtThisTime, baselineRefusalsAtThisHour, baselineRefusalsPerDay, baselineWholeDays, perDayAverage, type HourBucket, type ItemStat,
+} from "@/lib/pickReleaseQueries";
+
+const num = (v: unknown) => (v == null || v === "" ? 0 : Number(v));
+
+function hoursOf(all: any[], zero: any[], over: any[]): HourBucket[] {
+  const by = new Map<string, HourBucket>();
+  for (const r of all) { const key = String(r.dimensions[0]); by.set(key, { start: new Date(key), rows: r.rows, isShort: num(r.is_short), refused: num(r.refused), zero: 0, over: 0 }); }
+  for (const r of zero) { const b = by.get(String(r.dimensions[0])); if (b) b.zero = r.rows; }
+  for (const r of over) { const b = by.get(String(r.dimensions[0])); if (b) b.over = r.rows; }
+  return [...by.values()].sort((a, b) => a.start.getTime() - b.start.getTime());
+}
+
+function itemsOf(all: any[], zero: any[], minReleases: number): ItemStat[] {
+  const zeroBy = new Map(zero.map((r: any) => [String(r.dimensions[0]), r.rows]));
+  const out: ItemStat[] = [];
+  for (const r of all) {
+    const item = String(r.dimensions[0] ?? "");
+    const zeroPicks = (zeroBy.get(item) as number) ?? 0;
+    if (!item || r.rows < minReleases || zeroPicks === 0) continue;
+    const shortfall = num(r.shortfall);
+    out.push({ item, description: r.dimensions[1] ?? null, releases: r.rows, zeroPicks, zeroPickRate: zeroPicks / r.rows, unitsShort: shortfall < 0 ? -shortfall : 0 });
+  }
+  return out.sort((a, b) => b.zeroPickRate - a.zeroPickRate || b.unitsShort - a.unitsShort);
+}
+
+const lite = (r: Release | null) => (r ? { key: r.key, released_at: r.releasedAt.getTime(), item: r.item, picker: r.picker, duration_s: r.durationS } : null);
+
+test("parity", () => {
+  const data = JSON.parse(readFileSync(process.env.PARITY_IN as string, "utf8"));
+  const now = new Date(data.now);
+  const all: Release[] = data.rows.map(toRelease);
+  const out: Record<string, unknown> = {};
+  for (const kind of ["today", "yesterday", "week"] as const) {
+    const i = data.inputs[kind];
+    const w = windowFor(kind, now);
+    const range = fetchRangeFor(w, now);
+    const rows = inRange(all, range.start, range.end);
+    const baseline = hoursOf(i.hours_all, i.hours_zero, i.hours_over);
+    const items = itemsOf(i.items_all, i.items_zero, 10);
+    const baseDeliveries = i.per_day.map((r: any) => num(r.distinct_delivery_number));
+    const windowRows = inRange(rows, w.start, w.end);
+    const filtered = windowRows;
+    const chartRows = rows;
+    const baseDays = kind === "week" ? 1 : 7;
+    const rolling = kind === "today";
+    const base = baseline.length === 0 ? null : rolling ? baselineAtThisTime(baseline, now, 7) : baselineWholeDays(baseline, baseDays);
+    const split = outcomeSplit(filtered);
+    const chart = w.bucket === "day" ? buckets(filtered, w.end, Math.max(2, Math.ceil((w.end.getTime() - w.start.getTime()) / 86_400_000)), "day")
+      : rolling ? buckets(chartRows, now, 24, "hour") : buckets(filtered, w.end, Math.max(1, Math.ceil((w.end.getTime() - w.start.getTime()) / 3_600_000)), "hour");
+    const present = TX_ORDER.filter((t) => chartRows.some((r) => r.tx === t));
+    const last15 = finishedSince(filtered, now, 15);
+    const active = activePickers(filtered, now);
+    const pickersInWindow = distinct(filtered.map((r) => r.picker));
+    const lastHour = finishedSince(filtered, now, 60);
+    const refusedNow = rolling ? refusals(lastHour) : refusals(filtered);
+    const refusedBase = rolling ? baselineRefusalsAtThisHour(baseline, now, 7) : baselineRefusalsPerDay(baseline, baseDays);
+    const feed = zeroPickFeed(filtered);
+    const pickers = perPicker(filtered);
+    const allDeliveries = deliveries(filtered);
+    const incomplete = deliveriesIncomplete(filtered);
+    const deliveriesBase = perDayAverage(baseDeliveries, baseDays);
+    const durationsBy: Record<string, unknown> = { all: durationStats(filtered) };
+    for (const tx of present) durationsBy[tx] = durationStats(filtered.filter((r) => r.tx === tx));
+    out[kind] = {
+      tiles: {
+        last15_lines: last15.length, last15_deliveries: distinct(last15.map((r) => r.delivery)).length,
+        busiest_hour: Math.max(0, ...chart.map((b) => b.total)), deliveries: allDeliveries.length, deliveries_incomplete: incomplete.length,
+        deliveries_base: deliveriesBase, deliveries_delta: deliveriesBase == null ? null : deltaPct(allDeliveries.length, deliveriesBase),
+        lines: filtered.length, lines_base: base?.lines ?? null, lines_delta: base == null ? null : deltaPct(filtered.length, base.lines),
+        pickers_active: active.length, pickers_in_window: pickersInWindow.length,
+        refusals: refusedNow, refusals_base: refusedBase, refusals_delta: deltaPct(refusedNow, refusedBase),
+      },
+      split, split_base: base,
+      chart: chart.map((b) => ({ start: b.start.getTime(), end: b.end.getTime(), byTx: b.byTx, total: b.total, pickers: b.pickers })),
+      present,
+      feed: feed.slice(0, 12).map(lite), feed_total: feed.length,
+      pickers: pickers.map((p) => ({ ...p })),
+      top_share: pickers.length >= 2 ? pickers[0].share + pickers[1].share : 0,
+      incomplete: incomplete.slice(0, 100).map(({ releases, lastActivity, ...d }) => ({ ...d, lastActivity: lastActivity.getTime() })),
+      durations: Object.fromEntries(Object.entries(durationsBy).map(([k, v]: [string, any]) => [k, { ...v, longest: lite(v.longest) }])),
+      customers: customerShortfall(filtered).slice(0, 100).map(({ releases, ...c }) => c), customers_total: customerShortfall(filtered).length,
+      items: items.slice(0, 100), items_total: items.length,
+      volume: customerVolume(filtered).slice(0, 100).map(({ releases, ...c }) => c), volume_total: customerVolume(filtered).length,
+    };
+  }
+  writeFileSync(process.env.PARITY_OUT as string, JSON.stringify(out));
+});

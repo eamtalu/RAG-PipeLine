@@ -116,7 +116,7 @@ def _lite(r: rs.Release | None, tz: ZoneInfo) -> dict | None:
         return None
     return {"key": r.key, "released_at": _iso(r.released_at, tz), "finished_at": _iso(r.finished_at, tz),
             "transaction": r.transaction, "tx": r.tx, "picker": r.picker, "delivery": r.delivery, "customer": r.customer,
-            "item": r.item, "description": r.description, "order_line": r.order_line, "expected": r.expected,
+            "item": r.item, "description": r.description, "uom": r.uom, "order_line": r.order_line, "expected": r.expected,
             "picked": r.picked, "shortfall": r.shortfall, "refused": r.refused, "duration_s": r.duration_s,
             "outcome": r.outcome}
 

@@ -104,6 +104,7 @@ class Release:
     customer: str | None
     item: str | None
     description: str | None
+    uom: str | None
     order_line: str | None
     suffix: str | None
     expected: float
@@ -150,6 +151,7 @@ def to_release(row: dict) -> Release:
         customer=lk.get("delivery.customer_name") or None,
         item=row.get("item_number") or a.get("item_number") or None,
         description=lk.get("item description.ItemDescription") or None,
+        uom=lk.get("item description.basic_uom") or None,
         order_line=a.get("OrderLine") or None,
         suffix=a.get("PickListSuffix") or None,
         expected=expected,
