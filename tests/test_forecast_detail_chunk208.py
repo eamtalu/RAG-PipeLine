@@ -67,6 +67,11 @@ async def _web_series(db, metric: str, kind: str = "total", subject: str = "tota
                                  customer=CC, db=db)
 
 
+async def _status() -> dict:
+    async with async_session() as db:
+        return await web.read_status(customer=CC, db=db)
+
+
 # ==================================================== 1. no run yet
 
 
@@ -96,6 +101,10 @@ async def test_the_whole_customer_row_carries_the_web_pages_figures():
         assert row["series"]["units"][grain] == [forecast_detail.slim(p) for p in units["grains"][grain]["points"]]
     assert row["today"] == lines["today"] and row["as_of_date"] == lines["as_of_date"]
     assert row["accuracy"] == accuracy
+    status = await _status()
+    run = status["latest_run"]
+    assert row["status"]["latest_run"]["history_days"] == run["detail"]["history"]["days"]
+    assert row["status"]["latest_run"]["warnings"] == run["detail"].get("warnings", [])[:3]
     assert row["heatmap"] == heat
     assert row["items"] == items["items"]
     assert [g["key"] for g in row["by_transaction"]["lines"]] == [s["subject"] for s in subjects["subjects"]]

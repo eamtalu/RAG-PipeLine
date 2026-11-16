@@ -138,7 +138,10 @@ async def compute(db: AsyncSession, customer_code: str, site: Site | None = None
         "latest_run": lines["latest_run"],
         "status": {"model_version": status["model_version"], "run_hour_local": status["run_hour_local"],
                    "worker_enabled": status["worker_enabled"],
-                   "latest_run": {k: latest.get(k) for k in ("status", "as_of_date", "finished_at", "model_version", "error")}
+                   "latest_run": {**{k: latest.get(k) for k in ("status", "as_of_date", "finished_at", "model_version", "error")},
+                                  # the page's confidence and model tiles read these two of the run's detail
+                                  "history_days": ((latest.get("detail") or {}).get("history") or {}).get("days"),
+                                  "warnings": list((latest.get("detail") or {}).get("warnings") or [])[:3]}
                    if latest else None},
         "series": {m: _grains(main[m]) for m in METRICS},
         "hourly_pickers": [slim(p) for p in hourly["grains"]["hour"]["points"]],
