@@ -7,12 +7,13 @@ clock), and writes it to the edge's DynamoDB table as pk = HOME#<customer_code>,
 The edge only reads. A snapshot older than its TTL disappears, so a stopped consumer shows the tab
 "offline" rather than stale numbers for ever.
 
-Shape (the edge's `HomeSnapshot` mirrors it): customer_code, site, as_of, kpis[4], attention[],
-customers[], activity[], rail{}, shape{} (chunk 133, `home_shape`: lines per hour, last 24 h), forecast{}
+Shape (the edge's `HomeSnapshot` mirrors it): customer_code, site, as_of, kpis[4], activity[], rail{},
+shape{} (chunk 133, `home_shape`: lines per hour, last 24 h), forecast{}
 (chunk 142, `home_forecast`: tomorrow, the week, accuracy, tonight's peak, 15 days of actual against
 forecast, 7 shifts), at_risk{} (chunk 150, `home_at_risk`: the deliveries behind their route's rhythm,
 worst first, with a person's check and the accuracy line). Every value is pre-formatted text; the
-page never formats numbers.
+page never formats numbers. D37 dropped attention[] and customers[] (Overview's Needs attention and
+Customers today, edge step 27): the Pick releases page shows the same products and customers.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -45,9 +46,6 @@ logger = logging.getLogger(__name__)
 
 SETTLEMENT = "pick_release"
 SPARK_POINTS = 9
-ITEM_GROUP = ["item_number", "lookup:item description.ItemDescription"]
-CUSTOMER_GROUP = ["lookup:delivery.customer_name"]
-CHRONIC_MIN_RELEASES = 3
 
 
 # ============================================================== compute
@@ -84,15 +82,6 @@ async def compute(db: AsyncSession, customer_code: str, site: Site | None = None
         totals = await aggregate_releases(db, q({"day": "today"}), customer_code)
         zero = await aggregate_releases(db, q({"day": "today", "where": ["picked==0"]}), customer_code)
         short = await aggregate_releases(db, q({"day": "today", "where": ["shortfall<0"]}), customer_code)
-        zero_items = await _optional(aggregate_releases, db, q({"day": "today", "where": ["picked==0"],
-                                                                "group_by": ITEM_GROUP, "sort": "rows", "limit": 3}),
-                                     customer_code)
-        chronic = await _optional(aggregate_releases, db, q({"start": (now - timedelta(days=7)).isoformat(),
-                                                             "end": now.isoformat(), "where": ["shortfall<0"],
-                                                             "group_by": ITEM_GROUP, "sort": "rows", "limit": 5}),
-                                  customer_code)
-        customers = await _optional(aggregate_releases, db, q({"day": "today", "group_by": CUSTOMER_GROUP,
-                                                               "sort": "rows", "limit": 5}), customer_code)
         problems = await list_releases(db, q({"day": "today", "where": ["shortfall<0"], "limit": 6}), customer_code)
     except UnknownSettlement:
         return None
@@ -124,8 +113,6 @@ async def compute(db: AsyncSession, customer_code: str, site: Site | None = None
         {"id": "attention", "label": "Needs attention", "value": _int(zero_picks),
          "caption": f"{_int(zero_picks)} zero-pick · {_int(partial)} partial", "delta_direction": None, "spark": []},
     ]
-    attention = _attention(zero_items, chronic)
-    customer_rows = _customers(customers)
     shape = await _shape(db, customer_code, now, tz, site)
     forecast = await _forecast(db, customer_code, now, tz, site)
     at_risk = await _at_risk(db, customer_code, now, tz, site)
@@ -144,11 +131,9 @@ async def compute(db: AsyncSession, customer_code: str, site: Site | None = None
         "freshness": fresh.as_dict(),
         "as_of": now.isoformat(),
         "kpis": kpis,
-        "attention": attention,
-        "customers": customer_rows,
         "activity": _activity(problems["rows"], tz),
         "rail": {"releases": _int(releases), "deliveries": _int(deliveries), "fill_rate": _pct(fill),
-                 "alerts": _int(zero_picks), "customers": _int(len(customer_rows))},
+                 "alerts": _int(zero_picks)},
         "shape": shape,
         "forecast": forecast,
         "at_risk": at_risk,
@@ -183,23 +168,6 @@ async def _shape(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneIn
     except ReadProblem as exc:
         logger.warning("home snapshot for %s: no shape of the day: %s", customer_code, exc.problems)
         return None
-
-
-async def _optional(read, db, args, customer_code) -> dict:
-    """A read grouped by a lookup the tenant may not have declared. Without the lookup the same read
-    is made on the plain field (item number without its description); a customer grouping has no
-    plain field, so that panel is simply empty."""
-    try:
-        return await read(db, args, customer_code)
-    except ReadProblem as exc:
-        plain = [g for g in args.get("group_by") or [] if not g.startswith("lookup:")]
-        if plain and plain != list(args.get("group_by") or []):
-            try:
-                return await read(db, {**args, "group_by": plain}, customer_code)
-            except ReadProblem as again:
-                exc = again
-        logger.info("home snapshot: skipped %s: %s", args.get("group_by"), exc.problems)
-        return {"rows": [], "total_rows": 0}
 
 
 async def _site(db: AsyncSession, customer_code: str) -> str:
@@ -280,44 +248,7 @@ def _units(value: Decimal) -> str:
     return text or "0"
 
 
-# ============================================================== the panels
-def _attention(zero_items: dict, chronic: dict) -> list[dict]:
-    out: list[dict] = []
-    for r in zero_items.get("rows") or []:
-        dims = r.get("dimensions") or []
-        item, desc = str(dims[0]) if dims else "?", str(dims[1]) if len(dims) > 1 and dims[1] else ""
-        label = f"{desc} ({item})" if desc else item
-        n = int(r.get("rows") or 0)
-        units = -_dec(r.get("shortfall"))
-        out.append({"id": f"zero:{item}", "kind": "stock", "entity": {"kind": "product", "id": item},
-                    "title": f"{label} zero-picked {n} time{'s' if n != 1 else ''} today",
-                    "detail": f"{_units(units)} units short",
-                    "ask_text": f"Why was item {item} zero-picked today?"})
-    for r in chronic.get("rows") or []:
-        n = int(r.get("rows") or 0)
-        if n < CHRONIC_MIN_RELEASES:
-            continue
-        dims = r.get("dimensions") or []
-        item, desc = str(dims[0]) if dims else "?", str(dims[1]) if len(dims) > 1 and dims[1] else ""
-        label = f"{desc} ({item})" if desc else item
-        out.append({"id": f"chronic:{item}", "kind": "other", "entity": {"kind": "product", "id": item},
-                    "title": f"{label} short on {n} releases this week",
-                    "detail": f"{_units(-_dec(r.get('shortfall')))} units short over 7 days",
-                    "ask_text": f"Which customers were short of item {item} this week?"})
-    return out[:4]
-
-
-def _customers(customers: dict) -> list[dict]:
-    rows = customers.get("rows") or []
-    top = max((int(r.get("rows") or 0) for r in rows), default=0)
-    out = []
-    for r in rows:
-        dims = r.get("dimensions") or []
-        lines = int(r.get("rows") or 0)
-        out.append({"name": str(dims[0]) if dims and dims[0] else "(no customer)", "lines": _int(lines),
-                    "short_lines": _int(int(_dec(r.get("is_short")))),
-                    "share": float(Decimal(lines) / Decimal(top)) if top else 0.0})
-    return out
+# ============================================================== the live activity panel
 
 
 def _activity(rows: list[dict], tz: ZoneInfo) -> list[dict]:
