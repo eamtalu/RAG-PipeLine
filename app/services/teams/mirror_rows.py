@@ -121,6 +121,10 @@ KEY_LAYOUT: dict[str, KeySpec] = {
         pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USER#{user_id}#WATCHES", ttl_seconds=None
     ),
     "watchables": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="WATCHABLES", ttl_seconds=600),
+    #: step 30: the Forecast page opened from Overview, per site and for "all", rewritten every five minutes
+    "site_forecast": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}", sk="SITE#{site_id}#FORECAST", ttl_seconds=3600
+    ),
 }
 
 
