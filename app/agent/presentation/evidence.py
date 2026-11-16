@@ -18,12 +18,21 @@ import re
 from decimal import Decimal, InvalidOperation
 
 #: A figure in prose: 1,200 · -809 · 92.58 · 11.5% · 843s. Not a date, a time or a key (handled below).
-_NUMBER = re.compile(r"(?<![\w.\-/:])[-−]?\d[\d,]*(?:\.\d+)?%?(?![\w.\-/:])")
+#: It never ends on a comma ("2026," is 2026) and a full stop that ends the sentence does not hide
+#: it ("short by 5,999." is checked); a dot followed by more characters (1.2.3, 10.0.0.1) still does.
+_NUMBER = re.compile(r"(?<![\w.\-/:])[-−]?\d(?:[\d,]*\d)?(?:\.\d+)?%?(?![\w\-/:]|\.\w)")
+_MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
+#: The year of a written date ("16 November 2026", "November 16, 2026", "November 2026"), removed
+#: whole so the year is not read as a figure; a year on its own ("in 2026") stays a figure.
+_WRITTEN_DATE = re.compile(
+    rf"\b(?:\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH}|{_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?|{_MONTH}),?\s+(?:19|20)\d{{2}}\b", re.I)
 _DATE_OR_TIME = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}(?::\d{2})?|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*", re.I)
 _ORDINAL = re.compile(r"^\s*\d+\.\s", re.M)
 _TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$", re.M)
 _LIST_LINE = re.compile(r"^\s*(?:\d+\.|[-*•])\s+.*$", re.M)
 _RESULT_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+#: A thousands-grouped number inside a tool result ("777 – 1,042"), read whole for the guard's pool.
+_GROUPED_NUMBER = re.compile(r"(?<![\d,])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d,])")
 
 SMALL = 31  # a bare integer up to this is a count, an ordinal, a day or a "top N": never withheld
 
@@ -36,19 +45,35 @@ def _decimal(token: str) -> Decimal | None:
 
 
 def figures(text: str) -> list[str]:
-    """The figures a reader would take as data: dates, times, list ordinals and table rules removed."""
-    cleaned = _DATE_OR_TIME.sub(" ", text)
+    """The figures a reader would take as data: dates, times, list ordinals and table rules removed.
+
+    >>> figures("On 16 November 2026, 957 lines; short by 5,999.")
+    ['957', '5,999']
+    >>> figures("Build 1.2.3 on 10.0.0.1, in 2026")
+    ['2026']
+    """
+    cleaned = _WRITTEN_DATE.sub(" ", text)
+    cleaned = _DATE_OR_TIME.sub(" ", cleaned)
     cleaned = _ORDINAL.sub(" ", cleaned)
     cleaned = re.sub(r"\|[-: ]+\|", " ", cleaned)
     return [m.group(0) for m in _NUMBER.finditer(cleaned)]
 
 
 def numbers_in_results(results: list[str]) -> set[Decimal]:
-    """Every number any tool returned, as a Decimal, so 110.666667 and "110.67" can meet."""
+    """Every number any tool returned, as a Decimal, so 110.666667 and "110.67" can meet; a
+    thousands-grouped number in a text value counts whole as well as by its parts.
+
+    >>> sorted(n for n in numbers_in_results(['{"range": "777 to 1,042"}']) if n > 0)
+    [Decimal('1'), Decimal('42'), Decimal('777'), Decimal('1042')]
+    """
     out: set[Decimal] = set()
     for text in results:
-        for m in _RESULT_NUMBER.finditer(text):
-            d = _decimal(m.group(0))
+        # Step 1: the parts as before, so nothing that was grounded stops being grounded
+        tokens = [m.group(0) for m in _RESULT_NUMBER.finditer(text)]
+        # Step 2: "1,042" whole too, otherwise a figure a tool wrote for people is never grounded
+        tokens += [m.group(0) for m in _GROUPED_NUMBER.finditer(text)]
+        for token in tokens:
+            d = _decimal(token)
             if d is not None:
                 out.add(d)
                 out.add(-d)

@@ -86,3 +86,24 @@ def lift_written_calls(answer: str, known: frozenset[str] = PRESENTATION_TOOL_NA
             kept.append(lines[i - 1])  # a bare tool name with nothing after it is just a word
     text = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
     return text, calls
+
+
+#: A line that only names a block the model meant to show ("[Line chart: Deliveries per day]",
+#: "**[Table]**"): the block itself is drawn from the calls, so the line is noise in the text.
+_PLACEHOLDER = re.compile(
+    r"^[ \t]*[*_]*\[\s*(?:(?:line|bar|pie|area|column|trend)\s+)?(?:chart|graph|table|heat\s*map|kpis?|tiles?|findings)\b"
+    r"[^\]\n]*\][*_]*[ \t]*$\n?", re.I | re.M)
+
+
+def strip_placeholders(answer: str) -> str:
+    """The answer without lines that only name a block, such as "[Line chart: …]" (step 24).
+
+    >>> strip_placeholders("Lead.\\n\\n[Line chart: Deliveries per day]\\n\\n- Fact")
+    'Lead.\\n\\n- Fact'
+    >>> strip_placeholders("Item 104441 [milk] was over-picked.")
+    'Item 104441 [milk] was over-picked.'
+    """
+    if "[" not in answer:
+        return answer
+    return re.sub(r"\n{3,}", "\n\n", _PLACEHOLDER.sub("", answer)).strip()
+

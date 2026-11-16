@@ -51,8 +51,8 @@ from app.agent.runtime.trace import RunTrace
 from app.agent.router.providers import adapter_for
 from app.agent.router.router import ModelRouter
 from app.agent.presentation import evidence
-from app.agent.presentation.blocks import strip_followup_lines
-from app.agent.presentation.written_calls import lift_written_calls
+from app.agent.presentation.blocks import DRAWING_TOOL_NAMES, drop_followup_lead, strip_followup_lines
+from app.agent.presentation.written_calls import lift_written_calls, strip_placeholders
 from app.services.notifications.redact import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -128,6 +128,30 @@ def text_of(message: AIMessage) -> str:
         elif isinstance(block, dict) and block.get("type") == "text":
             parts.append(str(block.get("text") or ""))
     return "".join(parts).strip()
+
+
+def answer_from_draft(new: Sequence[BaseMessage]) -> str:
+    """The answer a draft gave: its closing message, unless that is only a remark ("The follow-up
+    options are ready") and the model wrote a fuller answer beside a drawing call after the data.
+
+    (data call; answer beside suggest_followups; "The options are ready.") -> the answer ;
+    (closing message with a figure) -> the closing message ; (words beside a data call) -> never them
+    """
+    # Step 1: The closing message is the answer whenever it states a figure, because that is what
+    # the model meant to say last
+    ai = [m for m in new if isinstance(m, AIMessage)]
+    final = next((m for m in reversed(ai) if not m.tool_calls), None)
+    closing = text_of(final) if final is not None else ""
+    if evidence.figures(closing):
+        return closing
+    # Step 2: Otherwise the longest text written beside a drawing call AFTER the last data call,
+    # because words beside a data call are narration ("let me read 3 days first"), not an answer
+    last_data = max((i for i, m in enumerate(ai)
+                     if any(c["name"] not in DRAWING_TOOL_NAMES for c in m.tool_calls)), default=-1)
+    # Step 3: Only a text that states a figure replaces the closing message, so a plain answer
+    # such as "No products were short today." is never swapped for an earlier draft
+    beside = [t for t in (text_of(m) for m in ai[last_data + 1:] if m.tool_calls) if evidence.figures(t)]
+    return max(beside, key=len) if beside else closing
 
 
 def short(value: Any, n: int = 200) -> str:
@@ -336,7 +360,8 @@ class GroundedAgent:
                 answer = strip_followup_lines(answer, calls)
             table = self.presentation.render(calls)
             if table:
-                answer = (self.presentation.strip(answer, table) + "\n\n" + table).strip()
+                # a follow-up lead whose list the stripper took is noise above the table (step 24)
+                answer = (drop_followup_lead(self.presentation.strip(answer, table)) + "\n\n" + table).strip()
                 data = self.presentation.structured(calls, context.public_base_url)
             # the typed blocks the presentation calls asked for (step 5); a withheld answer keeps
             # only those drawn from the data itself (step 19), and says so
@@ -379,18 +404,19 @@ class GroundedAgent:
         """One run of the tool loop, checked: the answer, its trace, and what is wrong with it
         ("fabricated" = figures with no successful data call, "ungrounded" = a figure no tool
         returned, None = fine)."""
-        # recursion_limit counts graph steps; a tool round is two (model, tools), plus the final answer.
+        # recursion_limit counts graph steps; a tool round is two (model, tools), plus the final
+        # answer, plus the one step LangGraph spends on the input: without it a run of exactly
+        # `max_iterations` rounds that then answered was cut off and its answer lost (step 24)
         seen: list[BaseMessage] = list(messages)
         stop_reason = "end_turn"
         try:
             # Stream by graph step so a run that hits the limit still yields every message before it.
             async for step in graph.astream({"messages": messages}, stream_mode="values",
-                                            config={"recursion_limit": max_iterations * 2 + 1}):
+                                            config={"recursion_limit": max_iterations * 2 + 2}):
                 seen = step["messages"]
         except GraphRecursionError:
             stop_reason = "max_iterations"
-        final = next((m for m in reversed(seen) if isinstance(m, AIMessage) and not m.tool_calls), None)
-        answer = text_of(final) if final is not None else ""
+        answer = answer_from_draft(seen[len(messages):])
         # A draft that ran out of tool rounds is not trusted, even when the model wrote a sentence:
         # on 13 November it ended an "Ask why" with words about a reminder form nobody asked for
         if stop_reason == "max_iterations":
@@ -400,6 +426,7 @@ class GroundedAgent:
         # A presentation call the model wrote out as text (step 19) is lifted off the answer into
         # the trace, so it is validated, guarded and drawn as if it had been called
         answer, written = lift_written_calls(answer)
+        answer = strip_placeholders(answer)
         if written:
             logger.info("agent written_calls lifted=%s", [c["tool"] for c in written])
             calls = calls + written

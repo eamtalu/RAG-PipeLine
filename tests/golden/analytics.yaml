@@ -603,6 +603,25 @@ cases:
       answer_contains: ["3 lines, 2 exact and 1 over."]
       answer_excludes: ["Which items were over-picked?", "Who picked it?"]
 
+  # ---------------------------------------------------------------- step 24: the total over every group comes from the tool
+  # On 15 November "by how many units" was answered with a total the model added up (withheld).
+  - name: the_total_short_over_all_items_is_quoted_from_overall
+    question: Which products were short on 18 September 2026, and by how many units in all?
+    replies:
+      - tool: aggregate_releases
+        args:
+          group_by: [item_number]
+          where: ["shortfall<0"]
+          sort: units_short
+          start: "2026-09-18T04:44:42+00:00"
+          end: "2026-09-18T07:44:42+00:00"
+      - text: "Two items were short by 11 units in all on 18 September 2026, across 3 releases.\n\n- 100230 was short by 10 units\n- 104568 by 1 unit"
+    expect:
+      stop_reason: end_turn
+      retries: 0
+      tools: [aggregate_releases]
+      withheld_figures: []
+
   # ---------------------------------------------------------------- step 22: facts as bullets, the order named
   - name: fact_bullets_survive_beside_the_rendered_table
     question: Which products were short on 18 September 2026, and by how much?

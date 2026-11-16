@@ -7,7 +7,7 @@ per site; every row the new Teams page reads is written to the edge's table unde
 
 import json
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -74,15 +74,18 @@ def _fact(when: datetime, expected, picked, *, rep, warehouse, delivery="D1", it
 
 async def _plant_two_warehouses(now: datetime):
     """Today: three releases at BRI and one at LON, all in the last two hours (or, in the first
-    hour and a half after midnight, from the start of today, so they never fall on yesterday)."""
+    hour and a half after midnight, from the start of today, so they never fall on yesterday),
+    and never after `now`: at 00:12 on 16 November the last two fell in the future and "this week
+    so far" counted two of four."""
     start_of_today = now.astimezone(ZoneInfo("Europe/London")).replace(
         hour=0, minute=0, second=0, microsecond=0)
     t = max(now - timedelta(minutes=90), start_of_today)
+    step = min(timedelta(minutes=10), (now - t) / 4)  # the last one strictly before now
     facts = [
         _fact(t, 10, 10, rep="B1", warehouse="BRI"),
-        _fact(t + timedelta(minutes=10), 4, 4, rep="B2", warehouse="BRI", user="DBOBOC"),
-        _fact(t + timedelta(minutes=20), 7, 0, rep="B3", warehouse="BRI", delivery="D2", item="100230"),
-        _fact(t + timedelta(minutes=30), 5, 5, rep="L1", warehouse="LON", delivery="D3", item="100606"),
+        _fact(t + step, 4, 4, rep="B2", warehouse="BRI", user="DBOBOC"),
+        _fact(t + 2 * step, 7, 0, rep="B3", warehouse="BRI", delivery="D2", item="100230"),
+        _fact(t + 3 * step, 5, 5, rep="L1", warehouse="LON", delivery="D3", item="100606"),
     ]
     async with async_session() as db:
         for f in facts:
