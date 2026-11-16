@@ -424,6 +424,16 @@ Rollback: the previous checkout and a restart.
 
 Deployed 15 November 2026 23:30 as `c9ddb1c`; live check passed for the three questions above; four follow-up observations are recorded in the handoff as step 24.
 
+## D25: the ranking keeps its chart, all-groups stats from the tool
+
+What it changes: the auto chart is drawn from the last grouped result, so reading the release list after a ranking keeps the ranking's chart; a grouped aggregate's `overall` also carries each stat asked for (a median over all rows, not a median of the groups' medians).
+Why: the D24 live runs lost the short-products chart whenever the model read the release list, and one answer called one picker's median the median across all pickers.
+No migration, no contract change, no edge change. Merge D24 (PR #39) first.
+
+Deploy: `./deploy.sh`. Check in Teams: "Which products were short today?" shows the ranking chart; "How long does a line take per picker on 13 November 2026?" gives 51.1 s as the median across all pickers, with each picker's own median in the bullets.
+
+Rollback: the previous checkout and a restart.
+
 ## D24: answer integrity (finished answers kept, figures read right, totals from the tool)
 
 What it changes: the step limit lets ten tool rounds end with an answer; a closing remark with no figure gives way to the answer written beside the last drawing call; the figure guard reads "1,042" in a result whole, ignores the year of a written date and checks a figure before a full stop; a bulleted follow-up lead-in, a dangling one above the table and "[… chart …]" placeholder lines are removed; a grouped aggregate returns `overall` (sums over all groups) with a note; the follow-up acknowledgement ends the turn and a run that only repeats presentation calls after it keeps its answer; the delivery story gives each not-exact pick its difference.
