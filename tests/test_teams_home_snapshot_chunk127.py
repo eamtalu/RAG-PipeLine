@@ -108,21 +108,29 @@ async def test_the_snapshot_counts_today_on_the_tenant_clock():
     assert fill["value"] == "64.3%" and fill["caption"] == "2 short lines"
     attention = _kpi(snap, "attention")
     assert attention["value"] == "1" and attention["caption"] == "1 zero-pick · 1 partial"
-    assert snap["rail"] == {"releases": "4", "deliveries": "2", "fill_rate": "64.3%", "alerts": "1", "customers": "0"}
+    assert snap["rail"] == {"releases": "4", "deliveries": "2", "fill_rate": "64.3%", "alerts": "1"}
 
 
-async def test_attention_items_customers_and_activity_come_from_the_rows():
+async def test_activity_comes_from_the_rows_and_the_dropped_panels_are_not_read(monkeypatch):
+    """D37: Overview dropped Needs attention and Customers today (edge step 27), so the snapshot
+    neither carries them nor makes the item and customer reads behind them."""
     now = datetime.now(timezone.utc)
     if now.astimezone(TZ).hour < 2:
         pytest.skip("the planted rows would fall on yesterday this close to midnight")
     await _plant(now)
+    reads: list[dict] = []
+    real = home_snapshot.aggregate_releases
+
+    async def recording(db, args, customer_code):
+        reads.append(args)
+        return await real(db, args, customer_code)
+
+    monkeypatch.setattr(home_snapshot, "aggregate_releases", recording)
     async with async_session() as db:
         snap = await home_snapshot.compute(db, CC)
-    zero = [a for a in snap["attention"] if a["kind"] == "stock"]
-    assert len(zero) == 1 and zero[0]["title"].startswith("100230 zero-picked 1 time")
-    assert "7 units short" in zero[0]["detail"] and "100230" in zero[0]["ask_text"]
-    # no customer lookup is declared for this probe, so the customers panel is empty, not broken
-    assert snap["customers"] == []
+    assert "attention" not in snap and "customers" not in snap
+    grouped = [g for a in reads for g in a.get("group_by") or []]
+    assert "item_number" not in grouped and not any(g.startswith("lookup:") for g in grouped)
     assert [a["alert"] for a in snap["activity"]] == [True, False]
     assert "DBOBOC" in snap["activity"][0]["text"] and "0 of 7" in snap["activity"][0]["text"]
     assert snap["as_of"].endswith("+00:00") or snap["as_of"].endswith("Z")
@@ -133,7 +141,7 @@ async def test_an_empty_day_is_a_snapshot_of_zeros_not_an_error():
         await api.create_settlement(body=BODY, backfill=True, customer=CC, db=db)
         snap = await home_snapshot.compute(db, CC)
     assert _kpi(snap, "releases")["value"] == "0" and _kpi(snap, "releases")["delta_direction"] is None
-    assert _kpi(snap, "fill_rate")["value"] == "–" and snap["attention"] == [] and snap["activity"] == []
+    assert _kpi(snap, "fill_rate")["value"] == "–" and "attention" not in snap and snap["activity"] == []
 
 
 async def test_a_customer_without_the_settlement_gives_no_snapshot():
