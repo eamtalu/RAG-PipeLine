@@ -55,6 +55,11 @@
       "sk": "SITE#{site_id}#HOME",
       "ttl_seconds": 3600
     },
+    "site_releases": {
+      "pk": "EYE#{customer_code}",
+      "sk": "SITE#{site_id}#RELEASES",
+      "ttl_seconds": 3600
+    },
     "sites": {
       "pk": "EYE#{customer_code}",
       "sk": "SITES",
@@ -1709,5 +1714,5 @@
       "type": "object"
     }
   },
-  "revision": "3.20"
+  "revision": "3.21"
 }
