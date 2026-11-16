@@ -130,6 +130,11 @@ KEY_LAYOUT: dict[str, KeySpec] = {
     "site_releases": KeySpec(
         pk=f"{KEY_PREFIX}#{{customer_code}}", sk="SITE#{site_id}#RELEASES", ttl_seconds=3600
     ),
+    #: step 34: Overview's all-sites view (every site side by side, fill rate by site by day, the last
+    #: 8 weeks against the target, what changed since last week), rewritten every five minutes
+    "all_sites": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}", sk="SITE#all#SITES", ttl_seconds=3600
+    ),
 }
 
 
