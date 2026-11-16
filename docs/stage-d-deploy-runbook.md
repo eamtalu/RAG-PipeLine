@@ -423,3 +423,14 @@ Deploy: `./deploy.sh`. Check in Teams: "How long does a line take per picker tod
 Rollback: the previous checkout and a restart.
 
 Deployed 15 November 2026 23:30 as `c9ddb1c`; live check passed for the three questions above; four follow-up observations are recorded in the handoff as step 24.
+
+## D24: answer integrity (finished answers kept, figures read right, totals from the tool)
+
+What it changes: the step limit lets ten tool rounds end with an answer; a closing remark with no figure gives way to the answer written beside the last drawing call; the figure guard reads "1,042" in a result whole, ignores the year of a written date and checks a figure before a full stop; a bulleted follow-up lead-in, a dangling one above the table and "[… chart …]" placeholder lines are removed; a grouped aggregate returns `overall` (sums over all groups) with a note; the follow-up acknowledgement ends the turn and a run that only repeats presentation calls after it keeps its answer; the delivery story gives each not-exact pick its difference.
+Why: the live check of 15 November and the live scores after D23 (answers lost at the limit or to a remark, forecast answers wrongly withheld, totals the model added up, tool loops).
+No migration, no contract change, no edge change. Merge the D23b hotfix (PR #38) first, or this PR alone, which contains it.
+
+Deploy: `./deploy.sh`. Check in Teams: "Which products were short today, and by how many units?" gives the total from the tool and is not withheld; "What is coming tomorrow?" is not withheld; "give me the details of this delivery number 33330" answers in full; "what is available?" answers.
+
+Rollback: the previous checkout and a restart.
+
