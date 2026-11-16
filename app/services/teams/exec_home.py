@@ -111,8 +111,13 @@ def on_time(counts: dict) -> tuple[float | None, int, int]:
     return round(fine / departures, 4), departures, missed
 
 
-async def _metrics(db: AsyncSession, cc: str, site: Site | None, start: datetime, end: datetime, *,
+async def window_metrics(db: AsyncSession, cc: str, site: Site | None, start: datetime, end: datetime, *,
                    with_pickers: bool) -> dict:
+    """One site's (or the customer's) figures over a window: fill rate, on-time dispatch, lines,
+    deliveries and, when asked, the distinct pickers. Also read by the all-sites view (step 34).
+
+    (BRI, this week) -> {"fill_rate": 0.971, "on_time": 0.93, "departures": 100, "left_behind": 2, "lines": ..., ...}
+    """
     args = {"start": start.isoformat(), "end": end.isoformat()}
     totals = await aggregate_releases(db, with_site(dict(args), site), cc)
     row = (totals.get("rows") or [{}])[0]
@@ -135,7 +140,7 @@ async def _metrics(db: AsyncSession, cc: str, site: Site | None, start: datetime
     }
 
 
-async def _series(db: AsyncSession, cc: str, site: Site | None, start: datetime, end: datetime) -> dict[str, float | None]:
+async def daily_fill_rates(db: AsyncSession, cc: str, site: Site | None, start: datetime, end: datetime) -> dict[str, float | None]:
     """Fill rate per day over the window: {"2026-11-07": 0.971, ...}; a day with no rows is absent."""
     result = await aggregate_releases(
         db, with_site({"start": start.isoformat(), "end": end.isoformat(), "group_by": ["day"], "limit": 100}, site), cc)
@@ -167,8 +172,8 @@ async def compute(db: AsyncSession, customer_code: str, *, now: datetime | None 
             start, end, prev_start, prev_end = period_windows(local_now, period)
             entry = {"label": PERIOD_LABELS[period], "range_text": range_text(start, end), "all": None, "sites": {}}
             for site_id, site in targets:
-                current = await _metrics(db, customer_code, site, start, end, with_pickers=True)
-                previous = await _metrics(db, customer_code, site, prev_start, prev_end, with_pickers=False)
+                current = await window_metrics(db, customer_code, site, start, end, with_pickers=True)
+                previous = await window_metrics(db, customer_code, site, prev_start, prev_end, with_pickers=False)
                 metrics = {**current, "fill_rate_prev": previous["fill_rate"], "on_time_prev": previous["on_time"],
                            "lines_prev": previous["lines"]}
                 if site is None:
@@ -181,7 +186,7 @@ async def compute(db: AsyncSession, customer_code: str, *, now: datetime | None 
         labels = [(series_start + timedelta(days=i)).date().isoformat() for i in range(SERIES_DAYS)]
         series: dict = {"labels": labels, "all": [], "sites": {}}
         for site_id, site in targets:
-            by_day = await _series(db, customer_code, site, series_start, local_now)
+            by_day = await daily_fill_rates(db, customer_code, site, series_start, local_now)
             values = [by_day.get(day) for day in labels]
             if site is None:
                 series["all"] = values

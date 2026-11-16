@@ -269,4 +269,4 @@ async def test_at_risk_rows_carry_the_warehouse_and_the_board_filters_on_it():
         stored = await db.scalar(select(AnalyticsAtRiskDelivery.warehouse).where(
             AnalyticsAtRiskDelivery.customer_code == CC, AnalyticsAtRiskDelivery.delivery_number == "D300"))
         assert stored == "LON"
-        assert delivery_store._state_from_row(row).warehouse == "LON"
+        assert delivery_store.state_from_row(row).warehouse == "LON"

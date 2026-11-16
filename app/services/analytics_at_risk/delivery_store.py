@@ -126,7 +126,7 @@ async def _write_tier(db: AsyncSession, row: AnalyticsAtRiskDelivery, tier: mode
         await check_store.record(db, row, action="reopened", actor=check_store.WORKER_ACTOR, note=None, at=now)
 
 
-def _state_from_row(row: AnalyticsAtRiskDelivery) -> model.DeliveryState:
+def state_from_row(row: AnalyticsAtRiskDelivery) -> model.DeliveryState:
     return model.DeliveryState(
         delivery_number=row.delivery_number, route=row.route, customer_name=row.customer_name,
         customer_number=row.customer_number, departure_at=row.departure_at, lines_expected=row.lines_expected,
@@ -202,7 +202,7 @@ async def close_due(db: AsyncSession, cc: str, states: Mapping[str, model.Delive
         state = states.get(row.delivery_number)
         if state is not None and state.departure_at.astimezone(tz).date() == row.departure_date:
             _write_progress(row, state)
-        state = _state_from_row(row)
+        state = state_from_row(row)
         clock = _clock_from_row(row, warn_before=warn_before, gone_after=gone_after)
         await _write_tier(db, row, model.tier_for(state, now, clock), now=now,
                           minutes=model.minutes_to_departure(clock.usual_ready_at, now), clock=clock, stats=ApplyStats())

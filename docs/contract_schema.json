@@ -5,6 +5,11 @@
       "sk": "ADVISORIES",
       "ttl_seconds": null
     },
+    "all_sites": {
+      "pk": "EYE#{customer_code}",
+      "sk": "SITE#all#SITES",
+      "ttl_seconds": 3600
+    },
     "approvals": {
       "pk": "EYE#{customer_code}",
       "sk": "APPROVALS",
@@ -1714,5 +1719,5 @@
       "type": "object"
     }
   },
-  "revision": "3.21"
+  "revision": "3.22"
 }
