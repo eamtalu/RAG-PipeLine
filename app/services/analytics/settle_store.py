@@ -288,18 +288,34 @@ async def settle_touched(db: AsyncSession, customer_code: str, facts: Sequence[M
     return out
 
 
-async def resettle_all(db: AsyncSession, customer_code: str, settlement: st.Settlement) -> int:
-    """Every key this settlement has, from scratch. For a new or edited settlement, whose rows do not
-    exist yet or were made by the old rules. Does NOT commit."""
+async def _keys(db: AsyncSession, customer_code: str, settlement: st.Settlement,
+                since: datetime | None = None) -> list[tuple[str, ...]]:
     key_exprs = []
     for name in settlement.key:
         key_exprs.append(AnalyticsFact.attributes[contract.attr_key(name)].astext
                          if contract.is_attr_path(name) else getattr(AnalyticsFact, name))
+    since_clause = [AnalyticsFact.event_time >= since] if since is not None else []
     rows = (await db.execute(
         select(*key_exprs).where(AnalyticsFact.customer_code == customer_code,
-                                 AnalyticsFact.method.in_(settlement.reads))
-        .group_by(*key_exprs))).all()
-    keys = [tuple(str(p) for p in r) for r in rows if all(p not in (None, "") for p in r)]
+                                 AnalyticsFact.method.in_(settlement.reads), *since_clause)
+        .group_by(*key_exprs).order_by(*key_exprs))).all()
+    return [tuple(str(p) for p in r) for r in rows if all(p not in (None, "") for p in r)]
+
+
+async def keys_since(db: AsyncSession, customer_code: str, settlement: st.Settlement,
+                     since: datetime) -> list[tuple[str, ...]]:
+    """Every key with a call at or after `since`, in key order, to re-settle in place after a lookup
+    was repaired (chunk 211). Reads only; the caller settles them in batches and commits each.
+
+    (pick_release, since 2 October) -> [("620498",), ("620499",), ...]
+    """
+    return await _keys(db, customer_code, settlement, since)
+
+
+async def resettle_all(db: AsyncSession, customer_code: str, settlement: st.Settlement) -> int:
+    """Every key this settlement has, from scratch. For a new or edited settlement, whose rows do not
+    exist yet or were made by the old rules. Does NOT commit."""
+    keys = await _keys(db, customer_code, settlement)
     written = 0
     for i in range(0, len(keys), 500):
         written += await settle_keys(db, customer_code, settlement, keys[i:i + 500])

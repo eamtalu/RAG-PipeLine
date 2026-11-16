@@ -340,6 +340,18 @@ def _needs_entries(source_row, stored_fact) -> bool:
             or prior.get(_NORM_V_KEY) != _NORMALISE_VERSION)
 
 
+def _list_harvest_rows(source_rows: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """The source rows in the shape `lk.harvest_lists` reads, timed as their facts are timed.
+
+    >>> _list_harvest_rows([{"id": 1, "method": "ListPickLinesByUser", "started_at": "t0", "status": "ok"}])
+    [{'id': 1, 'method': 'ListPickLinesByUser', 'event_time': 't0'}]
+    """
+    # Chunk 211: a source row carries `started_at`, never `event_time`; handed over as it was, every
+    # row was skipped and no list lookup was harvested live from chunk 129 on (only backfills were).
+    # The normaliser times a fact by `started_at` (normalizer.py), so the observation is timed alike.
+    return [{"id": r["id"], "method": r.get("method"), "event_time": r.get("started_at")} for r in source_rows]
+
+
 async def _read_response_entries(db: AsyncSession, customer_code: str, window: UtcWindow,
                                  only: set | None = None
                                  ) -> dict[uuid.UUID, list[tuple[str, dict]]]:
@@ -1016,7 +1028,8 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
             # entries this run already holds, keyed by the source transaction.
             await lookup_store.record(db, customer_code,
                                       lk.harvest(facts, lookups.values())
-                                      + lk.harvest_lists(source_rows, by_txn, lookups.values()),
+                                      + lk.harvest_lists(_list_harvest_rows(source_rows), by_txn,
+                                                         lookups.values()),
                                       lookups)
 
         # Chunk 117: the settlements, recomputed for every key these facts touched.
