@@ -433,6 +433,10 @@ def auto_story_table(tool: str, result: dict) -> TableBlock | None:
     quantity = ("QuantityPicked", "ExpectedQuantity")
     body = [[_cell(t.get(k)) if k in quantity and t.get(k) not in (None, "") else str(t.get(k) or "") for k in keys]
             for t in rows[:25] if isinstance(t, dict)]
+    # a story over several days (step 26) says the date beside each time, or the times read as one day
+    dates = [str(t.get("date") or "") for t in rows[:25] if isinstance(t, dict)]
+    if len(set(dates)) > 1:
+        body = [[f"{d} {r[0]}".strip(), *r[1:]] for d, r in zip(dates, body)]
     total = int(result.get("total") or len(rows))
     words = {"delivery_number": "Delivery", "order_number": "Order", "item_number": "Item", "reqid": "Request",
              "reporting_number": "Pick-list line"}.get(str(result.get("key")), "")

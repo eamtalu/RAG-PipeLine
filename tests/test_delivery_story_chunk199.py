@@ -66,7 +66,11 @@ async def test_the_story_widens_to_the_week_before_the_day_asked():
     later = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)  # three days after the planted day
     async with async_session() as db:
         out = await st.story_rows(db, CC, {"value": plant.STORY_DELIVERY}, now=later)
-    assert out["found"] is True and out["outside_filter"] is True and "2026-09-15 to 2026-09-21" in out["looked_in"]
+        named = await st.story_rows(db, CC, {"value": plant.STORY_DELIVERY, "day": "today"}, now=later)
+    # step 26: with no day named the 7 days are the search itself, not a widening
+    assert out["found"] is True and out["outside_filter"] is False and "2026-09-15 to 2026-09-21" in out["looked_in"]
+    # a day named that has nothing still widens to the week before it
+    assert named["found"] is True and named["outside_filter"] is True and "2026-09-15 to 2026-09-21" in named["looked_in"]
     async with async_session() as db:
         pinned = await st.story_rows(db, CC, {"value": plant.STORY_DELIVERY, "day": "2026-09-18"}, now=later)
     assert pinned["found"] is True and pinned["outside_filter"] is False
