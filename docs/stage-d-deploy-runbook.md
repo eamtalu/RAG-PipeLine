@@ -496,3 +496,5 @@ After a change to the arithmetic, run the parity check in `scripts/releases_pari
 Rollback: the previous checkout and a restart.
 
 Deployed 16 November 2026 15:34 GMT as `1cb53ff` (D33b list backfill, D34 all-sites row); D31 and D33 at 14:23 as `e8a471a`. Then the pick-line repair (see the handoff). Rollback: the previous checkout (`91285b7` keeps the Pick releases rows) and a restart.
+
+Deployed 16 November 2026: D35 (`8b6292f`, hourly forecast per warehouse) at 16:20; the forecast run as of 15 November then completed at 22:35 (a run takes about 6 hours and a restart kills it, so no deploy between 03:00 and about 09:30). D37 (`9a7217e`, Overview snapshot drops Needs attention and Customers today) at 23:26; `e0734fe` (all-sites volume line without headcount) at 23:34. Rollback: the previous checkout and a restart.
