@@ -73,37 +73,39 @@ async def clean():
     await _wipe()
 
 
-async def _plant_pick_list_call(lines: list[dict]) -> None:
-    """One `ListPickLinesByUser` call as Stage 2 leaves it: the transaction, and its response entry
-    whose `response` is the list of pick-list lines (the live shape, measured 14 November 2026)."""
+async def _plant_pick_list_calls(*calls: tuple[datetime, list[dict]]) -> None:
+    """`ListPickLinesByUser` calls as Stage 2 leaves them, then folded: each a transaction and its response
+    entry whose `response` is the list of pick-list lines (the live shape, measured 14 November 2026)."""
     async with async_session() as db:
         job = Job(customer_code=CC, filename="t.log", document_type="transaction_log",
                   storage_key=f"{CC}/{uuid.uuid4().hex}/t.log", status="completed")
         db.add(job)
         await db.flush()
-        txn = LogTransaction(customer_code=CC, job_id=job.id, sealed=True, started_at=T0,
-                             ended_at=T0 + timedelta(seconds=2), date=T0.date(), duration_ms=900,
-                             method="ListPickLinesByUser", transaction_name="Brighton Stock Pick",
-                             status=LogTransactionStatus.success, row_fingerprint="fp-1", attributes={})
-        db.add(txn)
-        await db.flush()
-        entry = LogEntry(customer_code=CC, job_id=job.id, timestamp=T0 + timedelta(seconds=1), line_number=1,
-                         raw_body="resp", entry_hash=uuid.uuid4().hex, source_file="S/x.log", level="INFO",
-                         entry_type=LogEntryType("response"), fields={"reqid": "r-1", "response": lines})
-        db.add(entry)
-        await db.flush()
-        db.add(LogEntryAssignment(customer_code=CC, entry_id=entry.id, entry_ts=entry.timestamp,
-                                  transaction_id=txn.id, seq=0))
-        db.add(AnalyticsPendingWindow(customer_code=CC, range_start=T0 - WIDE, range_end=T0 + WIDE))
+        for n, (at, lines) in enumerate(calls):
+            txn = LogTransaction(customer_code=CC, job_id=job.id, sealed=True, started_at=at,
+                                 ended_at=at + timedelta(seconds=2), date=at.date(), duration_ms=900,
+                                 method="ListPickLinesByUser", transaction_name="Brighton Stock Pick",
+                                 status=LogTransactionStatus.success, row_fingerprint=f"fp-{n}", attributes={})
+            db.add(txn)
+            await db.flush()
+            entry = LogEntry(customer_code=CC, job_id=job.id, timestamp=at + timedelta(seconds=1), line_number=1,
+                             raw_body="resp", entry_hash=uuid.uuid4().hex, source_file="S/x.log", level="INFO",
+                             entry_type=LogEntryType("response"), fields={"reqid": f"r-{n}", "response": lines})
+            db.add(entry)
+            await db.flush()
+            db.add(LogEntryAssignment(customer_code=CC, entry_id=entry.id, entry_ts=entry.timestamp,
+                                      transaction_id=txn.id, seq=0))
+        db.add(AnalyticsPendingWindow(customer_code=CC, range_start=min(c[0] for c in calls) - WIDE,
+                                      range_end=max(c[0] for c in calls) + WIDE))
         await db.commit()
     await n3.consume_tenant(CC)
 
 
 async def test_the_live_fold_harvests_every_line_of_a_pick_list_response():
-    await _plant_pick_list_call([
+    await _plant_pick_list_calls((T0, [
         {"ReportingNumber": "620498", "Location": "H01B", "DeliveryNumber": "33344", "ExpectedQty": "2"},
         {"ReportingNumber": "620499", "Location": "D07C", "DeliveryNumber": "33344", "ExpectedQty": "9"},
-    ])
+    ]))
     async with async_session() as db:
         values = (await db.execute(select(AnalyticsLookupValue).where(
             AnalyticsLookupValue.customer_code == CC))).scalars().all()
@@ -139,3 +141,26 @@ async def test_the_keys_since_a_date_are_only_the_releases_folded_from_then():
             assert await settle_store.settle_keys(db, cc, settlement, keys) == 2
     finally:
         await plant.wipe_analytics(cc)
+
+
+# ==================================================== the backfill's entry read (chunk 211b)
+
+
+async def test_the_backfill_reads_list_responses_in_time_bounded_batches(monkeypatch):
+    # Live, 16 November 2026: the backfill read every call's entries in one query per 2,000 calls,
+    # joined on the entry id alone, so Postgres scanned all 77 entry partitions and hit the 30 s
+    # statement timeout. It now reads in batches, each bounded by its calls' times on both tables.
+    day_before = datetime.now(timezone.utc) - timedelta(days=2)
+    await _plant_pick_list_calls(
+        (day_before, [{"ReportingNumber": "700001", "Location": "A01A"}]),
+        (day_before + timedelta(days=1), [{"ReportingNumber": "700002", "Location": "B02B"}]))
+    async with async_session() as db:
+        await db.execute(delete(AnalyticsLookupValue).where(AnalyticsLookupValue.customer_code == CC))
+        await db.commit()
+    monkeypatch.setattr(lookup_store, "LIST_ENTRY_BATCH", 1)
+    async with async_session() as db:
+        await lookup_store.backfill(db, CC, PICK_LINE, days=5)
+        await db.commit()
+        values = (await db.execute(select(AnalyticsLookupValue).where(
+            AnalyticsLookupValue.customer_code == CC))).scalars().all()
+    assert sorted((v.key, v.value) for v in values) == [("700001", "A01A"), ("700002", "B02B")]

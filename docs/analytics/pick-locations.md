@@ -68,3 +68,8 @@ The WMS kept sending `ListPickLinesByUser` throughout (47 to 340 calls a day), w
 Chunk 211 gives the harvest the fold's rows timed as their facts are (`_list_harvest_rows` in `app/services/analytics/consume.py`), with an end-to-end test through `consume_tenant` (`tests/test_pick_line_live_harvest_chunk211.py`).
 After it is deployed, `scripts/repair_pick_line_since.py` refills the lookup and re-settles every release since the gap began, in place and in batches of 500.
 On 16 November 2026 its dry run counted a 45-day backfill and 33,976 releases to re-settle.
+
+The first live run of the repair, on 16 November 2026, stopped in the lookup backfill with nothing written.
+The backfill read the response entries of 2,000 calls per query, joined on the entry id alone, so Postgres scanned every one of the 77 entry partitions and hit the 30 s statement timeout.
+Chunk 211b reads 500 calls per query in time order, joins on the entry's id and time, and bounds both tables by the batch's span (`LIST_ENTRY_BATCH` in `app/services/analytics/lookup_store.py`).
+Measured read-only on live over 45 days: 9,186 calls in 19 queries, the slowest 3.0 s, 32 s in all.
