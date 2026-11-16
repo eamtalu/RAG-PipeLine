@@ -368,28 +368,34 @@ async def aggregate_releases(db: AsyncSession, args: dict, customer_code: str) -
     if group_by:
         # the note travels with the result, not the prompt: in the prompt or the tool description
         # it made the model answer "what is available?" without calling a tool (step 24)
-        out["overall"] = await _overall(db, customer_code, name, since, until, where)
-        out["overall_note"] = "overall = the counts and sums over ALL groups; quote it for a total, never add the groups up"
+        out["overall"] = await _overall(db, customer_code, name, since, until, where, stats)
+        out["overall_note"] = ("overall = the counts and sums over ALL groups, and the stats asked for over ALL rows; "
+                               "quote it for a total or an all-groups figure, never add the groups up or use one group's value")
     if notes:
         out["notes"] = notes
     return out
 
 
-async def _overall(db: AsyncSession, customer_code: str, name: str, since, until, where: list[str]) -> dict:
-    """The releases, deliveries and every settled value summed over ALL groups of a grouped read,
-    so "by how many units in all" is quoted from the tool, never added up by the model (step 24).
+async def _overall(db: AsyncSession, customer_code: str, name: str, since, until, where: list[str],
+                   stats: list[str]) -> dict:
+    """The releases, deliveries, every settled value summed and every stat asked for, over ALL groups
+    of a grouped read, so "in all" and "across all pickers" are quoted from the tool (steps 24, 25).
 
-    (group_by item, where shortfall<0, 2 items) -> {"rows": 3, "deliveries": 1, "shortfall": "-11", ...}
+    (group_by item, where shortfall<0, 2 items) -> {"rows": 3, "deliveries": 1, "shortfall": "-11", ...} ;
+    (group_by user_name, stat median:duration_s) -> {..., "median_duration_s": "51.103"}
     """
     # Step 1: The same filter and window with no grouping, so a cut-off list of groups still
     # gets the total over every group
     whole = await settle_reads.grouped(db, customer_code, name, group_by=[], start=since, end=until,
-                                       where=where, stat=list(ALWAYS_STATS), limit=1)
+                                       where=where, stat=list(stats), limit=1)
     row = whole["rows"][0] if whole["rows"] else {}
-    # Step 2: Only counts and sums, because a median over all groups is not a total; a value with
-    # no sum (a timestamp) is left out rather than sent as null
+    # Step 2: The counts and sums, and each stat asked for computed over all rows (never a median
+    # of the groups' medians), because a missing all-pickers median made the model pass off one
+    # picker's as everyone's; a value with no sum (a timestamp) is left out rather than sent as null
     overall = {"rows": int(row.get("rows") or 0), "deliveries": row.get("distinct_delivery_number") or 0}
     overall.update({v: row[v] for v in whole["values"] if row.get(v) is not None})
+    asked = [k for k in whole.get("stats", []) if k != "distinct_delivery_number"]
+    overall.update({k: row[k] for k in asked if row.get(k) is not None})
     return overall
 
 

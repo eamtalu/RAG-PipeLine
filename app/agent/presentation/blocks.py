@@ -13,6 +13,7 @@ import logging
 import re
 
 from app.agent.presentation.charts import (
+    GROUPED_TOOLS,
     auto_chart,
     auto_heatmap,
     auto_kpis,
@@ -82,14 +83,19 @@ def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list
     """
     by_type: dict[str, dict] = {}
     latest: tuple[str, dict] | None = None  # the last usable data result so far (step 19)
-    latest_asked_sort = False  # whether the model asked that result for a ranking
+    # the last grouped result, the one a chart can be drawn from, and whether the model asked it
+    # for a ranking; a list read after it does not replace it (step 25)
+    chart_source: tuple[str, dict] | None = None
+    chart_asked_sort = False
     called: set[str] = set()  # the data tools that answered before this point, for a finding's source
     for call in trace:
         if not is_presentation_call(call):
             usable = usable_result(call)
             if usable is not None:
                 latest = (str(call.get("tool")), usable)
-                latest_asked_sort = bool((call.get("input") or {}).get("sort"))
+                if latest[0] in GROUPED_TOOLS:
+                    chart_source = latest
+                    chart_asked_sort = bool((call.get("input") or {}).get("sort"))
             if not _refused(call) and not str(call.get("result", "")).lstrip().startswith('{"error"'):
                 called.add(str(call.get("tool")))
             continue
@@ -111,6 +117,8 @@ def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list
     # heat map, replacing a model's line of hours; a trend over time always gets its chart, beside
     # a model's table; a ranking or a single total is drawn only when the model drew nothing.
     # These come from the data result itself, so the guards hold and a withheld answer keeps them.
+    # The chart comes from the last grouped result, so reading the release list after a ranking
+    # (for per-line detail) no longer loses the ranking's chart (step 25).
     if latest is not None:
         heatmap = auto_heatmap(*latest)
         if heatmap is not None:
@@ -118,7 +126,7 @@ def blocks_from_trace(trace: list[dict], *, only_grounded: bool = False) -> list
             by_type["heatmap"] = heatmap.model_dump(mode="json")
         elif "chart" not in by_type and "heatmap" not in by_type:
             # with a model's table only a trend earns a chart; without one, a ranking does too
-            chart = auto_chart(*latest, asked_sort=latest_asked_sort and "table" not in by_type)
+            chart = auto_chart(*chart_source, asked_sort=chart_asked_sort and "table" not in by_type) if chart_source else None
             if chart is not None:
                 by_type["chart"] = chart.model_dump(mode="json")
     if latest is not None and "kpis" not in by_type and not any(k in by_type for k in ("chart", "table", "heatmap")):

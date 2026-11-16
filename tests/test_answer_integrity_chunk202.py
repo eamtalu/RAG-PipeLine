@@ -179,7 +179,8 @@ async def test_the_result_tells_the_model_where_the_total_is_and_the_prompt_does
     await plant.plant_analytics(CC)
     async with async_session() as db:
         out = await agent_tools.aggregate_releases(db, {"group_by": ["item_number"], **plant.window()}, CC)
-    assert out["overall_note"].startswith("overall = the counts and sums over ALL groups; quote it for a total")
+    assert out["overall_note"].startswith("overall = the counts and sums over ALL groups")  # step 25 adds the stats
+    assert "quote it for a total" in out["overall_note"]
     aggregate = next(t for t in agent_tools.RELEASE_TOOLS if t["name"] == "aggregate_releases")
     assert "overall" not in aggregate["description"]
     assert "overall" not in " ".join(load_profile("analytics").system_prompt.split())
