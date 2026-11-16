@@ -17,6 +17,7 @@ it and corrects the field name instead of the turn failing.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -50,6 +51,115 @@ def _parse_dt(value) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+#: the time fields a `where` may bound; a business date is a warehouse day, so its window gets a
+#: day of slack either side, as `day` does
+_TIME_FIELDS = {"event_time": timedelta(0), "business_date": timedelta(days=1)}
+
+
+def _unquote(value: str) -> str:
+    """A filter value without the quotes a model wraps round it.
+
+    >>> _unquote("'2026-09-18T00:00:00'"), _unquote('"x"'), _unquote("5")
+    ('2026-09-18T00:00:00', 'x', '5')
+    """
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        return text[1:-1].strip()
+    return text
+
+
+def _clean_where(where: list) -> list[str]:
+    """The filters with quoted values unquoted, so `event_time>='2026-09-18'` is read, not an error.
+
+    >>> _clean_where(["event_time>='2026-09-18'", "shortfall<0", "bad"])
+    ['event_time>=2026-09-18', 'shortfall<0', 'bad']
+    """
+    out = []
+    for raw in where or []:
+        try:
+            f = settle_query.parse_filter(str(raw))
+        except ValueError:
+            out.append(str(raw))
+            continue
+        out.append(f"{f.field.strip()}{f.op}{_unquote(f.value)}")
+    return out
+
+
+def _end_of(value) -> tuple[datetime | None, list[str]]:
+    """An `end` as an instant; a bare date means the whole of that day, never its first midnight.
+
+    >>> _end_of("2026-09-18")[0].isoformat(), _end_of("2026-09-18T05:00:00")[0].isoformat()
+    ('2026-09-19T00:00:00+00:00', '2026-09-18T05:00:00+00:00')
+    """
+    if isinstance(value, str) and _DATE_ONLY.match(value.strip()):
+        day = date.fromisoformat(value.strip())
+        until = datetime(day.year, day.month, day.day, tzinfo=timezone.utc) + timedelta(days=1)
+        return until, [f"end {day.isoformat()} read as the whole of {day.isoformat()}, up to {until.isoformat()}"]
+    return _parse_dt(value), []
+
+
+def _bounds_from_where(where: list[str]) -> tuple[datetime | None, datetime | None]:
+    """The window a `where` on event_time or business_date names, for when start and end are not given.
+
+    >>> [d.isoformat() if d else None for d in _bounds_from_where(["event_time>=2026-09-18", "event_time<2026-09-19"])]
+    ['2026-09-18T00:00:00+00:00', '2026-09-19T00:00:00+00:00']
+    >>> [d.isoformat() if d else None for d in _bounds_from_where(["business_date==2026-09-18"])]
+    ['2026-09-17T00:00:00+00:00', '2026-09-20T00:00:00+00:00']
+    >>> _bounds_from_where(["shortfall<0"])
+    (None, None)
+    """
+    since = until = None
+    for raw in where:
+        try:
+            f = settle_query.parse_filter(raw)
+        except ValueError:
+            continue
+        slack = _TIME_FIELDS.get(f.field.strip())
+        if slack is None:
+            continue
+        is_day = bool(_DATE_ONLY.match(f.value))
+        at = _parse_dt(f.value)
+        if at is None:
+            continue
+        # a bare day as an upper bound with <= or == covers that whole day
+        top = at + timedelta(days=1) if is_day and f.op in ("<=", "==") else at
+        if f.op in (">=", ">", "=="):
+            since = min(since, at - slack) if since else at - slack
+        if f.op in ("<", "<=", "=="):
+            until = max(until, top + slack) if until else top + slack
+    return since, until
+
+
+def _release_window(args: dict, day: str | None) -> tuple[datetime, datetime, list[str], list[str]]:
+    """The window and the filters a release read uses: `day` first, then start and end (a bare end
+    date is that whole day), then the bounds a `where` on the time names, then the last 24 hours.
+
+    ({"where": ["event_time>=2026-09-18", "event_time<2026-09-19"]}, None) -> (18 Sep, 19 Sep, [note], where)
+    """
+    # Step 1: Unquote the filter values, otherwise a quoted date comes back as a raw ValueError
+    where = _clean_where(list(args.get("where") or []))
+    if day:
+        # Step 2: A day on the warehouse's clock wins, as before
+        base = datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
+        return base - timedelta(days=1), base + timedelta(days=2), [], where
+    # Step 3: A bare end date is the whole of that day, because "the week to 18 September" means
+    # through the 18th; read as its first midnight it dropped the 18th (11 units short missed)
+    until, notes = _end_of(args.get("end"))
+    start = args.get("start")
+    if start is None and args.get("end") is None:
+        # Step 4: No start or end: a where on the time sets the window, otherwise the last 24 hours
+        # left every row of an older day outside it and the answer was "I could not get that"
+        lo, hi = _bounds_from_where(where)
+        if lo or hi:
+            hi = hi or datetime.now(timezone.utc)
+            lo = lo or hi - timedelta(days=MAX_WINDOW_DAYS)
+            since, until, more = _window(lo.isoformat(), hi.isoformat())
+            return since, until, [f"the window follows the where on the time: {since.isoformat()} to {until.isoformat()}", *more], where
+    since, until, more = _window(start, until.isoformat() if until else None)
+    return since, until, notes + more, where
 
 
 def _window(start, end) -> tuple[datetime, datetime, list[str]]:
@@ -328,14 +438,12 @@ async def _day(db: AsyncSession, customer_code: str, args: dict) -> tuple[str | 
 async def aggregate_releases(db: AsyncSession, args: dict, customer_code: str) -> dict:
     name = str(args.get("settlement") or "pick_release")
     day, day_notes = await _day(db, customer_code, args)
-    since, until, notes = _window(None if day else args.get("start"), None if day else args.get("end"))
-    if day:
-        since, until = datetime.fromisoformat(day).replace(tzinfo=timezone.utc) - timedelta(days=1), datetime.fromisoformat(day).replace(tzinfo=timezone.utc) + timedelta(days=2)
+    since, until, notes, cleaned = _release_window(args, day)
     notes += day_notes
     stats, dropped = _stats_asked(list(args.get("stat") or []))
     notes += dropped
     stats += [x for x in ALWAYS_STATS if x not in stats]
-    where = list(args.get("where") or []) + ([f"business_date=={day}"] if day else [])
+    where = cleaned + ([f"business_date=={day}"] if day else [])
     sort, descending = _sort_words(args.get("sort"), args.get("dir"))
     # "units short" is the shortfall with the sign turned round; the biggest shortfall is the most
     # negative sum. A model that asks for shortfall descending on short releases wants the biggest
@@ -402,14 +510,12 @@ async def _overall(db: AsyncSession, customer_code: str, name: str, since, until
 async def list_releases(db: AsyncSession, args: dict, customer_code: str) -> dict:
     name = str(args.get("settlement") or "pick_release")
     day, day_notes = await _day(db, customer_code, args)
-    since, until, notes = _window(None if day else args.get("start"), None if day else args.get("end"))
-    if day:
-        since, until = datetime.fromisoformat(day).replace(tzinfo=timezone.utc) - timedelta(days=1), datetime.fromisoformat(day).replace(tzinfo=timezone.utc) + timedelta(days=2)
+    since, until, notes, cleaned = _release_window(args, day)
     notes += day_notes
     sort, descending = _sort_words(args.get("sort"), args.get("dir"))
     out = await settle_reads.listed(db, customer_code, name, start=since, end=until,
                                     search=(str(args["search"]).strip() if args.get("search") else None),
-                                    where=list(args.get("where") or []) + ([f"business_date=={day}"] if day else []),
+                                    where=cleaned + ([f"business_date=={day}"] if day else []),
                                     sort=sort, descending=descending,
                                     limit=_clamp(args.get("limit"), 20, LIST_LIMIT), offset=0)
     out["window"] = {"start": since.isoformat(), "end": until.isoformat()}
