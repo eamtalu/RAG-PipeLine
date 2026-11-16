@@ -469,3 +469,5 @@ No migration, no contract change, no edge change.
 Deploy: `./deploy.sh`. Check in Teams: "how many picked on 13 November 2026" gives the day's figure; "which items were short in the week to 13 November 2026?" includes the 13th.
 
 Rollback: the previous checkout and a restart.
+
+Deployed 16 November 2026 10:40 GMT as `92ded18` (main, PR #42): three units active, health 200; live check passed (a past day's total, a week to a date including that date, 33330, products short today).
