@@ -459,3 +459,13 @@ Deploy: `./deploy.sh`. Check in Teams: "give me the details of this delivery num
 Rollback: the previous checkout and a restart.
 
 Deployed 16 November 2026 10:10 GMT as `cd3191c` (main, PR #41): three units active, health 200; live check passed (33330 tells both days; a day named keeps to it; the at-risk question uses the at-risk tool).
+
+## D27: the release tools read the window the model meant
+
+What it changes: a bare `end` date covers that whole day; with no start or end, a `where` on event_time or business_date sets the window instead of the last 24 hours; quoted filter values are read. Both release tools share the one rule.
+Why: the golden run of 16 November answered "I could not get that" for a past day and "No items were short" for a week whose last day had 11 units short.
+No migration, no contract change, no edge change.
+
+Deploy: `./deploy.sh`. Check in Teams: "how many picked on 13 November 2026" gives the day's figure; "which items were short in the week to 13 November 2026?" includes the 13th.
+
+Rollback: the previous checkout and a restart.
