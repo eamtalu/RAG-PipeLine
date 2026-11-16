@@ -86,9 +86,9 @@ def test_on_time_volume_steady_and_quiet_sites_each_get_their_line():
              ("BIC", "Bicester", None, [None] * 7)]
     out = av.what_changed(sites, _m(0.98, 0.98, lines=31440, lines_prev=30230, pickers=20, pickers_prev=21))
     titles = [x["title"] for x in out]
-    assert titles == ["Brighton on-time dispatch rose to 96.0%.", "Volume grew 4% with no extra headcount.",
+    assert titles == ["Brighton on-time dispatch rose to 96.0%.", "Volume grew 4%.",
                       "London held steady on every measure.", "Bicester: no activity in either week."]
-    assert out[0]["delta_text"] == "+2.1 pts" and out[1]["detail"] == "31,440 lines across the sites · 20 pickers (was 21)."
+    assert out[0]["delta_text"] == "+2.1 pts" and out[1]["detail"] == "31,440 lines across the sites (was 30,230)."  # no headcount: the reader judges staffing (owner, 16 Nov)
     assert out[2]["direction"] == "steady" and out[3]["direction"] == "none"
 
 

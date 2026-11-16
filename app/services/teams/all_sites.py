@@ -143,16 +143,15 @@ def what_changed(sites: list[tuple[str, str, dict | None, list[float | None]]], 
             d = 0.0 if m["fill_rate"] is None or m["fill_rate_prev"] is None else (m["fill_rate"] - m["fill_rate_prev"]) * 100
             steady.append({"direction": "steady", "title": f"{name} held steady on every measure.",
                            "detail": f"Fill rate {fill} · on time {on_time}.", "delta_text": _pts(d)})
-    # Step 2: The volume across the sites, with the headcount beside it, because more lines from the
-    # same people is the efficiency the reader looks for
+    # Step 2: The volume across the sites, as lines only: no headcount, because staffing is the
+    # reader's judgement (owner, 16 November 2026)
     volume: list[dict] = []
     if total["lines_prev"]:
         pct = round((total["lines"] - total["lines_prev"]) / total["lines_prev"] * 100)
         if abs(pct) >= VOLUME_STEP_PCT:
             grew = pct > 0
-            tail = " with no extra headcount" if grew and total["pickers"] <= total["pickers_prev"] else ""
-            volume.append({"direction": "up" if grew else "down", "title": f"Volume {'grew' if grew else 'fell'} {abs(pct)}%{tail}.",
-                           "detail": f"{total['lines']:,} lines across the sites · {total['pickers']} pickers (was {total['pickers_prev']}).",
+            volume.append({"direction": "up" if grew else "down", "title": f"Volume {'grew' if grew else 'fell'} {abs(pct)}%.",
+                           "detail": f"{total['lines']:,} lines across the sites (was {total['lines_prev']:,}).",
                            "delta_text": f"{pct:+d}%"})
     return [x for _, x in sorted(moves, key=lambda t: -t[0])] + volume + steady + quiet
 
