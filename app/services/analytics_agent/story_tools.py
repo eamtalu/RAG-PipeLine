@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
@@ -76,6 +77,18 @@ def _day_of(raw: Any, today: date) -> date:
         return today
 
 
+def _difference(picked: Any, expected: Any) -> str | None:
+    """Picked minus expected as a person reads it, so "over by 0.08" is the tool's figure (step 24).
+
+    >>> _difference("4.08", "4.000000"), _difference("4", "7"), _difference(None, "7")
+    ('0.08', '-3', None)
+    """
+    try:
+        return format((Decimal(str(picked)) - Decimal(str(expected))).normalize(), "f")
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
 def story_digest(transactions: list[dict]) -> dict[str, Any]:
     """What a reader wants at a glance from the transaction rows: the picks by outcome, the picks
     that were not exact, the issues with their message, the packages and the photos.
@@ -100,6 +113,7 @@ def story_digest(transactions: list[dict]) -> dict[str, Any]:
             if outcome and outcome != "exact":
                 not_exact.append({"item": t.get("item_number"), "reporting_number": t.get("reporting_number"),
                                   "picked": _cell(t.get("QuantityPicked")), "expected": _cell(t.get("ExpectedQuantity")),
+                                  "difference": _difference(t.get("QuantityPicked"), t.get("ExpectedQuantity")),
                                   "outcome": outcome})
         if method == "NewDeliveryPackage" and status == "success":
             packages += 1

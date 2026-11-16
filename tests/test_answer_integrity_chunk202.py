@@ -250,3 +250,20 @@ async def test_a_run_that_reads_data_again_after_its_follow_ups_is_still_out_of_
     assert (await ask(analytics_runtime(CC, model=looping), "share of releases per picker"))["stop_reason"] == "max_iterations"
     # and a run that never offered follow-ups is out of tool calls as before
     assert (await ask(analytics_runtime(CC, model=_scripted(*_rounds(12))), "what is available?"))["stop_reason"] == "max_iterations"
+
+
+# ==================================================== 7. the story names how far off each pick was
+
+
+def test_a_pick_that_was_not_exact_carries_its_difference_so_the_guard_can_check_it():
+    # live score of 16 November: "over-picked by 0.08" (4.08 against 4) was the model's own sum and
+    # was withheld once figures before a full stop were checked
+    from app.services.analytics_agent.story_tools import story_digest
+    digest = story_digest([
+        {"method": "ConfirmPickLine", "status": "success", "pick_outcome": "over", "item_number": "104441",
+         "reporting_number": "889666", "QuantityPicked": "4.08", "ExpectedQuantity": "4.000000"},
+        {"method": "ConfirmPickLine", "status": "success", "pick_outcome": "partial", "item_number": "100230",
+         "reporting_number": "B1", "QuantityPicked": "4", "ExpectedQuantity": "7"},
+    ])
+    assert [(p["item"], p["difference"]) for p in digest["not_exact"]] == [("104441", "0.08"), ("100230", "-3")]
+    assert evidence.ungrounded("Item 104441 was over-picked by 0.08.", [json.dumps(digest)]) == []
