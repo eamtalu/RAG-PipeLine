@@ -9,7 +9,7 @@ know which to believe.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from decimal import Decimal
 
@@ -53,6 +53,9 @@ class HistoryBundle:
     items: list[ItemDayRow]
     items_truncated: bool
     hourly: list[hourly.HourRow]
+    #: chunk 213: the same hours per warehouse, so each warehouse's hourly forecast is cut by its own
+    #: profile and throughput and scored against its own hours
+    hourly_by_warehouse: dict[str, list[hourly.HourRow]] = field(default_factory=dict)
 
 
 def _num(value) -> float:
@@ -103,12 +106,15 @@ async def read_daily_items(db: AsyncSession, cc: str, settlement: str, *, since:
 
 
 async def read_hourly(db: AsyncSession, cc: str, settlement: str, *, since: datetime, until: datetime,
-                      tz: tzinfo, limit: int = 5000) -> list[hourly.HourRow]:
-    """Lines and distinct pickers per tenant-local hour. `start` is a naive local wall-clock hour,
-    which is what the profile keys on (a picker's 02:00 is 02:00 whatever the offset)."""
+                      tz: tzinfo, limit: int = 5000, warehouse: str | None = None) -> list[hourly.HourRow]:
+    """Lines and distinct pickers per tenant-local hour, for the whole customer or one warehouse.
+    `start` is a naive local wall-clock hour, which is what the profile keys on (a picker's 02:00 is
+    02:00 whatever the offset)."""
     declared = await _settlement(db, cc, settlement)
+    filters = () if warehouse is None else (sq.Filter("warehouse", "==", warehouse),)
     rows = await settle_store.read_grouped(db, cc, declared, group_by=("hour_start",), since=since, until=until,
-                                           tz=tz, limit=limit, stats=(sq.Stat("distinct", "user_name"),))
+                                           tz=tz, limit=limit, filters=filters,
+                                           stats=(sq.Stat("distinct", "user_name"),))
     out = []
     for r in rows:
         start = r["dimensions"][0]
@@ -126,7 +132,10 @@ async def read_history(db: AsyncSession, cc: str, settlement: str, *, start: dat
     daily = await read_daily(db, cc, settlement, since=since, until=until, tz=tz, units_value=units_value)
     items, truncated = await read_daily_items(db, cc, settlement, since=since, until=until, tz=tz,
                                               units_value=units_value, cap=item_cap)
-    hourly_rows = await read_hourly(db, cc, settlement, since=max(since, until - timedelta(days=HOURLY_DAYS)),
-                                    until=until, tz=tz)
+    hourly_since = max(since, until - timedelta(days=HOURLY_DAYS))
+    hourly_rows = await read_hourly(db, cc, settlement, since=hourly_since, until=until, tz=tz)
+    # chunk 213: each warehouse the daily rows name gets its own hours, read the same way
+    by_warehouse = {wh: await read_hourly(db, cc, settlement, since=hourly_since, until=until, tz=tz, warehouse=wh)
+                    for wh in sorted({r.warehouse for r in daily if r.warehouse})}
     return HistoryBundle(start=start, end=end, daily=daily, items=items, items_truncated=truncated,
-                         hourly=hourly_rows)
+                         hourly=hourly_rows, hourly_by_warehouse=by_warehouse)

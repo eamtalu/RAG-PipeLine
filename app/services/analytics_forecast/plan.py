@@ -196,12 +196,15 @@ def _targets(as_of: date, tz: tzinfo, cfg: ForecastConfig) -> dict[str, list[ser
             "month": series.targets(as_of=as_of, grain="month", n=cfg.horizon_months, tz=tz)}
 
 
-def _hourly_rows(total: list[PredictionRow], bundle: hs.HistoryBundle, *, as_of: date, tz: tzinfo, steady: date,
+def _hourly_rows(total: list[PredictionRow], hours: list[hourly.HourRow], *, as_of: date, tz: tzinfo, steady: date,
                  cfg: ForecastConfig, model_version: str, run_id, predicted_at: datetime,
-                 base: dict) -> tuple[list[PredictionRow], dict]:
-    """The heatmap: the headline daily lines cut into hours by the measured profile, and the pickers
-    each hour needs at the measured throughput."""
-    rows_in = hourly.since(bundle.hourly, steady)
+                 base: dict, subject_kind: str = TOTAL, subject: str = TOTAL) -> tuple[list[PredictionRow], dict]:
+    """The heatmap: a series' daily lines cut into hours by its own measured profile, and the pickers
+    each hour needs at its own measured throughput; the whole customer, or one warehouse (chunk 213).
+
+    (total's 14 days, the customer's hours) -> 8 x 24 lines rows and 8 x 24 pickers rows under total/total
+    """
+    rows_in = hourly.since(hours, steady)
     share = hourly.profile(rows_in)
     tp = hourly.throughput(rows_in)
     days = [hourly.DayPoint(day=r.target_at.astimezone(tz).date(), p10=float(r.p10), p50=float(r.value),
@@ -212,12 +215,12 @@ def _hourly_rows(total: list[PredictionRow], bundle: hs.HistoryBundle, *, as_of:
         label = series.horizon_label("day", (hp.day - as_of).days)
         rate = tp.at(dow=hp.day.weekday(), hour=hp.hour)
         detail = {**base, "hour": hp.hour, "lines_per_picker_hour": rate}
-        out.append(PredictionRow("lines", "hour", TOTAL, TOTAL, label, model_version, at, predicted_at,
+        out.append(PredictionRow("lines", "hour", subject_kind, subject, label, model_version, at, predicted_at,
                                  _dec(hp.p50), _dec(hp.p10), _dec(hp.p90), detail, run_id))
         need = staffing.pickers_needed(hp.p50, rate, buffer_pct=cfg.staffing_buffer_pct)
         high = staffing.pickers_needed(hp.p90, rate, buffer_pct=cfg.staffing_buffer_pct)
         low = staffing.pickers_needed(hp.p10, rate, buffer_pct=cfg.staffing_buffer_pct)
-        out.append(PredictionRow("pickers", "hour", TOTAL, TOTAL, label, model_version, at, predicted_at,
+        out.append(PredictionRow("pickers", "hour", subject_kind, subject, label, model_version, at, predicted_at,
                                  Decimal(need if need is not None else 0),
                                  Decimal(low if low is not None else 0), Decimal(high if high is not None else 0),
                                  {**detail, "throughput_known": rate is not None}, run_id))
@@ -248,6 +251,8 @@ def run_all(bundle: hs.HistoryBundle, *, as_of: date, tz: tzinfo, cfg: ForecastC
     targets = _targets(as_of, tz, cfg)
     steps = (targets["month"][-1].end - as_of).days
     headline_total: list[PredictionRow] = []
+    #: chunk 213: each warehouse's daily lines, cut into hours like the total's
+    headline_warehouse: dict[str, list[PredictionRow]] = {}
     counts = {"headline": 0, "items": 0, "items_daily": 0, "unforecast": 0}
     for spec in specs:
         y = np.asarray(spec.daily.since(steady).values, dtype=float)
@@ -269,15 +274,32 @@ def run_all(bundle: hs.HistoryBundle, *, as_of: date, tz: tzinfo, cfg: ForecastC
                 out.predictions.append(row)
                 if spec is total:
                     headline_total.append(row)
+                elif spec.metric == "lines" and spec.subject_kind == "warehouse":
+                    headline_warehouse.setdefault(spec.subject, []).append(row)
     if headline_total:
         base = {k: v for k, v in headline_total[0].detail.items() if k in ("model", "classification", "history")}
-        rows, staffing_detail = _hourly_rows(headline_total, bundle, as_of=as_of, tz=tz, steady=steady, cfg=cfg,
+        rows, staffing_detail = _hourly_rows(headline_total, bundle.hourly, as_of=as_of, tz=tz, steady=steady, cfg=cfg,
                                              model_version=model_version, run_id=run_id, predicted_at=predicted_at,
                                              base=base)
         out.predictions.extend(rows)
         out.history["staffing"] = staffing_detail
         if staffing_detail["lines_per_picker_hour"] is None:
             out.warnings.append("no picker throughput measured; pickers needed is 0 everywhere")
+        # chunk 213: each warehouse the run read hours for gets its own heatmap, after the total's so
+        # the total's rows and staffing detail are made exactly as before
+        by_warehouse_staffing = {}
+        for wh, wh_rows in sorted(headline_warehouse.items()):
+            hours = bundle.hourly_by_warehouse.get(wh)
+            if not hours:
+                continue
+            wh_base = {k: v for k, v in wh_rows[0].detail.items() if k in ("model", "classification", "history")}
+            rows, wh_staffing = _hourly_rows(wh_rows, hours, as_of=as_of, tz=tz, steady=steady, cfg=cfg,
+                                             model_version=model_version, run_id=run_id, predicted_at=predicted_at,
+                                             base=wh_base, subject_kind="warehouse", subject=wh)
+            out.predictions.extend(rows)
+            by_warehouse_staffing[wh] = wh_staffing
+        if by_warehouse_staffing:
+            out.history["staffing_by_warehouse"] = by_warehouse_staffing
     out.counts = counts
     return out
 
@@ -289,7 +311,10 @@ class Actuals:
 
     def __init__(self, bundle: hs.HistoryBundle, *, as_of: date, cfg: ForecastConfig):
         self._daily = {(s.metric, s.subject_kind, s.subject): s.daily for s in build_specs(bundle, as_of=as_of, cfg=cfg)}
-        self._hours = {r.start: r for r in bundle.hourly}
+        # chunk 213: an hour is scored against its own subject's hours: the customer's, or a warehouse's
+        self._hours = {(TOTAL, TOTAL): {r.start: r for r in bundle.hourly}}
+        for wh, rows in (getattr(bundle, "hourly_by_warehouse", None) or {}).items():
+            self._hours[("warehouse", wh)] = {r.start: r for r in rows}
         self._hours_from = min((r.start for r in bundle.hourly), default=None)
         self.start, self.end = bundle.start, as_of
 
@@ -299,9 +324,10 @@ class Actuals:
         local = target_at.astimezone(tz)
         if grain == "hour":
             key = local.replace(tzinfo=None, minute=0, second=0, microsecond=0)
-            if self._hours_from is None or key < self._hours_from or local.date() > self.end:
+            hours = self._hours.get((subject_kind, subject))
+            if hours is None or self._hours_from is None or key < self._hours_from or local.date() > self.end:
                 return None
-            row = self._hours.get(key)
+            row = hours.get(key)
             if metric == "pickers":
                 return Decimal(row.pickers if row else 0)
             return _dec(row.lines if row else 0.0)

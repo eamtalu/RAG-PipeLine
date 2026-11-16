@@ -79,7 +79,7 @@ async def plant(rows) -> None:
 
 
 def shift_rows(cc: str, day_local: datetime, *, lines: int, pickers: int, items=("104568", "100944"),
-               tx="Brighton Stock Pick") -> list[AnalyticsSettledRow]:
+               tx="Brighton Stock Pick", warehouse="BRI") -> list[AnalyticsSettledRow]:
     """`lines` pick lines spread over a 14:00 -> 08:00 shift starting on `day_local` (a naive local
     date at midnight), by `pickers` people round-robin, items alternating."""
     users = [f"P{n:02d}" for n in range(pickers)]
@@ -88,7 +88,7 @@ def shift_rows(cc: str, day_local: datetime, *, lines: int, pickers: int, items=
         hour = 14 + (i * 18) // max(lines, 1)  # 14..31 -> wraps past midnight
         when_local = day_local.replace(tzinfo=LONDON) + timedelta(hours=hour, minutes=(i * 7) % 60)
         out.append(settled(cc, when_local.astimezone(timezone.utc), item=items[i % len(items)],
-                           user=users[i % pickers], tx=tx))
+                           user=users[i % pickers], tx=tx, warehouse=warehouse))
     return out
 
 
