@@ -383,9 +383,10 @@ async def _overall(db: AsyncSession, customer_code: str, name: str, since, until
     whole = await settle_reads.grouped(db, customer_code, name, group_by=[], start=since, end=until,
                                        where=where, stat=list(ALWAYS_STATS), limit=1)
     row = whole["rows"][0] if whole["rows"] else {}
-    # Step 2: Only counts and sums, because a median over all groups is not a total
-    overall = {"rows": int(row.get("rows") or 0), "deliveries": row.get("distinct_delivery_number", 0)}
-    overall.update({v: row[v] for v in whole["values"] if v in row})
+    # Step 2: Only counts and sums, because a median over all groups is not a total; a value with
+    # no sum (a timestamp) is left out rather than sent as null
+    overall = {"rows": int(row.get("rows") or 0), "deliveries": row.get("distinct_delivery_number") or 0}
+    overall.update({v: row[v] for v in whole["values"] if row.get(v) is not None})
     return overall
 
 

@@ -158,6 +158,7 @@ async def test_a_grouped_aggregate_returns_the_sum_over_every_group():
     assert out["groups"] == 1 and out["truncated"] is True  # only the top group came back...
     overall = out["overall"]  # ...but the overall sum covers both items
     assert overall["rows"] == 3 and overall["shortfall"] == "-11" and overall["deliveries"] == 2  # 27907 and 25810
+    assert None not in overall.values()  # a value with no sum (a timestamp) is left out, not null
     assert "overall" not in single  # one total with no groups is already the overall
 
 
@@ -193,3 +194,11 @@ async def test_a_follow_up_lead_left_alone_after_the_table_stripper_is_removed_a
     body = result["answer"].split("From the data:")[0]
     assert "Suggested follow-ups" not in body and body.strip() == "Two items were short, across 3 releases."
     assert drop_followup_lead("The products short today are:") == "The products short today are:"
+
+
+async def test_a_grouped_aggregate_with_no_rows_has_an_overall_of_zeros_and_no_nulls():
+    # live at 00:20 on 16 November: "today" had no settled rows and every sum came back null
+    await plant.plant_analytics(CC)
+    async with async_session() as db:
+        out = await agent_tools.aggregate_releases(db, {"group_by": ["item_number"], "where": ["shortfall<-1000"], **plant.window()}, CC)
+    assert out["groups"] == 0 and out["overall"] == {"rows": 0, "deliveries": 0}
