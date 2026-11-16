@@ -394,7 +394,13 @@ async def find_transactions(ctx: Context, args: dict) -> dict:
                                         for t in rows]}, args)
 
 
-async def trace(ctx: Context, args: dict) -> dict:
+async def trace(ctx: Context, args: dict, *, whole_week: bool = False) -> dict:
+    """One key's transactions in time order: the filter first, then the whole day, then the 7 days up
+    to it; with `whole_week` (the Teams story when no day is named, step 26) the 7 days at once, so a
+    delivery picked one day and loaded the next is one story.
+
+    ({key: delivery_number, value: 33330}) -> {"found": True, "looked_in": "...", "transactions": [...]}
+    """
     key, value = str(args.get("key") or ""), str(args.get("value") or "").strip()
     if key not in TRACE_KEYS:
         raise Problem([f"key is one of {', '.join(TRACE_KEYS)}, not {key!r}"])
@@ -414,6 +420,9 @@ async def trace(ctx: Context, args: dict) -> dict:
     ]
     if not ctx.scope.explicit or ctx.scope == FeedScope(day=day, explicit=True):
         attempts.pop(1)   # nothing narrowed the day: the whole day is what was already searched
+    if whole_week:
+        # no day was named, so stopping at the first day with rows would hide the other days
+        attempts = [(week, f"the 7 days from {week_from.isoformat()} to {day.isoformat()}", False)]
     limit = _clamp(args.get("limit"), 60, 150)
     for conds, where, outside in attempts:
         conds = conds + [match]

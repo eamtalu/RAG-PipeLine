@@ -23,7 +23,6 @@ from app.persistence.models.agent_trace import AgentTrace
 from app.persistence.models.analytics_settlement import AnalyticsSettledRow, AnalyticsSettlement
 from app.persistence.models.customer import Customer
 from app.persistence.models.job import Job
-from app.persistence.models.log_transaction import LogTransaction
 from app.persistence.models.quota_window import QuotaWindow
 from app.persistence.models.usage_daily import UsageDaily
 from tests.test_logspace_tools_chunk132 import TODAY as LOGSPACE_TODAY
@@ -278,5 +277,23 @@ async def plant_delivery_story(cc: str) -> None:
                 warehouse="BRI", method=method, reqid=f"STORY-{i}", delivery_number=STORY_DELIVERY,
                 item_number=item, reporting_number=rep, attributes=attrs, error_text=error,
                 status=LogTransactionStatus(status),
+            ))
+        await db.commit()
+
+
+async def plant_delivery_loading(cc: str) -> None:
+    """The next morning of delivery 25899 (step 26): two packages loaded on 19 September 2026
+    (London 05:00 and 05:05) by PEVANS, so its story spans two days as delivery 33330's did."""
+    async with async_session() as db:
+        job = Job(customer_code=cc, filename="loading.log", storage_key="k")
+        db.add(job)
+        await db.flush()
+        for i, minute in enumerate((0, 5), start=1):
+            when = (T0 + timedelta(days=1)).replace(hour=4, minute=minute, second=0, microsecond=0)
+            db.add(LogTransaction(
+                customer_code=cc, job_id=job.id, started_at=when, ended_at=when, date=when.date(),
+                user_name="PEVANS", employee_name="Pe Evans", device_name="HH-03", device_id="HH-03",
+                warehouse="BRI", method="LoadDeliveryPackage", reqid=f"LOAD-{i}", delivery_number=STORY_DELIVERY,
+                attributes={}, status=LogTransactionStatus("success"),
             ))
         await db.commit()

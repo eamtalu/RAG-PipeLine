@@ -448,3 +448,12 @@ Rollback: the previous checkout and a restart.
 
 Deployed 16 November 2026 09:07 GMT as `e884752` with D24. Live: line time per picker on 13 November gave 51.1 s as the median across all pickers 2 of 2; products short on 13 November 2 of 2 answered, one quoting the 352-unit total from the tool; golden 30 of 39 with no run out of tool calls, the short-products case drawn.
 
+## D26: the delivery story covers every day the delivery appears
+
+What it changes: with no day named, Teams' `delivery_story` gathers the 7 days up to today at once, so a delivery picked one day and loaded the next is one story; the story says each day, and dates its times when it spans days.
+Why: on 16 November delivery 33330 got the picking in the log explorer (its page filter was 15 November) and only the loading in Teams (today first, then it stopped).
+No migration, no contract change, no edge change; the log explorer is unchanged.
+
+Deploy: `./deploy.sh`. Check in Teams: "give me the details of this delivery number 33330" tells both the picking of 15 November and the loading of 16 November; "give me the details of delivery 33330 on 15 November 2026" keeps to that day.
+
+Rollback: the previous checkout and a restart.
