@@ -25,7 +25,7 @@ FORECAST_TOOLS: list[dict[str, Any]] = [
     {
         "name": FORECAST_AHEAD,
         "description": (
-            "The forecast for the days ahead, as the Home tab's forecast card shows it: for each day the "
+            "The forecast for the days ahead, as the Overview page's forecast card shows it: for each day the "
             "expected lines (the middle estimate and the p10 to p90 range), which day ahead is busiest, "
             "the next shifts' peak hour with the pickers and lines it needs, how accurate the forecast "
             "has been, and a note on its limits. Call it for questions about tomorrow, the week ahead, "
