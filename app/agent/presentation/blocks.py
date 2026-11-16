@@ -205,14 +205,18 @@ def _previous_line(lines: list[str], index: int) -> int | None:
 
 
 def _is_followup_lead(line: str) -> bool:
-    """Whether a line only introduces a list of follow-ups: a lead-in ending with a colon, or a
-    heading that names follow-ups.
+    """Whether a line only introduces a list of follow-ups: a lead-in ending with a colon, a
+    heading that names follow-ups, or a bullet that names them (a fact bullet ending in a colon
+    stays, because its sub-points are facts).
 
     >>> _is_followup_lead("**Follow-up questions:**"), _is_followup_lead("## Follow-ups"), _is_followup_lead("- a:")
     (True, True, False)
+    >>> _is_followup_lead("- Suggested follow-ups:")
+    True
     """
     if _LIST_MARK.match(line):
-        return False
+        text = _LIST_MARK.sub("", line).strip().strip("*_`").strip()
+        return text.endswith(":") and "follow" in text.lower()
     text = line.strip().lstrip("#").strip().strip("*_`").strip()
     return text.endswith(":") or (line.lstrip().startswith("#") and "follow" in text.lower())
 
@@ -272,3 +276,20 @@ def strip_followup_lines(text: str, trace: list[dict]) -> str:
         return text
     kept = "\n".join(line for i, line in enumerate(lines) if i not in dropped)
     return re.sub(r"\n{3,}", "\n\n", kept).strip()
+
+
+def drop_followup_lead(text: str) -> str:
+    """The text without a closing line that only introduces follow-ups ("Suggested follow-ups:"),
+    left behind when the table stripper removed the list under it (step 24); a plain lead such
+    as "The products short today are:" stays, because the rendered table follows it.
+
+    >>> drop_followup_lead("Two items were short.\\n\\nSuggested follow-ups:")
+    'Two items were short.'
+    >>> drop_followup_lead("The products short today are:")
+    'The products short today are:'
+    """
+    lines = text.rstrip().split("\n")
+    last = _previous_line(lines, len(lines))
+    if last is None or "follow" not in lines[last].lower() or not _is_followup_lead(lines[last]):
+        return text
+    return "\n".join(lines[:last]).strip()

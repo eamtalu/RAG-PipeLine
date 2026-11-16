@@ -86,7 +86,9 @@ def test_the_policy_asks_for_facts_in_bullets_and_each_count_by_its_label():
     assert "each a fact from the data, not a note on the method" in prompt
     assert "Name each count by its own label" in prompt
     assert "packages are not photos" in prompt
-    assert "never also write them in the text" in prompt
+    # the live score of 15 November: this clause made the model end on the follow-up call with no
+    # answer text (6 of 38 cases ran out of tool calls); the stripper takes written follow-ups off
+    assert "never also write them in the text" not in prompt
 
 
 def test_the_live_heading_and_rule_before_the_follow_ups_go_with_them():

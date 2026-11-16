@@ -118,9 +118,6 @@ RELEASE_TOOLS: list[dict] = [
                 "day": {"type": "string", "description": "One whole day on the warehouse's clock: 'today', "
                                                           "'yesterday' or YYYY-MM-DD. Use this for a single "
                                                           "day instead of start and end."},
-                "day": {"type": "string", "description": "One whole day on the warehouse's clock: 'today', "
-                                                          "'yesterday' or YYYY-MM-DD. Use this for a single "
-                                                          "day instead of start and end."},
                 "start": {"type": "string", "description": "ISO-8601 start (inclusive). Default: 24 hours before end."},
                 "end": {"type": "string", "description": "ISO-8601 end (exclusive). Default: now."},
                 "limit": {"type": "integer", "description": f"Max groups (default 200, max {GROUP_LIMIT})."},
@@ -368,9 +365,32 @@ async def aggregate_releases(db: AsyncSession, args: dict, customer_code: str) -
             r["deliveries"] = r.pop("distinct_delivery_number")
     out["stats"] = ["deliveries" if x == "distinct_delivery_number" else x for x in out.get("stats", [])]
     out["grain"] = "one row = one pick-list release; every figure is over releases, not calls"
+    if group_by:
+        # the note travels with the result, not the prompt: in the prompt or the tool description
+        # it made the model answer "what is available?" without calling a tool (step 24)
+        out["overall"] = await _overall(db, customer_code, name, since, until, where)
+        out["overall_note"] = "overall = the counts and sums over ALL groups; quote it for a total, never add the groups up"
     if notes:
         out["notes"] = notes
     return out
+
+
+async def _overall(db: AsyncSession, customer_code: str, name: str, since, until, where: list[str]) -> dict:
+    """The releases, deliveries and every settled value summed over ALL groups of a grouped read,
+    so "by how many units in all" is quoted from the tool, never added up by the model (step 24).
+
+    (group_by item, where shortfall<0, 2 items) -> {"rows": 3, "deliveries": 1, "shortfall": "-11", ...}
+    """
+    # Step 1: The same filter and window with no grouping, so a cut-off list of groups still
+    # gets the total over every group
+    whole = await settle_reads.grouped(db, customer_code, name, group_by=[], start=since, end=until,
+                                       where=where, stat=list(ALWAYS_STATS), limit=1)
+    row = whole["rows"][0] if whole["rows"] else {}
+    # Step 2: Only counts and sums, because a median over all groups is not a total; a value with
+    # no sum (a timestamp) is left out rather than sent as null
+    overall = {"rows": int(row.get("rows") or 0), "deliveries": row.get("distinct_delivery_number") or 0}
+    overall.update({v: row[v] for v in whole["values"] if row.get(v) is not None})
+    return overall
 
 
 async def list_releases(db: AsyncSession, args: dict, customer_code: str) -> dict:

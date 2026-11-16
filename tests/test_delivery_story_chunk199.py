@@ -45,7 +45,9 @@ async def test_the_story_of_one_delivery_counts_the_picks_names_the_soft_error_a
     assert out["found"] is True and out["key"] == "delivery_number" and out["total"] == 6
     assert out["summary"]["users"] == ["BCHAM"] and out["summary"]["first"] == "07:10:00" and out["summary"]["last"] == "07:20:00"
     assert out["picks"] == {"lines": 3, "exact": 2, "over": 1, "partial": 0, "zero_pick": 0}
-    assert out["not_exact"] == [{"item": "104441", "reporting_number": "889666", "picked": "4.08", "expected": "4", "outcome": "over"}]
+    # step 24: the difference travels with it, so "over by 0.08" is the tool's figure
+    assert out["not_exact"] == [{"item": "104441", "reporting_number": "889666", "picked": "4.08", "expected": "4",
+                                 "difference": "0.08", "outcome": "over"}]
     assert out["issues"] == [{"time": "07:10:00", "method": "NewDeliveryPackage", "status": "soft",
                               "message": "No packages exist for delivery number " + plant.STORY_DELIVERY}]
     assert out["packages"] == 1 and out["photos"] == 1

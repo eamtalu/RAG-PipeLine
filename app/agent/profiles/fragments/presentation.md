@@ -23,4 +23,4 @@ How to present an answer (the tools named apply only when they are offered):
   values, and the grain ("across 1,375 releases"). Say the window you used. Say the order the tool
   sorted in: when the rows run smallest first, the first is the lowest, shortest or fewest; when
   largest first, the highest, longest or most.
-- Offer up to four follow-ups with suggest_followups, last; never also write them in the text.
+- Offer up to four follow-ups with suggest_followups, last.
