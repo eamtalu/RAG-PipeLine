@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -473,6 +474,10 @@ async def aggregate_releases(db: AsyncSession, args: dict, customer_code: str) -
             r["deliveries"] = r.pop("distinct_delivery_number")
     out["stats"] = ["deliveries" if x == "distinct_delivery_number" else x for x in out.get("stats", [])]
     out["grain"] = "one row = one pick-list release; every figure is over releases, not calls"
+    # only when the model asked for a ranking: an unsorted read defaults to rows, largest first
+    extremes = _extremes(out) if sort else None
+    if extremes:
+        out["extremes"] = extremes
     if group_by:
         # the note travels with the result, not the prompt: in the prompt or the tool description
         # it made the model answer "what is available?" without calling a tool (step 24)
@@ -482,6 +487,35 @@ async def aggregate_releases(db: AsyncSession, args: dict, customer_code: str) -
     if notes:
         out["notes"] = notes
     return out
+
+
+def _extremes(out: dict) -> dict | None:
+    """The lowest and highest group by the sorted value, named, so "the fewest" is read from the
+    tool and never from the row order (step 28: a largest-first list made FNACHONLEO, 9, "the fewest"
+    while DBOBOC had 8). None without a sort, with fewer than two groups, for a trend or a cut-off list.
+
+    >>> _extremes({"sort": {"by": "picked", "dir": "desc"}, "truncated": False,
+    ...     "rows": [{"dimensions": ["F"], "picked": "9"}, {"dimensions": ["D"], "picked": "8"}]})["lowest"]
+    {'dimensions': ['D'], 'picked': '8'}
+    """
+    by = str((out.get("sort") or {}).get("by") or "")
+    rows = [r for r in out.get("rows") or [] if isinstance(r, dict)]
+    # Step 1: Only a ranking over the whole set: a list cut at its limit may not hold the true
+    # lowest, units short already says "biggest first", and a trend is ordered by time
+    if not by or by == "units_short" or by in settle_query.BUCKETS or len(rows) < 2 or out.get("truncated"):
+        return None
+    # Step 2: Read the sorted value as a number; a row without one is left out, never guessed
+    valued = []
+    for r in rows:
+        try:
+            valued.append((Decimal(str(r[by]).replace(",", "")), r))
+        except (KeyError, InvalidOperation, TypeError):
+            continue
+    if len(valued) < 2:
+        return None
+    low, high = min(valued, key=lambda v: v[0])[1], max(valued, key=lambda v: v[0])[1]
+    return {"by": by, "lowest": {"dimensions": low.get("dimensions"), by: low[by]},
+            "highest": {"dimensions": high.get("dimensions"), by: high[by]}}
 
 
 async def _overall(db: AsyncSession, customer_code: str, name: str, since, until, where: list[str],
