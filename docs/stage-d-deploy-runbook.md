@@ -482,3 +482,4 @@ Deploy: `./deploy.sh` (it restarts the Teams consumer, which starts the loop). C
 
 Rollback: the previous checkout and a restart.
 
+Deployed 16 November 2026 13:04 GMT as `5209c82` (main, PR #43) with edge `1780ac8`: three units active, health 200; the four forecast rows of tmp-live written in about 22 s (255 to 260 KB) and rewritten five minutes later; Overview's rows unaffected.
