@@ -56,3 +56,15 @@ Then `PATCH /api/v1/analytics/settlements/pick_release` with the existing `value
 ## Measured on 2026-09-30 before switching on (394 releases, read-only run of the new rules)
 
 307 (77.9%) from the designated location, 24 elsewhere in the same zone, 63 in another zone (almost all JIT); 83 of 87 off-location picks came from a location the picker had checked; 1.89 stock checks per release, 14 of them empty; the oldest-stock suggestion was followed 150 of 150 times; no location was seen in two zones over 14 days.
+
+## The live list harvest gap, 2 October to 16 November 2026 (chunk 211)
+
+Until chunk 211 the live fold never harvested a list source.
+The fold handed `harvest_lists` its source rows, which carry `started_at`, and the harvest skipped every row without an `event_time`.
+Only the two manual backfills (30 September and 2 October, both built from facts that carry `event_time`) filled the `pick line` lookup, so nothing was harvested after 2 October 19:00 BST.
+Every release settled after that has no designated location, so `from_designated` and `same_zone` are unknown, and deliveries at risk had no expected line count for new deliveries.
+The WMS kept sending `ListPickLinesByUser` throughout (47 to 340 calls a day), with an unchanged response shape.
+
+Chunk 211 gives the harvest the fold's rows timed as their facts are (`_list_harvest_rows` in `app/services/analytics/consume.py`), with an end-to-end test through `consume_tenant` (`tests/test_pick_line_live_harvest_chunk211.py`).
+After it is deployed, `scripts/repair_pick_line_since.py` refills the lookup and re-settles every release since the gap began, in place and in batches of 500.
+On 16 November 2026 its dry run counted a 45-day backfill and 33,976 releases to re-settle.
