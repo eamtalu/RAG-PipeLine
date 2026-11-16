@@ -5,7 +5,6 @@ import asyncio, json, sys, time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from app.config.database import async_session
-from app.services.analytics import settle_reads
 from app.services.teams import releases_detail as rd, releases_stats as rs
 
 CC = "tmp-live"
