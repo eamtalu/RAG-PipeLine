@@ -495,3 +495,4 @@ After a change to the arithmetic, run the parity check in `scripts/releases_pari
 
 Rollback: the previous checkout and a restart.
 
+Deployed 16 November 2026 15:34 GMT as `1cb53ff` (D33b list backfill, D34 all-sites row); D31 and D33 at 14:23 as `e8a471a`. Then the pick-line repair (see the handoff). Rollback: the previous checkout (`91285b7` keeps the Pick releases rows) and a restart.
