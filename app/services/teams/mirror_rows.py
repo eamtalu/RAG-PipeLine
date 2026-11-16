@@ -125,6 +125,11 @@ KEY_LAYOUT: dict[str, KeySpec] = {
     "site_forecast": KeySpec(
         pk=f"{KEY_PREFIX}#{{customer_code}}", sk="SITE#{site_id}#FORECAST", ttl_seconds=3600
     ),
+    #: step 31: the Pick releases page opened from Overview, per site and for "all", three fixed
+    #: windows, rewritten every five minutes
+    "site_releases": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}", sk="SITE#{site_id}#RELEASES", ttl_seconds=3600
+    ),
 }
 
 
