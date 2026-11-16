@@ -56,8 +56,7 @@ from app.services.groups import mirror as groups_mirror
 from app.services.notifications import dispatcher as notifications
 from app.services.tasks import mirror as tasks_mirror
 from app.services.tasks import runner as tasks_runner
-from app.services.teams import home_snapshot
-from app.services.teams import exec_home, history
+from app.services.teams import exec_home, forecast_detail, history
 from app.services.teams.memory import ConversationMemory
 from app.services.teams.progress import ProgressReporter
 from app.settings import settings
@@ -409,6 +408,27 @@ async def _exec_loop(stop: asyncio.Event) -> None:
             pass
 
 
+async def _detail_loop(stop: asyncio.Event) -> None:
+    """The Forecast page opened from Overview (step 30), rewritten every five minutes per site, on a
+    loop of its own so a slow or failing read here never delays or breaks Overview's minute."""
+    mirror = _mirror_writer()
+    if mirror is None:
+        logger.info("detail page loop off: TEAMS_EDGE_DYNAMODB_TABLE is not set")
+        return
+    tracker = ChangeTracker(max_age_seconds=settings.teams_detail_seconds * 6)
+    while not stop.is_set():
+        try:
+            written = await forecast_detail.sweep_once(mirror, tracker=tracker,
+                                                       max_sites=settings.teams_max_sites_per_customer)
+            logger.debug("teams.detail_written customers=%s", written)
+        except Exception:
+            logger.exception("teams.detail_sweep_failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.teams_detail_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _advisories_loop(stop: asyncio.Event) -> None:
     """The agents of the Advisories tab (step 9): every tick runs whichever agent is due per bound
     customer, announces new HIGH advisories, and rewrites the ADVISORIES row."""
@@ -532,7 +552,7 @@ async def _amain() -> None:
     try:
         await asyncio.gather(consumer.run_forever(stop), _sweep_loop(stop), _snapshot_loop(stop),
                              _history_loop(stop), _access_loop(stop), _exec_loop(stop),
-                             _advisories_loop(stop), _tasks_loop(stop), _watches_loop(stop))
+                             _advisories_loop(stop), _tasks_loop(stop), _watches_loop(stop), _detail_loop(stop))
     finally:
         await engine.dispose()
 

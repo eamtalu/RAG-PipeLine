@@ -517,6 +517,9 @@ class Settings(BaseSettings):
     # site), and the fill-rate target its tiles and chart show.
     teams_exec_home_seconds: float = 300.0
     teams_fill_rate_target: float = 0.98
+    # The Forecast page opened from Overview (step 30): rewritten every five minutes, on its own loop,
+    # because it reads every grain, metric and transaction for each site.
+    teams_detail_seconds: float = 300.0
     # A receipt's Undo (step 8) works this long after the action.
     teams_undo_minutes: int = 10
     # The advisories loop (step 9) ticks this often; each agent runs on its own cadence (the

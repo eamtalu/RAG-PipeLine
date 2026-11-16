@@ -45,6 +45,11 @@
       "sk": "ROLES",
       "ttl_seconds": null
     },
+    "site_forecast": {
+      "pk": "EYE#{customer_code}",
+      "sk": "SITE#{site_id}#FORECAST",
+      "ttl_seconds": 3600
+    },
     "site_home": {
       "pk": "EYE#{customer_code}",
       "sk": "SITE#{site_id}#HOME",
@@ -1704,5 +1709,5 @@
       "type": "object"
     }
   },
-  "revision": "3.19"
+  "revision": "3.20"
 }

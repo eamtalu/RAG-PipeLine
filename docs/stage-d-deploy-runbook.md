@@ -471,3 +471,14 @@ Deploy: `./deploy.sh`. Check in Teams: "how many picked on 13 November 2026" giv
 Rollback: the previous checkout and a restart.
 
 Deployed 16 November 2026 10:40 GMT as `92ded18` (main, PR #42): three units active, health 200; live check passed (a past day's total, a week to a date including that date, 33330, products short today).
+
+## D30: the Teams Forecast page's row
+
+What it changes: a new consumer loop writes one `site_forecast` row per site and for "all" every five minutes, built from the functions behind `/analytics/forecast/*`; contract 3.20.
+Why: the edge's Forecast page (edge step 24), opened from Overview's forecast card, reads it.
+No migration. Deploy before or with edge step 24: an edge without the row says "no forecast page yet"; rows without the edge are simply unread.
+
+Deploy: `./deploy.sh` (it restarts the Teams consumer, which starts the loop). Check: after five minutes `SITE#all#FORECAST` exists for tmp-live, and the consumer log has no `teams.forecast_detail_failed`.
+
+Rollback: the previous checkout and a restart.
+
