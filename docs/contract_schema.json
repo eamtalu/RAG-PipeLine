@@ -65,6 +65,11 @@
       "sk": "SITE#{site_id}#RELEASES",
       "ttl_seconds": 3600
     },
+    "site_reports": {
+      "pk": "EYE#{customer_code}",
+      "sk": "SITE#{site_id}#REPORTS",
+      "ttl_seconds": 3600
+    },
     "sites": {
       "pk": "EYE#{customer_code}",
       "sk": "SITES",
@@ -1719,5 +1724,5 @@
       "type": "object"
     }
   },
-  "revision": "3.22"
+  "revision": "3.23"
 }

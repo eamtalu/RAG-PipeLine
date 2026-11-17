@@ -56,7 +56,7 @@ from app.services.groups import mirror as groups_mirror
 from app.services.notifications import dispatcher as notifications
 from app.services.tasks import mirror as tasks_mirror
 from app.services.tasks import runner as tasks_runner
-from app.services.teams import all_sites, exec_home, forecast_detail, history, releases_detail
+from app.services.teams import all_sites, exec_home, forecast_detail, history, releases_detail, routine_reports
 from app.services.teams.memory import ConversationMemory
 from app.services.teams.progress import ProgressReporter
 from app.settings import settings
@@ -410,7 +410,7 @@ async def _exec_loop(stop: asyncio.Event) -> None:
 
 async def _detail_loop(stop: asyncio.Event) -> None:
     """The Forecast (step 30) and Pick releases (step 31) pages opened from Overview, and Overview's
-    all-sites view (step 34), rewritten every five minutes, on a loop of its own so a slow or failing
+    all-sites view (step 34) and the routine library's reports (step 38), rewritten every five minutes, on a loop of its own so a slow or failing
     read here never delays or breaks Overview's minute; each sweep fails on its own."""
     mirror = _mirror_writer()
     if mirror is None:
@@ -430,6 +430,13 @@ async def _detail_loop(stop: asyncio.Event) -> None:
             logger.debug("teams.detail_written page=%s customers=%s", all_sites.ROW_TYPE, written)
         except Exception:
             logger.exception("teams.detail_sweep_failed page=%s", all_sites.ROW_TYPE)
+        # step 38: the routine library's reports, per site and for all, beside the pages
+        try:
+            written = await routine_reports.sweep_once(mirror, tracker=tracker, max_sites=settings.teams_max_sites_per_customer,
+                                                       target=settings.teams_fill_rate_target)
+            logger.debug("teams.detail_written page=%s customers=%s", routine_reports.ROW_TYPE, written)
+        except Exception:
+            logger.exception("teams.detail_sweep_failed page=%s", routine_reports.ROW_TYPE)
         try:
             await asyncio.wait_for(stop.wait(), timeout=settings.teams_detail_seconds)
         except asyncio.TimeoutError:
