@@ -500,3 +500,5 @@ Deployed 16 November 2026 15:34 GMT as `1cb53ff` (D33b list backfill, D34 all-si
 Deployed 16 November 2026: D35 (`8b6292f`, hourly forecast per warehouse) at 16:20; the forecast run as of 15 November then completed at 22:35 (a run takes about 6 hours and a restart kills it, so no deploy between 03:00 and about 09:30). D37 (`9a7217e`, Overview snapshot drops Needs attention and Customers today) at 23:26; `e0734fe` (all-sites volume line without headcount) at 23:34. Rollback: the previous checkout and a restart.
 
 Deployed 17 November 2026 00:27 GMT as `3a9cc09` (D38, the routine library's reports, PR #50): worker restarted 00:27:56; SITE#all/BRI/BIC/LON#REPORTS written 00:29, 6-9 KB, all available. Rollback: the previous checkout (`e0734fe`) and a restart.
+
+Deployed 17 November 2026 00:52 GMT as `0debed8` (D39, /brief and /review in Ask from the routine library, no model, PR #51): worker restarted 00:52:14, health 200, ASK_CATALOGUE rewritten at 00:52:40 as version 20.2 with shortcuts /graph, /chart, /table, /brief, /review. Rollback: `3a9cc09` and a restart.
