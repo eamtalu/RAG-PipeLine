@@ -138,7 +138,7 @@ def test_the_people_topic_is_open_to_everybody_and_offered_first_among_the_usage
     topic = next(t for t in catalogue.TOPICS if t.id == "people")
     assert topic.needs is None and topic.label == "People and devices" and len(topic.questions) == 6
     assert [t.id for t in catalogue.TOPICS].index("people") < [t.id for t in catalogue.TOPICS].index("usage")
-    assert catalogue.CATALOGUE_VERSION == "20.1"
+    assert catalogue.CATALOGUE_VERSION == "20.2"  # step 39 added /brief and /review
 
 
 async def test_a_scripted_run_gets_the_heat_map_without_asking_for_a_chart():

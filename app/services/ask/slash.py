@@ -14,6 +14,8 @@ from app.services.ask import actions, catalogue
 
 #: Commands that are shortcuts for a question rather than an action.
 SHORTCUTS = {"/graph": "Show {words} as a chart", "/chart": "Show {words} as a chart", "/table": "Show {words} as a table"}
+#: Commands answered from the routine library's reports without the model (step 39, app/services/ask/briefs.py).
+REPORT_COMMANDS = ("/brief", "/review")
 _COMMAND = re.compile(r"^\s*(/[a-z][a-z-]*)(?:\s+me)?\b\s*(.*)$", re.I | re.S)
 
 
@@ -24,6 +26,8 @@ class Slash:
     text: str
     #: A direct answer (the list of commands) when the command is unknown; None otherwise.
     answer: str | None = None
+    #: /brief or /review (step 39): answered from the routine library's reports, without the model.
+    report_command: str | None = None
 
 
 def parse(message: str) -> tuple[str, str] | None:
@@ -49,7 +53,7 @@ def commands_for(record: records.AccessRecord | None) -> list[str]:
     (a picker) -> ['/remind-me', '/schedule', '/graph', …] ; (an admin) -> every command
     """
     out = [a.slash for a in actions.ACTIONS if catalogue.may_use(record, a.capability)]
-    return out + list(SHORTCUTS)
+    return out + list(SHORTCUTS) + list(REPORT_COMMANDS)
 
 
 def resolve(message: str, record: records.AccessRecord | None) -> Slash | None:
@@ -67,6 +71,8 @@ def resolve(message: str, record: records.AccessRecord | None) -> Slash | None:
     if parsed is None:
         return None
     command, words = parsed
+    if command in REPORT_COMMANDS:
+        return Slash(text=message, report_command=command)
     if command in SHORTCUTS:
         if not words:
             return Slash(text=message, answer=f"Tell me what to draw after {command}, for example: {command} fill rate this week")
