@@ -13,7 +13,7 @@ from typing import Any
 from app.services.access import records
 
 #: Bumped when the words change, so the mirror rewrites every customer's row.
-CATALOGUE_VERSION = "20.1"
+CATALOGUE_VERSION = "20.2"
 
 QUESTION, ACTION, DEMO = "question", "action", "demo"
 

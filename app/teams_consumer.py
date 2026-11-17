@@ -169,6 +169,12 @@ async def _before_the_model(job: QuestionJob) -> tuple[str, dict | None]:
         text, block = catalogue.capability_answer(record)
         return question, _direct_answer(text, [block])
     resolved = slash.resolve(question, record)
+    if resolved is not None and resolved.report_command is not None:
+        # step 39: /brief and /review are the routine library's reports, answered without the model
+        from app.services.ask import briefs
+        async with async_session() as db:
+            text, blocks = await briefs.answer(db, resolved.report_command, job.customer_code, job.site_id, record)
+        return question, _direct_answer(text, blocks)
     if resolved is not None and resolved.answer is not None:
         return question, _direct_answer(resolved.answer, [])
     return resolved.text if resolved is not None else framed_question(job), None

@@ -16,4 +16,4 @@ def catalogue_payload() -> dict[str, Any]:
     () -> {"version": "18.1", "topics": [7 topics], "actions": [9 actions], "shortcuts": ["/graph", …]}
     """
     return {"version": catalogue.CATALOGUE_VERSION, "topics": catalogue.topics_payload(),
-            "actions": actions.actions_payload(), "shortcuts": list(slash.SHORTCUTS)}
+            "actions": actions.actions_payload(), "shortcuts": list(slash.SHORTCUTS) + list(slash.REPORT_COMMANDS)}

@@ -94,7 +94,7 @@ def test_the_catalogue_is_honest_and_its_tools_are_named_apart():
         t["name"] for t in action_tools.ACTION_TOOLS)
     row = ask_mirror.catalogue_payload()
     assert row["version"] == catalogue.CATALOGUE_VERSION and len(row["topics"]) == 8 and len(row["actions"]) == 9
-    assert row["shortcuts"] == ["/graph", "/chart", "/table"]
+    assert row["shortcuts"] == ["/graph", "/chart", "/table", "/brief", "/review"]  # step 39: /brief and /review answer without the model
 
 
 async def test_the_catalogue_is_filtered_by_what_a_record_may_do():
