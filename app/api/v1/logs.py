@@ -37,6 +37,7 @@ from app.services.mnp_log_ingestion.LogIngestion import LogIngestion, get_log_in
 from app.services.mnp_log_ingestion.pipeline.derive_transactions import (
     regroup_incremental, finalize_pending, run_finalize_tracked, reset_abandoned_windows,
 )
+from app.services.mnp_log_ingestion.label_print_check import load_early_label_prints
 from app.services.mnp_log_ingestion.render import render_transaction
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc, active_timezone_name
 from app.services.log_feed.scope import FeedScope, day_conditions, local_today, scope_conditions
@@ -1017,6 +1018,8 @@ async def view_transactions(
             "read right now — the transaction list above is complete; try another page or date.)",
             headers=pager,
         )
+    early_prints = await _early_label_prints_or_none(db, customer, list(txns))
+
     if len(entry_rows) > MAX_RENDER_ENTRIES:
         return PlainTextResponse(
             header + f"\n\n(too many log entries to render — this page exceeds "
@@ -1037,12 +1040,29 @@ async def view_transactions(
         for bucket in by_txn.values():
             bucket.sort(key=_assigned_sort_key)
         sep = "\n\n" + ("─" * 90) + "\n\n"
-        blocks = [render_transaction(t, [e for _seq, e in by_txn.get(t.id, [])], verbose=verbose)
+        blocks = [render_transaction(t, [e for _seq, e in by_txn.get(t.id, [])], verbose=verbose,
+                                     early_print=early_prints.get(t.id))
                   for t in txns]
         return header + sep + sep.join(blocks)
 
     text = await asyncio.to_thread(_render)
     return PlainTextResponse(text, headers=pager)
+
+
+async def _early_label_prints_or_none(db: AsyncSession, customer: str, txns: list) -> dict:
+    """Early case-label prints for these transactions; a damaged disk sector only drops the warning.
+    (page with apple printed before its pick) -> {apple id: EarlyLabelPrint} ; disk I/O error -> {}
+    """
+    try:
+        return await load_early_label_prints(db, customer, txns)
+    except Exception as exc:
+        # Never let the advisory warning take the feed down: the rows and their
+        # bodies are still readable; any non-disk failure is a real bug and must surface.
+        if not is_disk_io_error(exc):
+            raise
+        logger.critical("label_check.disk_io_error customer=%s detail=%s",
+                        customer, disk_io_detail(exc))
+        return {}
 
 
 async def _load_transaction_entries(transaction_id: uuid.UUID, customer: str, db: AsyncSession):
@@ -1072,8 +1092,9 @@ async def get_transaction_view(
 ):
     """Canonical §6 Transaction Detail View as human-readable text (request → steps → response)."""
     t, entries, truncated = await _load_transaction_entries(transaction_id, customer, db)
+    early_prints = await _early_label_prints_or_none(db, customer, [t])
     text = await asyncio.to_thread(render_transaction, t, [e for e, _q in entries],
-                                   verbose=verbose)
+                                   verbose=verbose, early_print=early_prints.get(t.id))
     notice = _pending_notice(pending)
     if truncated:
         notice += f"(showing the first {MAX_RENDER_ENTRIES:,} steps — transaction truncated)\n\n"
@@ -1090,9 +1111,11 @@ async def get_transaction(transaction_id: uuid.UUID,
     Includes a `rendered` field: the §6 text view (also available raw at `/view`).
     """
     t, entries, truncated = await _load_transaction_entries(transaction_id, customer, db)
+    early_prints = await _early_label_prints_or_none(db, customer, [t])
 
     return {
-        "rendered": await asyncio.to_thread(render_transaction, t, [e for e, _q in entries]),
+        "rendered": await asyncio.to_thread(render_transaction, t, [e for e, _q in entries],
+                                            early_print=early_prints.get(t.id)),
         "entries_truncated": truncated,
         "transaction": {
             **_txn_summary(t),

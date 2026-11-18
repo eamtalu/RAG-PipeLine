@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
+from app.services.mnp_log_ingestion.label_print_check import PICK_LOOKBACK, EarlyLabelPrint
 from app.services.mnp_log_ingestion.timefmt import to_display
 
 _STATUS_ICON = {
@@ -35,12 +36,17 @@ _STATUS_ICON = {
 }
 
 
-def render_transaction(txn: LogTransaction, entries: list[LogEntry], *, verbose: bool = False) -> str:
+def render_transaction(txn: LogTransaction, entries: list[LogEntry], *, verbose: bool = False,
+                       early_print: EarlyLabelPrint | None = None) -> str:
     """Render the §6 Transaction Detail View as text.
 
     verbose=False (default): show the signal — MI calls (with their results folded in), SQL,
     soft results, and real errors. Plain INFO narration is collapsed.
     verbose=True: also render every INFO step.
+    early_print: when this is a case-label print made before its item was picked
+    (label_print_check.py), an unnumbered warning line is appended as the LAST line. Last, not
+    under the REQUEST, so every existing line keeps its position: step numbers (and the step deep
+    links built on them) and the frontend's saved line comments (`<txn id>#<line index>`) stay put.
     """
     lines: list[str] = []
     lines.append(_header(txn))
@@ -55,6 +61,8 @@ def render_transaction(txn: LogTransaction, entries: list[LogEntry], *, verbose:
 
     resp = next((e for e in entries if e.entry_type.value == "response"), None)
     lines.append("  " + _response_line(txn, resp))
+    if early_print is not None:
+        lines.append("  " + _early_print_line(early_print))
     return "\n".join(lines)
 
 
@@ -95,10 +103,24 @@ def _request_line(t: LogTransaction, req: LogEntry | None) -> str:
         dims.append(f"Order {t.order_number}")
     if t.item_number:
         dims.append(f"Item {t.item_number}")
+    copies = (t.attributes or {}).get("NumberOfCopies")
+    if copies not in (None, ""):
+        dims.append(f"Copies {copies}")
     if t.user_name:
         dims.append(f"user {t.user_name}")
     summary = " · ".join(dims) or (t.request_summary or "")
     return f"{label}   {summary}".rstrip()
+
+
+def _early_print_line(early: EarlyLabelPrint) -> str:
+    """One warning line naming the unpicked item and the pick that came before the print.
+    (101897, last 100697 at 13:18:42.711) -> "⚠ PRINTED BEFORE PICK  item 101897 ... 13:18:42.711"
+    """
+    head = f"⚠ PRINTED BEFORE PICK  item {early.item_number} not picked yet"
+    if early.last_pick_item and early.last_pick_at is not None:
+        return f"{head} · last pick {early.last_pick_item} at {_hms(early.last_pick_at)}"
+    minutes = int(PICK_LOOKBACK.total_seconds() // 60)
+    return f"{head} · no pick in the {minutes} min before"
 
 
 def _response_line(t: LogTransaction, resp: LogEntry | None) -> str:
