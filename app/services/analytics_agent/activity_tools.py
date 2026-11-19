@@ -15,11 +15,13 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Integer, case, cast, func, select
+from sqlalchemy import Integer, and_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.persistence.repositories.customer_repository import get_customer_timezone
+from app.services.analytics_agent import activity_grid
 
 WMS_ACTIVITY = "wms_activity"
 ACTIVITY_TOOL_NAMES = frozenset({WMS_ACTIVITY})
@@ -30,6 +32,8 @@ MAX_MATRIX_DAYS = 62
 DEFAULT_DAYS = 14
 PEOPLE_LIMIT = 50
 GROUP_LIMIT = 200
+#: A bound on the people one company filter carries; a site has tens, a whole customer hundreds.
+MAX_COMPANY_WORKERS = 2000
 GRAIN_NOTE = "a user counts as active in an hour or a day when they completed at least one transaction in it"
 HOURS = [f"{h:02d}" for h in range(24)]
 
@@ -45,6 +49,12 @@ RECIPES: list[dict[str, Any]] = [
      "call": {"tool": WMS_ACTIVITY, "grain": "day", "days": 30}, "read": "rows[].devices; chart_from_data measure devices"},
     {"question": "which hours had the most users this month",
      "call": {"tool": WMS_ACTIVITY, "grain": "hour", "days": 30}, "read": "the matrix; name the busiest cells with their counts"},
+    {"question": "logins per user per day for the last month",
+     "call": {"tool": WMS_ACTIVITY, "grain": "day", "by": "user", "days": 30},
+     "read": "user_day; the grid with its logins and transactions switch is drawn for you"},
+    {"question": "who logged in each day last month for company 920",
+     "call": {"tool": WMS_ACTIVITY, "grain": "day", "by": "user", "days": 30, "company": "920"},
+     "read": "user_day; name the people with the most logins from its totals per row"},
 ]
 
 ACTIVITY_TOOLS: list[dict[str, Any]] = [
@@ -61,7 +71,10 @@ ACTIVITY_TOOLS: list[dict[str, Any]] = [
             "back as the breakdown beside the days. Window: days back (14 when not said, up to 92), or "
             "start and end, or one day. "
             "grain 'hour' over several days also returns the day-by-hour matrix the heat map is drawn "
-            "from. Answer only with the counts it returns."
+            "from. grain 'day' with by 'user' also returns user_day, a grid of people down and days "
+            "across with logins and transactions per cell, for 'logins per user per day' or 'who "
+            "logged in each day' (up to 48 days). company narrows to one company. "
+            "Answer only with the counts it returns."
         ),
         "input_schema": {
             "type": "object",
@@ -75,6 +88,7 @@ ACTIVITY_TOOLS: list[dict[str, Any]] = [
                 "user": {"type": "string", "description": "One user name, to narrow."},
                 "warehouse": {"type": "string", "description": "One warehouse code, to narrow."},
                 "method": {"type": "string", "description": "One transaction method, to narrow."},
+                "company": {"type": "string", "description": "One M3 company number, such as 920, to narrow."},
                 "limit": {"type": "integer", "description": "Groups to return when cut by user, device, warehouse or method; 50 when not said."},
             },
             "additionalProperties": False,
@@ -188,6 +202,29 @@ def matrix_of(cells: list[tuple[date, int, int]], start: datetime, end: datetime
     }
 
 
+async def company_workers(db: AsyncSession, company: str, where: list[ColumnElement[bool]]) -> list[str]:
+    """The people who did work tagged with the company under the same `where`, read once as a
+    list, because a sub-select in the filter is planned again for every daily partition of
+    `log_transactions` and a month then costs about 31 passes instead of one (19 Nov 2026).
+
+    ("920", [tenant, window]) -> ["CPRICE", "RBENJAMIN", ...] ; (no tagged work) -> []
+    """
+    T = LogTransaction
+    q = select(T.user_name).where(*where, T.company == company).distinct().limit(MAX_COMPANY_WORKERS)
+    return sorted(u for u in (await db.execute(q)).scalars() if u)
+
+
+def company_filter(company: str, workers: list[str]) -> ColumnElement[bool]:
+    """The condition that keeps one company's calls: tagged with it, or untagged (a login carries
+    no company) and made by one of its workers.
+
+    >>> print(company_filter("920", ["UA"]).compile(compile_kwargs={"literal_binds": True}))
+    log_transactions.company = '920' OR log_transactions.company IS NULL AND log_transactions.user_name IN ('UA')
+    """
+    T = LogTransaction
+    return or_(T.company == company, and_(T.company.is_(None), T.user_name.in_(workers)))
+
+
 async def activity_rows(db: AsyncSession, customer_code: str, args: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
     """The counts for the window and the cut: rows per bucket or group, the day-by-hour matrix
     for an hour grain, the people for a user cut or a short window, and the totals.
@@ -210,6 +247,11 @@ async def activity_rows(db: AsyncSession, customer_code: str, args: Mapping[str,
     for key, column in (("user", T.user_name), ("warehouse", T.warehouse), ("method", T.method)):
         if args.get(key):
             where.append(column == str(args[key]))
+    company = str(args.get("company") or "").strip()
+    if company:
+        where.append(company_filter(company, await company_workers(db, company, list(where))))
+        notes.append(f"company {company}: an untagged call, such as a login, counts when its user did "
+                     f"company {company} work in the window")
     errors = func.sum(case((T.status == LogTransactionStatus.error, 1), else_=0))
     measures = (
         func.count(func.distinct(T.user_name)).label("users"),
@@ -256,8 +298,17 @@ async def activity_rows(db: AsyncSession, customer_code: str, args: Mapping[str,
         "grain": grain, "by": by, "group_by": group_by, "rows": rows, "groups": len(rows), "total": total,
         "grain_note": GRAIN_NOTE,
     }
+    if company:
+        out["company"] = company
     if time_rows is not None and cut_rows is not None:
         out["breakdown_by"], out["breakdown"] = by, cut_rows
+    # Step 3a: The people-by-day grid for a day grain asked for together with the user cut, which
+    # the heat map with its logins and transactions switch is drawn from (step 41)
+    if asked_grain and grain == "day" and by == "user":
+        days = activity_grid.window_days(start, end, tz)
+        user_day = await activity_grid.user_day_grid(db, where, local, days, notes)
+        if user_day is not None:
+            out["user_day"] = user_day
     # Step 3: The day-by-hour matrix for an hour grain over several days, which the heat map is
     # drawn from, filled for every day of the window so a quiet day is a row of zeros
     if time_rows is not None and grain == "hour":

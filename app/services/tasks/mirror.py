@@ -8,6 +8,7 @@ days. Rewritten after every change and firing, and by the consumer's sweep every
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections import defaultdict
@@ -32,6 +33,10 @@ SUGGEST_WINDOW_MINUTES = 45
 COMING_UP = 6
 RUNS_WITH_BLOCKS = 10
 RUNS_LIMIT = 200
+#: The bytes of blocks the History row may carry. A row's payload is capped at 390,000 characters
+#: (`MirrorEnvelope`, under DynamoDB's 400 KB item); 200 runs of words take about 150 KB, so the
+#: blocks get the rest with room to spare (step 41: one month grid is up to about 55 KB).
+RUN_BLOCKS_BUDGET_BYTES = 150_000
 
 
 def normalise(question: str) -> str:
@@ -132,9 +137,31 @@ def today_list(rows: list[dict], *, tz: ZoneInfo, now: datetime) -> list[dict]:
     return due + done
 
 
+def fit_run_blocks(runs: list[dict], *, budget_bytes: int, max_runs: int) -> list[dict]:
+    """The runs, newest first, with blocks kept on the newest ones while they fit the byte budget and
+    at most `max_runs` of them; a run past either keeps `has_blocks`, so the page says so.
+
+    ([big 600 B, small, big, small], budget 1000) -> blocks on [yes, yes, no, yes]
+    """
+    used, kept = 0, 0
+    out = []
+    for run in runs:
+        blocks = run.get("blocks")
+        if blocks is None:
+            out.append(run)
+            continue
+        size = len(json.dumps(blocks, default=str).encode())
+        if kept < max_runs and used + size <= budget_bytes:
+            used, kept = used + size, kept + 1
+            out.append(run)
+        else:
+            out.append({k: v for k, v in run.items() if k != "blocks"})
+    return out
+
+
 async def runs_payload(db: AsyncSession, customer_code: str, owner_object_id: str, *, now: datetime) -> dict:
     """The USER#<id>#TASK_RUNS row (step 15): the person's runs of the retention window, newest
-    first; the newest few carry their blocks, the rest say they have some."""
+    first; the newest few carry their blocks while they fit the row, the rest say they have some."""
     tz = ZoneInfo(await get_customer_timezone(db, customer_code))
     since = now - timedelta(days=settings.teams_task_runs_retention_days)
     pairs = await store.list_runs(db, customer_code, owner_object_id, since=since, limit=RUNS_LIMIT)
@@ -142,7 +169,9 @@ async def runs_payload(db: AsyncSession, customer_code: str, owner_object_id: st
         "owner_object_id": owner_object_id,
         "as_of": now.isoformat(),
         "retention_days": settings.teams_task_runs_retention_days,
-        "runs": [store.run_payload(run, task, tz, with_blocks=i < RUNS_WITH_BLOCKS) for i, (run, task) in enumerate(pairs)],
+        "runs": fit_run_blocks([store.run_payload(run, task, tz, with_blocks=i < RUNS_WITH_BLOCKS)
+                                for i, (run, task) in enumerate(pairs)],
+                               budget_bytes=RUN_BLOCKS_BUDGET_BYTES, max_runs=RUNS_WITH_BLOCKS),
     }
 
 

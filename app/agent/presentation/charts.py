@@ -13,7 +13,15 @@ import json
 from typing import Any, Mapping
 
 from app.agent.presentation.evidence import _cell, _label
-from app.services.teams.contracts import ChartBlock, ChartSeries, EvidenceColumn, HeatmapBlock, KpisBlock, TableBlock
+from app.services.teams.contracts import (
+    ChartBlock,
+    ChartSeries,
+    EvidenceColumn,
+    HeatmapBlock,
+    HeatmapLayer,
+    KpisBlock,
+    TableBlock,
+)
 
 TIME_BUCKETS = ("day", "hour", "hour_start", "week", "business_date", "month")
 #: A measure the model may name that the rows spell differently: (row key, sign).
@@ -50,7 +58,7 @@ MAX_POINTS = 48
 MIN_CHART_POINTS = 2
 TOO_FEW_POINTS = "a chart needs at least two points; say the one value in words or show_kpis"
 #: The result keys that make a data call usable as the source of a chart.
-SOURCE_KEYS = ("rows", "counts", "summary", "vans", "matrix")
+SOURCE_KEYS = ("rows", "counts", "summary", "vans", "matrix", "user_day")
 #: The tools whose grouped rows the automatic shape may draw.
 GROUPED_TOOLS = ("aggregate_releases", "wms_activity")
 
@@ -349,7 +357,8 @@ def auto_kpis(tool: str, result: dict) -> KpisBlock | None:
 
 
 def auto_heatmap(tool: str, result: dict) -> HeatmapBlock | None:
-    """The heat map a result's day-by-hour matrix draws (step 20), validated by the contract.
+    """The heat map a result draws: its people-by-day grid (step 41) or its day-by-hour matrix
+    (step 20), validated by the contract.
 
     >>> auto_heatmap("wms_activity", {"matrix": {"rows": ["Fri 18 Sep"], "columns": ["00", "01"], "values": [[0, 3]],
     ...     "unit": "users", "scale": [1, 2, 4, 9], "outside": None}, "window": {"start": "2026-09-18T00:00:00+01:00", "end": "2026-09-19T00:00:00+01:00"}}).title
@@ -357,6 +366,9 @@ def auto_heatmap(tool: str, result: dict) -> HeatmapBlock | None:
     >>> auto_heatmap("wms_activity", {"rows": []}) is None
     True
     """
+    user_day = result.get("user_day")
+    if isinstance(user_day, dict) and user_day.get("rows"):
+        return user_day_heatmap(result, user_day)
     matrix = result.get("matrix")
     if not isinstance(matrix, dict) or not matrix.get("rows"):
         return None
@@ -377,6 +389,39 @@ def auto_heatmap(tool: str, result: dict) -> HeatmapBlock | None:
         return None
 
 
+def user_day_heatmap(result: dict, user_day: dict) -> HeatmapBlock | None:
+    """The people-by-day grid as a heat map the page switches between logins and transactions,
+    with a total per person and per day; None when the grid breaks the contract.
+
+    >>> user_day_heatmap({"window": {"start": "2026-11-17T00:00:00+00:00", "end": "2026-11-20T00:00:00+00:00"}},
+    ...     {"rows": ["User A (UA)"], "columns": ["Tu 17/11"], "layers": [
+    ...         {"label": "Logins", "unit": "logins", "values": [[1]], "scale": [1, 2, 4, 8]},
+    ...         {"label": "Transactions", "unit": "transactions", "values": [[4]], "scale": [1, 4]}]}).title
+    'Logins and transactions per user per day · 2026-11-17 to 2026-11-20'
+    """
+    window = result.get("window") or {}
+    start, end = str(window.get("start") or "")[:10], str(window.get("end") or "")[:10]
+    title = "Logins and transactions per user per day" + (f" · {start} to {end}" if start and end else "")
+    if result.get("company"):
+        title += f" · company {result['company']}"
+    try:
+        layers = [
+            HeatmapLayer(label=str(layer["label"]), unit=layer.get("unit"), scale=layer.get("scale"),
+                         values=[[float(v) for v in row] for row in layer["values"]])
+            for layer in user_day.get("layers") or []
+        ]
+        first = layers[0]
+        return HeatmapBlock(
+            title=title[:120],
+            rows=[str(r) for r in user_day["rows"]],
+            columns=[str(c) for c in user_day.get("columns") or []],
+            values=first.values, unit=first.unit, scale=first.scale,
+            layers=layers, totals=True,
+        )
+    except (ValueError, TypeError, KeyError, IndexError):
+        return None
+
+
 def auto_people_table(tool: str, result: dict) -> TableBlock | None:
     """The table of who was active, from the activity tool's own list of people: each person's
     user name, name, first and last call (the time only), calls and devices, busiest first.
@@ -388,7 +433,8 @@ def auto_people_table(tool: str, result: dict) -> TableBlock | None:
     True
     """
     people = result.get("people")
-    if tool != "wms_activity" or not isinstance(people, list) or not people:
+    # the people-by-day grid (step 41) already names every person, so a second list of them is noise
+    if tool != "wms_activity" or not isinstance(people, list) or not people or result.get("user_day"):
         return None
 
     def clock(value: object) -> str:

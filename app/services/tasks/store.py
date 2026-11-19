@@ -222,6 +222,18 @@ async def recent_runs(db: AsyncSession, task_id: uuid.UUID, *, limit: int = 5) -
         .order_by(TeamsTaskRun.planned_at.desc()).limit(limit))).scalars())
 
 
+def _without_blocks(last_result: dict | None) -> dict | None:
+    """The last result as the Routines row carries it: its words, not its blocks, which the page
+    never reads there and which the History row keeps (step 41: a month grid is tens of KB).
+
+    >>> _without_blocks({"text": "t", "blocks": [{"type": "heatmap"}]}), _without_blocks(None)
+    ({'text': 't'}, None)
+    """
+    if not last_result:
+        return last_result
+    return {k: v for k, v in last_result.items() if k != "blocks"}
+
+
 def task_payload(task: TeamsTask, tz: ZoneInfo) -> dict:
     """One task as the tab draws it."""
     last = task.last_result or {}
@@ -233,7 +245,7 @@ def task_payload(task: TeamsTask, tz: ZoneInfo) -> dict:
         "fire_count": task.fire_count, "query_text": task.query_text, "skip_if": task.skip_if,
         "target": task.target, "target_group_id": str(task.target_group_id) if task.target_group_id else None,
         "show_as": task.show_as, "until": _iso(task.until),
-        "created_via": task.created_via, "source": dict(task.source or {}), "last_result": task.last_result,
+        "created_via": task.created_via, "source": dict(task.source or {}), "last_result": _without_blocks(task.last_result),
         "created_at": _iso(task.created_at), "updated_at": _iso(task.updated_at), "done_at": _iso(task.done_at),
         "can_undo_until": _iso(task.created_at + timedelta(minutes=10)) if task.status == "active" else None,
     }

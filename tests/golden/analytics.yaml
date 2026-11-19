@@ -473,6 +473,18 @@ cases:
       tools: [wms_activity]
       blocks: [heatmap]
 
+  # step 41: people down, days across, logins and transactions the page switches between
+  - name: logins_per_user_per_day_as_a_grid
+    question: Show logins per user per day in the week to 18 September 2026
+    replies:
+      - tool: wms_activity
+        args: {grain: day, by: user, start: "2026-09-11", end: "2026-09-18"}
+      - text: "The grid shows each person's logins and transactions per day; switch between the two above it."
+    expect:
+      stop_reason: end_turn
+      tools: [wms_activity]
+      blocks: [heatmap]
+
   - name: who_was_active_on_a_day_with_first_and_last_call
     question: Who was active on 18 September 2026, and when did each person start and finish?
     replies:

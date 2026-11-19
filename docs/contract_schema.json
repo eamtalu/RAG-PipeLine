@@ -750,7 +750,7 @@
           "type": "object"
         },
         "HeatmapBlock": {
-          "description": "A grid of counts over two labelled axes (step 20): days down, hours across, the number of\ndifferent users active in each cell; `scale` holds the band thresholds, `outside` marks the\ncells beyond the window asked for.",
+          "description": "A grid of counts over two labelled axes: days down and hours across (step 20), or people\ndown and days across (step 41, 3.24); `scale` holds the band thresholds, `outside` marks the cells\nbeyond the window asked for. With `layers` the page switches between measures, and the block's\nown values, unit and scale are the first layer's; `totals` asks for a total per row and column.",
           "properties": {
             "columns": {
               "items": {
@@ -761,6 +761,23 @@
               "minItems": 1,
               "title": "Columns",
               "type": "array"
+            },
+            "layers": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/HeatmapLayer"
+                  },
+                  "maxItems": 3,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Layers"
             },
             "outside": {
               "anyOf": [
@@ -812,6 +829,11 @@
               "title": "Title",
               "type": "string"
             },
+            "totals": {
+              "default": false,
+              "title": "Totals",
+              "type": "boolean"
+            },
             "type": {
               "const": "heatmap",
               "default": "heatmap",
@@ -851,6 +873,65 @@
             "values"
           ],
           "title": "HeatmapBlock",
+          "type": "object"
+        },
+        "HeatmapLayer": {
+          "description": "One measure the page can switch the heat map to (step 41), such as logins or transactions:\nits own counts over the block's rows and columns, its unit and its bands.",
+          "properties": {
+            "label": {
+              "maxLength": 24,
+              "minLength": 1,
+              "title": "Label",
+              "type": "string"
+            },
+            "scale": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 6,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Scale"
+            },
+            "unit": {
+              "anyOf": [
+                {
+                  "maxLength": 24,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unit"
+            },
+            "values": {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "maxItems": 62,
+              "minItems": 1,
+              "title": "Values",
+              "type": "array"
+            }
+          },
+          "required": [
+            "label",
+            "values"
+          ],
+          "title": "HeatmapLayer",
           "type": "object"
         },
         "KpiItem": {
@@ -1724,5 +1805,5 @@
       "type": "object"
     }
   },
-  "revision": "3.23"
+  "revision": "3.24"
 }

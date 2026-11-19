@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.23"
+CONTRACT_REVISION = "3.24"
 
 
 def _now() -> datetime:
@@ -436,10 +436,37 @@ class FindingsBlock(BaseModel):
     )
 
 
+def _check_grid(
+    values: list[list[float]], scale: list[float] | None, rows: int, width: int
+) -> None:
+    """Refuse a grid that is not rows x width counts, or a band scale that does not rise.
+
+    ([[1, 2]], None, 1, 2) -> None ; ([[1]], None, 1, 2) -> ValueError ; (scale [4, 1]) -> ValueError
+    """
+    if len(values) != rows or any(len(r) != width for r in values):
+        raise ValueError("values must be one list per row with one number per column")
+    if any(v < 0 for r in values for v in r):
+        raise ValueError("a heat map holds counts, never a negative value")
+    if scale is not None and any(b <= a for a, b in zip(scale, scale[1:])):
+        raise ValueError("scale must rise")
+
+
+class HeatmapLayer(BaseModel):
+    """One measure the page can switch the heat map to (step 41), such as logins or transactions:
+    its own counts over the block's rows and columns, its unit and its bands."""
+
+    label: str = Field(..., min_length=1, max_length=24)
+    values: list[list[float]] = Field(..., min_length=1, max_length=62)
+    unit: str | None = Field(default=None, max_length=24)
+    scale: list[float] | None = Field(default=None, min_length=2, max_length=6)
+
+
 class HeatmapBlock(BaseModel):
-    """A grid of counts over two labelled axes (step 20): days down, hours across, the number of
-    different users active in each cell; `scale` holds the band thresholds, `outside` marks the
-    cells beyond the window asked for."""
+    """A grid of counts over two labelled axes: days down and hours across (step 20), or people
+    down and days across (step 41, 3.24); `scale` holds the band thresholds, `outside` marks the cells
+    beyond the window asked for. With `layers` the page switches between measures, and the block's
+    own values, unit and scale are the first layer's; `totals` asks for a total per row and column.
+    """
 
     type: Literal["heatmap"] = "heatmap"
     title: str = Field(..., max_length=120)
@@ -449,25 +476,32 @@ class HeatmapBlock(BaseModel):
     unit: str | None = Field(default=None, max_length=24)
     scale: list[float] | None = Field(default=None, min_length=2, max_length=6)
     outside: list[list[bool]] | None = None
+    layers: list[HeatmapLayer] | None = Field(default=None, min_length=2, max_length=3)
+    totals: bool = False
 
     @model_validator(mode="after")
     def _shape_holds(self) -> "HeatmapBlock":
-        """The values are one list per row with one number per column, none negative; the scale
-        rises; `outside`, when given, has the same shape.
+        """The values, and each layer's, are one count per row and column; the scales rise;
+        `outside` has the same shape; the block's own grid is the first layer's.
 
         (2 rows, 3 columns, values 2x3) -> ok ; (values 2x2) -> ValueError ; (scale [4, 1]) -> ValueError
         """
-        width = len(self.columns)
-        if len(self.values) != len(self.rows) or any(len(r) != width for r in self.values):
-            raise ValueError("values must be one list per row with one number per column")
-        if any(v < 0 for r in self.values for v in r):
-            raise ValueError("a heat map holds counts, never a negative value")
-        if self.scale is not None and any(b <= a for a, b in zip(self.scale, self.scale[1:])):
-            raise ValueError("scale must rise")
+        # Step 1: Hold the block's own grid to its rows and columns, because the page indexes it
+        # by position and a ragged row would draw counts under the wrong day
+        rows, width = len(self.rows), len(self.columns)
+        _check_grid(self.values, self.scale, rows, width)
         if self.outside is not None and (
-            len(self.outside) != len(self.rows) or any(len(r) != width for r in self.outside)
+            len(self.outside) != rows or any(len(r) != width for r in self.outside)
         ):
             raise ValueError("outside must have the shape of values")
+        # Step 2: Hold every layer to the same grid, and the block to its first layer, so a page
+        # that knows no layers draws exactly what a page that does shows first
+        for layer in self.layers or []:
+            _check_grid(layer.values, layer.scale, rows, width)
+        if self.layers:
+            first = self.layers[0]
+            if (self.values, self.unit, self.scale) != (first.values, first.unit, first.scale):
+                raise ValueError("the block's values, unit and scale must be its first layer's")
         return self
 
 

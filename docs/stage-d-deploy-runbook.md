@@ -502,3 +502,18 @@ Deployed 16 November 2026: D35 (`8b6292f`, hourly forecast per warehouse) at 16:
 Deployed 17 November 2026 00:27 GMT as `3a9cc09` (D38, the routine library's reports, PR #50): worker restarted 00:27:56; SITE#all/BRI/BIC/LON#REPORTS written 00:29, 6-9 KB, all available. Rollback: the previous checkout (`e0734fe`) and a restart.
 
 Deployed 17 November 2026 00:52 GMT as `0debed8` (D39, /brief and /review in Ask from the routine library, no model, PR #51): worker restarted 00:52:14, health 200, ASK_CATALOGUE rewritten at 00:52:40 as version 20.2 with shortcuts /graph, /chart, /table, /brief, /review. Rollback: `3a9cc09` and a restart.
+
+## D41: logins and transactions per user per day, by company
+
+What it changes: `wms_activity` takes a `company` (a call tagged with it, or an untagged call such as a login by someone who did that company's work in the window) and, for a day grain with the user cut, returns `user_day`: people down, days across, logins and transactions per cell (up to 62 people and 48 days).
+The lift draws it as one heat map with a Logins / Transactions switch and totals; contract 3.24 (`HeatmapBlock.layers`, `HeatmapBlock.totals`, synced from the edge).
+The routine rows stay under DynamoDB's item limit: the History row keeps blocks on the newest runs while they fit 150 KB, and the Routines row no longer carries `last_result.blocks`.
+No migration, no flag. Plan: `docs/plan/2026-11-19_19-48_user-by-day-login-grid-teams-ask.md`.
+
+Deploy the edge image first (edge step 41), then the backend: an older edge drops the two new fields and draws the logins layer alone, without the switch or the totals.
+
+Deploy: `./deploy.sh`. Check: in Teams on TMP Test, Ask "logins per user per day for the last month for company 920".
+The grid must match the hand-made one of 19 November 2026: 42 people (41 with a login, one with transactions only), 202 logins, Puskar Bhandari 38, Craig Price 31; the switch shows transactions; the consumer log has no `teams.answers` error.
+Then save it as a routine, press Run now, and check that History shows the same grid.
+
+Rollback: the previous checkout and a restart; the edge can stay on 3.24 (the fields are optional).
