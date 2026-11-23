@@ -21,6 +21,7 @@ from app.services.access import mirror as access_mirror
 from app.services.ask import forms as ask_forms
 from app.services.teams.contracts import ACCESS_COMMAND_KINDS, QuestionJob, ReceiptBlock
 from app.services.teams.mirror import MirrorWriter, build_mirror_writer_from_settings
+from app.services.teams.mirror_rows import normalize_email
 from app.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,8 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
     block where the action can be undone.
 
     (admin: access_set_user u-9 supervisor BRI) -> "created Jo Bloggs as Supervisor for BRI" + receipt ;
-    (supervisor: the same) -> "sent for approval · USR-3" + receipt ; (picker: the same) -> Refused
+    (supervisor: the same) -> "sent for approval · USR-3" + receipt ; (picker: the same) -> Refused ;
+    (no record: access_claim jo@cust.com) -> "access ready for Jo Bloggs" (step 43)
     """
     command = job.command
     if command is None or command.kind not in ACCESS_COMMAND_KINDS:
@@ -69,14 +71,19 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
     actor = users.Actor(job.sender_object_id, job.sender_name)
     factory = session_factory or async_session
     async with factory() as db:
-        # Step 1: The actor's own record decides, so a forged job cannot act beyond its sender
-        record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
-        if record is None or not record.is_active:
-            raise Refused("you have no active access record")
         # a confirmed form from Ask (step 18) arrives as {form_id, values, via}; its own fields come out
         payload = ask_forms.unwrap(dict(command.payload))
-        handler = _HANDLERS[command.kind]
-        outcome = await handler(db, job, record, actor, payload, now)
+        if command.kind == "access_claim":
+            # Step 1a: A claim comes from a person with no record yet, so it cannot be decided by
+            # one; claim_invite checks the invite, the domain and the object id instead
+            outcome = await _claim(db, job, actor, payload, now)
+        else:
+            # Step 1: The actor's own record decides, so a forged job cannot act beyond its sender
+            record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
+            if record is None or not record.is_active:
+                raise Refused("you have no active access record")
+            handler = _HANDLERS[command.kind]
+            outcome = await handler(db, job, record, actor, payload, now)
         if isinstance(outcome, str):
             outcome = CommandOutcome(outcome)
         await db.commit()
@@ -96,8 +103,11 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
 async def _set_user(db: AsyncSession, job: QuestionJob, record: records.AccessRecord,
                     actor: users.Actor, payload: dict, now: datetime) -> str:
     object_id = str(payload.get("object_id") or "").strip()
+    email = normalize_email(payload.get("email"))
+    if not object_id and email:
+        return await _invite(db, job, record, actor, payload, email, now)
     if not object_id:
-        raise ValueError("object_id is required")
+        raise ValueError("an object_id or an email is required")
     # the confirmed form (step 8) names one site and a shift; the Admin tab names site_ids
     site_ids = payload.get("site_ids")
     if site_ids is None and payload.get("site_id"):
@@ -140,6 +150,17 @@ async def _set_user(db: AsyncSession, job: QuestionJob, record: records.AccessRe
 async def _deactivate_user(db: AsyncSession, job: QuestionJob, record: records.AccessRecord,
                            actor: users.Actor, payload: dict, now: datetime) -> str:
     object_id = str(payload.get("object_id") or "").strip()
+    if not object_id and payload.get("email"):
+        # step 43: a pending invite has no object id yet; it is found and withdrawn by email
+        decision = records.decide(record, "manage_users")
+        if not decision.is_allowed:
+            raise Refused(decision.reason)
+        user = await users.get_user_by_email(db, job.customer_code, str(payload["email"]))
+        if user is None or user.object_id is not None:
+            raise ValueError(f"no pending invite for {normalize_email(payload['email'])}")
+        await users.update_user_row(db, user, change=users.UserChange(status="deactivated"),
+                                    actor=actor, now=now)
+        return f"deactivated {user.display_name}"
     if not object_id:
         raise ValueError("object_id is required")
     if object_id == actor.object_id:
@@ -150,6 +171,63 @@ async def _deactivate_user(db: AsyncSession, job: QuestionJob, record: records.A
     user = await users.update_user(db, job.customer_code, object_id,
                                    change=users.UserChange(status="deactivated"), actor=actor, now=now)
     return f"deactivated {user.display_name}"
+
+
+async def _invite(db: AsyncSession, job: QuestionJob, record: records.AccessRecord,
+                  actor: users.Actor, payload: dict, email: str, now: datetime) -> CommandOutcome:
+    """Invite a person by email from the Admin tab (step 43), or queue it where it needs approval.
+
+    (admin, jo@cust.com supervisor BRI) -> "invited Jo Bloggs (jo@cust.com) as Supervisor for BRI" ;
+    (supervisor) -> "sent for approval · USR-n" ; (picker) -> Refused
+    """
+    site_ids = payload.get("site_ids")
+    if site_ids is None and payload.get("site_id"):
+        site_ids = [payload["site_id"]]
+    change = users.UserChange(
+        display_name=payload.get("display_name"), role_code=payload.get("role"),
+        all_sites=payload.get("all_sites"), site_ids=tuple(site_ids) if site_ids is not None else None,
+        capabilities=payload.get("capabilities"), starts_on=_date(payload.get("starts_on")),
+        note=payload.get("note") or None)
+    decision = records.decide(record, "manage_users")
+    existing = await users.get_user_by_email(db, job.customer_code, email)
+    if existing is not None and existing.object_id is None and decision.is_allowed:
+        # Step 0: An email that is still a pending invite is that invite edited, not a new one
+        user = await users.update_user_row(db, existing, change=change, actor=actor, now=now)
+        return CommandOutcome(f"updated {user.display_name}")
+    if existing is not None and existing.object_id is None:
+        raise Refused(f"{email} is already invited; ask an Ops manager to change the invite")
+    # Step 1: "With approval" queues the invite for an Ops manager, as for a user added by id
+    if decision.outcome == "needs_approval":
+        row = await approvals.request(
+            db, job.customer_code, kind="create_user", requested_by=actor.object_id,
+            requested_by_name=actor.name, requested_via=payload.get("via") or "admin",
+            title=f"New user: {change.display_name or email}", detail=_detail(change),
+            payload={**payload, "object_id": None, "email": email, "site_ids": list(site_ids or [])},
+            now=now)
+        return CommandOutcome(
+            f"sent for approval · {row.reference}",
+            (receipt("Request sent to the Ops managers", status="needs_approval", reference=row.reference,
+                     undo={"reference": row.reference}, now=now),))
+    if not decision.is_allowed:
+        raise Refused(decision.reason)
+    user = await users.invite_user(db, job.customer_code, email, change=change, actor=actor, now=now)
+    text = (f"invited {user.display_name} ({email}) as {_role_name(user.role_code)}"
+            f"{_sites_of(change, site_ids)}")
+    return CommandOutcome(text, (receipt(text[0].upper() + text[1:], undo={"email": email}, now=now),))
+
+
+async def _claim(db: AsyncSession, job: QuestionJob, actor: users.Actor, payload: dict,
+                 now: datetime) -> str:
+    """Link the sender's first sign-in to their invite (step 43); the edge sends it, never the page.
+
+    (u-jo, {email: jo@cust.com} pending) -> "access ready for Jo Bloggs" ; (no invite) -> Refused
+    """
+    try:
+        user = await users.claim_invite(db, job.customer_code, str(payload.get("email") or ""),
+                                        job.sender_object_id, name=job.sender_name, now=now)
+    except ValueError as exc:
+        raise Refused(str(exc)) from None
+    return f"access ready for {user.display_name}"
 
 
 async def _set_matrix_cell(db: AsyncSession, job: QuestionJob, record: records.AccessRecord,
@@ -222,7 +300,16 @@ async def _undo(db: AsyncSession, job: QuestionJob, record: records.AccessRecord
         await users.update_user(db, job.customer_code, user.object_id,
                                 change=users.UserChange(status="deactivated"), actor=actor, now=now)
         return f"undone · {user.display_name} deactivated"
-    raise ValueError("an undo names a reference or an object_id")
+    if payload.get("email"):
+        user = await users.get_user_by_email(db, job.customer_code, str(payload["email"]))
+        if user is None or user.object_id is not None or user.created_by != actor.object_id:
+            raise Refused("that invite was not sent by you, or has been claimed already")
+        if now - user.created_at > window:
+            raise Refused("the undo window has passed; withdraw the invite from the Admin tab instead")
+        await users.update_user_row(db, user, change=users.UserChange(status="deactivated"),
+                                    actor=actor, now=now)
+        return f"undone · invite for {user.display_name} withdrawn"
+    raise ValueError("an undo names a reference, an object_id or an email")
 
 
 _HANDLERS = {

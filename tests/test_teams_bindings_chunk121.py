@@ -94,7 +94,8 @@ async def test_put_saves_mirrors_and_reports(mirror: InMemoryMirror):
     assert body["tenant_id"] == TENANT  # normalised to lowercase
     assert body["customer_code"] == CC and body["enabled"] is True
     assert body["display_name"] == "Acme" and body["mirrored"] is True
-    assert mirror.items[TENANT] == {"customer_code": CC, "enabled": True, "display_name": "Acme"}
+    assert mirror.items[TENANT] == {"customer_code": CC, "enabled": True, "display_name": "Acme",
+                                    "email_domains": []}
 
     async with _client() as c:
         r = await c.get("/api/v1/teams/bindings")

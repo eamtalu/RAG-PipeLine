@@ -9,6 +9,10 @@
 #
 #   customer_code is a real foreign key everywhere here: a user of a missing log space is a
 #   config error, as a site of one is.
+#
+#   Step 43: a person may be invited by email before they have signed in: a `pending` row with no
+#   object id, claimed at their first sign-in (the edge sends their object id and the email from
+#   their verified token). Emails are stored trimmed and lower case and are unique per customer.
 
 import uuid
 from datetime import date, datetime, timezone
@@ -24,13 +28,14 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.config.database import Base
 
-USER_STATUSES = ("active", "pending", "dormant", "deactivated")
+USER_STATUSES = ("active", "pending", "dormant", "deactivated", "expired")
 APPROVAL_STATUSES = ("pending", "approved", "declined", "expired", "withdrawn")
 
 
@@ -76,12 +81,15 @@ class TeamsUser(Base):
     __table_args__ = (
         UniqueConstraint("customer_code", "object_id", name="uq_teams_users_customer_object"),
         Index("ix_teams_users_customer_status", "customer_code", "status"),
+        Index("uq_teams_users_customer_email", "customer_code", text("lower(email)"), unique=True,
+              postgresql_where=text("email IS NOT NULL")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     customer_code: Mapped[str] = mapped_column(
         String(64), ForeignKey("customers.customer_code", ondelete="CASCADE"), nullable=False)
-    object_id: Mapped[str] = mapped_column(String(128), nullable=False)  # Entra object id
+    # Entra object id; NULL only for a pending invite (step 43), filled in at the first sign-in
+    object_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
     email: Mapped[str | None] = mapped_column(String(256), nullable=True)
     role_code: Mapped[str] = mapped_column(String(32), ForeignKey("access_roles.code"), nullable=False)
@@ -95,6 +103,8 @@ class TeamsUser(Base):
         DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
     last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # step 43: when an email invite was claimed at the first sign-in; NULL for users added by id
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class TeamsUserSite(Base):

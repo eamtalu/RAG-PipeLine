@@ -34,6 +34,10 @@ class BindingRequest(BaseModel):
                                                      "without losing the mapping.")
     display_name: str | None = Field(default=None, max_length=128, description="Customer name, for logs.")
     created_by: str | None = Field(default=None, max_length=128)
+    email_domains: list[str] | None = Field(
+        default=None, max_length=20,
+        description="The customer's own email domains (step 43): Teams invites go only to these and "
+                    "are claimed only from these. Omitted keeps the current list; [] clears it.")
 
 
 def _serialize(b: TeamsTenantBinding, *, mirrored: bool | None = None) -> dict:
@@ -42,12 +46,36 @@ def _serialize(b: TeamsTenantBinding, *, mirrored: bool | None = None) -> dict:
         "customer_code": b.customer_code,
         "enabled": b.enabled,
         "display_name": b.display_name,
+        "email_domains": list(b.email_domains or []),
         "created_by": b.created_by,
         "mirrored": (not b.needs_mirror) if mirrored is None else mirrored,
         "mirrored_at": b.mirrored_at.isoformat() if b.mirrored_at else None,
         "created_at": b.created_at.isoformat() if b.created_at else None,
         "updated_at": b.updated_at.isoformat() if b.updated_at else None,
     }
+
+
+_DOMAIN_RE = re.compile(r"^(?=.{3,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+
+
+def _validate_domains(domains: list[str] | None) -> list[str] | None:
+    """The domains trimmed, lower case and unique in order; 400 for one that is not a domain.
+
+    >>> _validate_domains([" Cust.COM ", "cust.com", "cust.co.uk"])
+    ['cust.com', 'cust.co.uk']
+    >>> _validate_domains(None) is None
+    True
+    """
+    if domains is None:
+        return None
+    out: list[str] = []
+    for raw in domains:
+        domain = (raw or "").strip().lower().lstrip("@")
+        if not _DOMAIN_RE.match(domain):
+            raise HTTPException(400, detail=f"{raw!r} is not an email domain (expected e.g. 'cust.com').")
+        if domain not in out:
+            out.append(domain)
+    return out
 
 
 def _validate_tenant(tenant_id: str) -> str:
@@ -78,7 +106,8 @@ async def upsert_binding(tenant_id: str, body: BindingRequest,
 
     row = await repo.upsert(tenant_id, code, enabled=body.enabled,
                             display_name=(body.display_name or "").strip() or None,
-                            created_by=(body.created_by or "").strip() or None)
+                            created_by=(body.created_by or "").strip() or None,
+                            email_domains=_validate_domains(body.email_domains))
     mirrored = await _try_mirror(mirror, repo, row)
     return _serialize(row, mirrored=mirrored)
 

@@ -293,7 +293,7 @@ async def test_the_usage_tool_counts_people_questions_and_acknowledgements_for_t
     await advisory_actions.run(_job("u-sup", "advisory_act", {"advisory_id": row_id, "action": "acknowledge"}, "Sam"),
                                mirror=InMemoryMirrorWriter(), now=NOW)
     async with async_session() as db:
-        out = json.loads(await usage_tools.run_usage_tool(db, CC, "u-adm", "app_usage", {"days": 7}))
+        out = json.loads(await usage_tools.run_usage_tool(db, CC, "u-adm", "app_usage", {"days": 7}, now=NOW))
         assert out["people"]["with_access"] == 5 and out["people"]["active_in_window"] == 1
         assert out["people"]["by_role"] == [{"role": "supervisor", "active": 1}]
         assert sum(d["questions"] for d in out["questions_per_day"]) == 3

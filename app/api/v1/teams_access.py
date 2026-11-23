@@ -1,5 +1,6 @@
 """Access control admin API (stage D, step 7): the superadmin's door to a customer's users and
-matrix. Admin-only (the ops service token), as the tenant bindings are.
+matrix. Admin-only (the ops service token), as the tenant bindings are. Since step 43 the first
+Admin can be invited by email instead of by object id (`POST .../invites`).
 
 Postgres is the record; every write is audited in the same transaction and the customer's access
 rows are mirrored to the edge at once (a failed mirror does not fail the write: the consumer's
@@ -114,6 +115,35 @@ async def put_user(customer_code: str, object_id: str, body: UserRequest,
     mirrored = await _mirror(db, mirror, code)
     await db.commit()
     return {**record.as_payload(), "mirrored": mirrored}
+
+
+class InviteRequest(UserRequest):
+    email: str = Field(..., max_length=256, description="Who to invite; must be in the customer's domains.")
+
+
+@router.post("/{customer_code}/invites")
+async def post_invite(customer_code: str, body: InviteRequest,
+                      _admin: None = Depends(require_admin), db: AsyncSession = Depends(get_session),
+                      customers: CustomerRepository = Depends(get_customer_repository),
+                      mirror: MirrorWriter | None = Depends(get_access_mirror)):
+    """Invite a person by email (step 43): pending until their first sign-in claims it.
+
+    (it.admin@cust.com, role admin, all_sites) -> 200 the pending user, mirrored ;
+    (email outside the customer's domains, or taken) -> 400
+    """
+    code = await _customer(customer_code, customers)
+    actor = users.Actor.system(body.actor or "superadmin")
+    try:
+        user = await users.invite_user(db, code, body.email, change=body.as_change(), actor=actor)
+        await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(400, detail=str(exc))
+    record = await records.record_for_user(db, user)
+    payload = users.user_payload(user, list(record.site_ids))
+    mirrored = await _mirror(db, mirror, code)
+    await db.commit()
+    return {**payload, "mirrored": mirrored}
 
 
 @router.get("/{customer_code}/matrix")
