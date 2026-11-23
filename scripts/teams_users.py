@@ -5,6 +5,8 @@
         --role admin --all-sites --email amin@example.com
     PYTHONPATH=. venv/bin/python scripts/teams_users.py set tmp-live <object id> "Jo Bloggs" \\
         --role supervisor --sites BRI,BIC
+    PYTHONPATH=. venv/bin/python scripts/teams_users.py invite tmp-live it.admin@cust.com "IT Admin" \\
+        --role admin --all-sites
     PYTHONPATH=. venv/bin/python scripts/teams_users.py deactivate tmp-live <object id>
     PYTHONPATH=. venv/bin/python scripts/teams_users.py matrix tmp-live
 
@@ -12,6 +14,11 @@
 customer is made at initialisation. Every change is audited as the superadmin and the customer's
 access rows are mirrored to the edge at once. The object id is the person's Entra object id, as
 the edge logs it (`tab.intake ... sender=`).
+
+`invite` (step 43) needs no object id: the person is pending until their first sign-in to the app
+claims the invite. The email must be in the customer's domains, set on its tenant binding
+(`PUT /api/v1/teams/bindings/<tenant>` with `email_domains`); invites expire after
+TEAMS_INVITE_DAYS (7).
 """
 
 from __future__ import annotations
@@ -37,7 +44,8 @@ async def list_users(customer_code: str) -> None:
         for user in rows:
             record = await records.record_for_user(db, user)
             sites = "all sites" if user.all_sites else ", ".join(record.site_ids) or "no sites"
-            print(f"{user.object_id}  {user.display_name!r}  {user.role_code}  {user.status}  {sites}")
+            who = user.object_id or f"(invited {user.email})"
+            print(f"{who}  {user.display_name!r}  {user.role_code}  {user.status}  {sites}")
 
 
 async def set_user(customer_code: str, object_id: str, name: str, *, role: str, email: str | None,
@@ -59,6 +67,21 @@ async def set_user(customer_code: str, object_id: str, name: str, *, role: str, 
             raise SystemExit(f"refused: {exc}")
         await _mirror(db, customer_code)
     print(f"{verb} {object_id} as {role} for {customer_code}")
+
+
+async def invite(customer_code: str, email: str, name: str, *, role: str, all_sites: bool,
+                 sites: list[str] | None, actor: str) -> None:
+    change = users.UserChange(display_name=name, role_code=role, all_sites=all_sites,
+                              site_ids=tuple(sites) if sites is not None else None)
+    async with async_session() as db:
+        try:
+            user = await users.invite_user(db, customer_code, email, change=change,
+                                           actor=users.Actor.system(actor))
+            await db.commit()
+        except ValueError as exc:
+            raise SystemExit(f"refused: {exc}")
+        await _mirror(db, customer_code)
+    print(f"invited {user.email} as {role} for {customer_code}; pending until their first sign-in")
 
 
 async def deactivate(customer_code: str, object_id: str, *, actor: str) -> None:
@@ -116,6 +139,14 @@ def main() -> None:
     p.add_argument("--all-sites", action="store_true")
     p.add_argument("--sites", help="comma-separated site ids, e.g. BRI,BIC")
     p.add_argument("--actor", default="superadmin")
+    p = sub.add_parser("invite", help="invite one person by email (no object id needed)")
+    p.add_argument("customer_code")
+    p.add_argument("email")
+    p.add_argument("name")
+    p.add_argument("--role", required=True)
+    p.add_argument("--all-sites", action="store_true")
+    p.add_argument("--sites", help="comma-separated site ids, e.g. BRI,BIC")
+    p.add_argument("--actor", default="superadmin")
     p = sub.add_parser("deactivate", help="switch one user off")
     p.add_argument("customer_code")
     p.add_argument("object_id")
@@ -132,6 +163,10 @@ def main() -> None:
                 sites = [s.strip() for s in args.sites.split(",") if s.strip()] if args.sites else None
                 await set_user(args.customer_code, args.object_id, args.name, role=args.role,
                                email=args.email, all_sites=args.all_sites, sites=sites, actor=args.actor)
+            elif args.command == "invite":
+                sites = [s.strip() for s in args.sites.split(",") if s.strip()] if args.sites else None
+                await invite(args.customer_code, args.email, args.name, role=args.role,
+                             all_sites=args.all_sites, sites=sites, actor=args.actor)
             elif args.command == "deactivate":
                 await deactivate(args.customer_code, args.object_id, actor=args.actor)
             elif args.command == "matrix":

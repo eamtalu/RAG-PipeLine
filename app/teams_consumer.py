@@ -380,6 +380,8 @@ async def _access_loop(stop: asyncio.Event) -> None:
         try:
             async with async_session() as db:
                 await access_approvals.expire_once(db, now=history.utc_now())
+                await access_users.expire_invites_once(db, now=history.utc_now())
+                await db.commit()
                 while await access_audit.purge_once(
                         db, now=history.utc_now(), retention_days=settings.teams_audit_retention_days):
                     pass

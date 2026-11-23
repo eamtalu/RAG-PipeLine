@@ -32,6 +32,8 @@ class DynamoBindingMirror:
                 "customer_code": binding.customer_code, "enabled": binding.enabled}
         if binding.display_name:
             item["display_name"] = binding.display_name
+        if binding.email_domains:  # step 43: the edge only offers an invite to these domains
+            item["email_domains"] = list(binding.email_domains)
         await asyncio.to_thread(lambda: self._table.put_item(Item=item))
 
     async def remove(self, tenant_id: str) -> None:
@@ -59,7 +61,8 @@ class InMemoryMirror:
             raise RuntimeError("mirror down")
         self.items[binding.tenant_id] = {"customer_code": binding.customer_code,
                                          "enabled": binding.enabled,
-                                         "display_name": binding.display_name}
+                                         "display_name": binding.display_name,
+                                         "email_domains": list(binding.email_domains or [])}
 
     async def remove(self, tenant_id: str) -> None:
         if self.fail:

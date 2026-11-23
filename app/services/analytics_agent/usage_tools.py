@@ -100,7 +100,7 @@ async def usage_rows(db: AsyncSession, customer_code: str, *, days: int, now: da
 
 
 async def run_usage_tool(db: AsyncSession, customer_code: str, actor_object_id: str, name: str,
-                         args: Mapping[str, Any]) -> str:
+                         args: Mapping[str, Any], *, now: datetime | None = None) -> str:
     """Run the usage tool for the asker: the counts as JSON, or the problem.
 
     ("app_usage", {"days": 7}) -> '{"days": 7, "people": {...}, ...}' ; (a supervisor) -> problems
@@ -114,4 +114,5 @@ async def run_usage_tool(db: AsyncSession, customer_code: str, actor_object_id: 
         days = max(1, min(MAX_DAYS, int(args.get("days") or 7)))
     except (TypeError, ValueError):
         days = 7
-    return json.dumps(await usage_rows(db, customer_code, days=days, now=datetime.now(timezone.utc)), default=str)
+    now = now or datetime.now(timezone.utc)
+    return json.dumps(await usage_rows(db, customer_code, days=days, now=now), default=str)

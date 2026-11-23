@@ -24,6 +24,9 @@ Row types so far:
 - users (step 7): the customer's users as the Admin tab lists them (no secrets).
 - approvals (step 7): the pending and recent approvals, for the queue and the badge.
 - audit (step 7): the latest audit events, for the Admin tab's list.
+- invite_access (step 43): one pending invite, keyed by the hash of the invited email (never the
+  email itself), so the edge can tell a first sign-in that it has been invited. Removed when the
+  invite is claimed, withdrawn or expires.
 - advisories (step 9): the open, acknowledged and snoozed advisories with the agent roster and
   the counts, rewritten after every agent run and every action.
 - exec_home (step 7d): the executive Home of screen 02: the week's figures per site and for the
@@ -32,6 +35,8 @@ Row types so far:
 Later steps add their rows here, and the edge's `KEY_LAYOUT` test keeps the Terraform prefix list
 in step with this table.
 """
+
+import hashlib
 
 from pydantic import BaseModel, Field
 
@@ -95,6 +100,10 @@ KEY_LAYOUT: dict[str, KeySpec] = {
     "users": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USERS", ttl_seconds=None),
     "approvals": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="APPROVALS", ttl_seconds=None),
     "audit": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="AUDIT", ttl_seconds=None),
+    #: step 43: a pending invite; user_id carries invite_key(email), not an object id
+    "invite_access": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}", sk="INVITE#{user_id}", ttl_seconds=None
+    ),
     "exec_home": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="EXEC#HOME", ttl_seconds=7200),
     "advisories": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="ADVISORIES", ttl_seconds=None),
     #: step 18: the Ask catalogue (topics, starters, actions, slash commands), unfiltered; the edge
@@ -160,3 +169,35 @@ class MirrorEnvelope(BaseModel):
     #: Epoch seconds when DynamoDB may drop the row; absent for rows that never expire.
     ttl: int | None = None
     payload_json: str = Field(..., max_length=390_000)
+
+
+def normalize_email(email: str | None) -> str:
+    """The form an email is stored and compared in: trimmed and lower case, "" for none.
+
+    >>> normalize_email("  Jo.Bloggs@Cust.COM ")
+    'jo.bloggs@cust.com'
+    >>> normalize_email(None)
+    ''
+    """
+    return (email or "").strip().lower()
+
+
+def invite_key(email: str) -> str:
+    """The key part of an invite row: a hash of the normalised email, so the row names nobody.
+
+    >>> invite_key("Jo@Cust.com") == invite_key(" jo@cust.com")
+    True
+    >>> len(invite_key("jo@cust.com"))
+    64
+    """
+    return hashlib.sha256(normalize_email(email).encode("utf-8")).hexdigest()
+
+
+def email_domain(email: str | None) -> str:
+    """The domain of an email in normalised form, "" when there is none.
+
+    >>> email_domain("Jo@Cust.COM"), email_domain("no-at-sign")
+    ('cust.com', '')
+    """
+    _, at, domain = normalize_email(email).rpartition("@")
+    return domain if at else ""

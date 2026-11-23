@@ -40,6 +40,11 @@
       "sk": "USER#{user_id}#TURN#{job_id}",
       "ttl_seconds": 2678400
     },
+    "invite_access": {
+      "pk": "EYE#{customer_code}",
+      "sk": "INVITE#{user_id}",
+      "ttl_seconds": null
+    },
     "job_progress": {
       "pk": "EYE#{customer_code}",
       "sk": "JOB#{job_id}#PROGRESS",
@@ -1629,6 +1634,7 @@
                 "access_decide",
                 "access_request",
                 "access_undo",
+                "access_claim",
                 "advisory_act",
                 "demo_act",
                 "task_create",
@@ -1805,5 +1811,5 @@
       "type": "object"
     }
   },
-  "revision": "3.24"
+  "revision": "3.25"
 }

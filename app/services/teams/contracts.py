@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.24"
+CONTRACT_REVISION = "3.25"
 
 
 def _now() -> datetime:
@@ -29,8 +29,13 @@ def _now() -> datetime:
 
 #: The access-control actions of the Admin tab (step 7c). Each carries its fields in `payload`:
 #: access_set_user {object_id, display_name?, email?, role?, all_sites?, site_ids?, status?,
-#:   starts_on?, note?, capabilities?} (creates the user when new, else changes them);
-#: access_deactivate_user {object_id}; access_set_matrix_cell {role, capability, state};
+#:   starts_on?, note?, capabilities?} (creates the user when new, else changes them); since 3.25
+#:   {email, ...} without an object_id invites the person: a pending user, claimed at first sign-in;
+#: access_deactivate_user {object_id} or, for a pending invite, {email};
+#: access_claim {email} (3.25: sent by the edge, never by the page, when a person with no record
+#:   signs in and the token's email matches a pending invite; the email comes from the verified
+#:   token and the sender's object id from the job);
+#: access_set_matrix_cell {role, capability, state};
 #: access_decide {reference, approve: bool, changes?, note?};
 #: access_request {capability} or {site_ids} (the person asking for more, for themselves);
 #: access_undo {reference} or {object_id} (a receipt's undo, within its window; step 8);
@@ -63,6 +68,7 @@ ACCESS_COMMAND_KINDS = (
     "access_decide",
     "access_request",
     "access_undo",
+    "access_claim",
     "advisory_act",
     "demo_act",
     "task_create",
@@ -98,6 +104,7 @@ class Command(BaseModel):
         "access_decide",
         "access_request",
         "access_undo",
+        "access_claim",
         "advisory_act",
         "demo_act",
         "task_create",

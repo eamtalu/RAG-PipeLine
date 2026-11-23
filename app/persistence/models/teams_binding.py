@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.config.database import Base
@@ -31,6 +31,10 @@ class TeamsTenantBinding(Base):
         String(64), ForeignKey("customers.customer_code", ondelete="CASCADE"), index=True, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Step 43: the customer's own email domains, lower case; an invite must be to one of them and
+    # is claimed only from one of them, so guests and outside addresses never match
+    email_domains: Mapped[list[str]] = mapped_column(
+        ARRAY(String(253)), nullable=False, default=list, server_default="{}")
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # When this row last reached the edge's DynamoDB copy. NULL = never; older than updated_at = stale.
     mirrored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

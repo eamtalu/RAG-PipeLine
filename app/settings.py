@@ -522,6 +522,8 @@ class Settings(BaseSettings):
     teams_detail_seconds: float = 300.0
     # A receipt's Undo (step 8) works this long after the action.
     teams_undo_minutes: int = 10
+    # step 43: an email invite not claimed within this many days expires
+    teams_invite_days: int = 7
     # The advisories loop (step 9) ticks this often; each agent runs on its own cadence (the
     # advisory_agents table, seeded from the registry: delivery 5 min, stock 15, location 30).
     teams_advisories_tick_seconds: float = 30.0

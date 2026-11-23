@@ -1,14 +1,16 @@
 """The people of a customer (stage D, step 7): create, change, deactivate, list, and the first
 Admin at initialisation. Every change writes an audit event in the same transaction.
+Step 43: invite a person by email (a pending row with no object id), claimed at their first
+sign-in, expired when unclaimed for `teams_invite_days`.
 Used by the ops API (the superadmin), the Admin tab's commands and scripts/teams_users.py.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.access import (
@@ -17,10 +19,13 @@ from app.persistence.models.access import (
     TeamsUserCapability,
     TeamsUserSite,
 )
+from app.persistence.models.teams_binding import TeamsTenantBinding
 from app.persistence.models.tenant_site import TenantSite
 from app.services.access import audit
 from app.services.access import matrix as matrix_file
 from app.services.access.matrix import STATES
+from app.services.teams.mirror_rows import email_domain, normalize_email
+from app.settings import settings
 
 
 @dataclass(frozen=True)
@@ -100,9 +105,11 @@ async def create_user(db: AsyncSession, customer_code: str, object_id: str, *, c
         raise ValueError(f"user {object_id!r} already exists for {customer_code}")
     if not change.display_name or not change.role_code:
         raise ValueError("a new user needs a display_name and a role_code")
+    if change.email and await get_user_by_email(db, customer_code, change.email) is not None:
+        raise ValueError(f"{normalize_email(change.email)} is already a user of {customer_code}")
     _check(change, await _customer_sites(db, customer_code))
     user = TeamsUser(customer_code=customer_code, object_id=object_id,
-                     display_name=change.display_name, email=change.email,
+                     display_name=change.display_name, email=normalize_email(change.email) or None,
                      role_code=change.role_code, all_sites=bool(change.all_sites),
                      status=change.status or "active", starts_on=change.starts_on,
                      note=change.note, created_by=actor.object_id, created_at=now, updated_at=now)
@@ -129,7 +136,23 @@ async def update_user(db: AsyncSession, customer_code: str, object_id: str, *, c
     user = await get_user(db, customer_code, object_id)
     if user is None:
         raise ValueError(f"no user {object_id!r} for {customer_code}")
+    return await update_user_row(db, user, change=change, actor=actor, now=now)
+
+
+async def update_user_row(db: AsyncSession, user: TeamsUser, *, change: UserChange, actor: Actor,
+                          now: datetime | None = None) -> TeamsUser:
+    """Change one user row, found by object id or, for a pending invite, by email; audited.
+
+    (row, role ops_manager) -> the row, role changed ; (row, status deactivated) -> deactivated_at set
+    """
+    now = now or datetime.now(timezone.utc)
+    customer_code = user.customer_code
+    if change.email is not None:
+        change = _with_email(change, normalize_email(change.email) or None)
     _check(change, await _customer_sites(db, customer_code))
+    if user.object_id is None and change.status == "active":
+        raise ValueError(f"{user.display_name} has not signed in yet; the invite turns active on "
+                         "their first sign-in")
     changed: dict[str, object] = {}
     for field_name in ("display_name", "email", "role_code", "all_sites", "status", "starts_on", "note"):
         value = getattr(change, field_name)
@@ -150,10 +173,141 @@ async def update_user(db: AsyncSession, customer_code: str, object_id: str, *, c
     await audit.record_event(
         db, customer_code, actor_object_id=actor.object_id, actor_name=actor.name,
         actor_kind=actor.kind, action=action, capability_code="manage_users", decision="allowed",
-        subject_kind="user", subject_id=object_id, detail=changed,
+        subject_kind="user", subject_id=user.object_id or user.email, detail=changed,
         text=f"{actor.name or actor.object_id} changed {user.display_name}: "
              + (", ".join(f"{k} {v}" for k, v in changed.items()) or "nothing"), at=now)
     return user
+
+
+async def get_user_by_email(db: AsyncSession, customer_code: str, email: str) -> TeamsUser | None:
+    """The user of one customer with this email, in any case; None when there is none."""
+    return (await db.execute(
+        select(TeamsUser).where(TeamsUser.customer_code == customer_code,
+                                func.lower(TeamsUser.email) == normalize_email(email))
+    )).scalar_one_or_none()
+
+
+async def customer_email_domains(db: AsyncSession, customer_code: str) -> set[str]:
+    """The email domains named on the customer's enabled tenant bindings, lower case."""
+    rows = (await db.execute(
+        select(TeamsTenantBinding.email_domains).where(TeamsTenantBinding.customer_code == customer_code,
+                                                       TeamsTenantBinding.enabled.is_(True)))).scalars()
+    return {d.strip().lower() for domains in rows for d in (domains or ()) if d and d.strip()}
+
+
+async def _check_domain(db: AsyncSession, customer_code: str, email: str) -> None:
+    domains = await customer_email_domains(db, customer_code)
+    if not domains:
+        raise ValueError(f"{customer_code} has no email domains on its tenant binding; set them "
+                         "first (PUT /api/v1/teams/bindings/<tenant> with email_domains)")
+    if email_domain(email) not in domains:
+        raise ValueError(f"{email} is outside {customer_code}'s email domains ({', '.join(sorted(domains))})")
+
+
+def is_invite_expired(user: TeamsUser, now: datetime) -> bool:
+    """Whether a pending invite is older than the invite window.
+
+    (invited 8 days ago, window 7) -> True ; (invited today) -> False
+    """
+    return now - user.created_at > timedelta(days=settings.teams_invite_days)
+
+
+async def invite_user(db: AsyncSession, customer_code: str, email: str, *, change: UserChange,
+                      actor: Actor, now: datetime | None = None) -> TeamsUser:
+    """Invite one person by email: a pending user with a role and sites, no object id yet; audited.
+
+    ("acme", "Jo@Cust.com", supervisor BRI) -> pending row, email "jo@cust.com" ;
+    (email taken, or outside the customer's domains) -> ValueError
+    """
+    now = now or datetime.now(timezone.utc)
+    email = normalize_email(email)
+    # Step 1: Accept only a real address inside the customer's own domains, so an invite can never
+    # be claimed by a guest or by someone at another company
+    if not email_domain(email):
+        raise ValueError(f"{email!r} is not an email address")
+    await _check_domain(db, customer_code, email)
+    if await get_user_by_email(db, customer_code, email) is not None:
+        raise ValueError(f"{email} is already a user of {customer_code}")
+    if not change.display_name or not change.role_code:
+        raise ValueError("an invite needs a display_name and a role_code")
+    _check(change, await _customer_sites(db, customer_code))
+    # Step 2: The row is the pending user itself, so approving, editing or withdrawing it uses the
+    # same code as for any user, and the claim only fills in the object id
+    user = TeamsUser(customer_code=customer_code, object_id=None, display_name=change.display_name,
+                     email=email, role_code=change.role_code, all_sites=bool(change.all_sites),
+                     status="pending", starts_on=change.starts_on, note=change.note,
+                     created_by=actor.object_id, created_at=now, updated_at=now)
+    db.add(user)
+    await db.flush()
+    await _apply_sites_and_overrides(db, user, change, actor, now)
+    await audit.record_event(
+        db, customer_code, actor_object_id=actor.object_id, actor_name=actor.name,
+        actor_kind=actor.kind, action="access.user_invited", capability_code="manage_users",
+        decision="allowed", subject_kind="user", subject_id=email,
+        text=f"{actor.name or actor.object_id} invited {user.display_name} ({email}) as "
+             f"{_role_name(user.role_code)}" + _sites_text(change), at=now)
+    return user
+
+
+async def claim_invite(db: AsyncSession, customer_code: str, email: str, object_id: str, *,
+                       name: str | None, now: datetime | None = None) -> TeamsUser:
+    """Link a person's first sign-in to their pending invite; the user row, now active; audited.
+
+    ("acme", "jo@cust.com", "u-jo") -> row with object_id u-jo, active ;
+    (oid already a user, no pending invite, expired, outside the domains) -> ValueError
+    """
+    now = now or datetime.now(timezone.utc)
+    email = normalize_email(email)
+    object_id = (object_id or "").strip()
+    if not object_id:
+        raise ValueError("a claim needs the signed-in person's object id")
+    # Step 1: Check the domain again here, because the backend never trusts the edge's own check
+    await _check_domain(db, customer_code, email)
+    # Step 2: An object id that already has a row keeps it, otherwise one person could end up
+    # with two records and the edge would read whichever was mirrored last
+    if await get_user(db, customer_code, object_id) is not None:
+        raise ValueError("this person already has access")
+    user = await get_user_by_email(db, customer_code, email)
+    if user is None or user.object_id is not None or user.status != "pending":
+        raise ValueError(f"no pending invite for {email}")
+    if is_invite_expired(user, now):
+        raise ValueError(f"the invite for {email} has expired; ask your admin to invite you again")
+    # Step 3: From here the object id is the key for good, so the email is never matched again
+    user.object_id, user.status = object_id, "active"
+    user.last_active_at, user.updated_at, user.claimed_at = now, now, now
+    await db.flush()
+    who = name or object_id
+    await audit.record_event(
+        db, customer_code, actor_object_id=object_id, actor_name=name, actor_kind="user",
+        action="access.user_claimed", capability_code=None, decision="allowed",
+        subject_kind="user", subject_id=object_id, detail={"email": email},
+        text=f"{who} joined as {user.display_name} ({email}), {_role_name(user.role_code)}", at=now)
+    return user
+
+
+async def expire_invites_once(db: AsyncSession, *, now: datetime | None = None) -> int:
+    """Mark pending invites past the invite window as expired, every customer; how many. Audited."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=settings.teams_invite_days)
+    rows = list((await db.execute(
+        select(TeamsUser).where(TeamsUser.status == "pending", TeamsUser.object_id.is_(None),
+                                TeamsUser.created_at < cutoff).limit(500))).scalars())
+    for user in rows:
+        user.status, user.updated_at = "expired", now
+        await audit.record_event(
+            db, user.customer_code, actor_object_id="system", actor_name="system", actor_kind="system",
+            action="access.invite_expired", capability_code="manage_users", decision="allowed",
+            subject_kind="user", subject_id=user.email,
+            text=f"invite for {user.display_name} ({user.email}) expired unclaimed", at=now)
+    if rows:
+        await db.flush()
+    return len(rows)
+
+
+def _with_email(change: UserChange, email: str | None) -> UserChange:
+    from dataclasses import replace
+
+    return replace(change, email=email)
 
 
 async def touch_last_active(db: AsyncSession, customer_code: str, object_id: str, *,
@@ -202,4 +356,9 @@ def user_payload(user: TeamsUser, site_ids: list[str]) -> dict:
         "starts_on": user.starts_on.isoformat() if user.starts_on else None, "note": user.note,
         "last_active_at": user.last_active_at.isoformat() if user.last_active_at else None,
         "created_at": user.created_at.isoformat() if user.created_at else None,
+        # step 43: an invite's state for the Admin tab ("Invited · until", "Joined · when")
+        "claimed_at": user.claimed_at.isoformat() if user.claimed_at else None,
+        "invite_expires_at": (
+            (user.created_at + timedelta(days=settings.teams_invite_days)).isoformat()
+            if user.status == "pending" and user.object_id is None and user.created_at else None),
     }

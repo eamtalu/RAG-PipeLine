@@ -2,12 +2,14 @@
 `roles` row (matrix and names), the `users`, `approvals` and `audit` rows for the Admin tab, all
 under EYE#<customer>. Rewritten by the consumer's sweep every minute (unchanged rows are skipped
 by the change tracker) and at once after a change through the ops API or a command.
+Step 43: a pending email invite is an `invite_access` row keyed by the hash of the email, so the
+edge can tell a first sign-in it was invited without the table naming anyone.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,8 +20,14 @@ from app.services.access import approvals, audit, records, users
 from app.services.access import matrix as matrix_file
 from app.services.ask import mirror as ask_mirror
 from app.services.teams.mirror import ChangeTracker, MirrorWriter, envelope, write_if_changed
+from app.services.teams.mirror_rows import invite_key
+from app.settings import settings
 
 logger = logging.getLogger(__name__)
+
+#: How long after an invite stops being pending its edge row is still removed on every sweep, so a
+#: removal that failed once is retried without deleting every closed invite every minute for ever
+INVITE_CLEANUP = timedelta(days=1)
 
 AUDIT_ROWS = 100
 APPROVAL_ROWS = 50
@@ -56,6 +64,17 @@ async def mirror_customer(db: AsyncSession, mirror: MirrorWriter, customer_code:
             select(TeamsUserSite).where(TeamsUserSite.customer_code == customer_code))).scalars():
         sites_by_user.setdefault(row.user_id, []).append(row.site_id)
     for user in people:
+        # step 43: a pending invite has no object id, so it has an invite row, not a record
+        if user.object_id is None:
+            if is_open_invite(user, now):
+                env = envelope("invite_access", customer_code, payload=invite_payload(user, sites_by_user),
+                               as_of=as_of, now=stamp, user_id=invite_key(user.email))
+                written += int(await write_if_changed(mirror, tracker, env, now=stamp))
+            elif now - user.updated_at <= INVITE_CLEANUP:
+                await mirror.remove(*_key("invite_access", customer_code, invite_key(user.email)))
+            continue
+        if user.email and user.claimed_at and now - user.claimed_at <= INVITE_CLEANUP:
+            await mirror.remove(*_key("invite_access", customer_code, invite_key(user.email)))
         if user.status == "deactivated":
             pk, sk = _key("user_access", customer_code, user.object_id)
             await mirror.remove(pk, sk)
@@ -77,6 +96,20 @@ async def mirror_customer(db: AsyncSession, mirror: MirrorWriter, customer_code:
         env = envelope(row_type, customer_code, payload=payload, as_of=as_of, now=stamp)
         written += int(await write_if_changed(mirror, tracker, env, now=stamp))
     return written
+
+
+def is_open_invite(user: TeamsUser, now: datetime) -> bool:
+    """Whether a user row is an invite the edge should still offer to a first sign-in."""
+    return (user.object_id is None and user.status == "pending" and bool(user.email)
+            and not users.is_invite_expired(user, now))
+
+
+def invite_payload(user: TeamsUser, sites_by_user: dict) -> dict:
+    """What the edge learns of an invite: who it is for in words and the role, never the email."""
+    return {"display_name": user.display_name, "role": user.role_code,
+            "role_name": users._role_name(user.role_code), "all_sites": user.all_sites,
+            "site_ids": sorted(sites_by_user.get(user.id, [])),
+            "expires_at": (user.created_at + timedelta(days=settings.teams_invite_days)).isoformat()}
 
 
 def _key(row_type: str, customer_code: str, user_id: str) -> tuple[str, str]:
@@ -107,4 +140,4 @@ async def sweep_once(mirror: MirrorWriter, *, tracker: ChangeTracker | None = No
 
 
 def users_of(db_users: list[TeamsUser]) -> list[str]:
-    return [u.object_id for u in db_users]
+    return [u.object_id for u in db_users if u.object_id]

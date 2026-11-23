@@ -53,18 +53,22 @@ class TeamsBindingRepository:
         return list((await self.db.execute(stmt)).scalars().all())
 
     async def upsert(self, tenant_id: str, customer_code: str, *, enabled: bool = True,
-                     display_name: str | None = None, created_by: str | None = None) -> TeamsTenantBinding:
+                     display_name: str | None = None, created_by: str | None = None,
+                     email_domains: list[str] | None = None) -> TeamsTenantBinding:
         """Create or replace the binding for a tenant. Any change clears mirrored_at implicitly
         because updated_at moves forward and `needs_mirror` compares the two."""
         row = await self.get_by_tenant(tenant_id)
         if row is None:
             row = TeamsTenantBinding(tenant_id=tenant_id, customer_code=customer_code, enabled=enabled,
-                                     display_name=display_name, created_by=created_by)
+                                     display_name=display_name, created_by=created_by,
+                                     email_domains=list(email_domains or []))
             self.db.add(row)
         else:
             row.customer_code = customer_code
             row.enabled = enabled
             row.display_name = display_name
+            if email_domains is not None:  # step 43: None keeps the list the binding has
+                row.email_domains = list(email_domains)
             row.updated_at = _now()
         await self.db.commit()
         await self.db.refresh(row)

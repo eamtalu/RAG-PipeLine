@@ -149,7 +149,13 @@ async def _apply(db: AsyncSession, row: AccessApproval, actor: users.Actor, now:
             role_code=payload.get("role"), all_sites=payload.get("all_sites"),
             site_ids=tuple(payload["site_ids"]) if payload.get("site_ids") is not None else None,
             starts_on=_date(payload.get("starts_on")), note=payload.get("note"), status="active")
-        if row.kind == "create_user":
+        if row.kind == "create_user" and not payload.get("object_id") and payload.get("email"):
+            # step 43: an approved invite is still pending until the person signs in
+            from dataclasses import replace
+
+            await users.invite_user(db, row.customer_code, payload["email"],
+                                    change=replace(change, status=None), actor=actor, now=now)
+        elif row.kind == "create_user":
             await users.create_user(db, row.customer_code, payload["object_id"], change=change,
                                     actor=actor, now=now)
         else:

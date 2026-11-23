@@ -1363,6 +1363,8 @@ The turns carry the soft tenant key like the log tables, so a tenant purge can r
 Since stage D step 6 the answer row also carries who asked, the site, the typed blocks and the times, so the same table is the Ask history of the Teams app: the consumer mirrors one person's last 30 days to the edge (`EYE#<customer>` / `USER#<object id>#HISTORY` and one `TURN` row per answer) and purges older turns every hour (`teams_history_retention_days`).
 Access control (stage D, step 7) is the matrix of screen 07 as data: `access_roles` and `access_capabilities` are seeded from `app/services/access/matrix.yaml`, `access_role_capabilities` holds one state per cell per customer (seeded from the file on first use, changed by an Admin in the app), `teams_users` is a person (Entra object id) within a customer with a role, `teams_user_sites` the sites they may see (none when `all_sites`), `teams_user_capabilities` a per-person override of a cell set by an Admin or granted for good by an approval, `access_approvals` the queue of "with approval" requests (24 h expiry), and `audit_events` every permission decision that changed data, append-only, purged after 90 days.
 Every one of them is a real foreign key to the customer; the effective record a person gets is computed in `app/services/access/records.py` and mirrored to the edge.
+Since step 43 a person can be invited by email before they sign in: a `teams_users` row with status `pending` and no `object_id`, claimed at their first sign-in (`claimed_at`), expired after `TEAMS_INVITE_DAYS`.
+Emails are stored lower case and are unique per customer, and an invite must be to one of the `email_domains` on the customer's `teams_tenant_bindings`.
 Advisories (stage D, step 9) are what the agents found: `advisories` holds one row per thing (unique on `customer_code` + `dedup_key`), kept open while the agent keeps finding it, resolved with reason `cleared` when it stops, reopened on the same row when it returns, and moved by people to `acknowledged`, `snoozed`, `dismissed` or `resolved` with an `audit_events` line each (`advisory.<action>`; since step 17 one command may act on up to 50 at once, one line each); since step 17 each row says its `kind` and what it is `about` in words (`app/services/advisories/kinds.py`), so the tab groups the feed without parsing titles; `advisory_agents` is each agent's switch and cadence per customer, seeded from `app/services/advisories/registry.py` on the first tick (Delivery, Stock controller and Location on; the others off with a reason); `advisory_agent_runs` the ledger of every run with what it opened, resolved or raised.
 All three are real foreign keys to the customer; the agents read `analytics_at_risk_deliveries` and `analytics_facts`, never a table of their own.
 Notification groups (stage D, step 12) route what the agents and the schedules produce: `notification_groups` is a named route per customer (the topics it takes as a JSON list, the lowest severity it takes, enabled), `notification_group_channels` the Teams channels it posts to (`customer_notification_channels`, by webhook), `notification_group_members` the people who see it in the app; `teams_tasks.target_group_id` names the group a schedule posts to.
@@ -1396,6 +1398,7 @@ erDiagram
         string customer_code FK "-> customers.customer_code (CASCADE)"
         bool enabled "false switches the bot off for the tenant"
         string display_name
+        string_array email_domains "the customer's email domains; invites only to these (step 43)"
         string created_by
         datetime mirrored_at "when the edge copy last matched; NULL = never"
         datetime created_at
@@ -1436,12 +1439,12 @@ erDiagram
     teams_users {
         uuid id PK
         string customer_code FK "customers; unique with object_id"
-        string object_id "Entra object id"
+        string object_id "Entra object id; NULL while an email invite is pending"
         string display_name
-        string email
+        string email "lower case; unique per customer (partial index on lower(email))"
         string role_code FK "access_roles"
         bool all_sites
-        string status "active | pending | dormant | deactivated"
+        string status "active | pending | dormant | deactivated | expired"
         date starts_on
         string note
         string created_by
@@ -1449,6 +1452,7 @@ erDiagram
         datetime updated_at
         datetime last_active_at "the last question answered"
         datetime deactivated_at
+        datetime claimed_at "when an email invite was claimed at the first sign-in"
     }
 
     teams_user_sites {
