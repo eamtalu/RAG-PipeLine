@@ -511,6 +511,8 @@ class Settings(BaseSettings):
     # Access control (step 7): the audit log's retention, how often the consumer rewrites the
     # access rows for the edge, and how long a "with approval" request waits.
     teams_audit_retention_days: int = 90
+    #: How long a run's trace is kept (chunk 221); it holds the question and the answer.
+    agent_trace_retention_days: int = 90
     teams_access_sweep_seconds: float = 60.0
     teams_approval_hours: int = 24
     # The executive Home (step 7d): rewritten every few minutes (it reads four periods for every

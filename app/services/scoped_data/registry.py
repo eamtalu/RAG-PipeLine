@@ -220,6 +220,16 @@ RULES = RULES + tuple(_access_rule(table) for table in access.ACCESS_TABLES)
 BY_TABLE: dict[str, Rule] = {rule.model.__tablename__: rule for rule in RULES}
 
 
+def closed_tables(table_names: set[str], scope: DataScope) -> list[str]:
+    """The tables of a read that this scope gets no row from, because they carry no site yet.
+
+    ({"log_entries", "advisories"}, BRI scope) -> ["log_entries"] ; (the same, all sites) -> []
+    """
+    if scope.all_sites:
+        return []
+    return sorted(name for name in table_names if isinstance(BY_TABLE.get(name), AllSitesOnly))
+
+
 def refuse_unclassified(table_names: set[str]) -> None:
     """Stop a read of any table the registry does not know, naming it.
 

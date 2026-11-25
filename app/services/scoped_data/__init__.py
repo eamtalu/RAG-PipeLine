@@ -6,8 +6,9 @@ wherever the query is built. Features depend on this package; it depends only on
 and the persistence layer.
 """
 
-from app.services.scoped_data.registry import UnclassifiedTable
+from app.services.scoped_data.registry import UnclassifiedTable, closed_tables
 from app.services.scoped_data.scope import DataScope
-from app.services.scoped_data.session import limit_session, open_session, scope_of
+from app.services.scoped_data.session import limit_session, open_session, scope_of, tables_read
 
-__all__ = ["DataScope", "UnclassifiedTable", "limit_session", "open_session", "scope_of"]
+__all__ = ["DataScope", "UnclassifiedTable", "closed_tables", "limit_session", "open_session",
+           "scope_of", "tables_read"]

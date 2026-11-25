@@ -14,6 +14,18 @@ from app.services.scoped_data import registry
 from app.services.scoped_data.scope import DataScope
 
 
+#: The key under which a limited session keeps the names of the tables it has read.
+TABLES_READ = "scoped_data.tables_read"
+
+
+def tables_read(db: AsyncSession) -> set[str]:
+    """Every table a limited session has read so far, for the run's trace.
+
+    (a session that ran select(Advisory)) -> {"advisories"} ; (an unused session) -> set()
+    """
+    return set(db.info.get(TABLES_READ, ()))
+
+
 def limit_session(db: AsyncSession, scope: DataScope) -> AsyncSession:
     """The same session, now adding the scope to every select it runs.
 
@@ -26,7 +38,9 @@ def limit_session(db: AsyncSession, scope: DataScope) -> AsyncSession:
         if not state.is_select or state.is_column_load or state.is_relationship_load:
             return
         # Step 2: Refuse a table nobody classified, otherwise new data would be open by default
-        registry.refuse_unclassified(_table_names(state.statement))
+        tables = _table_names(state.statement)
+        registry.refuse_unclassified(tables)
+        db.info.setdefault(TABLES_READ, set()).update(tables)
         # Step 3: Add each classified table's condition wherever it appears in the statement, so
         # that a query built deep in a shared service is limited without that service knowing
         state.statement = state.statement.options(*(

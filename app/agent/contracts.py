@@ -65,6 +65,11 @@ class AgentRequest:
     #: The data the asker may read (step 45), built by the channel from the person's access record.
     #: Opaque here: the tool runners hand it to app.services.scoped_data, never the model.
     data_scope: Any | None = None
+    #: The access facts of this moment, for the trace only (step 45): role, all_sites, site_ids,
+    #: categories, and the capability that let the run start with its outcome. Plain values.
+    access: Mapping[str, Any] | None = None
+    #: What started the run: ask | routine | watch | brief.
+    trigger: str = "ask"
 
     def __post_init__(self) -> None:
         # An adapter bug must fail here, before any model is paid for, not as an empty question.
@@ -188,6 +193,15 @@ class TraceRecord:
     withheld_figures: tuple[str, ...]
     usage: Mapping[str, int] | None
     error: str | None
+    # who asked, as it was then (chunk 221): a role or a site list can change after the run
+    role_code: str | None = None
+    scope: Mapping[str, Any] | None = None
+    capability_code: str | None = None
+    capability_outcome: str | None = None
+    trigger: str = "ask"
+    model_calls: tuple[Mapping[str, Any], ...] = ()
+    steps: tuple[Mapping[str, Any], ...] = ()
+    events: tuple[Mapping[str, Any], ...] = ()
 
     def as_row(self) -> dict[str, Any]:
         """The row a store writes: every field by name, the tuples as lists.
@@ -199,6 +213,9 @@ class TraceRecord:
         row["tool_calls"] = [dict(t) for t in self.tool_calls]
         row["withheld_figures"] = list(self.withheld_figures)
         row["usage"] = dict(self.usage) if self.usage is not None else None
+        row["scope"] = dict(self.scope) if self.scope is not None else None
+        for name in ("model_calls", "steps", "events"):
+            row[name] = [dict(item) for item in getattr(self, name)]
         return row
 
 

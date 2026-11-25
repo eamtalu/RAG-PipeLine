@@ -11,7 +11,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from app.agent.capabilities.spec import Namespace, ToolSet, ToolSpec
 from app.agent.contracts import AgentRequest, ExecutionContext
 from app.agent.runtime.guards import wrap_tool
-from app.agent.runtime.trace import RunTrace
+from app.agent.runtime.trace import RunTrace, collecting_call_notes
 
 logger = logging.getLogger(__name__)
 
@@ -118,48 +118,53 @@ class ToolRegistry:
         one entry on the run's trace."""
 
         async def run(name: str, args: Mapping[str, Any]) -> str:
-            started = time.monotonic()
-            ok = False
-            result = ""
-            try:
-                # Step 1: Join the tenant from the context, never from the arguments, so that
-                # which tenant a tool reads for is never a model decision.
-                call = namespace.runner(context, request, name, args)
-                # Step 2: Cap the call when the spec says so, because a tool that hangs must
-                # cost one failed call, not the whole run's deadline.
-                if spec.timeout_seconds is not None:
-                    try:
-                        result = await asyncio.wait_for(call, timeout=spec.timeout_seconds)
-                    except asyncio.TimeoutError:
-                        result = json.dumps(
-                            {
-                                "error": f"{name} did not finish within "
-                                f"{spec.timeout_seconds:g}s and was stopped"
-                            }
+            # The runner may leave notes beside its call (the tables it read); they are collected
+            # per call here, so two calls of one run never share them.
+            with collecting_call_notes() as notes:
+                started = time.monotonic()
+                ok = False
+                result = ""
+                try:
+                    # Step 1: Join the tenant from the context, never from the arguments, so that
+                    # which tenant a tool reads for is never a model decision.
+                    call = namespace.runner(context, request, name, args)
+                    # Step 2: Cap the call when the spec says so, because a tool that hangs must
+                    # cost one failed call, not the whole run's deadline.
+                    if spec.timeout_seconds is not None:
+                        try:
+                            result = await asyncio.wait_for(call, timeout=spec.timeout_seconds)
+                        except asyncio.TimeoutError:
+                            result = json.dumps(
+                                {
+                                    "error": f"{name} did not finish within "
+                                    f"{spec.timeout_seconds:g}s and was stopped"
+                                }
+                            )
+                    else:
+                        result = await call
+                    ok = not result.lstrip().startswith('{"error"')
+                    return result
+                except Exception as exc:  # noqa: BLE001 - recorded, then left to the loop
+                    result = json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+                    raise
+                finally:
+                    # Step 3: One line per call with its timing, so a slow or failing tool is
+                    # visible per tenant and per request without reading the whole trace.
+                    ms = int((time.monotonic() - started) * 1000)
+                    logger.info("agent.tool ns=%s name=%s ms=%d ok=%s",
+                                namespace.name, name, ms, ok)
+                    # Step 4: Record the raw call on the run's trace, because the record is redacted
+                    # and capped once, when the run finishes, not here.
+                    if trace is not None:
+                        trace.record_tool(
+                            namespace=namespace.name,
+                            name=name,
+                            args=args,
+                            result=result,
+                            ms=ms,
+                            ok=ok,
+                            sensitive_args=spec.sensitive_args,
+                            notes=notes,
                         )
-                else:
-                    result = await call
-                ok = not result.lstrip().startswith('{"error"')
-                return result
-            except Exception as exc:  # noqa: BLE001 - recorded, then left to the loop
-                result = json.dumps({"error": f"{type(exc).__name__}: {exc}"})
-                raise
-            finally:
-                # Step 3: One line per call with its timing, so a slow or failing tool is visible
-                # per tenant and per request without reading the whole trace.
-                ms = int((time.monotonic() - started) * 1000)
-                logger.info("agent.tool ns=%s name=%s ms=%d ok=%s", namespace.name, name, ms, ok)
-                # Step 4: Record the raw call on the run's trace, because the record is redacted
-                # and capped once, when the run finishes, not here.
-                if trace is not None:
-                    trace.record_tool(
-                        namespace=namespace.name,
-                        name=name,
-                        args=args,
-                        result=result,
-                        ms=ms,
-                        ok=ok,
-                        sensitive_args=spec.sensitive_args,
-                    )
 
         return run

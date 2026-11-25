@@ -1686,6 +1686,7 @@ erDiagram
         string by_object_id "nullable; who ran or ticked it"
         string by_name "nullable"
         text note "nullable; the person's own note on done or skipped"
+        string trace_id "nullable; soft link to agent_traces.trace_id of the run that answered it"
     }
 
     teams_conversations {
@@ -1754,10 +1755,18 @@ erDiagram
         text question "redacted"
         text answer "redacted"
         jsonb guards "verdicts in run order: name, stage, verdict, detail, ms"
-        jsonb tool_calls "namespace, name, args (hashed when sensitive), result (capped), ms, ok"
+        jsonb tool_calls "namespace, name, args (hashed when sensitive), result (capped), ms, ok, result_chars, result_rows, data"
         jsonb withheld_figures
         jsonb usage "model_calls, input_tokens, output_tokens"
         text error "Type: message when the run raised"
+        string role_code "nullable; the asker's role at the time of the run"
+        jsonb scope "nullable; all_sites, site_ids, categories the run could read"
+        string capability_code "nullable; the check that let the run start"
+        string capability_outcome "nullable; allowed | with_approval"
+        string trigger "ask | routine | watch | brief"
+        jsonb model_calls "one per model call in order: round, provider, model, ms, ok, tokens"
+        jsonb steps "the model's own text before each tool call, redacted and capped"
+        jsonb events "loop events: settled_loop, retry"
     }
 
     quota_windows {

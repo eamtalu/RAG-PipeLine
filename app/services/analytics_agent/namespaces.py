@@ -8,10 +8,14 @@ so no pooled connection is held while the model thinks (step 3).
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Mapping
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.capabilities.spec import Namespace, ToolSpec
 from app.agent.contracts import AgentRequest, ExecutionContext
+from app.agent.runtime.trace import note_call
 from app.config.database import SessionFactory, async_session
 from app.services.analytics_agent import (
     activity_tools,
@@ -42,6 +46,23 @@ def _scope(context: ExecutionContext, request: AgentRequest) -> scoped_data.Data
                                 is_service=request.principal.kind == "service")
 
 
+@asynccontextmanager
+async def _scoped(session_factory: SessionFactory, context: ExecutionContext,
+                  request: AgentRequest) -> AsyncIterator[AsyncSession]:
+    """A session limited to what this run may read; on the way out the call's trace entry is told
+    which tables it read and which of them are closed to the asker.
+
+    (a BRI supervisor's call that read advisories) -> note tables=["advisories"], closed=[]
+    """
+    scope = _scope(context, request)
+    async with scoped_data.open_session(session_factory, scope) as db:
+        try:
+            yield db
+        finally:
+            tables = scoped_data.tables_read(db)
+            note_call(tables=sorted(tables), closed=scoped_data.closed_tables(tables, scope))
+
+
 def logs_namespace(session_factory: SessionFactory = async_session) -> Namespace:
     """The eight read-only log tools (transactions, entries, metrics), with no extra text.
 
@@ -51,7 +72,7 @@ def logs_namespace(session_factory: SessionFactory = async_session) -> Namespace
     async def run(
         context: ExecutionContext, request: AgentRequest, name: str, args: Mapping[str, Any]
     ) -> str:
-        async with scoped_data.open_session(session_factory, _scope(context, request)) as db:
+        async with _scoped(session_factory, context, request) as db:
             return await log_tools.execute_tool(name, dict(args), db, context.tenant)
 
     return Namespace(
@@ -70,7 +91,7 @@ def analytics_namespace(session_factory: SessionFactory = async_session) -> Name
     async def run(
         context: ExecutionContext, request: AgentRequest, name: str, args: Mapping[str, Any]
     ) -> str:
-        async with scoped_data.open_session(session_factory, _scope(context, request)) as db:
+        async with _scoped(session_factory, context, request) as db:
             if name in _AT_RISK_NAMES:
                 return await at_risk_tools.run_at_risk_tool(name, dict(args), db, context.tenant)
             if name in advisory_tools.ADVISORY_TOOL_NAMES:

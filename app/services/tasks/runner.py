@@ -102,6 +102,7 @@ async def fire(db: AsyncSession, task: TeamsTask, *, now: datetime, tz: ZoneInfo
                     answer = await run_query(task)
                     text = str(answer.get("answer") or "")
                     blocks = list(answer.get("blocks") or [])
+                    run.trace_id = answer.get("trace_id")
                 run.outcome, run.text, run.blocks = "sent", text, blocks
                 # Step 1b: A schedule aimed at a group goes to that group's channels; a group
                 # that is gone or switched off means nothing is posted (the ledger still says sent)
@@ -146,6 +147,7 @@ async def run_by_hand(db: AsyncSession, task: TeamsTask, *, actor_object_id: str
             answer = await run_query(task)
             text = str(answer.get("answer") or "")
             blocks = list(answer.get("blocks") or [])
+            run.trace_id = answer.get("trace_id")
         run.outcome, run.text, run.blocks = "sent", text, blocks
     except Exception as exc:  # noqa: BLE001 - the ledger keeps the reason
         logger.exception("task %s failed to run by hand", task.id)
