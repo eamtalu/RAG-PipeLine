@@ -3,23 +3,23 @@ or change a user, deactivate one, set a matrix cell, decide a request, or ask fo
 for oneself. The actor's own record decides first (the job's claims are never trusted); an
 action the matrix marks "with approval" becomes a request instead of acting; everything is
 audited by the service it calls, and the customer's access rows are mirrored at once.
-Used by app/services/teams/commands.py.
+Used by app/services/teams/commands.py, which unwraps a confirmed Ask form before dispatch.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
-from app.services.access import approvals, records, users
-from app.services.access import matrix as matrix_file
-from app.services.access import mirror as access_mirror
-from app.services.ask import forms as ask_forms
-from app.services.teams.contracts import ACCESS_COMMAND_KINDS, QuestionJob, ReceiptBlock
+from app.services.access import edge_mirror as access_mirror
+from app.services.access.authorization import matrix as matrix_file
+from app.services.access.authorization import records
+from app.services.access.people import approvals, users
+from app.services.teams.command_outcome import CommandOutcome, Refused, receipt
+from app.services.teams.contracts import ACCESS_COMMAND_KINDS, QuestionJob
 from app.services.teams.mirror import MirrorWriter, build_mirror_writer_from_settings
 from app.services.teams.mirror_rows import normalize_email
 from app.settings import settings
@@ -27,32 +27,6 @@ from app.settings import settings
 logger = logging.getLogger(__name__)
 
 
-class Refused(ValueError):
-    """The actor may not do this; the sentence is what the page shows."""
-
-
-@dataclass(frozen=True)
-class CommandOutcome:
-    """What a command answers with: one line, and the blocks the page draws (a receipt)."""
-
-    text: str
-    blocks: tuple[dict, ...] = ()
-
-
-def receipt(text: str, *, status: str = "done", reference: str | None = None, undo: dict | None = None,
-            now: datetime | None = None, minutes: int | None = None) -> dict:
-    """A receipt block (step 8): what happened, its reference, and the undo while it is open.
-
-    >>> r = receipt("Request sent", status="needs_approval", reference="USR-1", undo={"reference": "USR-1"},
-    ...             now=datetime(2026, 11, 13, 9, 0, tzinfo=timezone.utc), minutes=10)
-    >>> r["type"], r["undo_until"], r["undo"]
-    ('receipt', '2026-11-13T09:10:00Z', {'reference': 'USR-1'})
-    """
-    now = now or datetime.now(timezone.utc)
-    minutes = settings.teams_undo_minutes if minutes is None else minutes
-    return ReceiptBlock(text=text, reference=reference, status=status,
-                        undo_until=(now + timedelta(minutes=minutes)) if undo else None,
-                        undo=undo).model_dump(mode="json")
 
 
 async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | None = None,
@@ -71,8 +45,8 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
     actor = users.Actor(job.sender_object_id, job.sender_name)
     factory = session_factory or async_session
     async with factory() as db:
-        # a confirmed form from Ask (step 18) arrives as {form_id, values, via}; its own fields come out
-        payload = ask_forms.unwrap(dict(command.payload))
+        # a confirmed Ask form (step 18) was unwrapped into its own fields by the router
+        payload = dict(command.payload)
         if command.kind == "access_claim":
             # Step 1a: A claim comes from a person with no record yet, so it cannot be decided by
             # one; claim_invite checks the invite, the domain and the object id instead

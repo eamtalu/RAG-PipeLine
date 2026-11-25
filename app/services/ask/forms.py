@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.notification_group import SEVERITIES, TOPICS as GROUP_TOPICS
 from app.persistence.repositories.customer_repository import get_customer_timezone
-from app.services.access import approvals, matrix as matrix_file, records, users
+from app.services import access
 from app.services.groups import store as groups_store
 from app.services.teams.contracts import FormBlock, FormField
 from app.services.teams.sites import list_sites
@@ -81,13 +81,13 @@ async def create_user_form(db: AsyncSession, customer_code: str, actor_object_id
     """
     # Step 1: The actor's own record decides whether a form is offered at all, and whether the
     # confirmed form will wait for an Ops manager
-    record = await records.access_record_for(db, customer_code, actor_object_id)
-    decision = records.decide(record, "manage_users")
+    record = await access.access_record_for(db, customer_code, actor_object_id)
+    decision = access.decide(record, "manage_users")
     if decision.outcome == "refused":
         raise ValueError(f"you cannot create users: {decision.reason}")
     requires_approval = decision.outcome == "needs_approval"
     sites = await list_sites(db, customer_code)
-    m = matrix_file.load()
+    m = access.load_matrix()
     role = str(args.get("role") or "picker").strip().lower().replace(" ", "_")
     if role not in m.role_codes:
         role = "picker"
@@ -136,15 +136,15 @@ async def change_user_form(db: AsyncSession, customer_code: str, actor_object_id
     (admin, {"who": "Sam", "role": "supervisor", "site_id": "BRI"}) -> form with Sam Super chosen ;
     ({"who": "Lee", "status": "deactivated"}) -> form with Lee London and Deactivated
     """
-    record = await records.access_record_for(db, customer_code, actor_object_id)
-    decision = records.decide(record, "manage_users")
+    record = await access.access_record_for(db, customer_code, actor_object_id)
+    decision = access.decide(record, "manage_users")
     if decision.outcome == "refused":
         raise ValueError(f"you cannot change users: {decision.reason}")
     requires_approval = decision.outcome == "needs_approval"
-    people = [u for u in await users.list_users(db, customer_code) if u.object_id != actor_object_id]
+    people = [u for u in await access.list_users(db, customer_code) if u.object_id != actor_object_id]
     if not people:
         raise ValueError("there is nobody else to change yet")
-    m = matrix_file.load()
+    m = access.load_matrix()
     role_names = {r.code: r.name for r in m.roles}
     sites = await list_sites(db, customer_code)
     chosen = _pick_user(people, args.get("who"))
@@ -179,11 +179,11 @@ async def decide_request_form(db: AsyncSession, customer_code: str, actor_object
     (ops manager, {"reference": "USR-2041", "decision": "approve"}) -> form with USR-2041 chosen ;
     (nothing waiting) -> ValueError
     """
-    record = await records.access_record_for(db, customer_code, actor_object_id)
-    decision = records.decide(record, "approve")
+    record = await access.access_record_for(db, customer_code, actor_object_id)
+    decision = access.decide(record, "approve")
     if not decision.is_allowed:
         raise ValueError(f"you cannot decide requests: {decision.reason}")
-    waiting = await approvals.pending(db, customer_code)
+    waiting = await access.pending_approvals(db, customer_code)
     if not waiting:
         raise ValueError("nothing is waiting for a decision")
     wanted = str(args.get("reference") or "").strip().upper()
@@ -210,8 +210,8 @@ async def set_group_form(db: AsyncSession, customer_code: str, actor_object_id: 
     (ops manager, {"name": "Stock", "topics": ["stock"], "min_severity": "high", "channel": "stock-control"})
     -> form with Stock, Stock ticked, High, the channel chosen ; (picker) -> ValueError
     """
-    record = await records.access_record_for(db, customer_code, actor_object_id)
-    decision = records.decide(record, "configure_agents")
+    record = await access.access_record_for(db, customer_code, actor_object_id)
+    decision = access.decide(record, "configure_agents")
     if not decision.is_allowed:
         raise ValueError(f"you cannot change notification groups: {decision.reason}")
     groups = await groups_store.list_groups(db, customer_code)

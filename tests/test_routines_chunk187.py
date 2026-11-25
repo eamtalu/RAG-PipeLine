@@ -21,7 +21,7 @@ from sqlalchemy import select
 from app.config.database import async_session
 from app.persistence.models.access import AuditEvent
 from app.persistence.models.task import TeamsTask, TeamsTaskRun
-from app.services.access import commands as access_commands
+from app.services.access import admin_commands as access_commands
 from app.services.tasks import commands, runner, store
 from app.services.tasks import mirror as tasks_mirror
 from app.services.teams.mirror import InMemoryMirrorWriter

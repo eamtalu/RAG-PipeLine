@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from app.services.access import records
+from app.services import access
 
 #: Bumped when the words change, so the mirror rewrites every customer's row.
 CATALOGUE_VERSION = "20.2"
@@ -149,7 +149,7 @@ def is_capability_question(text: str) -> bool:
     return bool(_CAPABILITY_WORDS.search(words))
 
 
-def may_use(record: records.AccessRecord | None, needs: str | None) -> bool:
+def may_use(record: access.AccessRecord | None, needs: str | None) -> bool:
     """Whether a record may see something that needs a capability: "no" hides it, "with approval"
     keeps it (the form then says so), and no requirement means everyone with access.
 
@@ -163,7 +163,7 @@ def may_use(record: records.AccessRecord | None, needs: str | None) -> bool:
     return record.state(needs) != "no"
 
 
-def visible_topics(record: records.AccessRecord | None) -> list[TopicSpec]:
+def visible_topics(record: access.AccessRecord | None) -> list[TopicSpec]:
     """The topics and starters a record may use, in the catalogue's order; a topic left with no
     starters is dropped.
 
@@ -192,7 +192,7 @@ def topics_payload() -> list[dict[str, Any]]:
     return [topic_payload(t) for t in TOPICS]
 
 
-def topics_block(record: records.AccessRecord | None) -> dict[str, Any]:
+def topics_block(record: access.AccessRecord | None) -> dict[str, Any]:
     """The "What can I ask" answer as a block: the record's topics with their starters.
 
     (a picker) -> {"type": "topics", "topics": [stock, deliveries, pickers, planning, watch]}
@@ -200,7 +200,7 @@ def topics_block(record: records.AccessRecord | None) -> dict[str, Any]:
     return {"type": "topics", "topics": [topic_payload(t) for t in visible_topics(record)]}
 
 
-def capability_answer(record: records.AccessRecord | None) -> tuple[str, dict[str, Any]]:
+def capability_answer(record: access.AccessRecord | None) -> tuple[str, dict[str, Any]]:
     """The sentence and the block that answer "What can I ask you about?".
 
     (an admin) -> ("I can help with stock and locations, … Pick a topic below, or just ask…", the block)
@@ -219,9 +219,9 @@ def check() -> list[str]:
 
     (the shipped catalogue) -> []
     """
-    from app.services.access import matrix as matrix_file
+    from app.services import access
 
-    known = {c.code for c in matrix_file.load().capabilities}
+    known = {c.code for c in access.load_matrix().capabilities}
     problems: list[str] = []
     ids = [t.id for t in TOPICS]
     if len(ids) != len(set(ids)):

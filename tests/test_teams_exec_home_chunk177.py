@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from app.config.database import async_session
-from app.services.access import approvals
+from app.services.access.people import approvals
 from app.services.teams import exec_home
 from app.services.teams.mirror import InMemoryMirrorWriter
 from tests.test_teams_sites_chunk174 import (  # noqa: F401 - the fixture is used by name

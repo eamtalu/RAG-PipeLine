@@ -18,7 +18,9 @@ from app.agent.presentation import blocks as answer_blocks
 from app.config.database import async_session
 from app.persistence.models.customer import Customer
 from app.persistence.models.tenant_site import TenantSite
-from app.services.access import approvals, commands as access_commands, users
+from app.services.access.people import approvals
+from app.services.access import admin_commands as access_commands
+from app.services.access.people import users
 from app.services.analytics_agent import action_tools
 from app.services.teams.contracts import Command, QuestionJob
 from app.services.teams.mirror import InMemoryMirrorWriter

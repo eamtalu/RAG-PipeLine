@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from app.persistence.repositories.customer_repository import get_customer_timezone
-from app.services.access import records
+from app.services import access
 from app.services.teams.contracts import QuestionJob
 from app.services.watchlist import registry, search, store
 from app.settings import settings
@@ -57,7 +57,7 @@ async def decorate(result: dict, job: QuestionJob, *, session_factory=None, now:
     now = now or datetime.now(timezone.utc)
     factory = session_factory or async_session
     async with factory() as db:
-        record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
+        record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
         if record is None or not record.is_active:
             return result
         tz = ZoneInfo(await get_customer_timezone(db, job.customer_code))

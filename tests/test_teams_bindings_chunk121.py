@@ -24,7 +24,7 @@ from app.persistence.models.customer import Customer
 from app.persistence.models.teams_binding import TeamsTenantBinding
 from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
 from app.persistence.repositories.teams_repository import TeamsBindingRepository, TeamsConversationRepository
-from app.services.teams.binding_mirror import InMemoryMirror
+from app.services.access.tenancy.binding_mirror import InMemoryMirror
 
 CC = "test_c121"
 CC2 = "test_c121_b"

@@ -9,7 +9,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.access.records import AccessRecord
+from app.services.access import AccessRecord
 from app.services.advisories import store as advisories_store
 from app.services.watchlist import store
 

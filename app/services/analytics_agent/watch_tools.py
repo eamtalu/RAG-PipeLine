@@ -18,8 +18,8 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.repositories.customer_repository import get_customer_timezone
-from app.services.access import records
-from app.services.access.commands import Refused
+from app.services import access
+from app.services.teams.command_outcome import Refused
 from app.services.teams.contracts import Command, QuestionJob
 from app.services.watchlist import commands as watch_commands
 from app.services.watchlist import forms, readers, registry, search, store
@@ -129,7 +129,7 @@ async def watch_now(db: AsyncSession, customer_code: str, actor_object_id: str, 
     what = " ".join(str(args.get("what") or "").split()).strip()
     if not what:
         return _problems("say what to watch: a delivery number, a route, an item, a location, a zone or a measure")
-    record = await records.access_record_for(db, customer_code, actor_object_id)
+    record = await access.access_record_for(db, customer_code, actor_object_id)
     if record is None or not record.is_active:
         return _problems("you have no active access record")
     tz = ZoneInfo(await get_customer_timezone(db, customer_code))

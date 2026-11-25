@@ -33,8 +33,6 @@ from app.services.agent_usage.store import PostgresUsageStore
 from app.services.analytics_agent.namespaces import (actions_namespace, analytics_namespace, logs_namespace,
                                                      presentation_namespace)
 from app.services.logspace_agent.namespaces import logspace_namespace
-from app.services.teams.binding_mirror import build_mirror_from_settings
-from app.services.teams.binding_sweep import sweep_once
 from app.services.teams.commands import run_command
 from app.services.teams.consumer import HttpAnswerPoster, TeamsQuestionConsumer
 from app.services.teams.contracts import AnswerPayload, QuestionJob
@@ -42,12 +40,8 @@ from app.services.teams.home_snapshot import build_writer_from_settings
 from app.services.teams.home_snapshot import sweep_once as snapshot_sweep_once
 from app.services.teams.mirror import ChangeTracker, build_mirror_writer_from_settings
 from app.services.teams.freshness import freshness_for
-from app.services.access import approvals as access_approvals
-from app.services.access import audit as access_audit
-from app.services.access import mirror as access_mirror
-from app.services.access import records
-from app.services.access import records as access_records
-from app.services.access import users as access_users
+from app.services import access
+from app.services.ask import mirror as ask_mirror
 from app.services.advisories import runner as advisories_runner
 from app.services.watchlist import ask_hooks
 from app.services.watchlist import mirror as watch_mirror
@@ -164,7 +158,7 @@ async def _before_the_model(job: QuestionJob) -> tuple[str, dict | None]:
     if not (slash.parse(question) or catalogue.is_capability_question(question)):
         return framed_question(job), None
     async with async_session() as db:
-        record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
+        record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
     if catalogue.is_capability_question(question):
         text, block = catalogue.capability_answer(record)
         return question, _direct_answer(text, [block])
@@ -294,10 +288,10 @@ async def _resolve_customer(tenant_id: str) -> str | None:
 
 
 async def _sweep_loop(stop: asyncio.Event) -> None:
-    mirror = build_mirror_from_settings()
+    mirror = access.build_binding_mirror()
     while not stop.is_set():
         try:
-            await sweep_once(mirror)
+            await access.sweep_bindings(mirror)
         except Exception:
             logger.exception("binding mirror sweep failed")
         try:
@@ -343,14 +337,14 @@ async def _check_access(job: QuestionJob) -> str | None:
     """
     now = history.utc_now()
     async with async_session() as db:
-        record = await access_records.access_record_for(db, job.customer_code, job.sender_object_id)
-        decision = access_records.decide(record, "ask", job.site_id)
+        record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
+        decision = access.decide(record, "ask", job.site_id)
         if decision.is_allowed:
-            await access_users.touch_last_active(db, job.customer_code, job.sender_object_id, now=now)
+            await access.touch_last_active(db, job.customer_code, job.sender_object_id, now=now)
             await db.commit()
             return None
         # a refusal that changes nothing is still audited: it is the trail the Admin reads
-        await access_audit.record_event(
+        await access.record_audit_event(
             db, job.customer_code, actor_object_id=job.sender_object_id, actor_name=job.sender_name,
             action="ask.refused", capability_code="ask", decision="refused", site_id=job.site_id,
             request_id=job.job_id, text=f"{job.sender_name or job.sender_object_id} was refused: "
@@ -379,14 +373,17 @@ async def _access_loop(stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
             async with async_session() as db:
-                await access_approvals.expire_once(db, now=history.utc_now())
-                await access_users.expire_invites_once(db, now=history.utc_now())
+                await access.expire_approvals(db, now=history.utc_now())
+                await access.expire_invites_once(db, now=history.utc_now())
                 await db.commit()
-                while await access_audit.purge_once(
+                while await access.purge_audit_events(
                         db, now=history.utc_now(), retention_days=settings.teams_audit_retention_days):
                     pass
-            written = await access_mirror.sweep_once(mirror, tracker=tracker)
+            written = await access.sweep_edge_rows(mirror, tracker=tracker)
             logger.debug("access rows written %s", written)
+            # the Ask catalogue rides with the access sweep, for the same bound customers (step 18)
+            for code in written:
+                await ask_mirror.mirror_catalogue(mirror, code, tracker=tracker)
             await groups_mirror.sweep_once(mirror, tracker=tracker)
         except Exception:
             logger.exception("access sweep failed")

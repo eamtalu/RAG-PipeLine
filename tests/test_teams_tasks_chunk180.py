@@ -28,7 +28,8 @@ from app.persistence.models.teams_conversation import TeamsConversation
 from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
 from app.persistence.models.tenant_site import TenantSite
 from app.persistence.repositories.teams_repository import ExchangeDetails, TeamsConversationRepository
-from app.services.access import commands as access_commands, users
+from app.services.access import admin_commands as access_commands
+from app.services.access.people import users
 from app.services.advisories import store as advisories_store
 from app.services.advisories.registry import Finding
 from app.services.groups import store as groups_store

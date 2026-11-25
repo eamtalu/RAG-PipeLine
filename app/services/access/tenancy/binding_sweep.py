@@ -4,7 +4,7 @@ import logging
 
 from app.config.database import async_session
 from app.persistence.repositories.teams_repository import TeamsBindingRepository
-from app.services.teams.binding_mirror import BindingMirror
+from app.services.access.tenancy.binding_mirror import BindingMirror
 
 logger = logging.getLogger(__name__)
 

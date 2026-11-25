@@ -14,7 +14,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.access import records
+from app.services import access
 from app.services.teams import routine_reports
 from app.services.teams.sites import ALL_SITES_ID, Site, list_sites
 
@@ -64,7 +64,7 @@ async def _site(db: AsyncSession, cc: str, site_id: str) -> Site | None:
 
 
 async def answer(db: AsyncSession, command: str, customer_code: str, site_id: str | None,
-                 record: records.AccessRecord | None, *, now: datetime | None = None) -> tuple[str, list[dict]]:
+                 record: access.AccessRecord | None, *, now: datetime | None = None) -> tuple[str, list[dict]]:
     """The answer to /brief or /review: one lead line and the reports' blocks, or one plain sentence
     when the person may not see what it covers.
 
@@ -74,13 +74,13 @@ async def answer(db: AsyncSession, command: str, customer_code: str, site_id: st
     # Step 1: Who may see what: /review covers every site, /brief the site the person is on
     site_id = site_id or ALL_SITES_ID
     if command == "/review":
-        if not records.decide(record, "view_all_sites", ALL_SITES_ID).is_allowed:
+        if not access.decide(record, "view_all_sites", ALL_SITES_ID).is_allowed:
             return ("Site performance compares every site, so it is for people who may see every site. "
                     "Try /brief for your own site."), []
         site = None
     else:
         capability = "view_all_sites" if site_id == ALL_SITES_ID else "view_own_site"
-        if not records.decide(record, capability, site_id).is_allowed:
+        if not access.decide(record, capability, site_id).is_allowed:
             return f"{'All sites' if site_id == ALL_SITES_ID else site_id} is not one of your sites. Choose your site and ask /brief again.", []
         site = None if site_id == ALL_SITES_ID else await _site(db, customer_code, site_id)
     # Step 2: The reports, built as the Library builds them, so the two cannot disagree

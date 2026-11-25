@@ -28,7 +28,8 @@ from app.persistence.models.customer import Customer
 from app.persistence.models.notification import CustomerNotificationChannel
 from app.persistence.models.teams_binding import TeamsTenantBinding
 from app.persistence.models.tenant_site import TenantSite
-from app.services.access import commands as access_commands, users
+from app.services.access import admin_commands as access_commands
+from app.services.access.people import users
 from app.services.advisories import actions, registry, runner, store
 from app.services.advisories import mirror as advisories_mirror
 from app.services.advisories.agents import location as location_agent

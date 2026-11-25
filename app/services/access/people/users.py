@@ -19,11 +19,11 @@ from app.persistence.models.access import (
     TeamsUserCapability,
     TeamsUserSite,
 )
-from app.persistence.models.teams_binding import TeamsTenantBinding
 from app.persistence.models.tenant_site import TenantSite
 from app.services.access import audit
-from app.services.access import matrix as matrix_file
-from app.services.access.matrix import STATES
+from app.services.access.authorization import matrix as matrix_file
+from app.services.access.authorization.matrix import STATES
+from app.services.access.tenancy.bindings import customer_email_domains
 from app.services.teams.mirror_rows import email_domain, normalize_email
 from app.settings import settings
 
@@ -185,14 +185,6 @@ async def get_user_by_email(db: AsyncSession, customer_code: str, email: str) ->
         select(TeamsUser).where(TeamsUser.customer_code == customer_code,
                                 func.lower(TeamsUser.email) == normalize_email(email))
     )).scalar_one_or_none()
-
-
-async def customer_email_domains(db: AsyncSession, customer_code: str) -> set[str]:
-    """The email domains named on the customer's enabled tenant bindings, lower case."""
-    rows = (await db.execute(
-        select(TeamsTenantBinding.email_domains).where(TeamsTenantBinding.customer_code == customer_code,
-                                                       TeamsTenantBinding.enabled.is_(True)))).scalars()
-    return {d.strip().lower() for domains in rows for d in (domains or ()) if d and d.strip()}
 
 
 async def _check_domain(db: AsyncSession, customer_code: str, email: str) -> None:

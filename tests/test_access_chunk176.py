@@ -23,8 +23,12 @@ from app.main import app
 from app.persistence.models.access import AuditEvent, TeamsUser
 from app.persistence.models.customer import Customer
 from app.persistence.models.tenant_site import TenantSite
-from app.services.access import approvals, audit, mirror as access_mirror, records, users
-from app.services.access.matrix import ALLOWED, NO, WITH_APPROVAL, load
+from app.services.access.people import approvals
+from app.services.access import audit
+from app.services.access import edge_mirror as access_mirror
+from app.services.access.authorization import records
+from app.services.access.people import users
+from app.services.access.authorization.matrix import ALLOWED, NO, WITH_APPROVAL, load
 from app.services.teams.contracts import QuestionJob
 from app.services.teams.mirror import InMemoryMirrorWriter
 from tests.test_teams_consumer_chunk123 import Harness, job
@@ -187,7 +191,7 @@ async def test_the_access_rows_are_written_per_person_and_per_customer():
         await db.commit()
         written = await access_mirror.mirror_customer(db, mirror, CC, now=NOW)
         await db.commit()
-    assert written == 6  # one record, roles, users, approvals, audit, and the Ask catalogue (step 18)
+    assert written == 5  # one record, roles, users, approvals, audit (the Ask catalogue is Ask's own row, chunk 219)
     access = json.loads(mirror.items[(f"EYE#{CC}", "USER#u-sup#ACCESS")].payload_json)
     assert access["role"] == "supervisor" and access["site_ids"] == ["BRI"]
     assert access["capabilities"]["approve"] == NO and access["status"] == "active"
@@ -292,7 +296,7 @@ async def test_the_real_check_reads_the_record_and_audits_a_refusal():
 
 # ==================================================== 7. the Admin tab's commands (step 7c)
 
-from app.services.access import commands as access_commands  # noqa: E402
+from app.services.access import admin_commands as access_commands  # noqa: E402
 from app.services.teams.commands import run_command  # noqa: E402
 from app.services.teams.contracts import Command  # noqa: E402
 

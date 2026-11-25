@@ -16,9 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.access import TeamsUser, TeamsUserSite
 from app.persistence.models.teams_binding import TeamsTenantBinding
-from app.services.access import approvals, audit, records, users
-from app.services.access import matrix as matrix_file
-from app.services.ask import mirror as ask_mirror
+from app.services.access import audit
+from app.services.access.authorization import matrix as matrix_file
+from app.services.access.authorization import records
+from app.services.access.people import approvals, users
 from app.services.teams.mirror import ChangeTracker, MirrorWriter, envelope, write_if_changed
 from app.services.teams.mirror_rows import invite_key
 from app.settings import settings
@@ -90,9 +91,8 @@ async def mirror_customer(db: AsyncSession, mirror: MirrorWriter, customer_code:
                         for a in await approvals.recent(db, customer_code, limit=APPROVAL_ROWS)]}
     log = {"events": [audit.event_payload(e)
                       for e in await audit.recent_events(db, customer_code, limit=AUDIT_ROWS)]}
-    # step 18: the Ask catalogue rides with the access rows, written once and again when its words change
     for row_type, payload in (("roles", await roles_payload(db, customer_code)), ("users", listing),
-                              ("approvals", queue), ("audit", log), ("ask_catalogue", ask_mirror.catalogue_payload())):
+                              ("approvals", queue), ("audit", log)):
         env = envelope(row_type, customer_code, payload=payload, as_of=as_of, now=stamp)
         written += int(await write_if_changed(mirror, tracker, env, now=stamp))
     return written

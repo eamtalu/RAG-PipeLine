@@ -13,7 +13,7 @@ from sqlalchemy import delete
 from app.config.database import async_session
 from app.persistence.models.analytics_at_risk import AnalyticsAtRiskDelivery
 from app.persistence.repositories.site_repository import SiteRepository
-from app.services.access.records import AccessRecord
+from app.services.access.authorization.records import AccessRecord
 from app.services.ask import briefs, slash
 from app.services.teams.contracts import FindingsBlock, KpisBlock
 from tests.golden import plant

@@ -16,7 +16,7 @@ from app.api.deps import normalize_customer_code, require_admin
 from app.persistence.models.teams_binding import TeamsTenantBinding
 from app.persistence.repositories.customer_repository import CustomerRepository, get_customer_repository
 from app.persistence.repositories.teams_repository import TeamsBindingRepository, get_teams_binding_repository
-from app.services.teams.binding_mirror import BindingMirror, build_mirror_from_settings
+from app.services.access import BindingMirror, build_binding_mirror
 
 router = APIRouter(prefix="/teams", tags=["teams"])
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ _TENANT_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA
 
 
 def get_binding_mirror() -> BindingMirror:
-    return build_mirror_from_settings()
+    return build_binding_mirror()
 
 
 class BindingRequest(BaseModel):

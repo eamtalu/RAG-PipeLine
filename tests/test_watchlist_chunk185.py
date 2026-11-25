@@ -28,7 +28,9 @@ from app.persistence.models.analytics_lookup import AnalyticsLookupValue
 from app.persistence.models.customer import Customer
 from app.persistence.models.tenant_site import TenantSite
 from app.persistence.models.watch import Watch, WatchEvent
-from app.services.access import commands as access_commands, records, users
+from app.services.access import admin_commands as access_commands
+from app.services.access.authorization import records
+from app.services.access.people import users
 from app.services.analytics_at_risk import RULE_VERSION
 from app.services.teams import home_snapshot
 from app.services.teams.commands import run_command

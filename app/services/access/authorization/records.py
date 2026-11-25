@@ -21,8 +21,8 @@ from app.persistence.models.access import (
     TeamsUserCapability,
     TeamsUserSite,
 )
-from app.services.access import matrix as matrix_file
-from app.services.access.matrix import ALLOWED, NO, WITH_APPROVAL
+from app.services.access.authorization import matrix as matrix_file
+from app.services.access.authorization.matrix import ALLOWED, NO, WITH_APPROVAL
 
 ALL_SITES = "all"
 
@@ -210,7 +210,7 @@ async def set_matrix_cell(db: AsyncSession, customer_code: str, role_code: str, 
     ("acme", "supervisor", "export", "allowed") -> the cell, an audit line ; (unknown role) -> ValueError
     """
     from app.services.access import audit  # local: audit imports nothing from here
-    from app.services.access.matrix import STATES
+    from app.services.access.authorization.matrix import STATES
 
     m = matrix_file.load()
     if role_code not in m.role_codes:

@@ -24,15 +24,18 @@ from app.persistence.models.notification import CustomerNotificationChannel
 from app.persistence.models.notification_group import NotificationGroup
 from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
 from app.persistence.models.tenant_site import TenantSite
-from app.services.access import approvals, commands as access_commands, records, users
-from app.services.access import mirror as access_mirror
+from app.services.access.people import approvals
+from app.services.access import admin_commands as access_commands
+from app.services.access.authorization import records
+from app.services.access.people import users
+from app.services.access import edge_mirror as access_mirror
 from app.services.advisories import kinds, store as advisory_store
 from app.services.advisories.registry import Finding
 from app.services.analytics_agent import action_tools, advisory_tools, forecast_tools, usage_tools
 from app.services.ask import actions, catalogue, demo, forms, slash
 from app.services.ask import mirror as ask_mirror
 from app.services.groups import commands as group_commands
-from app.services.teams.commands import run_command
+from app.services.teams.commands import run_command, unwrap_form
 from app.services.teams.contracts import Command, QuestionJob
 from app.services.teams.mirror import InMemoryMirrorWriter
 from app import teams_consumer
@@ -167,8 +170,8 @@ async def test_a_real_action_proposes_its_form_asks_for_what_is_missing_and_refu
 async def test_a_confirmed_change_user_form_becomes_access_set_user_and_decide_becomes_access_decide():
     mirror = InMemoryMirrorWriter()
     outcome = await access_commands.run(
-        _job("u-adm", "access_set_user", {"form_id": "change_user", "via": "ask",
-                                          "values": {"object_id": "u-sup", "role": "ops_manager", "site_id": "LON", "status": "active"}}),
+        unwrap_form(_job("u-adm", "access_set_user", {"form_id": "change_user", "via": "ask",
+                                          "values": {"object_id": "u-sup", "role": "ops_manager", "site_id": "LON", "status": "active"}})),
         mirror=mirror, now=NOW)
     assert outcome.text == "updated Sam Super"
     async with async_session() as db:
@@ -176,8 +179,8 @@ async def test_a_confirmed_change_user_form_becomes_access_set_user_and_decide_b
         assert sam.role_code == "ops_manager"
     # a picker is refused outright; a waiting request is listed by the decision form and a confirmed decline applies
     with pytest.raises(access_commands.Refused):
-        await access_commands.run(_job("u-pick", "access_set_user", {"form_id": "change_user", "via": "ask",
-                                                                      "values": {"object_id": "u-exec", "status": "deactivated"}}),
+        await access_commands.run(unwrap_form(_job("u-pick", "access_set_user", {"form_id": "change_user", "via": "ask",
+                                                                      "values": {"object_id": "u-exec", "status": "deactivated"}})),
                                   mirror=mirror, now=NOW)
     async with async_session() as db:
         row = await approvals.request(db, CC, kind="change_role", requested_by="u-sup", requested_by_name="Sam Super",
@@ -191,8 +194,8 @@ async def test_a_confirmed_change_user_form_becomes_access_set_user_and_decide_b
         assert fields["reference"]["value"] == reference and "Change Pat Picker · by Sam Super" in fields["reference"]["labels"][0]
         assert out["block"]["submit_label"] == "Decline" and out["block"]["command_kind"] == "access_decide"
     outcome = await access_commands.run(
-        _job("u-ops", "access_decide", {"form_id": "decide_request", "via": "ask",
-                                        "values": {"reference": reference, "decision": "decline", "note": "not now"}}),
+        unwrap_form(_job("u-ops", "access_decide", {"form_id": "decide_request", "via": "ask",
+                                        "values": {"reference": reference, "decision": "decline", "note": "not now"}})),
         mirror=mirror, now=NOW)
     assert outcome.text.startswith(f"declined {reference}")
 
@@ -210,7 +213,7 @@ async def test_a_confirmed_group_form_becomes_group_set_with_its_topics_and_chan
         assert fields["topic_stock"]["value"] == "true" and fields["topic_delivery"]["value"] == "false"
         assert fields["channel_id"]["value"] == channel_id and "stock-control" in fields["channel_id"]["labels"]
     values = {f["name"]: f.get("value") or "" for f in out["block"]["fields"]}
-    outcome = await group_commands.run(_job("u-ops", "group_set", {"form_id": "set_group", "values": values, "via": "ask"}),
+    outcome = await group_commands.run(unwrap_form(_job("u-ops", "group_set", {"form_id": "set_group", "values": values, "via": "ask"})),
                                        mirror=InMemoryMirrorWriter(), now=NOW)
     assert outcome.text.startswith("group Stock saved")
     async with async_session() as db:
@@ -309,10 +312,14 @@ async def test_the_usage_tool_counts_people_questions_and_acknowledgements_for_t
 
 
 # ==================================================== 5. the row
-async def test_the_access_mirror_writes_the_catalogue_row():
+async def test_the_ask_mirror_writes_the_catalogue_row_and_access_control_does_not():
+    from app.services.ask import mirror as ask_mirror
+
     mirror = InMemoryMirrorWriter()
     async with async_session() as db:
         await access_mirror.mirror_customer(db, mirror, CC, now=NOW)
+    assert (f"EYE#{CC}", "ASK_CATALOGUE") not in mirror.items  # chunk 219: Ask writes its own row
+    assert await ask_mirror.mirror_catalogue(mirror, CC, now=NOW) is True
     env = mirror.items[(f"EYE#{CC}", "ASK_CATALOGUE")]
     payload = json.loads(env.payload_json)
     assert env.row_type == "ask_catalogue" and payload["version"] == catalogue.CATALOGUE_VERSION

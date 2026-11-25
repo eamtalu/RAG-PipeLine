@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.access import records
+from app.services import access
 from app.services.ask import forms
 from app.services.teams.contracts import FormBlock
 
@@ -351,10 +351,10 @@ async def run(db: AsyncSession, customer_code: str, actor_object_id: str, actor_
     # reason instead of a form they could not confirm; a demo still needs run_actions. The site
     # is not part of this gate because the form's own site field is what the command checks
     # (a BRI supervisor may propose a LON user and have it approved), as the step 8 tools did
-    record = await records.access_record_for(db, customer_code, actor_object_id)
+    record = await access.access_record_for(db, customer_code, actor_object_id)
     if record is None or not record.is_active:
         return json.dumps({"problems": ["you have no active access record"]})
-    decision = records.decide(record, spec.capability)
+    decision = access.decide(record, spec.capability)
     if decision.outcome == "refused":
         return json.dumps({"problems": [f"you cannot do that: {decision.reason}"]})
     # Step 3: Something required and not said is asked back as one question, so a command typed
