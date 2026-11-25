@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from sqlalchemy import ColumnElement, and_, false, select, true
+from sqlalchemy import ColumnElement, and_, false, or_, select, true
 
 from app.persistence.models import analytics_at_risk as at_risk
 from app.persistence.models import analytics_forecast as forecast
@@ -43,7 +43,7 @@ from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_transaction import LogTransaction
 from app.persistence.models.teams_conversation import TeamsConversation
 from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
-from app.persistence.models.tenant_site import TenantSite
+from app.persistence.models.tenant_site import TenantSite, TenantSitePlace
 from app.services import access
 from app.services.scoped_data.scope import DataScope
 
@@ -65,8 +65,8 @@ class Rule(Protocol):
         """The rows of the table this scope may read: (BRI scope) -> a WHERE condition."""
 
 
-def _sites(scope: DataScope, mine: ColumnElement[bool], site: Any) -> ColumnElement[bool]:
-    """The customer's rows, cut to the scope's sites unless it covers every site.
+def _in_sites(scope: DataScope, mine: ColumnElement[bool], site: Any) -> ColumnElement[bool]:
+    """The customer's rows whose column is one of the scope's site ids, or all for every site.
 
     (all sites) -> mine ; (BRI) -> mine AND site IN ('BRI') ; (no sites) -> false
     """
@@ -79,17 +79,41 @@ def _sites(scope: DataScope, mine: ColumnElement[bool], site: Any) -> ColumnElem
 
 @dataclass(frozen=True, slots=True)
 class SiteLimited:
-    """A table whose rows belong to one customer and one site."""
+    """A table whose rows belong to one customer and one site.
+
+    The site column holds the warehouse code. With `company_column` the row is matched by the
+    company and warehouse pair; without one, by the warehouse alone. With `holds_site_id` the
+    column holds a site id (written from the warehouse by the advisory agents), so it is matched
+    against the person's site ids and their places' warehouses.
+    """
 
     model: Any
     site_column: str
     category: str = "operations"
+    company_column: str | None = None
+    holds_site_id: bool = False
 
     def condition(self, scope: DataScope) -> ColumnElement[bool]:
+        mine = self.model.customer_code == scope.customer_code
         if scope.category_is_closed(self.category):
             return false()
-        return _sites(scope, self.model.customer_code == scope.customer_code,
-                      getattr(self.model, self.site_column))
+        if scope.all_sites:
+            return mine
+        places = scope.site_places
+        if not places:
+            return false()
+        site = getattr(self.model, self.site_column)
+        warehouses = sorted({place.warehouse for place in places})
+        if self.holds_site_id:
+            return and_(mine, site.in_(sorted({*warehouses, *scope.site_ids})))
+        if self.company_column is None:
+            return and_(mine, site.in_(warehouses))
+        # the pair decides: the same warehouse code under another company is another place
+        company = getattr(self.model, self.company_column)
+        return and_(mine, or_(*(
+            site == place.warehouse if place.company is None
+            else and_(site == place.warehouse, company == place.company)
+            for place in places)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +130,7 @@ class SubjectLimited:
         if scope.all_sites:
             return mine
         site_subjects = and_(mine, self.model.subject_kind == SITE_SUBJECT)
-        return _sites(scope, site_subjects, self.model.subject)
+        return _in_sites(scope, site_subjects, self.model.subject)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,14 +184,14 @@ class Shared:
 
 RULES: tuple[Rule, ...] = (
     # the WMS activity and what is derived from it, each row with its warehouse
-    SiteLimited(LogTransaction, "warehouse"),
+    SiteLimited(LogTransaction, "warehouse", company_column="company"),
     SiteLimited(AnalyticsFact, "warehouse"),
     SiteLimited(AnalyticsFactLedger, "warehouse"),
     SiteLimited(AnalyticsSettledRow, "warehouse"),
     SiteLimited(at_risk.AnalyticsAtRiskDelivery, "warehouse"),
-    SiteLimited(Advisory, "site_id"),
-    SiteLimited(TeamsConversation, "site_id"),
-    SiteLimited(TeamsConversationTurn, "site_id"),
+    SiteLimited(Advisory, "site_id", holds_site_id=True),
+    SiteLimited(TeamsConversation, "site_id", holds_site_id=True),
+    SiteLimited(TeamsConversationTurn, "site_id", holds_site_id=True),
     # the forecast, by subject
     SubjectLimited(forecast.AnalyticsForecastSeries),
     SubjectLimited(forecast.AnalyticsForecastAccuracy),
@@ -185,6 +209,7 @@ RULES: tuple[Rule, ...] = (
     CustomerWide(Customer),
     CustomerWide(CustomerDisplayName),
     CustomerWide(TenantSite),
+    CustomerWide(TenantSitePlace),
     CustomerWide(AnalyticsFieldMeaning),
     CustomerWide(AnalyticsFieldRegistry),
     CustomerWide(AnalyticsLookup),
@@ -208,7 +233,7 @@ def _access_rule(table: access.AccessTable) -> Rule:
     (TeamsUser, "customer") -> CustomerWide ; (AuditEvent, "site", "site_id") -> SiteLimited
     """
     if table.ownership == "site":
-        return SiteLimited(table.model, table.key)
+        return SiteLimited(table.model, table.key, holds_site_id=True)
     if table.ownership == "owner":
         return OwnedBy(table.model, table.key, table.owner)
     return Shared(table.model) if table.ownership == "shared" else CustomerWide(table.model)

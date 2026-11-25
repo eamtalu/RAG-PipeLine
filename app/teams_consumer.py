@@ -113,7 +113,9 @@ async def _asker(job: QuestionJob) -> tuple[access.AccessRecord | None, scoped_d
     """
     async with async_session() as db:
         record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
-    return record, scoped_data.DataScope.from_record(record, customer_code=job.customer_code)
+        # each site is resolved to the company and warehouse pairs it stands for (chunk 223)
+        scope = await scoped_data.scope_for(db, record, customer_code=job.customer_code)
+    return record, scope
 
 
 async def _data_scope(job: QuestionJob) -> scoped_data.DataScope:

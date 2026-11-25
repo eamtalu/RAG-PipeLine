@@ -53,7 +53,7 @@ from app.persistence.models.analytics_rollup import (AnalyticsHourlyRollup, Anal
 from app.persistence.models.analytics_tenant_state import AnalyticsTenantState
 from app.persistence.models.analytics_quality_issue import AnalyticsQualityIssue
 from app.persistence.models.teams_binding import TeamsTenantBinding
-from app.persistence.models.tenant_site import TenantSite  # noqa: F401
+from app.persistence.models.tenant_site import TenantSite, TenantSitePlace  # noqa: F401
 from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
 from app.persistence.models.teams_conversation import TeamsConversation
 from app.persistence.models.access import (  # noqa: F401
