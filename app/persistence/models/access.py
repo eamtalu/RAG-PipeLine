@@ -1,11 +1,11 @@
 # access.py — who may do what in the eSmart Eye Teams app (stage D, step 7)
 #
 #   The matrix of screen 07 as data: roles and capabilities (seeded from
-#   app/services/access/matrix.yaml), one state per cell per customer (an Admin may change a cell
-#   in the app), and the people: a user is an Entra object id within a customer, with a role, the
-#   sites they may see (or all of them) and, per capability, an override the Admin set or an
-#   approval granted. Approvals queue the "with approval" requests; audit_events keep every
-#   permission decision that changed data, append-only, purged after 90 days.
+#   app/services/access/authorization/matrix.yaml), one state per cell per customer (an Admin may
+#   change a cell in the app), and the people: a user is an Entra object id within a customer,
+#   with a role, the sites they may see (or all of them) and, per capability, an override the
+#   Admin set or an approval granted. Approvals queue the "with approval" requests; audit_events
+#   keep every permission decision that changed data, append-only, purged after 90 days.
 #
 #   customer_code is a real foreign key everywhere here: a user of a missing log space is a
 #   config error, as a site of one is.
