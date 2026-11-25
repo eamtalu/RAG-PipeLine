@@ -31,7 +31,8 @@ class AmbiguousDelivery(LookupError):
 async def record(db: AsyncSession, row: AnalyticsAtRiskDelivery, *, action: str, actor: str, note: str | None,
                  at: datetime) -> AnalyticsAtRiskCheck:
     entry = AnalyticsAtRiskCheck(customer_code=row.customer_code, delivery_id=row.id, delivery_number=row.delivery_number,
-                                 departure_date=row.departure_date, action=action, tier=row.tier,
+                                 departure_date=row.departure_date, warehouse=row.warehouse,
+                                 action=action, tier=row.tier,
                                  actor=(actor or DEFAULT_ACTOR)[:128], note=(note or None) and note[:MAX_NOTE], at=at)
     db.add(entry)
     return entry

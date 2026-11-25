@@ -353,7 +353,8 @@ async def read_routes(customer: str = Depends(get_current_customer), db: AsyncSe
     cfg = await settings_store.effective(db, customer)
     profiles = await profile_store.latest(db, customer)
     out = []
-    for route, p in sorted(profiles.items()):
+    for p in profiles.all():  # one per place; a route that spans two warehouses is listed twice
+        route = p.route
         loading = (p.loaded_sample or 0) > 0
         usual = p.van_ready_usual_min if loading else p.pick_done_usual_min
         out.append({"route": route, "as_of_date": p.as_of_date.isoformat(), "window_days": p.window_days, "sample": p.sample,

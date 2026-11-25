@@ -1234,6 +1234,8 @@ erDiagram
         uuid delivery_id "soft -> analytics_at_risk_deliveries.id"
         string delivery_number
         date departure_date
+        string company "nullable; the delivery's WMS company when checked"
+        string warehouse "nullable; the delivery's warehouse when checked"
         string action "checked | unchecked | reopened"
         string tier
         string actor "self-declared web name or Teams display name"
@@ -1242,8 +1244,10 @@ erDiagram
     }
     analytics_at_risk_route_profiles {
         uuid id PK
-        string customer_code "soft tenant key"
+        string customer_code "soft tenant key; unique with warehouse, route, as_of_date (nulls not distinct)"
         string route
+        string company "nullable; the WMS company of the place, filled once deliveries carry it"
+        string warehouse "nullable; the warehouse the norm was learned for"
         date as_of_date
         int window_days
         int sample

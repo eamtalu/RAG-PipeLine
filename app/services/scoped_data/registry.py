@@ -189,6 +189,8 @@ RULES: tuple[Rule, ...] = (
     SiteLimited(AnalyticsFactLedger, "warehouse"),
     SiteLimited(AnalyticsSettledRow, "warehouse"),
     SiteLimited(at_risk.AnalyticsAtRiskDelivery, "warehouse"),
+    SiteLimited(at_risk.AnalyticsAtRiskCheck, "warehouse"),
+    SiteLimited(at_risk.AnalyticsAtRiskRouteProfile, "warehouse"),
     SiteLimited(Advisory, "site_id", holds_site_id=True),
     SiteLimited(TeamsConversation, "site_id", holds_site_id=True),
     SiteLimited(TeamsConversationTurn, "site_id", holds_site_id=True),
@@ -203,8 +205,6 @@ RULES: tuple[Rule, ...] = (
     AllSitesOnly(rollup.AnalyticsHourlyRollup),
     AllSitesOnly(rollup.AnalyticsDailyRollup),
     AllSitesOnly(rollup.AnalyticsMonthlyRollup),
-    AllSitesOnly(at_risk.AnalyticsAtRiskCheck),
-    AllSitesOnly(at_risk.AnalyticsAtRiskRouteProfile),
     # settings and reference data
     CustomerWide(Customer),
     CustomerWide(CustomerDisplayName),

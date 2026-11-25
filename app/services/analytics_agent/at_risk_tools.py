@@ -270,7 +270,8 @@ async def describe_at_risk(db: AsyncSession, args: dict, cc: str) -> dict:
     cfg = await settings_store.effective(db, cc)
     profiles = await profile_store.latest(db, cc)
     routes = []
-    for route, p in sorted(profiles.items()):
+    for p in profiles.all():  # one per place; a route that spans two warehouses is listed twice
+        route = p.route
         loading = (p.loaded_sample or 0) > 0
         usual = profile_store.usual_minutes(p, loading_expected=loading)
         hhmm = None if usual is None else f"{int(usual) // 60:02d}:{int(usual) % 60:02d}"
