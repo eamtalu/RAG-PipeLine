@@ -87,6 +87,24 @@ class PostgresTraceStore:
                 .limit(max(1, min(int(limit), LIST_MAX))))).scalars().all()
         return [_as_dict(trace) for trace in traces]
 
+    async def all_runs(self, customer_code: str, *, since: datetime, page: int = LIST_MAX,
+                       most: int = 20_000, **filters: Any) -> list[dict[str, Any]]:
+        """Every run of a window, newest first, read a page at a time and never more than `most`.
+
+        ("acme", since=30 days ago) -> all of the month's runs ; (most=1000) -> the newest 1000
+        """
+        runs: list[dict[str, Any]] = []
+        until: datetime | None = None
+        while len(runs) < most:
+            batch = await self.list_runs(customer_code, since=since, until=until, limit=page,
+                                         **filters)
+            runs.extend(batch)
+            if len(batch) < min(page, LIST_MAX):
+                break
+            # the next page is everything strictly older than the oldest run read so far
+            until = batch[-1]["started_at"]
+        return runs[:most]
+
     async def purge_once(self, *, now: datetime, retention_days: int) -> int:
         """Delete one batch of runs older than the retention; how many went (0 = none left).
 
