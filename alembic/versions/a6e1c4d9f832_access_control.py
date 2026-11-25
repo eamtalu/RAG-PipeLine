@@ -5,7 +5,7 @@ Revises: f5d9b3c8e721
 Create Date: 2026-11-13
 
 Stage D, step 7 of docs/esmart-agent-execution-plan.md: the matrix of screen 07 as data. The
-roles and capabilities are seeded here from app/services/access/matrix.yaml; a customer's cells
+roles and capabilities are seeded here from app/services/access/authorization/matrix.yaml; a customer's cells
 are seeded by the service on first use, so a new customer starts from the file and an Admin may
 change cells in the app. Users, their sites and their per-capability overrides; the approvals
 queue; the audit log. Additive only: nothing existing is touched.
@@ -23,7 +23,8 @@ down_revision = "f5d9b3c8e721"
 branch_labels = None
 depends_on = None
 
-MATRIX = Path(__file__).resolve().parents[2] / "app" / "services" / "access" / "matrix.yaml"
+# chunk 219 moved the file into access/authorization/; a fresh database must still seed from it
+MATRIX = Path(__file__).resolve().parents[2] / "app" / "services" / "access" / "authorization" / "matrix.yaml"
 
 
 def upgrade() -> None:
