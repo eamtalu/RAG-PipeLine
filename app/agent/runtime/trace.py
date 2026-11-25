@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -64,9 +65,18 @@ class RunTrace:
     steps: list[dict] = field(default_factory=list)  # the model's own text between tool calls
     events: list[dict] = field(default_factory=list)  # loop rescue, retry: what the log file had
     finished_at: datetime | None = None  # fixed by the first finish, so a repeat is equal
+    #: The collector's own start, so every call can say where in the run it happened (chunk 222).
+    _clock_start: float = field(default_factory=time.monotonic, compare=False, repr=False)
     #: Told of every event as it is recorded ("tool", "model_call", "guard" with a small dict),
     #: for a channel that shows progress (step 6); never affects the record, never raises out.
     listener: Callable[[str, dict], None] | None = field(default=None, compare=False, repr=False)
+
+    def _at_ms(self, lasted_ms: int = 0) -> int:
+        """Milliseconds into the run at which something began, given how long it lasted.
+
+        (recorded 500 ms in, lasted 120) -> 380 ; never negative
+        """
+        return max(0, int((time.monotonic() - self._clock_start) * 1000) - int(lasted_ms))
 
     def _emit(self, kind: str, data: dict) -> None:
         if self.listener is None:
@@ -98,6 +108,7 @@ class RunTrace:
                 "ok": bool(ok),
                 "sensitive_args": sensitive_args,
                 "notes": dict(notes) if notes else None,
+                "at_ms": self._at_ms(ms),
             }
         )
         self._emit("tool", {"namespace": namespace, "name": name, "ok": bool(ok)})
@@ -123,7 +134,7 @@ class RunTrace:
 
         ("retry", "ungrounded") -> events gains {"kind": "retry", "detail": "ungrounded"}
         """
-        self.events.append({"kind": kind, "detail": detail})
+        self.events.append({"kind": kind, "detail": detail, "at_ms": self._at_ms()})
         self._emit("event", {"kind": kind})
 
     def record_model_call(
@@ -152,6 +163,7 @@ class RunTrace:
                 "input_tokens": int(usage.get("input_tokens") or 0),
                 "output_tokens": int(usage.get("output_tokens") or 0),
                 "cached_tokens": int(details.get("cache_read") or 0),
+                "at_ms": self._at_ms(ms),
             }
         )
         self._emit("model_call", {"provider": provider, "model": model, "ok": bool(ok)})
@@ -407,4 +419,5 @@ def _stored_call(call: Mapping[str, Any]) -> dict[str, Any]:
         "result_chars": len(call["result"] or ""),
         "result_rows": _result_rows(call["result"]),
         "data": call.get("notes"),
+        "at_ms": call.get("at_ms"),
     }
