@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.watch import Watch
 from app.persistence.repositories.customer_repository import get_customer_timezone
-from app.services.access import records
+from app.services import access
 from app.services.watchlist import readers, registry, store
 from app.services.watchlist import mirror as watch_mirror
 from app.services.teams.mirror import ChangeTracker, MirrorWriter
@@ -203,11 +203,11 @@ async def evaluate_customer(db: AsyncSession, customer_code: str, watches: list[
     events = 0
     # Step 1: A watch whose owner lost the site (or the record) ends quietly, so a watch never
     # shows a person something their access no longer covers
-    record_cache: dict[str, records.AccessRecord | None] = {}
+    record_cache: dict[str, access.AccessRecord | None] = {}
     alive: list[Watch] = []
     for w in watches:
         if w.owner_object_id not in record_cache:
-            record_cache[w.owner_object_id] = await records.access_record_for(db, customer_code, w.owner_object_id)
+            record_cache[w.owner_object_id] = await access.access_record_for(db, customer_code, w.owner_object_id)
         record = record_cache[w.owner_object_id]
         if record is None or not record.is_active or (w.site_id and not record.may_see(w.site_id)):
             store.end(w, "access", now=now)

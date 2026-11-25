@@ -13,9 +13,8 @@ from typing import Any, Mapping
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.persistence.models.access import AuditEvent, TeamsUser
 from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
-from app.services.access import records
+from app.services import access
 
 APP_USAGE = "app_usage"
 USAGE_TOOL_NAMES = frozenset({APP_USAGE})
@@ -41,14 +40,14 @@ USAGE_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def may_read(record: records.AccessRecord | None) -> bool:
+def may_read(record: access.AccessRecord | None) -> bool:
     """Whether a record may read usage: it manages users or approves.
 
     (admin) -> True ; (supervisor) -> False ; (None) -> False
     """
     if record is None or not record.is_active:
         return False
-    return records.decide(record, "manage_users").is_allowed or records.decide(record, "approve").is_allowed
+    return access.decide(record, "manage_users").is_allowed or access.decide(record, "approve").is_allowed
 
 
 async def usage_rows(db: AsyncSession, customer_code: str, *, days: int, now: datetime) -> dict[str, Any]:
@@ -58,14 +57,10 @@ async def usage_rows(db: AsyncSession, customer_code: str, *, days: int, now: da
     ("acme", 7 days) -> {"days": 7, "people": {...}, "questions_per_day": [...], "top_askers": [...], ...}
     """
     since = now - timedelta(days=days)
-    # Step 1: Who was active, by role, against everyone who has access, so "12 of 30" reads at once
-    people = list((await db.execute(select(TeamsUser).where(TeamsUser.customer_code == customer_code))).scalars())
-    active = [u for u in people if u.status == "active"]
-    seen = [u for u in active if u.last_active_at is not None and u.last_active_at >= since]
-    by_role: dict[str, int] = {}
-    for u in seen:
-        by_role[u.role_code] = by_role.get(u.role_code, 0) + 1
-    names = {u.object_id: u.display_name for u in people}
+    # Step 1: Who was active, by role, against everyone who has access, so "12 of 30" reads at once;
+    # access control owns those tables, so it counts them (chunk 219)
+    people = await access.people_activity(db, customer_code, since=since)
+    names = people.names
     # Step 2: The questions, per day and per person, from the stored turns
     per_day = await db.execute(
         select(func.date_trunc("day", TeamsConversationTurn.created_at).label("day"), func.count())
@@ -77,25 +72,19 @@ async def usage_rows(db: AsyncSession, customer_code: str, *, days: int, now: da
         .where(TeamsConversationTurn.customer_code == customer_code, TeamsConversationTurn.role == "user",
                TeamsConversationTurn.created_at >= since, TeamsConversationTurn.sender_object_id.is_not(None))
         .group_by(TeamsConversationTurn.sender_object_id).order_by(func.count().desc()).limit(TOP))
-    # Step 3: The actions and the acknowledgements, from the audit
-    by_action = await db.execute(
-        select(AuditEvent.action, func.count())
-        .where(AuditEvent.customer_code == customer_code, AuditEvent.at >= since, AuditEvent.decision != "refused")
-        .group_by(AuditEvent.action).order_by(func.count().desc()).limit(TOP * 2))
-    acknowledged = await db.execute(
-        select(AuditEvent.actor_object_id, AuditEvent.actor_name, func.count())
-        .where(AuditEvent.customer_code == customer_code, AuditEvent.at >= since,
-               AuditEvent.action == "advisory.acknowledge")
-        .group_by(AuditEvent.actor_object_id, AuditEvent.actor_name).order_by(func.count().desc()).limit(TOP))
+    # Step 3: The actions and the acknowledgements, from the audit log access control keeps
+    by_action = await access.audit_action_counts(db, customer_code, since=since, limit=TOP * 2)
+    acknowledged = await access.audit_actor_counts(db, customer_code, since=since,
+                                                   action="advisory.acknowledge", limit=TOP)
     return {
         "days": days, "since": since.isoformat(),
-        "people": {"with_access": len(active), "active_in_window": len(seen),
-                   "by_role": [{"role": r, "active": n} for r, n in sorted(by_role.items())]},
+        "people": {"with_access": people.with_access, "active_in_window": people.active_in_window,
+                   "by_role": [{"role": r, "active": n} for r, n in sorted(people.by_role.items())]},
         "questions_per_day": [{"day": d.date().isoformat(), "questions": n} for d, n in per_day.all()],
         "top_askers": [{"name": names.get(oid, oid), "questions": n} for oid, n in per_person.all()],
-        "actions": [{"action": a, "count": n} for a, n in by_action.all()],
+        "actions": [{"action": a, "count": n} for a, n in by_action],
         "advisories_acknowledged": [{"name": name or names.get(oid, oid), "count": n}
-                                    for oid, name, n in acknowledged.all()],
+                                    for oid, name, n in acknowledged],
     }
 
 
@@ -107,7 +96,7 @@ async def run_usage_tool(db: AsyncSession, customer_code: str, actor_object_id: 
     """
     if name != APP_USAGE:
         return json.dumps({"problems": [f"unknown usage tool {name!r}"]})
-    record = await records.access_record_for(db, customer_code, actor_object_id)
+    record = await access.access_record_for(db, customer_code, actor_object_id)
     if not may_read(record):
         return json.dumps({"problems": ["usage figures are for people who manage users or approve requests"]})
     try:

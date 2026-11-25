@@ -1,6 +1,6 @@
 """Writing mirror rows to the edge's DynamoDB table (stage D, step 4).
 
-One writer for every row type the Teams app reads, in the style of `binding_mirror.py`: a protocol,
+One writer for every row type the Teams app reads, in the style of `access/tenancy/binding_mirror.py`: a protocol,
 the DynamoDB implementation, an in-memory twin for tests, and a builder from settings. The envelope
 and the key layout come from `mirror_rows.py`, the file shared with the edge.
 

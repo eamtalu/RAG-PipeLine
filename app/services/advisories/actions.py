@@ -13,8 +13,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
-from app.services.access import audit, records, users
-from app.services.access.commands import CommandOutcome, Refused, receipt
+from app.services import access
+from app.services.teams.command_outcome import CommandOutcome, Refused, receipt
 from app.services.advisories import mirror as advisories_mirror
 from app.services.advisories import store
 from app.services.teams.contracts import QuestionJob
@@ -51,13 +51,13 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
     if action not in ACTIONS:
         raise ValueError(f"unknown advisory action {action!r}")
     ids = batch_ids(payload)
-    actor = users.Actor(job.sender_object_id, job.sender_name)
+    actor = access.Actor(job.sender_object_id, job.sender_name)
     factory = session_factory or async_session
     async with factory() as db:
         # Step 1: The actor's own record decides, scoped to each advisory's site, so a forged job
         # cannot act on a site its sender cannot see; in a batch the refused ones are counted,
         # not fatal, because a selection may straddle sites
-        record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
+        record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
         done: list = []
         refused: list[str] = []
         for advisory_id in ids:
@@ -65,13 +65,13 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
             if row is None:
                 refused.append("that advisory no longer exists")
                 continue
-            decision = records.decide(record, CAPABILITY[action], row.site_id)
+            decision = access.decide(record, CAPABILITY[action], row.site_id)
             if not decision.is_allowed:
                 refused.append(decision.reason or f"{action} is not allowed for you")
                 continue
             # Step 2: Apply the action and write its audit line, one per advisory, in one transaction
             text = _apply(row, action, payload, actor, now)
-            await audit.record_event(
+            await access.record_audit_event(
                 db, job.customer_code, actor_object_id=actor.object_id, actor_name=actor.name,
                 action=f"advisory.{action}", capability_code=CAPABILITY[action], decision="allowed",
                 subject_kind="advisory", subject_id=str(row.id), site_id=row.site_id, text=text,
@@ -129,7 +129,7 @@ def batch_text(action: str, done: int, refused: int) -> str:
     return text if refused == 0 else f"{text} · {refused} not yours to change"
 
 
-def _apply(row, action: str, payload: dict, actor: users.Actor, now: datetime) -> str:
+def _apply(row, action: str, payload: dict, actor: access.Actor, now: datetime) -> str:
     """Change the row for one action; the one line that says what happened.
 
     (open row, "acknowledge") -> "acknowledged · <title>" and status acknowledged

@@ -21,9 +21,12 @@ from app.api.v1 import teams_access as access_api
 from app.config.database import async_session
 from app.main import app
 from app.persistence.models.teams_binding import TeamsTenantBinding
-from app.services.access import audit, mirror as access_mirror, records, users
-from app.services.access import commands as access_commands
-from app.services.teams.binding_mirror import InMemoryMirror
+from app.services.access import audit
+from app.services.access import edge_mirror as access_mirror
+from app.services.access.authorization import records
+from app.services.access.people import users
+from app.services.access import admin_commands as access_commands
+from app.services.access.tenancy.binding_mirror import InMemoryMirror
 from app.services.teams.mirror import InMemoryMirrorWriter
 from app.services.teams.mirror_rows import invite_key
 from app.settings import settings
@@ -218,7 +221,7 @@ async def test_a_pending_invite_is_edited_by_email_not_invited_twice():
 
 
 async def test_a_supervisors_invite_waits_for_an_ops_manager():
-    from app.services.access import approvals
+    from app.services.access.people import approvals
 
     mirror = InMemoryMirrorWriter()
     async with async_session() as db:

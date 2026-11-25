@@ -24,8 +24,8 @@ from app.persistence.models.customer import Customer
 from app.persistence.models.teams_binding import TeamsTenantBinding
 from app.persistence.repositories.teams_repository import TeamsBindingRepository
 from app.services.teams import consumer as c
-from app.services.teams.binding_mirror import InMemoryMirror
-from app.services.teams.binding_sweep import sweep_once
+from app.services.access.tenancy.binding_mirror import InMemoryMirror
+from app.services.access.tenancy.binding_sweep import sweep_once
 from app.services.teams.contracts import AnswerPayload, QuestionJob
 
 Q = "https://sqs.test/queue"

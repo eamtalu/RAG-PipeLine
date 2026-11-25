@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.watch import Watch
 from app.persistence.repositories.customer_repository import get_customer_timezone
-from app.services.access import records
+from app.services import access
 from app.services.teams.mirror import ChangeTracker, MirrorWriter, envelope, write_if_changed
 from app.services.teams.sites import list_sites
 from app.services.watchlist import readers, registry, store, suggest
@@ -36,11 +36,12 @@ def _iso(at: datetime | None) -> str | None:
 def ends_text(watch: Watch, tz: ZoneInfo) -> str:
     """How a watch ends, in the card's words.
 
-    (delivery) -> "stops by itself once it has gone" ; (until 20 Nov) -> "until Fri 20 Nov" ; (route) -> ""
+    (delivery) -> "stops by itself once it has gone" ; (until 20 Nov) -> "until Fri 20 Nov" ;
+    (until 2 Dec) -> "until Wed 2 Dec", not "02" ; (route) -> ""
     """
     if watch.until is not None:
         at = watch.until.astimezone(tz)
-        return f"until {at.strftime('%a %d %b')}"
+        return f"until {at:%a} {at.day} {at:%b}"
     if watch.kind == "delivery":
         return "stops by itself once it has gone"
     return ""
@@ -81,7 +82,7 @@ async def user_payload(db: AsyncSession, customer_code: str, owner_object_id: st
     if missing:
         for w in (await db.execute(select(Watch).where(Watch.id.in_(missing)))).scalars():
             labels[w.id] = w
-    record = await records.access_record_for(db, customer_code, owner_object_id)
+    record = await access.access_record_for(db, customer_code, owner_object_id)
     suggestion = None
     limit = int(settings.teams_watches_limit)
     if record is not None and record.is_active and len(watches) < limit:

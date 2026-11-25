@@ -31,18 +31,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config.database import async_session, engine  # noqa: E402
-from app.services.access import mirror as access_mirror  # noqa: E402
-from app.services.access import records, users  # noqa: E402
+from app.services import access  # noqa: E402
 from app.services.teams.mirror import build_mirror_writer_from_settings  # noqa: E402
 
 
 async def list_users(customer_code: str) -> None:
     async with async_session() as db:
-        rows = await users.list_users(db, customer_code)
+        rows = await access.list_users(db, customer_code)
         if not rows:
             print(f"no users for {customer_code}")
         for user in rows:
-            record = await records.record_for_user(db, user)
+            record = await access.record_for_user(db, user)
             sites = "all sites" if user.all_sites else ", ".join(record.site_ids) or "no sites"
             who = user.object_id or f"(invited {user.email})"
             print(f"{who}  {user.display_name!r}  {user.role_code}  {user.status}  {sites}")
@@ -50,17 +49,17 @@ async def list_users(customer_code: str) -> None:
 
 async def set_user(customer_code: str, object_id: str, name: str, *, role: str, email: str | None,
                    all_sites: bool, sites: list[str] | None, actor: str) -> None:
-    change = users.UserChange(display_name=name, email=email, role_code=role, all_sites=all_sites,
+    change = access.UserChange(display_name=name, email=email, role_code=role, all_sites=all_sites,
                               site_ids=tuple(sites) if sites is not None else None, status="active")
     async with async_session() as db:
         try:
-            if await users.get_user(db, customer_code, object_id) is None:
-                await users.create_user(db, customer_code, object_id, change=change,
-                                        actor=users.Actor.system(actor))
+            if await access.get_user(db, customer_code, object_id) is None:
+                await access.create_user(db, customer_code, object_id, change=change,
+                                        actor=access.Actor.system(actor))
                 verb = "created"
             else:
-                await users.update_user(db, customer_code, object_id, change=change,
-                                        actor=users.Actor.system(actor))
+                await access.update_user(db, customer_code, object_id, change=change,
+                                        actor=access.Actor.system(actor))
                 verb = "updated"
             await db.commit()
         except ValueError as exc:
@@ -71,12 +70,12 @@ async def set_user(customer_code: str, object_id: str, name: str, *, role: str, 
 
 async def invite(customer_code: str, email: str, name: str, *, role: str, all_sites: bool,
                  sites: list[str] | None, actor: str) -> None:
-    change = users.UserChange(display_name=name, role_code=role, all_sites=all_sites,
+    change = access.UserChange(display_name=name, role_code=role, all_sites=all_sites,
                               site_ids=tuple(sites) if sites is not None else None)
     async with async_session() as db:
         try:
-            user = await users.invite_user(db, customer_code, email, change=change,
-                                           actor=users.Actor.system(actor))
+            user = await access.invite_user(db, customer_code, email, change=change,
+                                           actor=access.Actor.system(actor))
             await db.commit()
         except ValueError as exc:
             raise SystemExit(f"refused: {exc}")
@@ -87,9 +86,9 @@ async def invite(customer_code: str, email: str, name: str, *, role: str, all_si
 async def deactivate(customer_code: str, object_id: str, *, actor: str) -> None:
     async with async_session() as db:
         try:
-            await users.update_user(db, customer_code, object_id,
-                                    change=users.UserChange(status="deactivated"),
-                                    actor=users.Actor.system(actor))
+            await access.update_user(db, customer_code, object_id,
+                                    change=access.UserChange(status="deactivated"),
+                                    actor=access.Actor.system(actor))
             await db.commit()
         except ValueError as exc:
             raise SystemExit(f"refused: {exc}")
@@ -99,7 +98,7 @@ async def deactivate(customer_code: str, object_id: str, *, actor: str) -> None:
 
 async def show_matrix(customer_code: str) -> None:
     async with async_session() as db:
-        payload = await access_mirror.roles_payload(db, customer_code)
+        payload = await access.roles_payload(db, customer_code)
         await db.commit()
     roles = [r["code"] for r in payload["roles"]]
     print("capability".ljust(18) + "".join(r.ljust(14) for r in roles))
@@ -116,7 +115,7 @@ async def _mirror(db, customer_code: str) -> None:
         print("(no mirror table configured; the consumer's sweep writes the edge rows)")
         return
     try:
-        written = await access_mirror.mirror_customer(db, mirror, customer_code)
+        written = await access.mirror_customer(db, mirror, customer_code)
         await db.commit()
     except Exception as exc:  # noqa: BLE001 - the shell may lack the service's AWS credentials
         print(f"saved; not mirrored from this shell ({type(exc).__name__}: {str(exc)[:120]}). "

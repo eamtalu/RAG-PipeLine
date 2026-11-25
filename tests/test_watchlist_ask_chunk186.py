@@ -24,7 +24,7 @@ from app.persistence.models.watch import Watch
 from app.services.analytics_agent import watch_tools
 from app.services.analytics_agent.action_tools import ACTION_TOOL_NAMES, ACTION_TOOLS, run_action_tool
 from app.services.teams import home_snapshot
-from app.services.access.commands import Refused
+from app.services.teams.command_outcome import Refused
 from app.services.teams.commands import run_command
 from app.services.teams.contracts import QuestionJob
 from app.services.teams.mirror import InMemoryMirrorWriter

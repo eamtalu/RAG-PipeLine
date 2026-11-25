@@ -15,9 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
 from app.persistence.models.notification import CustomerNotificationChannel
-from app.services.access import audit, records, users
-from app.services.ask import forms as ask_forms
-from app.services.access.commands import CommandOutcome, Refused, receipt
+from app.services import access
+from app.services.teams.command_outcome import CommandOutcome, Refused, receipt
 from app.services.groups import store
 from app.services.groups import mirror as groups_mirror
 from app.services.notifications import channel_secrets
@@ -43,26 +42,26 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
     if command is None or command.kind not in KINDS:
         raise ValueError("the job carries no group command")
     now = now or datetime.now(timezone.utc)
-    actor = users.Actor(job.sender_object_id, job.sender_name)
+    actor = access.Actor(job.sender_object_id, job.sender_name)
     factory = session_factory or async_session
     async with factory() as db:
         # Step 1: The actor's own record decides: managing needs configure_agents, which Admins and
         # Ops managers hold; joining and leaving need an active record only
-        record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
+        record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
         if record is None or not record.is_active:
             raise Refused("you have no active access record")
         if command.kind in MANAGING:
-            decision = records.decide(record, "configure_agents")
+            decision = access.decide(record, "configure_agents")
             if not decision.is_allowed:
                 raise Refused(decision.reason or "managing groups and channels needs configure_agents")
-        # a confirmed form from Ask (step 18) arrives as {form_id, values, via}; its own fields come out
-        payload = ask_forms.unwrap(dict(command.payload))
+        # a confirmed Ask form (step 18) was unwrapped into its own fields by the router
+        payload = dict(command.payload)
         handler = _HANDLERS[command.kind]
         try:
             text, subject_kind, subject_id, detail = await handler(db, job, actor, payload, now)
         except ValueError as exc:
             raise Refused(str(exc))
-        await audit.record_event(
+        await access.record_audit_event(
             db, job.customer_code, actor_object_id=actor.object_id, actor_name=actor.name, action=f"{command.kind}",
             capability_code="configure_agents" if command.kind in MANAGING else None, decision="allowed",
             subject_kind=subject_kind, subject_id=subject_id, request_id=job.job_id,
@@ -78,7 +77,7 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
         return CommandOutcome(text, (receipt(text, reference=subject_id, now=now),))
 
 
-async def _group_set(db: AsyncSession, job: QuestionJob, actor: users.Actor, payload: dict, now: datetime):
+async def _group_set(db: AsyncSession, job: QuestionJob, actor: access.Actor, payload: dict, now: datetime):
     group = await store.set_group(
         db, job.customer_code, group_id=payload.get("group_id"), name=str(payload.get("name") or ""),
         topics=payload.get("topics"), min_severity=payload.get("min_severity"), channel_ids=payload.get("channel_ids"),
@@ -91,24 +90,24 @@ async def _group_set(db: AsyncSession, job: QuestionJob, actor: users.Actor, pay
                                            "max_per_hour": group.max_per_hour}
 
 
-async def _group_delete(db: AsyncSession, job: QuestionJob, actor: users.Actor, payload: dict, now: datetime):
+async def _group_delete(db: AsyncSession, job: QuestionJob, actor: access.Actor, payload: dict, now: datetime):
     group = await store.delete_group(db, job.customer_code, str(payload.get("group_id") or ""))
     return f"group {group.name} deleted", "group", str(group.id), None
 
 
-async def _group_join(db: AsyncSession, job: QuestionJob, actor: users.Actor, payload: dict, now: datetime):
+async def _group_join(db: AsyncSession, job: QuestionJob, actor: access.Actor, payload: dict, now: datetime):
     group = await store.set_membership(db, job.customer_code, str(payload.get("group_id") or ""), actor.object_id,
                                        join=True, actor_object_id=actor.object_id, now=now)
     return f"joined {group.name}", "group", str(group.id), None
 
 
-async def _group_leave(db: AsyncSession, job: QuestionJob, actor: users.Actor, payload: dict, now: datetime):
+async def _group_leave(db: AsyncSession, job: QuestionJob, actor: access.Actor, payload: dict, now: datetime):
     group = await store.set_membership(db, job.customer_code, str(payload.get("group_id") or ""), actor.object_id,
                                        join=False, actor_object_id=actor.object_id, now=now)
     return f"left {group.name}", "group", str(group.id), None
 
 
-async def _channel_set(db: AsyncSession, job: QuestionJob, actor: users.Actor, payload: dict, now: datetime):
+async def _channel_set(db: AsyncSession, job: QuestionJob, actor: access.Actor, payload: dict, now: datetime):
     """Add a Teams channel by its webhook, or rename one / replace its webhook; the webhook goes
     into the secret store, never into the row."""
     name = str(payload.get("name") or "").strip()[:128]
@@ -143,7 +142,7 @@ async def _channel_set(db: AsyncSession, job: QuestionJob, actor: users.Actor, p
     return f"channel {name} saved", "channel", str(channel_id), {"channel_type": channel_type}
 
 
-async def _channel_delete(db: AsyncSession, job: QuestionJob, actor: users.Actor, payload: dict, now: datetime):
+async def _channel_delete(db: AsyncSession, job: QuestionJob, actor: access.Actor, payload: dict, now: datetime):
     try:
         key = uuid.UUID(str(payload.get("channel_id") or ""))
     except ValueError:
@@ -157,7 +156,7 @@ async def _channel_delete(db: AsyncSession, job: QuestionJob, actor: users.Actor
     return f"channel {row.name} deleted", "channel", str(key), None
 
 
-async def _channel_test(db: AsyncSession, job: QuestionJob, actor: users.Actor, payload: dict, now: datetime):
+async def _channel_test(db: AsyncSession, job: QuestionJob, actor: access.Actor, payload: dict, now: datetime):
     """Send one test card straight to the channel, as the ops API's test does."""
     try:
         key = uuid.UUID(str(payload.get("channel_id") or ""))

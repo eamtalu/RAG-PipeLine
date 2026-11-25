@@ -275,6 +275,8 @@ One global dashboard and alerts on dead letters, open breakers and cost anomalie
 
 The agent stays a package in the backend repo, `app/agent/`, with the layout test guarding its imports; it is extracted to its own repo only when a second deployable consumer exists, because an extra service and a shared contracts package cost a small team more than they return today.
 Contracts stay verbatim copies between the edge and the backend, the pattern that already works.
+Access control (tenancy, roles, people, approvals, audit and the edge's copy) is one package with one front door, `app/services/access/`.
+Its README is `app/services/access/README.md`, and `tests/test_access_boundary_chunk219.py` keeps features from reaching inside it.
 
 ```
 app/agent/

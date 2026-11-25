@@ -12,8 +12,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.access import AccessApproval, TeamsUserCapability
-from app.services.access import audit, users
-from app.services.access.matrix import ALLOWED
+from app.services.access import audit
+from app.services.access.authorization.matrix import ALLOWED
+from app.services.access.people import users
 
 logger = logging.getLogger(__name__)
 

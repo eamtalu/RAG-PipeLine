@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.watch import KINDS
-from app.services.access.records import AccessRecord
+from app.services.access import AccessRecord
 from app.services.teams.sites import ALL_SITES_ID, list_sites
 from app.services.watchlist import readers, registry
 

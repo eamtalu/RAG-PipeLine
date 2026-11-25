@@ -20,9 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import normalize_customer_code, require_admin
 from app.config.database import get_session
 from app.persistence.repositories.customer_repository import CustomerRepository, get_customer_repository
-from app.services.access import mirror as access_mirror
-from app.services.access import records, users
-from app.services.access.matrix import STATES
+from app.services import access
+from app.services.access import STATES
 from app.services.teams.mirror import MirrorWriter, build_mirror_writer_from_settings
 
 router = APIRouter(prefix="/teams/access", tags=["teams"])
@@ -46,8 +45,8 @@ class UserRequest(BaseModel):
     note: str | None = Field(default=None, max_length=300)
     actor: str | None = Field(default=None, max_length=128, description="Who is making the change, for the audit line.")
 
-    def as_change(self) -> users.UserChange:
-        return users.UserChange(
+    def as_change(self) -> access.UserChange:
+        return access.UserChange(
             display_name=self.display_name, email=self.email, role_code=self.role,
             all_sites=self.all_sites,
             site_ids=tuple(self.site_ids) if self.site_ids is not None else None,
@@ -71,7 +70,7 @@ async def _mirror(db: AsyncSession, mirror: MirrorWriter | None, customer_code: 
     if mirror is None:
         return False
     try:
-        await access_mirror.mirror_customer(db, mirror, customer_code)
+        await access.mirror_customer(db, mirror, customer_code)
         return True
     except Exception:
         logger.warning("access rows for %s not mirrored; the sweep will retry", customer_code,
@@ -85,9 +84,9 @@ async def list_users(customer_code: str, _admin: None = Depends(require_admin),
                      customers: CustomerRepository = Depends(get_customer_repository)):
     code = await _customer(customer_code, customers)
     out = []
-    for user in await users.list_users(db, code):
-        record = await records.record_for_user(db, user)
-        out.append({**users.user_payload(user, list(record.site_ids)), "capabilities": record.capabilities})
+    for user in await access.list_users(db, code):
+        record = await access.record_for_user(db, user)
+        out.append({**access.user_payload(user, list(record.site_ids)), "capabilities": record.capabilities})
     return {"customer_code": code, "users": out}
 
 
@@ -101,17 +100,17 @@ async def put_user(customer_code: str, object_id: str, body: UserRequest,
     (new object id, role admin, all_sites) -> 200 the record, mirrored ; (unknown role) -> 400
     """
     code = await _customer(customer_code, customers)
-    actor = users.Actor.system(body.actor or "superadmin")
+    actor = access.Actor.system(body.actor or "superadmin")
     try:
-        if await users.get_user(db, code, object_id) is None:
-            user = await users.create_user(db, code, object_id, change=body.as_change(), actor=actor)
+        if await access.get_user(db, code, object_id) is None:
+            user = await access.create_user(db, code, object_id, change=body.as_change(), actor=actor)
         else:
-            user = await users.update_user(db, code, object_id, change=body.as_change(), actor=actor)
+            user = await access.update_user(db, code, object_id, change=body.as_change(), actor=actor)
         await db.commit()
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(400, detail=str(exc))
-    record = await records.record_for_user(db, user)
+    record = await access.record_for_user(db, user)
     mirrored = await _mirror(db, mirror, code)
     await db.commit()
     return {**record.as_payload(), "mirrored": mirrored}
@@ -132,15 +131,15 @@ async def post_invite(customer_code: str, body: InviteRequest,
     (email outside the customer's domains, or taken) -> 400
     """
     code = await _customer(customer_code, customers)
-    actor = users.Actor.system(body.actor or "superadmin")
+    actor = access.Actor.system(body.actor or "superadmin")
     try:
-        user = await users.invite_user(db, code, body.email, change=body.as_change(), actor=actor)
+        user = await access.invite_user(db, code, body.email, change=body.as_change(), actor=actor)
         await db.commit()
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(400, detail=str(exc))
-    record = await records.record_for_user(db, user)
-    payload = users.user_payload(user, list(record.site_ids))
+    record = await access.record_for_user(db, user)
+    payload = access.user_payload(user, list(record.site_ids))
     mirrored = await _mirror(db, mirror, code)
     await db.commit()
     return {**payload, "mirrored": mirrored}
@@ -151,7 +150,7 @@ async def get_matrix(customer_code: str, _admin: None = Depends(require_admin),
                      db: AsyncSession = Depends(get_session),
                      customers: CustomerRepository = Depends(get_customer_repository)):
     code = await _customer(customer_code, customers)
-    payload = await access_mirror.roles_payload(db, code)
+    payload = await access.roles_payload(db, code)
     await db.commit()  # the seed, when this is the first read
     return payload
 
@@ -165,8 +164,8 @@ async def put_matrix_cell(customer_code: str, role: str, capability: str, body: 
     """Change one cell of the customer's matrix; audited and mirrored."""
     code = await _customer(customer_code, customers)
     try:
-        await records.set_matrix_cell(db, code, role, capability, body.state,
-                                      actor=users.Actor.system(body.actor or "superadmin"))
+        await access.set_matrix_cell(db, code, role, capability, body.state,
+                                      actor=access.Actor.system(body.actor or "superadmin"))
         await db.commit()
     except ValueError as exc:
         await db.rollback()

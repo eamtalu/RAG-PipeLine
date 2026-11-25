@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from app.services.access import records
+from app.services import access
 from app.services.ask import actions, catalogue
 
 #: Commands that are shortcuts for a question rather than an action.
@@ -47,7 +47,7 @@ def parse(message: str) -> tuple[str, str] | None:
     return command, m.group(2).strip()
 
 
-def commands_for(record: records.AccessRecord | None) -> list[str]:
+def commands_for(record: access.AccessRecord | None) -> list[str]:
     """The slash commands a record may use, in the registry's order plus the shortcuts.
 
     (a picker) -> ['/remind-me', '/schedule', '/graph', …] ; (an admin) -> every command
@@ -56,7 +56,7 @@ def commands_for(record: records.AccessRecord | None) -> list[str]:
     return out + list(SHORTCUTS) + list(REPORT_COMMANDS)
 
 
-def resolve(message: str, record: records.AccessRecord | None) -> Slash | None:
+def resolve(message: str, record: access.AccessRecord | None) -> Slash | None:
     """What a message that starts with a slash means; None when it is not a command.
 
     >>> resolve("/graph fill rate this week", None).text

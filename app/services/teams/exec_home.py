@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.repositories.customer_repository import get_customer_timezone
-from app.services.access import approvals
+from app.services import access
 from app.services.analytics.settle_reads import ReadProblem, UnknownSettlement
 from app.services.analytics_agent.tools import aggregate_releases
 from app.services.analytics_at_risk import delivery_store
@@ -202,7 +202,7 @@ async def compute(db: AsyncSession, customer_code: str, *, now: datetime | None 
     decisions = [
         {"reference": a.reference, "kind": a.kind, "title": a.title, "detail": a.detail,
          "requested_by_name": a.requested_by_name, "created_at": a.created_at.isoformat()}
-        for a in await approvals.pending(db, customer_code)
+        for a in await access.pending_approvals(db, customer_code)
     ]
     return {
         "customer_code": customer_code,

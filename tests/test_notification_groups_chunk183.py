@@ -21,7 +21,8 @@ from app.persistence.models.customer import Customer
 from app.persistence.models.notification import CustomerNotificationChannel
 from app.persistence.models.notification_group import NotificationGroup
 from app.persistence.models.tenant_site import TenantSite
-from app.services.access import commands as access_commands, users
+from app.services.access import admin_commands as access_commands
+from app.services.access.people import users
 from app.services.groups import commands, routing, store
 from app.services.groups import mirror as groups_mirror
 from app.services.teams.commands import run_command

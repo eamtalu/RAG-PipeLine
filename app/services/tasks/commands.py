@@ -16,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
 from app.persistence.repositories.customer_repository import get_customer_timezone
-from app.services.access import audit, records, users
-from app.services.access.commands import CommandOutcome, Refused, receipt
+from app.services import access
+from app.services.teams.command_outcome import CommandOutcome, Refused, receipt
 from app.services.tasks import forms, runner, store
 from app.services.tasks import mirror as tasks_mirror
 from app.services.teams.contracts import QuestionJob
@@ -41,12 +41,12 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
     if command is None or command.kind not in ("task_create", "task_update"):
         raise ValueError("the job carries no task command")
     now = now or datetime.now(timezone.utc)
-    actor = users.Actor(job.sender_object_id, job.sender_name)
+    actor = access.Actor(job.sender_object_id, job.sender_name)
     factory = session_factory or async_session
     async with factory() as db:
         # Step 1: The actor's own record decides, so a forged job cannot make tasks for someone
         # else or run questions a role may not ask
-        record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
+        record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
         if record is None or not record.is_active:
             raise Refused("you have no active access record")
         tz = ZoneInfo(await get_customer_timezone(db, job.customer_code))
@@ -74,7 +74,7 @@ async def sendable_groups(db: AsyncSession, customer_code: str, object_id: str) 
     return [(str(v.group.id), v.group.name) for v in await groups_store.list_groups(db, customer_code, include_disabled=False)]
 
 
-async def _create(db: AsyncSession, job: QuestionJob, record: records.AccessRecord, actor: users.Actor,
+async def _create(db: AsyncSession, job: QuestionJob, record: access.AccessRecord, actor: access.Actor,
                   payload: dict, now: datetime, tz: ZoneInfo):
     # Step 1: A confirmed Ask form arrives as its field values under "form"; read it into the
     # same fields the Tasks tab sends, so one path makes every task
@@ -89,7 +89,7 @@ async def _create(db: AsyncSession, job: QuestionJob, record: records.AccessReco
     # Step 2: A schedule runs questions, so it needs the ask capability at its site; a reminder
     # with a question attached too
     if kind == "schedule" or payload.get("query_text"):
-        decision = records.decide(record, "ask", site_id)
+        decision = access.decide(record, "ask", site_id)
         if not decision.is_allowed:
             raise Refused(decision.reason or "you cannot schedule questions")
     until = payload.get("until")
@@ -106,14 +106,14 @@ async def _create(db: AsyncSession, job: QuestionJob, record: records.AccessReco
         raise Refused(str(exc))
     # step 15: one word for both kinds, the clock says which it is
     text = f"added to your routines · {store.task_payload(task, tz)['when_text']} · {task.title}"
-    await audit.record_event(
+    await access.record_audit_event(
         db, job.customer_code, actor_object_id=actor.object_id, actor_name=actor.name, action=f"task.created.{kind}",
         decision="allowed", subject_kind="task", subject_id=str(task.id), site_id=site_id, request_id=job.job_id,
         text=f"{actor.name or actor.object_id} set {text}", detail={"when": task.when, "via": task.created_via}, at=now)
     return text, task, {"task_id": str(task.id), "action": "delete"}
 
 
-async def _update(db: AsyncSession, job: QuestionJob, record: records.AccessRecord, actor: users.Actor,
+async def _update(db: AsyncSession, job: QuestionJob, record: access.AccessRecord, actor: access.Actor,
                   payload: dict, now: datetime, tz: ZoneInfo, *, run_query: runner.RunQuery | None = None):
     task = await store.get(db, job.customer_code, str(payload.get("task_id") or ""))
     if task is None:
@@ -144,14 +144,14 @@ async def _update(db: AsyncSession, job: QuestionJob, record: records.AccessReco
         text = store.apply(task, action, fields, now=now, tz=tz)
     except ValueError as exc:
         raise Refused(str(exc))
-    await audit.record_event(
+    await access.record_audit_event(
         db, job.customer_code, actor_object_id=actor.object_id, actor_name=actor.name, action=f"task.{action}",
         decision="allowed", subject_kind="task", subject_id=str(task.id), site_id=task.site_id, request_id=job.job_id,
         text=f"{actor.name or actor.object_id}: {text}", at=now)
     return text, task, None
 
 
-async def _routine_action(db: AsyncSession, job: QuestionJob, record: records.AccessRecord, actor: users.Actor,
+async def _routine_action(db: AsyncSession, job: QuestionJob, record: access.AccessRecord, actor: access.Actor,
                           task, action: str, payload: dict, now: datetime, tz: ZoneInfo, *,
                           run_query: runner.RunQuery | None):
     """The step 15 actions on one routine: run it by hand, tick it done or skipped with a note,
@@ -166,7 +166,7 @@ async def _routine_action(db: AsyncSession, job: QuestionJob, record: records.Ac
         if task.status not in ("active", "paused"):
             raise Refused("that routine has ended; plan it again first")
         if task.query_text:
-            decision = records.decide(record, "ask", task.site_id)
+            decision = access.decide(record, "ask", task.site_id)
             if not decision.is_allowed:
                 raise Refused(decision.reason or "you cannot run questions")
             if run_query is None:
@@ -213,7 +213,7 @@ async def _routine_action(db: AsyncSession, job: QuestionJob, record: records.Ac
         text = f"copied · {store.task_payload(task, tz)['when_text']} · {task.title}"
         undo = {"task_id": str(task.id), "action": "delete"}
         detail = {"from_task_id": task.source.get("task_id"), "fields": sorted(fields)}
-    await audit.record_event(
+    await access.record_audit_event(
         db, job.customer_code, actor_object_id=actor.object_id, actor_name=actor.name, action=f"task.{action}",
         decision="allowed", subject_kind="task", subject_id=str(task.id), site_id=task.site_id, request_id=job.job_id,
         text=f"{actor.name or actor.object_id}: {text}", detail=detail, at=now)

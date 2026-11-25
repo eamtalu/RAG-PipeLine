@@ -16,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.database import async_session
 from app.persistence.models.watch import Watch
 from app.persistence.repositories.customer_repository import get_customer_timezone
-from app.services.access import audit, records, users
-from app.services.access.commands import CommandOutcome, Refused, receipt
+from app.services import access
+from app.services.teams.command_outcome import CommandOutcome, Refused, receipt
 from app.services.teams.contracts import QuestionJob
 from app.services.teams.mirror import MirrorWriter, build_mirror_writer_from_settings
 from app.services.watchlist import forms, registry, search, store
@@ -53,10 +53,10 @@ async def _run_on(db: AsyncSession, job: QuestionJob, *, mirror: MirrorWriter | 
     command = job.command
     assert command is not None
     now = now or datetime.now(timezone.utc)
-    actor = users.Actor(job.sender_object_id, job.sender_name)
+    actor = access.Actor(job.sender_object_id, job.sender_name)
     # Step 1: The actor's own record decides, so a forged job cannot watch for someone else or
     # watch a site the role may not see
-    record = await records.access_record_for(db, job.customer_code, job.sender_object_id)
+    record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
     if record is None or not record.is_active:
         raise Refused("you have no active access record")
     tz = ZoneInfo(await get_customer_timezone(db, job.customer_code))
@@ -66,7 +66,7 @@ async def _run_on(db: AsyncSession, job: QuestionJob, *, mirror: MirrorWriter | 
         text, blocks, subject_id, detail = await handler(db, job, record, actor, payload, now, tz)
     except (search.NotFound, search.NoAccess, ValueError) as exc:
         raise Refused(str(exc))
-    await audit.record_event(
+    await access.record_audit_event(
         db, job.customer_code, actor_object_id=actor.object_id, actor_name=actor.name, action=f"{command.kind}",
         decision="allowed", subject_kind="watch", subject_id=subject_id, site_id=job.site_id, request_id=job.job_id,
         text=f"{actor.name or actor.object_id}: {text}", detail=detail, at=now)
@@ -118,7 +118,7 @@ def full_choice(watches: list[Watch], limit: int, wanted: dict, label: str) -> d
             "options": options, "allow_typed": False}
 
 
-async def _add(db: AsyncSession, job: QuestionJob, record: records.AccessRecord, actor: users.Actor, payload: dict,
+async def _add(db: AsyncSession, job: QuestionJob, record: access.AccessRecord, actor: access.Actor, payload: dict,
                now: datetime, tz: ZoneInfo):
     # Step 0: A confirmed Ask form (step 14c) names the thing in words; find it again within the
     # person's sites and read the rule, so one path adds every watch
@@ -167,7 +167,7 @@ async def _add(db: AsyncSession, job: QuestionJob, record: records.AccessRecord,
         {"kind": watch.kind, "entity_id": watch.entity_id, "alert": alert, "via": via, "swapped": str(swapped.id) if swapped else None}
 
 
-async def _own(db: AsyncSession, job: QuestionJob, actor: users.Actor, payload: dict) -> Watch:
+async def _own(db: AsyncSession, job: QuestionJob, actor: access.Actor, payload: dict) -> Watch:
     watch = await store.get(db, job.customer_code, payload.get("watch_id"))
     if watch is None:
         raise ValueError("that watch no longer exists")
@@ -176,7 +176,7 @@ async def _own(db: AsyncSession, job: QuestionJob, actor: users.Actor, payload: 
     return watch
 
 
-async def _update(db: AsyncSession, job: QuestionJob, record: records.AccessRecord, actor: users.Actor, payload: dict,
+async def _update(db: AsyncSession, job: QuestionJob, record: access.AccessRecord, actor: access.Actor, payload: dict,
                   now: datetime, tz: ZoneInfo):
     watch = await _own(db, job, actor, payload)
     action = str(payload.get("action") or "set_alert")
@@ -202,7 +202,7 @@ async def _update(db: AsyncSession, job: QuestionJob, record: records.AccessReco
     return text, [receipt(text, reference=str(watch.id), now=now, undo=undo)], str(watch.id), {"action": action, "alert": alert}
 
 
-async def _stop(db: AsyncSession, job: QuestionJob, record: records.AccessRecord, actor: users.Actor, payload: dict,
+async def _stop(db: AsyncSession, job: QuestionJob, record: access.AccessRecord, actor: access.Actor, payload: dict,
                 now: datetime, tz: ZoneInfo):
     watch = await _own(db, job, actor, payload)
     if watch.status != "active":
@@ -220,13 +220,13 @@ async def _stop(db: AsyncSession, job: QuestionJob, record: records.AccessRecord
     return text, [receipt(text, reference=str(watch.id), now=now, undo=undo)], str(watch.id), {"via": payload.get("via")}
 
 
-async def _seen(db: AsyncSession, job: QuestionJob, record: records.AccessRecord, actor: users.Actor, payload: dict,
+async def _seen(db: AsyncSession, job: QuestionJob, record: access.AccessRecord, actor: access.Actor, payload: dict,
                 now: datetime, tz: ZoneInfo):
     n = await store.mark_seen(db, job.customer_code, actor.object_id, payload.get("event_ids"), now=now)
     return f"marked seen · {n} change{'s' if n != 1 else ''}", [], None, {"count": n}
 
 
-async def _not_now(db: AsyncSession, job: QuestionJob, record: records.AccessRecord, actor: users.Actor, payload: dict,
+async def _not_now(db: AsyncSession, job: QuestionJob, record: access.AccessRecord, actor: access.Actor, payload: dict,
                    now: datetime, tz: ZoneInfo):
     kind = str(payload.get("kind") or "").strip().lower()
     entity_id = str(payload.get("entity_id") or "").strip()
