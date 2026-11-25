@@ -62,6 +62,9 @@ class AgentRequest:
     scope: Mapping[str, Any] | None = None
     tz_name: str | None = None
     today: date | None = None
+    #: The data the asker may read (step 45), built by the channel from the person's access record.
+    #: Opaque here: the tool runners hand it to app.services.scoped_data, never the model.
+    data_scope: Any | None = None
 
     def __post_init__(self) -> None:
         # An adapter bug must fail here, before any model is paid for, not as an empty question.

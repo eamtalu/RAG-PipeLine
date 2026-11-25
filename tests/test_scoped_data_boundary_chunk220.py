@@ -71,8 +71,22 @@ def test_outside_code_uses_only_the_front_door():
     assert offenders == []
 
 
-def test_every_classified_table_has_the_columns_it_names():
-    for entry in registry.SITE_LIMITED:
-        columns = entry.model.__table__.columns
-        assert "customer_code" in columns, entry.model.__tablename__
-        assert entry.site_column in columns, entry.model.__tablename__
+def test_every_classified_table_has_the_columns_its_rule_reads():
+    for rule in registry.RULES:
+        columns, table = rule.model.__table__.columns, rule.model.__tablename__
+        if isinstance(rule, registry.Shared):
+            continue
+        if isinstance(rule, registry.OwnedBy):
+            assert rule.owner_key in columns, table
+            assert "customer_code" in rule.owner.__table__.columns, table
+            continue
+        assert "customer_code" in columns, table
+        if isinstance(rule, registry.SiteLimited):
+            assert rule.site_column in columns, table
+        if isinstance(rule, registry.SubjectLimited):
+            assert {"subject_kind", "subject"} <= set(columns.keys()), table
+
+
+def test_a_table_is_classified_once():
+    names = [rule.model.__tablename__ for rule in registry.RULES]
+    assert sorted(names) == sorted(set(names))

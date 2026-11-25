@@ -70,3 +70,19 @@ class DataScope:
         ('all sites', 'no sites')
         """
         return "all sites" if self.all_sites else ", ".join(self.site_ids) or "no sites"
+
+    @property
+    def note(self) -> str:
+        """What the model is told about a limited scope, so it names the limit instead of "no data".
+
+        >>> DataScope("c", site_ids=("BRI",)).note
+        '(This person may see data for: BRI. Data of any other site is outside their access; if \
+they ask about another site, say that it is outside their sites.)'
+        >>> DataScope("c", all_sites=True).note
+        ''
+        """
+        if self.all_sites:
+            return ""
+        return (f"(This person may see data for: {self.sites_text}. Data of any other site is "
+                "outside their access; if they ask about another site, say that it is outside "
+                "their sites.)")

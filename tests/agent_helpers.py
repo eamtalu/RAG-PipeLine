@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import date
 
 from app import log_context
+from app.services.scoped_data import DataScope
 from app.agent.contracts import AgentRequest, ExecutionContext, Principal
 from app.agent.gateway import build_context, run_request, snapshot_settings
 from app.agent.profiles import load_profile
@@ -84,6 +85,8 @@ def request_for(
         profile=profile,
         text=question,
         conversation_id=None,
+        # the test user may see every site unless a test hands over a narrower scope (chunk 220)
+        data_scope=DataScope.for_system(cc),
     )
     if profile == "logspace":
         base.update(tz_name=TZ, today=TODAY)

@@ -40,7 +40,7 @@ from app.services.teams.home_snapshot import build_writer_from_settings
 from app.services.teams.home_snapshot import sweep_once as snapshot_sweep_once
 from app.services.teams.mirror import ChangeTracker, build_mirror_writer_from_settings
 from app.services.teams.freshness import freshness_for
-from app.services import access
+from app.services import access, scoped_data
 from app.services.ask import mirror as ask_mirror
 from app.services.advisories import runner as advisories_runner
 from app.services.watchlist import ask_hooks
@@ -105,6 +105,16 @@ def framed_question(job: QuestionJob) -> str:
     return job.question
 
 
+async def _data_scope(job: QuestionJob) -> scoped_data.DataScope:
+    """The data the asker may read, from their record as it is now; nothing without a record.
+
+    (u-7, supervisor of BRI) -> DataScope(sites=("BRI",)) ; (no user row) -> a scope with no sites
+    """
+    async with async_session() as db:
+        record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
+    return scoped_data.DataScope.from_record(record, customer_code=job.customer_code)
+
+
 async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> dict:
     """One Teams question answered under a context built from the job; the legacy result dict.
 
@@ -118,12 +128,17 @@ async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> di
         return direct
     # Step 1: Build the request from the job, so that who asked and where is fixed before any
     # model runs; the gateway builds the context and the runtime never reads settings.
+    # The asker's sites become the limit every data tool reads within (step 45), and the model is
+    # told of a limit so that it names it instead of answering "no data" for another site.
+    data_scope = await _data_scope(job)
     request = AgentRequest(
         request_id=job.job_id, tenant=job.customer_code,
         principal=Principal(tenant=job.customer_code, object_id=job.sender_object_id,
                             display_name=job.sender_name),
-        profile="analytics", text=text, conversation_id=job.conversation_id,
-        conversation_type=_conversation_type(job.source), site_id=job.site_id)
+        profile="analytics", text="\n\n".join(part for part in (text, data_scope.note) if part),
+        conversation_id=job.conversation_id,
+        conversation_type=_conversation_type(job.source), site_id=job.site_id,
+        data_scope=data_scope)
     # Step 2: Name the profile; it lists its namespaces, and the registry binds their tools.
     runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),
                             registry=_REGISTRY, router=_ROUTER)

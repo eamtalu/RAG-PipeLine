@@ -8,6 +8,6 @@ and the persistence layer.
 
 from app.services.scoped_data.registry import UnclassifiedTable
 from app.services.scoped_data.scope import DataScope
-from app.services.scoped_data.session import limit_session
+from app.services.scoped_data.session import limit_session, open_session, scope_of
 
-__all__ = ["DataScope", "UnclassifiedTable", "limit_session"]
+__all__ = ["DataScope", "UnclassifiedTable", "limit_session", "open_session", "scope_of"]

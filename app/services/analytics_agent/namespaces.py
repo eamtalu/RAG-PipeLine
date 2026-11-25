@@ -18,6 +18,7 @@ from app.services.analytics_agent import (
     story_tools,
     action_tools, advisory_tools, at_risk_tools, forecast_tools, presentation_tools, usage_tools,
 )
+from app.services import scoped_data
 from app.services.analytics_agent.tools import RECIPES, RELEASE_TOOLS, run_release_tool
 from app.services.log_agent import tools as log_tools
 
@@ -32,6 +33,15 @@ ANALYTICS_TOOL_TEXT = json.dumps(
 _AT_RISK_NAMES = frozenset(spec["name"] for spec in at_risk_tools.AT_RISK_TOOLS)
 
 
+def _scope(context: ExecutionContext, request: AgentRequest) -> scoped_data.DataScope:
+    """The data this run may read: the asker's own scope, or every site for a system caller.
+
+    (a Teams question from a BRI supervisor) -> BRI scope ; (the web's service caller) -> all sites
+    """
+    return scoped_data.scope_of(request.data_scope, customer_code=context.tenant,
+                                is_service=request.principal.kind == "service")
+
+
 def logs_namespace(session_factory: SessionFactory = async_session) -> Namespace:
     """The eight read-only log tools (transactions, entries, metrics), with no extra text.
 
@@ -41,7 +51,7 @@ def logs_namespace(session_factory: SessionFactory = async_session) -> Namespace
     async def run(
         context: ExecutionContext, request: AgentRequest, name: str, args: Mapping[str, Any]
     ) -> str:
-        async with session_factory() as db:
+        async with scoped_data.open_session(session_factory, _scope(context, request)) as db:
             return await log_tools.execute_tool(name, dict(args), db, context.tenant)
 
     return Namespace(
@@ -60,7 +70,7 @@ def analytics_namespace(session_factory: SessionFactory = async_session) -> Name
     async def run(
         context: ExecutionContext, request: AgentRequest, name: str, args: Mapping[str, Any]
     ) -> str:
-        async with session_factory() as db:
+        async with scoped_data.open_session(session_factory, _scope(context, request)) as db:
             if name in _AT_RISK_NAMES:
                 return await at_risk_tools.run_at_risk_tool(name, dict(args), db, context.tenant)
             if name in advisory_tools.ADVISORY_TOOL_NAMES:

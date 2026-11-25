@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Callable
+
 from sqlalchemy import Table, event
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import ORMExecuteState, with_loader_criteria
@@ -28,7 +31,7 @@ def limit_session(db: AsyncSession, scope: DataScope) -> AsyncSession:
         # that a query built deep in a shared service is limited without that service knowing
         state.statement = state.statement.options(*(
             with_loader_criteria(entry.model, entry.condition(scope), include_aliases=True)
-            for entry in registry.SITE_LIMITED))
+            for entry in registry.RULES))
 
     event.listen(db.sync_session, "do_orm_execute", add_scope)
     return db
@@ -40,3 +43,25 @@ def _table_names(statement) -> set[str]:
     (select(LogTransaction.id).join(Advisory, ...)) -> {"log_transactions", "advisories"}
     """
     return {node.name for node in visitors.iterate(statement) if isinstance(node, Table)}
+
+
+def scope_of(data_scope: DataScope | None, *, customer_code: str, is_service: bool) -> DataScope:
+    """The scope a run reads within: the person's own, every site for a system caller, else nothing.
+
+    (BRI scope, ...) -> the BRI scope ; (None, is_service=True) -> every site of the customer ;
+    (None, is_service=False) -> no sites, because a person without a record may read nothing
+    """
+    if data_scope is not None:
+        return data_scope
+    return DataScope.for_system(customer_code) if is_service else DataScope(customer_code)
+
+
+@asynccontextmanager
+async def open_session(session_factory: Callable[[], AsyncSession],
+                       scope: DataScope) -> AsyncIterator[AsyncSession]:
+    """One short session that reads inside the scope, closed on the way out.
+
+    (async_session, BRI scope) -> a session whose selects return BRI rows of that customer only
+    """
+    async with session_factory() as db:
+        yield limit_session(db, scope)
