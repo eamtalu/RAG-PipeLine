@@ -11,6 +11,14 @@ DEFAULT_CATEGORIES = ("operations",)
 
 
 @dataclass(frozen=True, slots=True)
+class Place:
+    """One company and warehouse pair, as the data rows carry them; no company means any."""
+
+    company: str | None
+    warehouse: str
+
+
+@dataclass(frozen=True, slots=True)
 class DataScope:
     """The limit a run reads within, fixed before the run starts."""
 
@@ -18,6 +26,19 @@ class DataScope:
     all_sites: bool = False
     site_ids: tuple[str, ...] = ()
     categories: tuple[str, ...] = DEFAULT_CATEGORIES
+    #: The pairs the sites stand for (chunk 223); empty means each site is its own warehouse.
+    places: tuple[Place, ...] = ()
+
+    @property
+    def site_places(self) -> tuple[Place, ...]:
+        """The company and warehouse pairs this scope reads; a site with none is its own warehouse.
+
+        >>> DataScope("c", site_ids=("BRI", "LON")).site_places
+        (Place(company=None, warehouse='BRI'), Place(company=None, warehouse='LON'))
+        >>> DataScope("c", site_ids=("B",), places=(Place("911", "BRI"),)).site_places
+        (Place(company='911', warehouse='BRI'),)
+        """
+        return self.places or tuple(Place(None, site) for site in self.site_ids)
 
     @classmethod
     def from_record(cls, record: access.AccessRecord | None, *,

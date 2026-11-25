@@ -16,7 +16,8 @@ from app.services.scoped_data import registry
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "app/services/scoped_data/"
 FACADE = "app.services.scoped_data"
-ALLOWED = ("app.services.scoped_data", "app.services.access", "app.persistence.models")
+ALLOWED = ("app.services.scoped_data", "app.services.access", "app.persistence.models",
+           "app.persistence.repositories")
 
 
 def _imports(path: Path) -> set[str]:

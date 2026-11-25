@@ -1415,6 +1415,16 @@ erDiagram
         datetime updated_at
     }
 
+    tenant_site_places {
+        uuid id PK
+        string customer_code FK "with site_id -> tenant_sites (CASCADE); unique with site_id, company, warehouse"
+        string site_id FK
+        string company "nullable; the WMS company number on the rows, null = any company"
+        string warehouse "the warehouse value on the rows, as stored"
+        string created_by "nullable"
+        datetime created_at
+    }
+
     access_roles {
         string code PK "picker | shift_lead | supervisor | ops_manager | executive | admin"
         string name
@@ -1829,6 +1839,7 @@ erDiagram
     access_roles ||--o{ teams_users : "role of"
     teams_users ||--o{ teams_user_sites : "may see"
     tenant_sites ||--o{ teams_user_sites : "seen by"
+    tenant_sites ||--o{ tenant_site_places : "stands for"
     teams_users ||--o{ teams_user_capabilities : "overrides for"
     access_capabilities ||--o{ teams_user_capabilities : "overridden"
     teams_conversations ||..o{ teams_conversation_turns : "thread of (by conversation_id)"
@@ -1888,6 +1899,7 @@ erDiagram
 | `customers.customer_code` | `logspace_presence.customer_code` | CASCADE |
 | `customers.customer_code` | `teams_tenant_bindings.customer_code` | CASCADE |
 | `customers.customer_code` | `tenant_sites.customer_code` | CASCADE |
+| `tenant_sites (customer_code, site_id)` | `tenant_site_places (customer_code, site_id)` | CASCADE |
 | `customers.customer_code` | `access_role_capabilities.customer_code` | CASCADE |
 | `customers.customer_code` | `teams_users.customer_code` | CASCADE |
 | `customers.customer_code` | `access_approvals.customer_code` | CASCADE |
