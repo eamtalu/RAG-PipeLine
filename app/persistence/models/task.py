@@ -101,3 +101,5 @@ class TeamsTaskRun(Base):
     by_object_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The agent run that answered this run's question (chunk 221); null for a run with no question.
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

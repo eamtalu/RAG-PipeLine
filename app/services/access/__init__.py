@@ -10,6 +10,7 @@ names below, never a submodule (tests/test_access_boundary_chunk219.py). Inside,
 - edge_mirror     the rows the edge checks on every request
 - admin_commands  the Admin tab's access_* commands
 - usage           who has access and who was active, for the usage tool
+- tables          whose each access table's rows are, for a data limit (step 45)
 """
 
 from app.services.access.admin_commands import run as run_admin_command
@@ -28,6 +29,7 @@ from app.services.access.authorization.records import (
 )
 from app.services.access.edge_mirror import mirror_customer, roles_payload
 from app.services.access.edge_mirror import sweep_once as sweep_edge_rows
+from app.services.access.tables import ACCESS_TABLES, AccessTable
 from app.services.access.people.approvals import expire_once as expire_approvals
 from app.services.access.people.approvals import pending as pending_approvals
 from app.services.access.people.approvals import request as request_approval
@@ -51,6 +53,7 @@ from app.services.access.usage import PeopleActivity, audit_action_counts, audit
 __all__ = [
     # authorization: what a person may do
     "ALLOWED", "WITH_APPROVAL", "NO", "STATES", "ALL_SITES", "AccessRecord", "Decision", "decide",
+    "ACCESS_TABLES", "AccessTable",
     "access_record_for", "record_for_user", "load_matrix", "set_matrix_cell",
     # people: who has access and how they get it
     "Actor", "UserChange", "create_user", "update_user", "invite_user", "get_user", "list_users",

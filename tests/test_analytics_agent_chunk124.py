@@ -216,7 +216,9 @@ async def test_the_consumer_runs_the_analytics_profile_through_the_gateway(monke
     job = QuestionJob(job_id="j", tenant_id="t", customer_code=CC, conversation_id="c",
                       question="q1", sender_object_id="u-1")
     out = await teams_consumer._run_agent(job, [])
-    assert calls == [("analytics", "q1")] and out["stop_reason"] == "end_turn"
+    # chunk 220: a person with a limited scope has it named to the model after their question
+    (profile, text), = calls
+    assert profile == "analytics" and text.startswith("q1") and out["stop_reason"] == "end_turn"
 
 
 # ==================================================== 4. the model is one setting

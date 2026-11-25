@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from app.agent.contracts import AgentRequest, AgentResult, ExecutionContext, TraceRecord
 from app.agent.profiles.version import code_version
@@ -21,6 +23,35 @@ from app.services.notifications.redact import redact_secrets, redact_value
 
 RESULT_CAP = 2000
 CAP_MARKER = "...[cut]"
+
+#: What a tool's runner wants kept beside its call (the tables it read), set per call by the
+#: executor and written by the runner; None outside a call, so a note is then dropped.
+_call_notes: ContextVar[dict | None] = ContextVar("agent_call_notes", default=None)
+
+
+@contextmanager
+def collecting_call_notes() -> Iterator[dict]:
+    """The notes one tool call leaves, collected while the block runs.
+
+    with collecting_call_notes() as notes: ... note_call(tables=["advisories"]) ->
+    notes == {"tables": ["advisories"]}
+    """
+    notes: dict = {}
+    token = _call_notes.set(notes)
+    try:
+        yield notes
+    finally:
+        _call_notes.reset(token)
+
+
+def note_call(**facts: Any) -> None:
+    """Keep these facts beside the tool call now running; outside a call nothing is kept.
+
+    note_call(tables=["advisories"], closed=[]) -> the call's trace entry gains them under "data"
+    """
+    notes = _call_notes.get()
+    if notes is not None:
+        notes.update(facts)
 
 
 @dataclass
@@ -30,6 +61,8 @@ class RunTrace:
     tool_calls: list[dict] = field(default_factory=list)
     guards: list[dict] = field(default_factory=list)
     model_calls_made: list[dict] = field(default_factory=list)  # one per call, by the guard
+    steps: list[dict] = field(default_factory=list)  # the model's own text between tool calls
+    events: list[dict] = field(default_factory=list)  # loop rescue, retry: what the log file had
     finished_at: datetime | None = None  # fixed by the first finish, so a repeat is equal
     #: Told of every event as it is recorded ("tool", "model_call", "guard" with a small dict),
     #: for a channel that shows progress (step 6); never affects the record, never raises out.
@@ -53,6 +86,7 @@ class RunTrace:
         ms: int,
         ok: bool,
         sensitive_args: bool = False,
+        notes: Mapping[str, Any] | None = None,
     ) -> None:
         self.tool_calls.append(
             {
@@ -63,6 +97,7 @@ class RunTrace:
                 "ms": int(ms),
                 "ok": bool(ok),
                 "sensitive_args": sensitive_args,
+                "notes": dict(notes) if notes else None,
             }
         )
         self._emit("tool", {"namespace": namespace, "name": name, "ok": bool(ok)})
@@ -74,6 +109,22 @@ class RunTrace:
             {"name": name, "stage": stage, "verdict": verdict, "detail": detail, "ms": int(ms)}
         )
         self._emit("guard", {"name": name, "stage": stage, "verdict": verdict})
+
+    def record_step(self, text: str) -> None:
+        """The model's own words before a tool call, in order, so its choice can be read later.
+
+        ("I will list the releases first.") -> steps gains {"round": 1, "text": "I will ..."}
+        """
+        if text and text.strip():
+            self.steps.append({"round": len(self.steps) + 1, "text": text.strip()})
+
+    def record_event(self, kind: str, detail: str | None = None) -> None:
+        """Something the loop did that is not a call: a rescued loop, a retry and its reason.
+
+        ("retry", "ungrounded") -> events gains {"kind": "retry", "detail": "ungrounded"}
+        """
+        self.events.append({"kind": kind, "detail": detail})
+        self._emit("event", {"kind": kind})
 
     def record_model_call(
         self,
@@ -93,6 +144,7 @@ class RunTrace:
         details = usage.get("input_token_details") or {}
         self.model_calls_made.append(
             {
+                "round": len(self.model_calls_made) + 1,
                 "provider": provider,
                 "model": model,
                 "ms": int(ms),
@@ -175,6 +227,9 @@ class RunTrace:
             usage=self.usage,
             error=None,
             finished_at=self.finished_at,
+            model_calls=self.model_calls_made,
+            steps=self.steps,
+            events=self.events,
         )
 
 
@@ -208,6 +263,9 @@ def error_record(
         usage=trace.usage,
         error=f"{type(error).__name__}: {str(error)[:500]}",
         finished_at=None,
+        model_calls=trace.model_calls_made,
+        steps=trace.steps,
+        events=trace.events,
     )
 
 
@@ -230,6 +288,9 @@ def _record(
     usage: dict[str, int] | None,
     error: str | None,
     finished_at: datetime | None,
+    model_calls: list[dict] | None = None,
+    steps: list[dict] | None = None,
+    events: list[dict] | None = None,
 ) -> TraceRecord:
     # Step 1: Fix the end of the run now, so that the duration covers everything up to the
     # record and two records of one run differ only by the clock.
@@ -264,7 +325,63 @@ def _record(
         withheld_figures=tuple(withheld_figures),
         usage=dict(usage) if usage is not None else None,
         error=error,
+        **_access_facts(request.access),
+        trigger=request.trigger,
+        model_calls=tuple(dict(c) for c in model_calls or ()),
+        steps=tuple({"round": s["round"], "text": _capped(s["text"])} for s in steps or ()),
+        events=tuple(dict(e) for e in events or ()),
     )
+
+
+def _access_facts(access: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The role, the scope and the check of the run's moment, as the record's own fields.
+
+    >>> _access_facts({"role": "supervisor", "all_sites": False, "site_ids": ["BRI"],
+    ...                "categories": ["operations"], "capability": "ask", "outcome": "allowed"})
+    ... # doctest: +NORMALIZE_WHITESPACE
+    {'role_code': 'supervisor', 'scope': {'all_sites': False, 'site_ids': ['BRI'],
+    'categories': ['operations']}, 'capability_code': 'ask', 'capability_outcome': 'allowed'}
+    >>> _access_facts(None)["scope"] is None
+    True
+    """
+    if not access:
+        return {"role_code": None, "scope": None, "capability_code": None,
+                "capability_outcome": None}
+    scope = {"all_sites": bool(access.get("all_sites")),
+             "site_ids": list(access.get("site_ids") or ()),
+             "categories": list(access.get("categories") or ())}
+    return {"role_code": access.get("role"), "scope": scope,
+            "capability_code": access.get("capability"),
+            "capability_outcome": access.get("outcome")}
+
+
+def _capped(text: str) -> str:
+    """A text as stored: secrets replaced, then cut at the cap with the marker.
+
+    >>> _capped("short"), len(_capped("x" * 5000)) == RESULT_CAP + len(CAP_MARKER)
+    ('short', True)
+    """
+    text = redact_secrets(text) or ""
+    return text[:RESULT_CAP] + CAP_MARKER if len(text) > RESULT_CAP else text
+
+
+def _result_rows(result: str) -> int | None:
+    """How many rows a tool result carried: its longest top-level list, or None when not JSON.
+
+    >>> _result_rows('{"rows": [1, 2, 3], "groups": [1]}'), _result_rows("not json")
+    (3, None)
+    >>> _result_rows('{"total": 4}')
+    0
+    """
+    try:
+        parsed = json.loads(result)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(parsed, list):
+        return len(parsed)
+    if not isinstance(parsed, dict):
+        return None
+    return max((len(v) for v in parsed.values() if isinstance(v, list)), default=0)
 
 
 def _stored_call(call: Mapping[str, Any]) -> dict[str, Any]:
@@ -279,14 +396,15 @@ def _stored_call(call: Mapping[str, Any]) -> dict[str, Any]:
         args: dict[str, Any] = {"sha256": hashlib.sha256(raw).hexdigest()}
     else:
         args = redact_value(dict(call["args"]))
-    result = redact_secrets(call["result"]) or ""
-    if len(result) > RESULT_CAP:
-        result = result[:RESULT_CAP] + CAP_MARKER
     return {
         "namespace": call["namespace"],
         "name": call["name"],
         "args": args,
-        "result": result,
+        "result": _capped(call["result"]),
         "ms": call["ms"],
         "ok": call["ok"],
+        # the size before the cut, so "too much data" shows; the tables read, when the runner said
+        "result_chars": len(call["result"] or ""),
+        "result_rows": _result_rows(call["result"]),
+        "data": call.get("notes"),
     }

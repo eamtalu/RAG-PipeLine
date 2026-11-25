@@ -40,7 +40,7 @@ from app.services.teams.home_snapshot import build_writer_from_settings
 from app.services.teams.home_snapshot import sweep_once as snapshot_sweep_once
 from app.services.teams.mirror import ChangeTracker, build_mirror_writer_from_settings
 from app.services.teams.freshness import freshness_for
-from app.services import access
+from app.services import access, scoped_data
 from app.services.ask import mirror as ask_mirror
 from app.services.advisories import runner as advisories_runner
 from app.services.watchlist import ask_hooks
@@ -105,25 +105,80 @@ def framed_question(job: QuestionJob) -> str:
     return job.question
 
 
+async def _asker(job: QuestionJob) -> tuple[access.AccessRecord | None, scoped_data.DataScope]:
+    """The asker's record as it is now and the data it lets them read; no record reads nothing.
+
+    (u-7, supervisor of BRI) -> (record, DataScope(sites=("BRI",))) ;
+    (no user row) -> (None, a scope with no sites)
+    """
+    async with async_session() as db:
+        record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
+    return record, scoped_data.DataScope.from_record(record, customer_code=job.customer_code)
+
+
+async def _data_scope(job: QuestionJob) -> scoped_data.DataScope:
+    """The data the asker may read: (u-7, supervisor of BRI) -> DataScope(sites=("BRI",))."""
+    return (await _asker(job))[1]
+
+
+def _access_facts(record: access.AccessRecord | None, scope: scoped_data.DataScope,
+                  job: QuestionJob) -> dict | None:
+    """What the trace keeps about who asked: the role, the scope and the check, as they are now.
+
+    (supervisor of BRI) -> {"role": "supervisor", "site_ids": ["BRI"], "capability": "ask", ...} ;
+    (no record) -> None
+    """
+    if record is None:
+        return None
+    return {"role": record.role_code, "all_sites": scope.all_sites,
+            "site_ids": list(scope.site_ids), "categories": list(scope.categories),
+            "capability": "ask", "outcome": access.decide(record, "ask", job.site_id).outcome}
+
+
+def _trigger(job: QuestionJob) -> str:
+    """What started the run, for the trace: a routine's job id says so, anything else is a question.
+
+    (job "task-7-1764072000") -> "routine" ; (job "j1") -> "ask"
+    """
+    return "routine" if job.job_id.startswith("task-") else "ask"
+
+
 async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> dict:
     """One Teams question answered under a context built from the job; the legacy result dict.
 
     (job for acme by u-7, earlier turns) -> {"answer", "stop_reason", "tool_calls", ...}
+    """
+    return (await _run_agent_traced(job, history, progress))[0]
+
+
+async def _run_agent_traced(job: QuestionJob, history: list[dict],
+                            progress=None) -> tuple[dict, str | None]:
+    """The answer as `_run_agent` gives it, with the trace id of the run that produced it.
+
+    (a question the model answered) -> ({"answer": ...}, "9f3c...") ;
+    (one answered before the model, as "what can I ask") -> ({"answer": ...}, None)
     """
     # Step 0: Two kinds of message never need the model (step 18): "what can I ask" is answered from
     # the catalogue for the asker's record, and a slash command is turned into the words the model
     # reads, or answered with the commands the asker may use
     text, direct = await _before_the_model(job)
     if direct is not None:
-        return direct
+        return direct, None
     # Step 1: Build the request from the job, so that who asked and where is fixed before any
     # model runs; the gateway builds the context and the runtime never reads settings.
+    # The asker's sites become the limit every data tool reads within (step 45), and the model is
+    # told of a limit so that it names it instead of answering "no data" for another site.
+    record, data_scope = await _asker(job)
     request = AgentRequest(
         request_id=job.job_id, tenant=job.customer_code,
         principal=Principal(tenant=job.customer_code, object_id=job.sender_object_id,
-                            display_name=job.sender_name),
-        profile="analytics", text=text, conversation_id=job.conversation_id,
-        conversation_type=_conversation_type(job.source), site_id=job.site_id)
+                            display_name=job.sender_name,
+                            roles=(record.role_code,) if record is not None else ()),
+        profile="analytics", text="\n\n".join(part for part in (text, data_scope.note) if part),
+        conversation_id=job.conversation_id,
+        conversation_type=_conversation_type(job.source), site_id=job.site_id,
+        data_scope=data_scope, access=_access_facts(record, data_scope, job),
+        trigger=_trigger(job))
     # Step 2: Name the profile; it lists its namespaces, and the registry binds their tools.
     runtime = GroundedAgent(job.customer_code, profile=load_profile("analytics"),
                             registry=_REGISTRY, router=_ROUTER)
@@ -132,7 +187,7 @@ async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> di
                                on_event=progress.on_event if progress is not None else None)
     # Step 3: Mark the answer's entities as watched or not and add the one suggestion the
     # watchlist's rules allow (step 14c); a failure here never costs the answer
-    return await ask_hooks.decorate_safely(result.to_legacy_dict(), job)
+    return await ask_hooks.decorate_safely(result.to_legacy_dict(), job), result.trace_id or None
 
 
 def _direct_answer(text: str, blocks: list[dict]) -> dict:
@@ -379,6 +434,10 @@ async def _access_loop(stop: asyncio.Event) -> None:
                 while await access.purge_audit_events(
                         db, now=history.utc_now(), retention_days=settings.teams_audit_retention_days):
                     pass
+            # run traces hold questions and answers, so they go after the same kind of retention
+            while await _TRACES.purge_once(
+                    now=history.utc_now(), retention_days=settings.agent_trace_retention_days):
+                pass
             written = await access.sweep_edge_rows(mirror, tracker=tracker)
             logger.debug("access rows written %s", written)
             # the Ask catalogue rides with the access sweep, for the same bound customers (step 18)
@@ -483,7 +542,9 @@ async def _run_task_query(task) -> dict:
     refusal = await _check_access(job)
     if refusal:
         return {"answer": refusal, "blocks": []}
-    return await _run_agent(job, [])
+    # the run's trace id rides with the answer, so the routine's run row can name it (chunk 221)
+    answer, trace_id = await _run_agent_traced(job, [])
+    return {**answer, "trace_id": trace_id}
 
 
 async def _tasks_loop(stop: asyncio.Event) -> None:

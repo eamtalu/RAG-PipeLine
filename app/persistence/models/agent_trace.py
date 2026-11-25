@@ -52,8 +52,26 @@ class AgentTrace(Base):
     answer: Mapped[str] = mapped_column(Text, nullable=False)
     # [{"name", "stage", "verdict", "detail", "ms"}] in run order
     guards: Mapped[list] = mapped_column(JSONB, nullable=False)
-    # [{"namespace", "name", "args", "result", "ms", "ok"}] in run order; args hashed when sensitive
+    # [{"namespace", "name", "args", "result", "ms", "ok", "result_chars", "result_rows", "data"}]
+    # in run order; args hashed when sensitive; "data" = the tables read and those closed
     tool_calls: Mapped[list] = mapped_column(JSONB, nullable=False)
     withheld_figures: Mapped[list] = mapped_column(JSONB, nullable=False)
     usage: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # model_calls, tokens
     error: Mapped[str | None] = mapped_column(Text, nullable=True)  # "Type: message" when raised
+
+    # --- who asked, as it was then (chunk 221); a role or a site list can change after the run ---
+    role_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # {"all_sites", "site_ids", "categories"}: the data the run was allowed to read
+    scope: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    capability_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    capability_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # ask | routine | watch | brief
+    trigger: Mapped[str] = mapped_column(String(16), nullable=False, default="ask",
+                                         server_default="ask")
+    # [{"round", "provider", "model", "ms", "ok", "input_tokens", ...}] in run order
+    model_calls: Mapped[list] = mapped_column(JSONB, nullable=False, default=list,
+                                              server_default="[]")
+    # [{"round", "text"}]: the model's own words before each tool call, redacted and capped
+    steps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    # [{"kind", "detail"}]: settled_loop, retry
+    events: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")

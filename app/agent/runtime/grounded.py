@@ -351,6 +351,7 @@ class GroundedAgent:
                                   pipeline=pipeline)
         if draft["problem"]:
             retries = 1
+            trace.record_event("retry", draft["problem"])
             nudge = (self.profile.ungrounded_nudge.format(figures=", ".join(draft["ungrounded"]))
                      if draft["problem"] == "ungrounded" else self.profile.retry_nudge)
             # the nudge follows the question after a blank line, as the old constants carried it
@@ -440,6 +441,7 @@ class GroundedAgent:
         # answer is kept (step 24; live on 16 November it repeated findings and follow-ups)
         if stop_reason == "max_iterations" and answer and is_settled_loop(seen[len(messages):]):
             logger.info("agent settled_loop kept the answer written before the repeats")
+            trace.record_event("settled_loop", "kept the answer written before the repeats")
             stop_reason = "end_turn"
         # A draft that ran out of tool rounds is not trusted, even when the model wrote a sentence:
         # on 13 November it ended an "Ask why" with words about a reminder form nobody asked for
@@ -447,6 +449,11 @@ class GroundedAgent:
             answer = ("I could not settle on an answer within the allowed number of tool calls. "
                       "Ask a narrower question, or name the field or window you want.")
         calls = tool_trace(seen)
+        # The model's own words before each tool call go on the trace (chunk 221), so that why it
+        # chose a tool can be read afterwards; the final answer is already the record's answer
+        for message in seen[len(messages):]:
+            if isinstance(message, AIMessage) and message.tool_calls:
+                trace.record_step(text_of(message))
         # A presentation call the model wrote out as text (step 19) is lifted off the answer into
         # the trace, so it is validated, guarded and drawn as if it had been called
         answer, written = lift_written_calls(answer)
