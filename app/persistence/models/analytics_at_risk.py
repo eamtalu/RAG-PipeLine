@@ -158,6 +158,9 @@ class AnalyticsAtRiskCheck(Base):
     delivery_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     delivery_number: Mapped[str] = mapped_column(String(64), nullable=False)
     departure_date: Mapped[date_type] = mapped_column(Date, nullable=False)
+    #: The delivery's place when it was checked (chunk 224), so a check can be limited by site.
+    company: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    warehouse: Mapped[str | None] = mapped_column(String(64), nullable=True)
     action: Mapped[str] = mapped_column(String(16), nullable=False)
     tier: Mapped[str] = mapped_column(String(16), nullable=False)
     #: Who: the web app's self-declared logspace name, or the Teams display name. Text, never authority.
@@ -172,13 +175,21 @@ class AnalyticsAtRiskRouteProfile(Base):
 
     __tablename__ = "analytics_at_risk_route_profiles"
     __table_args__ = (
-        UniqueConstraint("customer_code", "route", "as_of_date", name="uq_analytics_at_risk_route_profiles_key"),
+        # One norm per place and route per day (chunk 224). NULLS NOT DISTINCT so a route with no
+        # warehouse still has one row a day.
+        UniqueConstraint("customer_code", "warehouse", "route", "as_of_date",
+                         name="uq_analytics_at_risk_route_profiles_key",
+                         postgresql_nulls_not_distinct=True),
         Index("ix_analytics_at_risk_route_profiles_latest", "customer_code", "route", "as_of_date"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     customer_code: Mapped[str] = mapped_column(String(64), nullable=False)
     route: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: The place the norm was learned for (chunk 224): the warehouse its deliveries name, null for
+    #: a route whose deliveries name none. The company arrives with the deliveries' own (stage 2).
+    company: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    warehouse: Mapped[str | None] = mapped_column(String(64), nullable=True)
     as_of_date: Mapped[date_type] = mapped_column(Date, nullable=False)
     window_days: Mapped[int] = mapped_column(Integer, nullable=False)
     #: Closed deliveries in the window, and those that were loaded at all.
