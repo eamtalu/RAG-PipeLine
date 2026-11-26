@@ -12,7 +12,8 @@ Pinned here
     backfill     facts and ledger versions written before this chunk take the company their own
                  call carried, whether or not their transaction still exists; a call that
                  carried none stays empty; a dry run writes nothing; a run that stops early is
-                 finished by the next one
+                 finished by the next one; the walk goes block by block, because neither table
+                 has an index on its id and a batch must never scan a whole partition
 """
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -96,6 +97,7 @@ async def clean():
 
 async def _plant(*specs, ticket: bool = True) -> list[uuid.UUID]:
     """`specs` are (minutes after T0, company, warehouse) tuples: one sealed pick each."""
+    last = T0 + timedelta(minutes=max(spec[0] for spec in specs))
     async with async_session() as db:
         job = Job(customer_code=CC, filename="t.log", document_type="transaction_log",
                   storage_key=f"{CC}/{uuid.uuid4().hex}/t.log", status="completed")
@@ -116,7 +118,7 @@ async def _plant(*specs, ticket: bool = True) -> list[uuid.UUID]:
         await db.flush()
         if ticket:
             db.add(AnalyticsPendingWindow(customer_code=CC, range_start=T0 - WIDE,
-                                          range_end=T0 + WIDE))
+                                          range_end=last + WIDE))
         await db.commit()
         return [r.id for r in rows]
 
@@ -180,7 +182,7 @@ async def _drop_transactions(*ids: uuid.UUID) -> None:
                                            ("analytics_fact_ledger", AnalyticsFactLedger)])
 async def test_old_rows_take_the_company_their_own_call_carried(table, model):
     a, b, none = await _folded_then_forgotten((0, "915", "BRI"), (1, "920", "BRI"), (2, None, None))
-    totals = await backfill.fill_table(async_session, table, CC, batch=2)
+    totals = await backfill.fill_table(async_session, table, CC, blocks=1)
     assert await _companies(model) == {a: ["915"], b: ["920"], none: [None]}
     assert totals.filled == 2 and totals.read == 3
 
@@ -233,13 +235,41 @@ async def test_a_dry_run_counts_what_it_would_fill_and_writes_nothing():
     assert await _companies(AnalyticsFact) == {i: [None] for i in ids}
 
 
+#: Minutes from T0 (10 Sep) to 20 Oct: a fact there lives in the next monthly partition.
+NEXT_MONTH = 40 * 24 * 60
+
+
 async def test_a_run_that_stops_early_is_finished_by_the_next_one():
-    ids = await _folded_then_forgotten(*[(m, "915", "BRI") for m in range(5)])
-    first = await backfill.fill_table(async_session, "analytics_facts", CC, batch=2, max_batches=1)
-    assert first.filled == 2 and first.is_finished is False
-    second = await backfill.fill_table(async_session, "analytics_facts", CC, batch=2)
-    assert second.filled == 3 and second.is_finished is True
-    assert await _companies(AnalyticsFact) == {i: ["915"] for i in ids}
+    september, october = await _folded_then_forgotten((0, "915", "BRI"), (NEXT_MONTH, "915", "BRI"))
+    first = await backfill.fill_table(async_session, "analytics_facts", CC, max_batches=1)
+    assert first.filled == 1 and first.is_finished is False
+    assert await _companies(AnalyticsFact) == {september: ["915"], october: [None]}
+    second = await backfill.fill_table(async_session, "analytics_facts", CC)
+    assert second.filled == 1 and second.is_finished is True
+    assert await _companies(AnalyticsFact) == {september: ["915"], october: ["915"]}
+
+
+async def test_a_batch_reads_a_range_of_blocks_and_never_sorts_the_partition():
+    """Neither fact table has an index on its id, so a batch ordered by id scanned the whole
+    partition: 22 seconds a batch on the dev server's ledger, against a 30 second limit.
+
+    The table is read by row position alone. On a table this small the planner calls that a
+    sequential scan, on a large one a Tid Range Scan; what must never appear is a sort, or an
+    index chosen for the customer, which would read the partition to find the range.
+    """
+    await _folded_then_forgotten((0, "915", "BRI"))
+    async with async_session() as db:
+        partition = (await backfill.partitions_of(db, "analytics_fact_ledger"))[0]
+        plan = await backfill.explain_batch(db, partition, CC, first_block=0, blocks=100)
+    assert "Sort" not in plan and "Index" not in plan
+    assert "ctid >= '(0,0)'::tid" in plan and "ctid < '(100,0)'::tid" in plan
+    position_only = [line for line in plan.splitlines() if "ctid" in line]
+    assert position_only and all("customer_code" not in line for line in position_only)
+
+
+async def test_blocks_are_walked_in_ranges_until_the_end_of_the_partition():
+    assert list(backfill.block_ranges(0, 100)) == []
+    assert list(backfill.block_ranges(250, 100)) == [(0, 100), (100, 200), (200, 250)]
 
 
 async def test_only_the_two_fact_tables_can_be_backfilled():
@@ -253,7 +283,8 @@ async def test_the_script_reports_a_dry_run_and_then_fills(capsys):
     from scripts import backfill_fact_company as script
     ids = await _folded_then_forgotten((0, "915", "BRI"), (1, "915", "BRI"))
     parser = script.build_parser()
-    assert await script.run(parser.parse_args([CC, "--dry-run", "--pause", "0"])) == 0
+    dry = parser.parse_args([CC, "--dry-run", "--pause", "0", "--blocks", "50"])
+    assert await script.run(dry) == 0
     assert "would fill 2" in capsys.readouterr().out
     assert await _companies(AnalyticsFact) == {i: [None] for i in ids}
     assert await script.run(parser.parse_args([CC, "--pause", "0", "--vacuum"])) == 0
