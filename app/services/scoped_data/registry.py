@@ -191,7 +191,7 @@ RULES: tuple[Rule, ...] = (
     SiteLimited(AnalyticsSettledRow, "warehouse", company_column="company"),
     SiteLimited(at_risk.AnalyticsAtRiskDelivery, "warehouse", company_column="company"),
     SiteLimited(at_risk.AnalyticsAtRiskCheck, "warehouse", company_column="company"),
-    SiteLimited(at_risk.AnalyticsAtRiskRouteProfile, "warehouse"),
+    SiteLimited(at_risk.AnalyticsAtRiskRouteProfile, "warehouse", company_column="company"),
     SiteLimited(Advisory, "site_id", holds_site_id=True),
     SiteLimited(TeamsConversation, "site_id", holds_site_id=True),
     SiteLimited(TeamsConversationTurn, "site_id", holds_site_id=True),
