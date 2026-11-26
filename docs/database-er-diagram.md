@@ -938,6 +938,7 @@ erDiagram
         string lot_number
         string order_number
         string delivery_number
+        string company "nullable; the WMS company (M3 CONO) of the source transaction, chunk 226"
         string warehouse
         string warehouse_id
         string from_location
@@ -962,6 +963,7 @@ erDiagram
         text reason "why this version was written"
         datetime event_time
         date business_date
+        string company "nullable; as on analytics_facts, chunk 226; older versions are backfilled"
         numeric quantity
         jsonb attributes
     }

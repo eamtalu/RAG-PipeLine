@@ -93,6 +93,9 @@ class FactColumns:
     delivery_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # --- place ---
+    #: The WMS company (M3 CONO) of the source transaction (chunk 226). With the warehouse it names
+    #: the place a row belongs to: the same warehouse code can exist under two companies.
+    company: Mapped[str | None] = mapped_column(String(16), nullable=True)
     warehouse: Mapped[str | None] = mapped_column(String(16), nullable=True)
     warehouse_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
     from_location: Mapped[str | None] = mapped_column(String(32), nullable=True)

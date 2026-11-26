@@ -281,7 +281,8 @@ def normalise(row: Mapping[str, Any], *, tenant_timezone: str | None,
         "item_number": _as_text(row.get("item_number")),
         "order_number": _as_text(row.get("order_number")),
         "delivery_number": _as_text(row.get("delivery_number")),
-        # place
+        # place: company and warehouse together say which site the fact belongs to
+        "company": _as_text(row.get("company")),
         "warehouse": _as_text(row.get("warehouse")),
         "warehouse_id": _as_text(row.get("warehouse_id")),
         # actor
