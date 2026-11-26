@@ -59,14 +59,15 @@ async def routing_universe(db: AsyncSession, cc: str, *, day: date, tz: tzinfo) 
     three days up to it. Returns the routes by delivery and how many calls had an unreadable departure.
     Bounded on the partition key and capped."""
     since, until = _local_midnight(day - CALL_LOOKBACK, tz), _local_midnight(day + timedelta(days=1), tz)
-    rows = (await db.execute(select(LogTransaction.started_at, LogTransaction.response_summary).where(
+    rows = (await db.execute(select(LogTransaction.started_at, LogTransaction.response_summary,
+                                    LogTransaction.company, LogTransaction.warehouse).where(
         LogTransaction.customer_code == cc, LogTransaction.method == ROUTING_METHOD,
         LogTransaction.started_at >= since, LogTransaction.started_at < until,
         LogTransaction.response_summary.like('%"DeparatureDate"%'),
     ).order_by(LogTransaction.started_at).limit(CALLS_CAP))).all()
     latest: dict[str, board_store._Route] = {}
     unreadable = 0
-    for _at, text in rows:
+    for _at, text, company, warehouse in rows:
         text = text or ""
         delivery = _field(text, "DeliveryNumber")
         if not delivery:
@@ -77,7 +78,10 @@ async def routing_universe(db: AsyncSession, cc: str, *, day: date, tz: tzinfo) 
             continue
         # the latest call wins, even when it moves the delivery off this day
         latest[delivery] = board_store._Route(departure_at=departure, route=_field(text, "Route"),
-                                              customer_name=_field(text, "CustomerName"), customer_number=_field(text, "CustomerNumber"))
+                                              customer_name=_field(text, "CustomerName"),
+                                              customer_number=_field(text, "CustomerNumber"),
+                                              # the place of the call itself (chunk 229)
+                                              warehouse=warehouse or None, company=company or None)
     return {d: r for d, r in latest.items() if r.departure_at.astimezone(tz).date() == day}, unreadable
 
 

@@ -73,18 +73,20 @@ class _Route:
     customer_name: str | None
     customer_number: str | None
     warehouse: str | None = None
+    company: str | None = None
 
 
 async def _routes(db: AsyncSession, cc: str, *, settlement: str, now: datetime, tz: tzinfo,
                   today: date) -> tuple[dict[str, _Route], int]:
     rows = (await db.execute(select(AnalyticsSettledRow.key_parts, AnalyticsSettledRow.attributes,
-                                    AnalyticsSettledRow.warehouse).where(
+                                    AnalyticsSettledRow.warehouse,
+                                    AnalyticsSettledRow.company).where(
         AnalyticsSettledRow.customer_code == cc, AnalyticsSettledRow.settlement == settlement,
         AnalyticsSettledRow.event_time >= now - ROUTE_LOOKBACK,
     ).order_by(AnalyticsSettledRow.event_time).limit(ROUTE_ROWS_CAP))).all()
     out: dict[str, _Route] = {}
     unreadable = 0
-    for key_parts, attributes, warehouse in rows:
+    for key_parts, attributes, warehouse, company in rows:
         delivery = str((key_parts or [None])[0] or "").strip()
         if not delivery:
             continue
@@ -99,7 +101,7 @@ async def _routes(db: AsyncSession, cc: str, *, settlement: str, now: datetime, 
         out[delivery] = _Route(departure_at=departure, route=_text(attrs.get("resp.Route")),
                                customer_name=_text(attrs.get("resp.CustomerName")),
                                customer_number=_text(attrs.get("resp.CustomerNumber")),
-                               warehouse=_text(warehouse))
+                               warehouse=_text(warehouse), company=_text(company))
     return out, unreadable
 
 
@@ -241,7 +243,7 @@ def assemble(delivery: str, r: _Route, p: _Picks, k: _Packages | None, *, expect
         transaction_names=p.transaction_names,
         route_loaded_at=route_loaded.get(day_key) if day_key else None,
         route_loading_from=route_loading_from.get(day_key) if day_key else None,
-        warehouse=r.warehouse)
+        warehouse=r.warehouse, company=r.company)
 
 
 # ============================================================== the board

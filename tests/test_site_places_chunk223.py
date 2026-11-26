@@ -64,10 +64,10 @@ def test_a_place_with_no_company_matches_any_company():
 
 
 def test_a_table_without_a_company_column_is_limited_by_the_warehouse():
-    from app.persistence.models.analytics_at_risk import AnalyticsAtRiskDelivery
+    from app.persistence.models.analytics_fact import AnalyticsFactLedger
     scope = DataScope(CC, site_ids=("BRI-911",), places=(Place("911", "BRI"),))
-    sql = _sql(AnalyticsAtRiskDelivery, scope)
-    assert "analytics_at_risk_deliveries.warehouse IN ('BRI')" in sql and "company" not in sql
+    sql = _sql(AnalyticsFactLedger, scope)
+    assert "analytics_fact_ledger.warehouse IN ('BRI')" in sql and "company" not in sql
 
 
 def test_a_table_keyed_by_site_id_matches_the_site_ids_and_the_places_warehouses():

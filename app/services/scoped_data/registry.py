@@ -189,8 +189,8 @@ RULES: tuple[Rule, ...] = (
     # by warehouse alone: part of the ledger's history has no company, and no data tool reads it
     SiteLimited(AnalyticsFactLedger, "warehouse"),
     SiteLimited(AnalyticsSettledRow, "warehouse", company_column="company"),
-    SiteLimited(at_risk.AnalyticsAtRiskDelivery, "warehouse"),
-    SiteLimited(at_risk.AnalyticsAtRiskCheck, "warehouse"),
+    SiteLimited(at_risk.AnalyticsAtRiskDelivery, "warehouse", company_column="company"),
+    SiteLimited(at_risk.AnalyticsAtRiskCheck, "warehouse", company_column="company"),
     SiteLimited(at_risk.AnalyticsAtRiskRouteProfile, "warehouse"),
     SiteLimited(Advisory, "site_id", holds_site_id=True),
     SiteLimited(TeamsConversation, "site_id", holds_site_id=True),
