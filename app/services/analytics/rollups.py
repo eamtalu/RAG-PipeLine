@@ -228,20 +228,35 @@ def _dim_key(row: Mapping[str, Any], definition: d.MetricDefinition) -> DimKey:
     return tuple(values)
 
 
-def group_fold(rows: Iterable[Mapping[str, Any]], definition: d.MetricDefinition, bucket_of
-               ) -> dict[tuple[Any, DimKey], dict]:
+def place_of(row: Any) -> tuple[str | None, str | None]:
+    """The (company, warehouse) a fact or a stored rollup row belongs to; empty strings are none.
+
+    >>> place_of({"company": "915", "warehouse": "BRI"}), place_of({"warehouse": ""})
+    (('915', 'BRI'), (None, None))
+    """
+    get = row.get if isinstance(row, Mapping) else lambda name: getattr(row, name, None)
+    return (get("company") or None, get("warehouse") or None)
+
+
+def group_fold(rows: Iterable[Mapping[str, Any]], definition: d.MetricDefinition, bucket_of, *,
+               with_place: bool = False) -> dict[tuple[Any, DimKey], dict]:
     """Fold `rows` into `{(bucket, dimensions): {measure: {role: value}}}`.
 
     `bucket_of` returns a row's bucket, or None to exclude it. Delegates the arithmetic entirely to
     `definition.fold`, so every filter -- method, classification and status -- is applied in exactly one
     place and this function never asks what it is measuring.
+
+    `with_place` (chunk 232) is what the STORED rollups use: the key's dimensions are followed by
+    the row's company and warehouse, so each place gets its own row and the data scope can filter
+    it. A read that folds facts on the fly leaves it off: it only wants the requested dimensions.
     """
     grouped: dict[tuple[Any, DimKey], list] = {}
     for row in rows:
         bucket = bucket_of(row)
         if bucket is None:
             continue
-        grouped.setdefault((bucket, _dim_key(row, definition)), []).append(row)
+        dims = _dim_key(row, definition)
+        grouped.setdefault((bucket, dims + place_of(row) if with_place else dims), []).append(row)
     return {key: d.fold(group, definition) for key, group in grouped.items()}
 
 
@@ -280,6 +295,9 @@ def _rows_for(customer_code: str, definition_id: uuid.UUID, definition: d.Metric
                    "definition_id": definition_id, "measure_name": measure_name,
                    bucket_column: bucket, "computed_at": computed_at}
             row.update({f"dim{i + 1}": dims[i] for i in range(DIMENSION_SLOTS)})
+            # a key folded with its place carries it after the six dimensions (chunk 232)
+            has_place = len(dims) > DIMENSION_SLOTS
+            row["company"], row["warehouse"] = dims[DIMENSION_SLOTS:] if has_place else (None, None)
             row.update({_ROLE_COLUMN[role]: value for role, value in roles.items()
                         if role is not d.Role.histogram})
             # Chunk 92: a JSONB array of band counts, NULL when nothing was counted so an unused
@@ -422,7 +440,9 @@ async def _fold_daily_from_hourly(db: AsyncSession, customer_code: str, definiti
         day = next((day for day, (s_lo, s_hi) in spans.items() if s_lo <= row.bucket_start < s_hi), None)
         if day is None:
             continue          # inside the outer range but in a gap between two requested days
-        key = (day, tuple(getattr(row, f"dim{i + 1}") for i in range(DIMENSION_SLOTS)))
+        # the place rides along, so a day is merged per place and never across them
+        key = (day, tuple(getattr(row, f"dim{i + 1}") for i in range(DIMENSION_SLOTS))
+               + place_of(row))
         roles = {role: getattr(row, column) for role, column in _ROLE_COLUMN.items()
                  if getattr(row, column, None) is not None}
         bucket = folded.setdefault(key, {})
@@ -463,7 +483,7 @@ async def _fold_monthly(db: AsyncSession, customer_code: str, definition_id: uui
         if month_of(row.business_date) not in months:
             continue
         key = (month_of(row.business_date),
-               tuple(getattr(row, f"dim{i + 1}") for i in range(DIMENSION_SLOTS)))
+               tuple(getattr(row, f"dim{i + 1}") for i in range(DIMENSION_SLOTS)) + place_of(row))
         roles = {role: getattr(row, column) for role, column in _ROLE_COLUMN.items()
                  if getattr(row, column, None) is not None}
         bucket = folded.setdefault(key, {})
@@ -600,7 +620,8 @@ async def _fold_grains(db: AsyncSession, customer_code: str, definition_id: uuid
         folded = group_fold(
             facts, definition,
             lambda r: hour_of(r["event_time"])
-            if r.get("event_time") and hour_of(r["event_time"]) in hours else None)
+            if r.get("event_time") and hour_of(r["event_time"]) in hours else None,
+            with_place=True)
         stats["hourly"] = await _replace(
             db, AnalyticsHourlyRollup, customer_code, definition_id, bucket_column="bucket_start",
             buckets=sorted(hours),
@@ -612,7 +633,8 @@ async def _fold_grains(db: AsyncSession, customer_code: str, definition_id: uuid
         if by_fact:
             folded = group_fold(
                 facts, definition,
-                lambda r: r["business_date"] if r.get("business_date") in by_fact else None)
+                lambda r: r["business_date"] if r.get("business_date") in by_fact else None,
+                with_place=True)
             daily = _merge(daily, await _replace(
                 db, AnalyticsDailyRollup, customer_code, definition_id, bucket_column="business_date",
                 buckets=sorted(by_fact),

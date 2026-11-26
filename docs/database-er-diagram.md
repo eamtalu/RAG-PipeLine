@@ -975,6 +975,8 @@ erDiagram
         uuid definition_id "soft ref to analytics_metrics"
         string measure_name "one row PER MEASURE"
         datetime bucket_start "PARTITION KEY, daily, NOT NULL"
+        string company "nullable; the WMS company of the row's facts, chunk 232"
+        string warehouse "nullable; with company, the place the row belongs to"
         string dim1 "positional, read via the definition"
         string dim2
         string dim3
@@ -994,6 +996,8 @@ erDiagram
         uuid definition_id "soft ref to analytics_metrics"
         string measure_name
         date business_date "PARTITION KEY, yearly, tenant-LOCAL"
+        string company "nullable; the WMS company of the row's facts, chunk 232"
+        string warehouse "nullable; with company, the place the row belongs to"
         string dim1
         string dim2
         string dim3
@@ -1013,6 +1017,8 @@ erDiagram
         uuid definition_id "soft ref to analytics_metrics"
         string measure_name
         date month_start "NOT partitioned: ~300K rows at 5 years"
+        string company "nullable; the WMS company of the row's facts, chunk 232"
+        string warehouse "nullable; with company, the place the row belongs to"
         string dim1
         string dim2
         string dim3
