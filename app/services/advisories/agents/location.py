@@ -25,17 +25,21 @@ STAGING = {"JIT"}
 
 
 async def zero_picks_by_location(db: AsyncSession, customer_code: str, since: datetime) -> list[dict]:
-    """Locations with zero-picks since the moment: location, zero_picks, items, warehouse."""
+    """Locations with zero-picks since the moment, each with its warehouse and company.
+
+    (6 zero-picks at A-03-04) -> [{location, zero_picks: 6, items, warehouse, company}]
+    """
     f = AnalyticsFact
     loc = f.attributes["FromLocation"].astext
     rows = (await db.execute(
         select(loc, func.count().label("n"), func.count(func.distinct(f.item_number)).label("items"),
-               func.min(f.warehouse).label("warehouse"))
+               func.min(f.warehouse).label("warehouse"), func.min(f.company).label("company"))
         .where(f.customer_code == customer_code, f.method == PICK_METHOD, f.event_time >= since,
                f.quantity_classification == "attempt", loc.is_not(None))
         .group_by(loc).order_by(func.count().desc()).limit(20)
     )).all()
-    return [{"location": r[0], "zero_picks": int(r[1]), "items": int(r[2]), "warehouse": r[3]} for r in rows]
+    return [{"location": r[0], "zero_picks": int(r[1]), "items": int(r[2]), "warehouse": r[3],
+             "company": r[4]} for r in rows]
 
 
 async def items_at(db: AsyncSession, customer_code: str, location: str, since: datetime, limit: int = 3) -> list[str]:
@@ -84,7 +88,7 @@ async def run(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo)
                    else "Lines staged for just-in-time picking were not there when picked",
             recommended=("Check what is staged and when it arrives" if staging
                          else f"Check {row['location']}: stock missing, mis-slotted or the balance wrong; recount it"),
-            site_id=row["warehouse"],
+            site_id=row["warehouse"], company=row["company"],
             source={"kind": "location", "location": row["location"]},
             kind="empty_location", about=kinds.about_location(str(row["location"]), is_staging=staging),
         ))

@@ -30,7 +30,8 @@ from app.services.analytics import company_backfill as backfill
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("customer_code")
-    parser.add_argument("--table", choices=(*backfill.TABLES, backfill.SETTLED_ROWS),
+    parser.add_argument("--table",
+                        choices=(*backfill.TABLES, backfill.SETTLED_ROWS, backfill.ADVISORIES),
                         default=backfill.TABLES[0])
     parser.add_argument("--blocks", type=int, default=1000,
                         help="table blocks (8 kB each) read per transaction")
@@ -64,6 +65,12 @@ async def run(args: argparse.Namespace) -> int:
               flush=True)
         last[0] = now
 
+    if args.table == backfill.ADVISORIES:
+        filled = await backfill.fill_advisories(async_session, args.customer_code,
+                                                dry_run=args.dry_run)
+        print(f"advisories for {args.customer_code}: "
+              f"{'would fill' if args.dry_run else 'filled'} {filled}")
+        return 0
     options = dict(blocks=args.blocks, pause_seconds=args.pause, dry_run=args.dry_run,
                    max_batches=args.max_batches, on_batch=report)
     if args.table == backfill.SETTLED_ROWS:

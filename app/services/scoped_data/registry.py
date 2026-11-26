@@ -84,7 +84,8 @@ class SiteLimited:
     The site column holds the warehouse code. With `company_column` the row is matched by the
     company and warehouse pair; without one, by the warehouse alone. With `holds_site_id` the
     column holds a site id (written from the warehouse by the advisory agents), so it is matched
-    against the person's site ids and their places' warehouses.
+    against the person's site ids and their places' warehouses. With both, a row is matched by
+    the pair where it has a company and by its site where it has none (chunk 231).
     """
 
     model: Any
@@ -104,16 +105,29 @@ class SiteLimited:
             return false()
         site = getattr(self.model, self.site_column)
         warehouses = sorted({place.warehouse for place in places})
-        if self.holds_site_id:
-            return and_(mine, site.in_(sorted({*warehouses, *scope.site_ids})))
         if self.company_column is None:
+            if self.holds_site_id:
+                return and_(mine, site.in_(sorted({*warehouses, *scope.site_ids})))
             return and_(mine, site.in_(warehouses))
         # the pair decides: the same warehouse code under another company is another place
         company = getattr(self.model, self.company_column)
-        return and_(mine, or_(*(
+        if not self.holds_site_id:
+            return and_(mine, or_(*(
+                site == place.warehouse if place.company is None
+                else and_(site == place.warehouse, company == place.company)
+                for place in places)))
+        # A row written before it had a company still follows its site, otherwise older
+        # advisories would vanish for the people of that site.
+        by_place = [
             site == place.warehouse if place.company is None
-            else and_(site == place.warehouse, company == place.company)
-            for place in places)))
+            else and_(site == place.warehouse, or_(company == place.company, company.is_(None)))
+            for place in places]
+        # A site id that is not one of the warehouses is matched by id alone. One that IS a
+        # warehouse is not, or the pair above would be bypassed for another company's rows.
+        other_ids = sorted(set(scope.site_ids) - set(warehouses))
+        if other_ids:
+            by_place.append(site.in_(other_ids))
+        return and_(mine, or_(*by_place))
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +206,7 @@ RULES: tuple[Rule, ...] = (
     SiteLimited(at_risk.AnalyticsAtRiskDelivery, "warehouse", company_column="company"),
     SiteLimited(at_risk.AnalyticsAtRiskCheck, "warehouse", company_column="company"),
     SiteLimited(at_risk.AnalyticsAtRiskRouteProfile, "warehouse", company_column="company"),
-    SiteLimited(Advisory, "site_id", holds_site_id=True),
+    SiteLimited(Advisory, "site_id", company_column="company", holds_site_id=True),
     SiteLimited(TeamsConversation, "site_id", holds_site_id=True),
     SiteLimited(TeamsConversationTurn, "site_id", holds_site_id=True),
     # the forecast, by subject
