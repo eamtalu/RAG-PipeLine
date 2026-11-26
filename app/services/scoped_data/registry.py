@@ -185,7 +185,8 @@ class Shared:
 RULES: tuple[Rule, ...] = (
     # the WMS activity and what is derived from it, each row with its warehouse
     SiteLimited(LogTransaction, "warehouse", company_column="company"),
-    SiteLimited(AnalyticsFact, "warehouse"),
+    SiteLimited(AnalyticsFact, "warehouse", company_column="company"),
+    # by warehouse alone: part of the ledger's history has no company, and no data tool reads it
     SiteLimited(AnalyticsFactLedger, "warehouse"),
     SiteLimited(AnalyticsSettledRow, "warehouse"),
     SiteLimited(at_risk.AnalyticsAtRiskDelivery, "warehouse"),
