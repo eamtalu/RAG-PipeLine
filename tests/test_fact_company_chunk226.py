@@ -9,10 +9,10 @@ Pinned here
     normaliser   the company of the source row lands on the fact, and is part of the fingerprint
     fold         the fact and its ledger version carry it; an unchanged transaction still writes
                  nothing on the second fold
-    backfill     facts and ledger versions written before this chunk take the company of their
-                 transaction; a row whose transaction is gone takes the customer's only company
-                 for that warehouse, and stays empty when there are two; a dry run writes nothing;
-                 a run that stops early is finished by the next one
+    backfill     facts and ledger versions written before this chunk take the company their own
+                 call carried, whether or not their transaction still exists; a call that
+                 carried none stays empty; a dry run writes nothing; a run that stops early is
+                 finished by the next one
 """
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -110,7 +110,8 @@ async def _plant(*specs, ticket: bool = True) -> list[uuid.UUID]:
                 transaction_type="002001", status=LogTransactionStatus.success,
                 item_number="101978",
                 user_name="EDA", company=company, warehouse=warehouse,
-                attributes={"QuantityPicked": "10.0"}))
+                # as on live: the call's own fields are kept, and the company is one of them
+                attributes={"QuantityPicked": "10.0", **({"Company": company} if company else {})}))
         db.add_all(rows)
         await db.flush()
         if ticket:
@@ -177,11 +178,11 @@ async def _drop_transactions(*ids: uuid.UUID) -> None:
 
 @pytest.mark.parametrize("table, model", [("analytics_facts", AnalyticsFact),
                                            ("analytics_fact_ledger", AnalyticsFactLedger)])
-async def test_old_rows_take_the_company_of_their_transaction(table, model):
+async def test_old_rows_take_the_company_their_own_call_carried(table, model):
     a, b, none = await _folded_then_forgotten((0, "915", "BRI"), (1, "920", "BRI"), (2, None, None))
     totals = await backfill.fill_table(async_session, table, CC, batch=2)
     assert await _companies(model) == {a: ["915"], b: ["920"], none: [None]}
-    assert totals.filled == 2
+    assert totals.filled == 2 and totals.read == 3
 
 
 async def test_a_row_that_already_has_a_company_is_left_alone():
@@ -195,19 +196,34 @@ async def test_a_row_that_already_has_a_company_is_left_alone():
     assert await _companies(AnalyticsFact) == {txn_id: ["777"]} and totals.filled == 0
 
 
-async def test_a_row_whose_transaction_is_gone_takes_the_customers_only_company_for_its_warehouse():
-    gone, kept = await _folded_then_forgotten((0, "915", "BRI"), (1, "915", "BRI"))
-    await _drop_transactions(gone)
+async def test_a_row_whose_transaction_is_gone_is_filled_like_any_other():
+    """The same warehouse under two companies: each removed row still knows its own."""
+    gone_915, gone_920, kept = await _folded_then_forgotten((0, "915", "BRI"), (1, "920", "BRI"),
+                                                           (2, "915", "BRI"))
+    await _drop_transactions(gone_915, gone_920)
     await backfill.fill_table(async_session, "analytics_facts", CC)
-    assert await _companies(AnalyticsFact) == {gone: ["915"], kept: ["915"]}
+    assert await _companies(AnalyticsFact) == {gone_915: ["915"], gone_920: ["920"], kept: ["915"]}
 
 
-async def test_a_row_whose_transaction_is_gone_stays_empty_when_the_warehouse_has_two_companies():
-    gone, kept_915, kept_920 = await _folded_then_forgotten((0, "915", "BRI"), (1, "915", "BRI"),
-                                                           (2, "920", "BRI"))
-    await _drop_transactions(gone)
+async def _set_attributes(attributes: dict) -> None:
+    async with async_session() as db:
+        await db.execute(update(AnalyticsFact).where(AnalyticsFact.customer_code == CC)
+                         .values(attributes=attributes))
+        await db.commit()
+
+
+@pytest.mark.parametrize("attributes, expected", [
+    ({"CONO": "915"}, "915"),                         # the M3 field name is read as well
+    ({"Company": "920", "CONO": "915"}, "920"),       # the name ingestion prefers wins
+    ({"Company": ""}, None),                          # an empty value is no company
+    ({"Company": "9" * 17}, None),                    # too long for the column: left empty
+    ({}, None),
+])
+async def test_the_company_is_read_from_the_calls_own_fields(attributes, expected):
+    (txn_id,) = await _folded_then_forgotten((0, "915", "BRI"))
+    await _set_attributes(attributes)
     await backfill.fill_table(async_session, "analytics_facts", CC)
-    assert await _companies(AnalyticsFact) == {gone: [None], kept_915: ["915"], kept_920: ["920"]}
+    assert await _companies(AnalyticsFact) == {txn_id: [expected]}
 
 
 async def test_a_dry_run_counts_what_it_would_fill_and_writes_nothing():

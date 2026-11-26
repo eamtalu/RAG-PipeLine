@@ -5,11 +5,11 @@
     PYTHONPATH=. venv/bin/python scripts/backfill_fact_company.py tmp-live \
         --table analytics_fact_ledger --batch 2000 --pause 1 --vacuum
 
-A row takes the company of its source transaction. A row whose transaction is gone takes the
-customer's only company for its warehouse, and stays empty when there are two. Each batch is its
-own transaction, so the run can be stopped with Ctrl-C at any time and started again: it picks up
-the rows that still lack a company. `--vacuum` cleans each partition of the table afterwards,
-because an update leaves the old copy of every row behind.
+A row takes the company its own WMS call carried (`Company` or `CONO` in its attributes), which
+is the value ingestion files the transaction under; a call that carried none stays empty. Each
+batch is its own transaction, so the run can be stopped with Ctrl-C at any time and started
+again: it picks up the rows that still lack a company. `--vacuum` cleans each partition of
+the table afterwards, because an update leaves the old copy of every row behind.
 """
 
 from __future__ import annotations
