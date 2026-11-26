@@ -10,9 +10,9 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
-from app.config.database import async_session
+from app.config.database import async_session, engine
 from app.persistence.models.analytics_ml import AnalyticsPrediction
 from app.services.analytics import settle_query
 from app.services.analytics import settle_store
@@ -141,14 +141,64 @@ async def test_scoring_fills_the_actual_for_closed_buckets_only():
     async with async_session() as db:
         await prediction_store.upsert(db, CC, [_pred(T, value="100"), _pred(T + timedelta(days=1), value="100")])
         await db.commit()
-        rows = await prediction_store.scorable(db, CC, since=T - timedelta(days=30), until=T + timedelta(days=1, hours=6), tz=LONDON)
-        assert [r.target_at for r in rows] == [T]
+        rows, after = await prediction_store.scorable_page(
+            db, CC, since=T - timedelta(days=30), until=T + timedelta(days=1, hours=6), tz=LONDON, after=None)
+        assert [r.target_at for r in rows] == [T] and after is None
         await prediction_store.write_scores(db, [(rows[0].id, Decimal("90"))], scored_at=T + timedelta(days=2))
         await db.commit()
         got = (await db.execute(select(AnalyticsPrediction).where(AnalyticsPrediction.customer_code == CC)
                                 .order_by(AnalyticsPrediction.target_at))).scalars().all()
     assert got[0].actual == Decimal("90") and got[0].abs_error == Decimal("10") and got[0].scored_at is not None
     assert got[1].actual is None
+
+
+async def test_scorable_pages_visit_every_closed_prediction_once_and_then_stop():
+    """Chunk 225: three horizons share one target instant, so the page edge falls inside a tie."""
+    preds = [_pred(T + timedelta(days=d), horizon=h) for d in range(3) for h in ("1d", "2d", "3d")]
+    preds.append(_pred(T + timedelta(days=40), horizon="1d"))          # not closed yet: never returned
+    async with async_session() as db:
+        await prediction_store.upsert(db, CC, preds)
+        await db.commit()
+        seen, after, pages = [], None, 0
+        while True:
+            rows, after = await prediction_store.scorable_page(
+                db, CC, since=T - timedelta(days=30), until=T + timedelta(days=10), tz=LONDON, after=after, limit=4)
+            seen.extend(rows)
+            pages += 1
+            if after is None:
+                break
+    assert pages == 3
+    assert len(seen) == 9 and len({r.id for r in seen}) == 9
+    assert [r.target_at for r in seen] == sorted(r.target_at for r in seen)
+    assert all(r.scored_at is None and r.actual is None for r in seen)
+
+
+async def test_a_page_of_scores_is_written_by_one_statement():
+    async with async_session() as db:
+        await prediction_store.upsert(db, CC, [_pred(T + timedelta(days=d), value="100") for d in range(3)])
+        await db.commit()
+        rows, _after = await prediction_store.scorable_page(
+            db, CC, since=T - timedelta(days=30), until=T + timedelta(days=10), tz=LONDON, after=None)
+        updates = []
+
+        def record(_conn, _cursor, statement, *_rest):
+            if statement.lstrip().upper().startswith("UPDATE"):
+                updates.append(statement)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record)
+        try:
+            written = await prediction_store.write_scores(
+                db, [(r.id, Decimal(a)) for r, a in zip(rows, ["90", "100", "125.5"])], scored_at=T + timedelta(days=10))
+            assert await prediction_store.write_scores(db, [], scored_at=T + timedelta(days=10)) == 0
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record)
+        await db.commit()
+        got = (await db.execute(select(AnalyticsPrediction).where(AnalyticsPrediction.customer_code == CC)
+                                .order_by(AnalyticsPrediction.target_at))).scalars().all()
+    assert written == 3 and len(updates) == 1
+    assert [(g.actual, g.abs_error) for g in got] == [
+        (Decimal("90"), Decimal("10")), (Decimal("100"), Decimal("0")), (Decimal("125.5"), Decimal("25.5"))]
+    assert all(g.scored_at == T + timedelta(days=10) for g in got)
 
 
 # ==================================================== 4. accuracy
@@ -160,7 +210,8 @@ async def test_recompute_matches_a_hand_calculation_per_horizon():
             preds.append(_pred(T + timedelta(days=k), value=value))
         await prediction_store.upsert(db, CC, preds)
         await db.commit()
-        rows = await prediction_store.scorable(db, CC, since=T - timedelta(days=30), until=T + timedelta(days=10), tz=LONDON)
+        rows, _after = await prediction_store.scorable_page(
+            db, CC, since=T - timedelta(days=30), until=T + timedelta(days=10), tz=LONDON, after=None)
         await prediction_store.write_scores(db, [(r.id, Decimal(a)) for r, a in zip(rows, ["90", "220", "50"])],
                                             scored_at=T + timedelta(days=10))
         await db.commit()

@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from app.config.database import async_session
 from app.persistence.models.analytics_forecast import AnalyticsForecastSeries
 from app.persistence.models.analytics_ml import AnalyticsPrediction
-from app.services.analytics_forecast import accuracy_store, plan, run_store, runner
+from app.services.analytics_forecast import accuracy_store, plan, prediction_store, run_store, runner
 from tests import forecast_fixtures as fx
 
 CC = "test_chunk139fc"
@@ -143,6 +143,88 @@ async def test_the_next_days_actuals_produce_the_first_out_of_sample_score():
     # the heatmap's hours for 5 Oct have closed too, so they are scored against the hourly actuals
     hour_scored = [r for r in await _rows(metric="pickers", grain="hour", subject_kind="total", subject="total") if r.scored_at]
     assert len(hour_scored) == 24
+
+
+# ---------------------------------------------------------------- chunk 225: scoring in pages
+
+MONDAY = AS_OF + timedelta(days=1)
+NIGHT_2 = datetime(2026, 10, 6, 3, 0, tzinfo=UTC)
+
+
+async def _two_nights(**second) -> dict:
+    """Night one predicts; Monday happens; night two scores it. Returns night two's summary."""
+    await _plant_weeks(FIRST, 28)
+    await runner.run_tenant(CC, as_of_date=AS_OF, trigger="manual", cfg=CFG)
+    await fx.plant(_day_rows(MONDAY))
+    return await runner.run_tenant(CC, as_of_date=MONDAY, trigger="manual", cfg=CFG, now=NIGHT_2, **second)
+
+
+async def _scores() -> dict:
+    return {r.id: (r.actual, r.abs_error, r.scored_at) for r in await _rows() if r.scored_at}
+
+
+async def _accuracy() -> list:
+    async with async_session() as db:
+        rows = await accuracy_store.read_series(db, CC, metric="lines", grain="day", subject_kind="total", subject="total")
+    return [(a.horizon, a.n, a.mae, a.wape, a.mape, a.bias) for a in rows]
+
+
+async def test_small_pages_score_exactly_what_one_big_page_scores(monkeypatch):
+    big = await _two_nights()
+    one_page, one_accuracy = await _scores(), await _accuracy()
+    await fx.wipe(CC)
+    await fx.seed_tenant(CC)
+    monkeypatch.setattr(runner, "SCORE_PAGE", 5)
+    small = await _two_nights()
+    many_pages = await _scores()
+    assert small["status"] == big["status"] == "completed"
+    assert small["scored"] == big["scored"] == len(one_page) > 5
+    assert sorted(v[:2] for v in many_pages.values()) == sorted(v[:2] for v in one_page.values())
+    assert await _accuracy() == one_accuracy
+
+
+async def test_a_score_that_still_holds_is_not_written_again():
+    await _two_nights()
+    before = await _scores()
+    again = await runner.run_tenant(CC, as_of_date=MONDAY, trigger="manual", cfg=CFG,
+                                    now=NIGHT_2 + timedelta(hours=1))
+    assert again["status"] == "completed" and again["scored"] == 0
+    assert await _scores() == before
+
+
+async def test_lines_that_arrive_late_change_the_score_of_that_day():
+    await _two_nights()
+    await fx.plant(fx.shift_rows(CC, datetime(MONDAY.year, MONDAY.month, MONDAY.day), lines=7, pickers=1,
+                                 items=("400400",)))
+    again = await runner.run_tenant(CC, as_of_date=MONDAY, trigger="manual", cfg=CFG,
+                                    now=NIGHT_2 + timedelta(hours=1))
+    day = [r for r in await _rows(metric="lines", grain="day", subject_kind="total", subject="total") if r.scored_at]
+    assert again["scored"] >= 1
+    assert len(day) == 1 and day[0].actual == Decimal(await fx.lines_between(CC, MONDAY, MONDAY))
+    assert day[0].abs_error == abs(day[0].value - day[0].actual)
+
+
+async def test_a_failure_in_a_later_page_keeps_the_pages_already_scored(monkeypatch):
+    monkeypatch.setattr(runner, "SCORE_PAGE", 5)
+    real, calls = prediction_store.write_scores, []
+
+    async def fail_on_the_third(db, scores, *, scored_at):
+        calls.append(len(scores))
+        if len(calls) == 3:
+            raise RuntimeError("canceling statement due to statement timeout")
+        return await real(db, scores, scored_at=scored_at)
+
+    monkeypatch.setattr(prediction_store, "write_scores", fail_on_the_third)
+    failed = await _two_nights()
+    kept = await _scores()
+    assert failed["status"] == "failed"
+    assert len(kept) == calls[0] + calls[1] > 0
+    monkeypatch.setattr(prediction_store, "write_scores", real)
+    retry = await runner.run_tenant(CC, as_of_date=MONDAY, trigger="manual", cfg=CFG,
+                                    now=NIGHT_2 + timedelta(minutes=15))
+    after = await _scores()
+    assert retry["status"] == "completed" and retry["scored"] == len(after) - len(kept) > 0
+    assert all(after[i] == kept[i] for i in kept)
 
 
 async def test_too_little_history_is_a_skip_with_no_rows():

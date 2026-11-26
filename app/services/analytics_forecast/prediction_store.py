@@ -13,7 +13,8 @@ from datetime import datetime, timedelta, tzinfo
 from decimal import Decimal
 from typing import Sequence
 
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import Numeric, Row, and_, column, func, or_, select, update, values
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +25,8 @@ from app.services.analytics_forecast import series
 BATCH = 1000
 #: Hard cap on rows one read may return; a window of 365 days at three grains is far below it.
 READ_CAP = 2000
+#: Where the next scoring page starts: the target instant and id of the last row already read.
+ScoreCursor = tuple[datetime, uuid.UUID]
 
 
 @dataclass(frozen=True)
@@ -136,24 +139,44 @@ def bucket_close(target_at: datetime, grain: str, tz: tzinfo) -> datetime:
     return series.local_midnight(end + timedelta(days=1), tz)
 
 
-async def scorable(db: AsyncSession, cc: str, *, since: datetime, until: datetime, tz: tzinfo,
-                   limit: int = 50000) -> list[AnalyticsPrediction]:
-    """Predictions whose target bucket started at or after `since` and had CLOSED by `until`, so
-    the actual is final enough to score. The read is bounded by `ix_analytics_predictions_score`;
-    the close test needs the grain and the zone, so it is applied to the rows."""
-    q = select(AnalyticsPrediction).where(
-        AnalyticsPrediction.customer_code == cc, AnalyticsPrediction.target_at >= since,
-        AnalyticsPrediction.target_at < until,
-    ).order_by(AnalyticsPrediction.target_at, AnalyticsPrediction.predicted_at).limit(limit)
-    rows = (await db.execute(q)).scalars().all()
-    return [r for r in rows if bucket_close(r.target_at, r.grain, tz) <= until]
+async def scorable_page(db: AsyncSession, cc: str, *, since: datetime, until: datetime, tz: tzinfo,
+                        after: ScoreCursor | None, limit: int = 5000,
+                        ) -> tuple[list[Row], ScoreCursor | None]:
+    """One page of predictions whose bucket started at or after `since` and had closed by `until`.
+
+    (9 closed rows, limit 4) -> 4 rows + cursor ; 4 rows + cursor ; 1 row + None
+    """
+    # Step 1: Read only the columns scoring needs, in (target_at, id) order, so that a page is
+    # small in memory and the walk along `ix_analytics_predictions_score` never sorts the window.
+    P = AnalyticsPrediction
+    q = select(P.id, P.metric, P.grain, P.subject_kind, P.subject, P.target_at, P.actual,
+               P.scored_at).where(P.customer_code == cc, P.target_at >= since, P.target_at < until)
+    if after is not None:
+        # Step 2: Start after the last row of the previous page by position, because many
+        # predictions share one target instant and an offset would re-read or skip some of them.
+        at, pid = after
+        q = q.where(P.target_at >= at, or_(P.target_at > at, P.id > pid))
+    rows = (await db.execute(q.order_by(P.target_at, P.id).limit(limit))).all()
+    # Step 3: Take the cursor from the last row READ, not the last row kept, otherwise a page
+    # holding only open buckets would end the walk before the closed ones behind it.
+    next_after = (rows[-1].target_at, rows[-1].id) if len(rows) == limit else None
+    return [r for r in rows if bucket_close(r.target_at, r.grain, tz) <= until], next_after
 
 
 async def write_scores(db: AsyncSession, scores: Sequence[tuple[uuid.UUID, Decimal]], *, scored_at: datetime) -> int:
-    """Set the actual, the absolute error and the scoring instant on each prediction by id."""
-    for pid, actual in scores:
-        await db.execute(update(AnalyticsPrediction).where(AnalyticsPrediction.id == pid).values(
-            actual=actual, abs_error=func.abs(AnalyticsPrediction.value - actual), scored_at=scored_at))
+    """Set the actual, the absolute error and the scoring instant on each prediction by id.
+
+    (3 scores) -> 3, in one UPDATE ; (2,500 scores) -> 2,500, in three ; () -> 0, nothing sent
+    """
+    P = AnalyticsPrediction
+    for chunk in _chunks(list(scores), BATCH):
+        # One statement per thousand rows: a statement per row took six hours a night and gave a
+        # stalled server 47,000 chances to cancel the run (26 Nov 2026).
+        new = values(column("id", UUID(as_uuid=True)), column("actual", Numeric(20, 6)),
+                     name="new").data(list(chunk))
+        await db.execute(update(P).where(P.id == new.c.id).values(
+            actual=new.c.actual, abs_error=func.abs(P.value - new.c.actual), scored_at=scored_at,
+        ).execution_options(synchronize_session=False))
     return len(scores)
 
 

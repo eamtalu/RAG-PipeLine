@@ -2,7 +2,8 @@
 
 Five phases, each in its own short session, because the compute in the middle runs in a thread
 and a session must never span it (CLAUDE.md rule 6). The write phase holds the tenant's advisory
-lock so a manual trigger and the nightly loop cannot interleave their upserts.
+lock so a manual trigger and the nightly loop cannot interleave their upserts. Scoring commits
+page by page (chunk 225), so no transaction stays open for long and a failed run keeps its pages.
 """
 
 from __future__ import annotations
@@ -24,6 +25,9 @@ from app.settings import settings
 logger = logging.getLogger(__name__)
 
 LOCK_PREFIX = "analytics-forecast:"
+#: Predictions read, scored and committed together. It bounds the memory of a page and the work
+#: lost when a statement is cancelled.
+SCORE_PAGE = 5000
 
 
 def config_from_settings(cc: str) -> plan.ForecastConfig:
@@ -72,25 +76,53 @@ async def _write(cc: str, out: plan.RunOutput, *, predicted_at: datetime) -> int
     return written
 
 
+def _changed_scores(rows, actuals: plan.Actuals, tz) -> list[tuple[uuid.UUID, object]]:
+    """The scores one page needs written: an actual where none is stored, or where it has changed.
+
+    (unscored, actual 90) -> written ; (scored 90, actual 90) -> left
+    ; (scored 90, actual 97) -> written ; (no actual in the history read) -> left
+    """
+    scores = []
+    for r in rows:
+        actual = actuals.value(metric=r.metric, grain=r.grain, subject_kind=r.subject_kind,
+                               subject=r.subject, target_at=r.target_at, tz=tz)
+        if actual is not None and (r.scored_at is None or r.actual != actual):
+            scores.append((r.id, actual))
+    return scores
+
+
 async def _score(cc: str, bundle, *, as_of_date: date, tz, cfg: plan.ForecastConfig, now: datetime) -> int:
-    """Fill the actual on every prediction whose bucket has closed, then recompute the rolling scores."""
+    """Score every closed prediction of the accuracy window, then recompute the rolling scores.
+
+    (window with 12,000 closed, 5,000 unscored) -> 5,000 ; (same night again) -> 0
+    """
     actuals = plan.Actuals(bundle, as_of=as_of_date, cfg=cfg)
     window_start = as_of_date - timedelta(days=cfg.accuracy_window_days)
+    since = plan.series.local_midnight(window_start, tz)
     cutoff = now - timedelta(hours=cfg.score_lag_hours)
+    scored, after = 0, None
     async with async_session() as db:
-        rows = await prediction_store.scorable(db, cc, since=plan.series.local_midnight(window_start, tz),
-                                               until=cutoff, tz=tz)
-        scores = []
-        for r in rows:
-            actual = actuals.value(metric=r.metric, grain=r.grain, subject_kind=r.subject_kind, subject=r.subject,
-                                   target_at=r.target_at, tz=tz)
-            if actual is not None:
-                scores.append((r.id, actual))
-        await prediction_store.write_scores(db, scores, scored_at=now)
+        while True:
+            # Step 1: Read one page of the window, scored or not, so that a day whose lines arrived
+            # late is compared again; reading only unscored rows would freeze a stale score.
+            rows, after = await prediction_store.scorable_page(
+                db, cc, since=since, until=cutoff, tz=tz, after=after, limit=SCORE_PAGE)
+            # Step 2: Write only the scores that are new or different, because rewriting the same
+            # rows every night is what made the run six hours long and the table bloated.
+            scores = _changed_scores(rows, actuals, tz)
+            if scores:
+                await prediction_store.write_scores(db, scores, scored_at=now)
+            # Step 3: Commit each page, otherwise one cancelled statement late in the run would
+            # roll back every score before it, as it did on 25 and 26 Nov 2026.
+            await db.commit()
+            scored += len(scores)
+            if after is None:
+                break
+        # Step 4: Recompute the accuracy once, after the last page, so that it sees every score.
         await accuracy_store.recompute(db, cc, window_start=window_start, window_end=as_of_date,
                                        model_version=MODEL_VERSION, tz=tz)
         await db.commit()
-    return len(scores)
+    return scored
 
 
 async def _finish(run_id: uuid.UUID, **fields) -> None:
