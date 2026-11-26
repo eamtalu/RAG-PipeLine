@@ -254,7 +254,8 @@ _SOURCE_COLUMNS = (
     LogTransaction.id, LogTransaction.started_at, LogTransaction.duration_ms, LogTransaction.method,
     LogTransaction.transaction_name, LogTransaction.transaction_type, LogTransaction.status,
     LogTransaction.item_number, LogTransaction.order_number, LogTransaction.delivery_number,
-    LogTransaction.warehouse, LogTransaction.warehouse_id, LogTransaction.user_name,
+    LogTransaction.company, LogTransaction.warehouse, LogTransaction.warehouse_id,
+    LogTransaction.user_name,
     LogTransaction.device_id, LogTransaction.device_name, LogTransaction.attributes,
     LogTransaction.sealed, _FRONTIER_COLUMN,
     # S3's digests, read so the fold can tell "this transaction has not changed at all" without

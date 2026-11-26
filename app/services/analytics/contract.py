@@ -76,7 +76,7 @@ FACT_FIELDS: tuple[str, ...] = (
     # subject
     "item_number", "lot_number", "order_number", "delivery_number",
     # place
-    "warehouse", "warehouse_id", "from_location", "to_location",
+    "company", "warehouse", "warehouse_id", "from_location", "to_location",
     # actor
     "user_name", "device_id", "device_name",
     # measures

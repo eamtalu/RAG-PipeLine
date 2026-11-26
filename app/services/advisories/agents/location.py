@@ -44,7 +44,8 @@ async def items_at(db: AsyncSession, customer_code: str, location: str, since: d
         select(f.item_number, func.count()).where(
             f.customer_code == customer_code, f.method == PICK_METHOD, f.event_time >= since,
             f.quantity_classification == "attempt", f.attributes["FromLocation"].astext == location)
-        .group_by(f.item_number).order_by(func.count().desc()).limit(limit)
+        # the item number breaks a tie, so equal counts always list in the same order
+        .group_by(f.item_number).order_by(func.count().desc(), f.item_number).limit(limit)
     )).all()
     return [str(r[0]) for r in rows]
 
