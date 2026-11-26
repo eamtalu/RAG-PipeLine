@@ -125,7 +125,13 @@ class RouteProfiles(dict):
         """
         if not route:
             return None
-        return self._by_place.get((warehouse, route)) or self.get(route)
+        newest = self.get(route)
+        own = self._by_place.get((warehouse, route))
+        # the warehouse's own norm counts only while it is as new as the route's newest: places of
+        # one route are learned on the same night, so an older one was left behind by a later run
+        if own is not None and newest is not None and own.as_of_date >= newest.as_of_date:
+            return own
+        return newest
 
     def all(self) -> list[AnalyticsAtRiskRouteProfile]:
         """Every place's norm, by route then warehouse: [BRI03/BRI, R1/BRI, R1/LON]."""

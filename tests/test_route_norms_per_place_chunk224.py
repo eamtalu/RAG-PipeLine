@@ -189,3 +189,20 @@ async def test_a_site_limited_person_reads_the_norms_and_checks_of_their_warehou
         norms = await profile_store.latest(db, CC)
         assert [(n.route, n.warehouse) for n in norms.all()] == [("R1", "BRI")]
         assert scoped_data.closed_tables(scoped_data.tables_read(db), bri) == []
+
+
+async def test_a_stale_norm_of_the_same_warehouse_never_beats_the_routes_newer_one():
+    # the route was last learned with its warehouse some days ago; since then it has been learned
+    # without one, so the older row must not be the one a delivery is judged with
+    async with async_session() as db:
+        for as_of, warehouse, usual in ((AS_OF - timedelta(days=5), "BRI", Decimal("420")),
+                                        (AS_OF, None, Decimal("480"))):
+            db.add(AnalyticsAtRiskRouteProfile(
+                customer_code=CC, route="BRI03", warehouse=warehouse, as_of_date=as_of,
+                window_days=28, sample=10, loaded_sample=10, van_days=6,
+                van_ready_usual_min=usual, coverage=Decimal("0.9"), rule_version="r",
+                computed_at=NOW))
+        await db.commit()
+        norms = await profile_store.latest(db, CC)
+    assert norms.of("BRI03", "BRI").van_ready_usual_min == Decimal("480")
+    assert norms["BRI03"].van_ready_usual_min == Decimal("480")
