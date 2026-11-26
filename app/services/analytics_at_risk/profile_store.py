@@ -61,9 +61,10 @@ async def compute(db: AsyncSession, cc: str, *, as_of: date, settings: Settings,
     groups = _by_place(await _closed_rows(db, cc, start=start, end=as_of))
     stored = (await db.execute(select(AnalyticsAtRiskRouteProfile).where(
         AnalyticsAtRiskRouteProfile.customer_code == cc, AnalyticsAtRiskRouteProfile.as_of_date == as_of))).scalars().all()
-    existing = {(r.warehouse, r.route): r for r in stored}
+    existing = {(r.company, r.warehouse, r.route): r for r in stored}
     out = []
-    for (warehouse, route), rows in sorted(groups.items(), key=lambda kv: (kv[0][1], kv[0][0] or "")):
+    in_order = sorted(groups.items(), key=lambda kv: (kv[0][2], kv[0][1] or "", kv[0][0] or ""))
+    for (company, warehouse, route), rows in in_order:
         van_by_day: dict[date, datetime] = {}
         from_by_day: dict[date, datetime] = {}
         pick_by_day: dict[date, datetime] = {}
@@ -78,13 +79,15 @@ async def compute(db: AsyncSession, cc: str, *, as_of: date, settings: Settings,
         loading_from = [minutes_of_day(v, tz) for v in from_by_day.values()]
         picks = [minutes_of_day(v, tz) for v in pick_by_day.values()]
         mode = Counter(r.departure_at.astimezone(tz).strftime("%H%M") for r in rows).most_common(1)
-        # the day's row for this place, or the one stored before norms carried a warehouse, which
-        # is taken over instead of being doubled
-        profile = existing.get((warehouse, route)) or existing.pop((None, route), None)
+        # the day's row for this place, or the one stored before norms carried a company, or
+        # before they carried a warehouse: either is taken over instead of being doubled
+        profile = (existing.get((company, warehouse, route))
+                   or existing.pop((None, warehouse, route), None)
+                   or existing.pop((None, None, route), None))
         if profile is None:
             profile = AnalyticsAtRiskRouteProfile(customer_code=cc, route=route, as_of_date=as_of)
             db.add(profile)
-        profile.warehouse = warehouse
+        profile.company, profile.warehouse = company, warehouse
         profile.window_days = settings.window_days
         profile.sample, profile.loaded_sample = len(rows), sum(r.last_load_at is not None for r in rows)
         profile.van_days = len(van)
@@ -107,26 +110,45 @@ class RouteProfiles(dict):
     the norm of each place of a route.
 
     `norms["BRI03"]` is the route's newest norm; `norms.of("R1", "LON")` is the norm of that
-    warehouse when the route spans several; `norms.all()` lists every place's norm.
+    warehouse when the route spans several, and `norms.of("R1", "BRI", "911")` the norm of that
+    company's BRI when two companies share the code; `norms.all()` lists every place's norm.
     """
 
     def __init__(self, newest_first: list[AnalyticsAtRiskRouteProfile]):
         super().__init__()
-        self._by_place: dict[tuple[str | None, str], AnalyticsAtRiskRouteProfile] = {}
+        self._by_place: dict[tuple[str | None, str | None, str], AnalyticsAtRiskRouteProfile] = {}
+        #: The newest norm of a warehouse on a route, whatever its company.
+        self._at_warehouse: dict[tuple[str | None, str], AnalyticsAtRiskRouteProfile] = {}
         for row in newest_first:
-            self._by_place.setdefault((row.warehouse, row.route), row)
-        for row in sorted(self._by_place.values(), key=lambda r: r.as_of_date, reverse=True):
+            self._by_place.setdefault((row.company, row.warehouse, row.route), row)
+        newest = sorted(self._by_place.values(), key=lambda r: r.as_of_date, reverse=True)
+        for row in newest:
+            self._at_warehouse.setdefault((row.warehouse, row.route), row)
             self.setdefault(row.route, row)
 
-    def of(self, route: str | None, warehouse: str | None) -> AnalyticsAtRiskRouteProfile | None:
-        """The norm a delivery is judged with: its own warehouse's, else its route's newest.
+    def _own(self, route: str, warehouse: str | None,
+             company: str | None) -> AnalyticsAtRiskRouteProfile | None:
+        """The norm of a delivery's own place.
 
-        ("R1", "LON") -> the LON norm of R1 ; ("BRI03", None) -> BRI03's newest ; (None, ...) -> None
+        (915, BRI) -> the 915 BRI norm, else the BRI norm stored before norms had a company
+        ; (no company, BRI) -> the newest BRI norm of any company
+        """
+        if company is None:
+            return self._at_warehouse.get((warehouse, route))
+        return (self._by_place.get((company, warehouse, route))
+                or self._by_place.get((None, warehouse, route)))
+
+    def of(self, route: str | None, warehouse: str | None,
+           company: str | None = None) -> AnalyticsAtRiskRouteProfile | None:
+        """The norm a delivery is judged with: its own place's, else its route's newest.
+
+        ("R1", "LON") -> the LON norm of R1 ; ("R1", "BRI", "911") -> company 911's BRI norm
+        ; ("BRI03", None) -> BRI03's newest ; (None, ...) -> None
         """
         if not route:
             return None
         newest = self.get(route)
-        own = self._by_place.get((warehouse, route))
+        own = self._own(route, warehouse, company)
         # the warehouse's own norm counts only while it is as new as the route's newest: places of
         # one route are learned on the same night, so an older one was left behind by a later run
         if own is not None and newest is not None and own.as_of_date >= newest.as_of_date:
@@ -134,30 +156,57 @@ class RouteProfiles(dict):
         return newest
 
     def all(self) -> list[AnalyticsAtRiskRouteProfile]:
-        """Every place's norm, by route then warehouse: [BRI03/BRI, R1/BRI, R1/LON]."""
-        return sorted(self._by_place.values(), key=lambda r: (r.route, r.warehouse or ""))
+        """Every place's norm, by route, warehouse, then company: [BRI03/BRI, R1/BRI, R1/LON]."""
+        return sorted(self._by_place.values(),
+                      key=lambda r: (r.route, r.warehouse or "", r.company or ""))
 
 
-def _by_place(rows: list[AnalyticsAtRiskDelivery]) -> dict[tuple[str | None, str], list[AnalyticsAtRiskDelivery]]:
-    """The learning rows grouped by (warehouse, route). A route whose rows name at most one
-    warehouse stays one group and takes that warehouse, its rows without one included, so that
-    older rows without a warehouse do not split a route below the day floor; only a route that
-    names two or more warehouses is split, and its rows without one form their own group.
+#: What a norm is learned for: (company, warehouse, route). Company and warehouse are None for a
+#: route whose deliveries name no warehouse.
+PlaceRoute = tuple[str | None, str | None, str]
 
-    (BRI03: 3 rows BRI, 3 rows no warehouse) -> {("BRI", "BRI03"): 6 rows} ;
-    (R1: BRI and LON rows) -> {("BRI", "R1"): [...], ("LON", "R1"): [...]}
+
+def _by_place(
+        rows: list[AnalyticsAtRiskDelivery]) -> dict[PlaceRoute, list[AnalyticsAtRiskDelivery]]:
+    """The learning rows grouped by (company, warehouse, route). A route whose rows name at most
+    one place stays one group and takes that place, its rows without a warehouse included, so
+    that older rows do not split a route below the day floor; only a route that names two or more
+    places is split, and its rows without a warehouse form their own group. A row with a
+    warehouse and no company counts with that warehouse's only company on the route.
+
+    (BRI03: 3 rows 915 BRI, 3 rows no warehouse) -> {("915", "BRI", "BRI03"): 6 rows} ;
+    (R1: 911 BRI and 920 BRI rows) -> {("911", "BRI", "R1"): [...], ("920", "BRI", "R1"): [...]}
     """
     by_route: dict[str, list[AnalyticsAtRiskDelivery]] = defaultdict(list)
     for row in rows:
         by_route[row.route].append(row)
-    groups: dict[tuple[str | None, str], list[AnalyticsAtRiskDelivery]] = {}
+    groups: dict[PlaceRoute, list[AnalyticsAtRiskDelivery]] = {}
     for route, of_route in by_route.items():
-        named = {r.warehouse for r in of_route if r.warehouse}
-        if len(named) <= 1:
-            groups[(next(iter(named), None), route)] = of_route
-            continue
+        # Step 1: Find the companies each warehouse is filed under on this route, so that a row
+        # closed before deliveries carried a company can join its warehouse's only one.
+        companies: dict[str, set[str]] = defaultdict(set)
         for row in of_route:
-            groups.setdefault((row.warehouse or None, route), []).append(row)
+            if row.warehouse and row.company:
+                companies[row.warehouse].add(row.company)
+
+        def place_of(row: AnalyticsAtRiskDelivery) -> tuple[str | None, str] | None:
+            if not row.warehouse:
+                return None
+            only = companies[row.warehouse]
+            return (row.company or (next(iter(only)) if len(only) == 1 else None), row.warehouse)
+
+        placed = [(place_of(row), row) for row in of_route]
+        named = {place for place, _row in placed if place is not None}
+        # Step 2: One place at most: the route is one norm, otherwise rows without a warehouse
+        # would split it below the number of days a norm needs.
+        if len(named) <= 1:
+            company, warehouse = next(iter(named), (None, None))
+            groups[(company, warehouse, route)] = of_route
+            continue
+        # Step 3: Two or more places: one norm each, because their vans keep different hours.
+        for place, row in placed:
+            company, warehouse = place or (None, None)
+            groups.setdefault((company, warehouse, route), []).append(row)
     return groups
 
 
@@ -186,7 +235,7 @@ def _norm_for(profiles: Mapping[str, AnalyticsAtRiskRouteProfile], state: model.
     (RouteProfiles, R1 at LON) -> the LON norm ; (a plain dict by route, as tests hand over) -> by route
     """
     if isinstance(profiles, RouteProfiles):
-        return profiles.of(state.route, state.warehouse)
+        return profiles.of(state.route, state.warehouse, state.company)
     return profiles.get(state.route) if state.route else None
 
 

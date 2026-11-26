@@ -178,9 +178,10 @@ class AnalyticsAtRiskRouteProfile(Base):
 
     __tablename__ = "analytics_at_risk_route_profiles"
     __table_args__ = (
-        # One norm per place and route per day (chunk 224). NULLS NOT DISTINCT so a route with no
-        # warehouse still has one row a day.
-        UniqueConstraint("customer_code", "warehouse", "route", "as_of_date",
+        # One norm per place and route per day (chunk 224); a place is a company and warehouse
+        # pair since chunk 230. NULLS NOT DISTINCT so a route with no warehouse still has one
+        # row a day.
+        UniqueConstraint("customer_code", "company", "warehouse", "route", "as_of_date",
                          name="uq_analytics_at_risk_route_profiles_key",
                          postgresql_nulls_not_distinct=True),
         Index("ix_analytics_at_risk_route_profiles_latest", "customer_code", "route", "as_of_date"),

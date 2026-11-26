@@ -1248,7 +1248,7 @@ erDiagram
     }
     analytics_at_risk_route_profiles {
         uuid id PK
-        string customer_code "soft tenant key; unique with warehouse, route, as_of_date (nulls not distinct)"
+        string customer_code "soft tenant key; unique with company, warehouse, route, as_of_date (nulls not distinct)"
         string route
         string company "nullable; the WMS company of the place, filled once deliveries carry it"
         string warehouse "nullable; the warehouse the norm was learned for"
