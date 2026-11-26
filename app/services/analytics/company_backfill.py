@@ -7,8 +7,12 @@ source and a fact whose transaction was removed is filled like any other. The wo
 partition by partition, a range of table blocks per batch, each batch in its own transaction, so
 it can be stopped at any batch and run again. It walks blocks and not ids because neither table
 has an index on its id: a batch ordered by id scanned and sorted the whole partition, which took
-22 seconds on the ledger against a 30 second statement limit. Used by
-`scripts/backfill_fact_company.py`; nothing in the serving path imports this.
+22 seconds on the ledger against a 30 second statement limit.
+
+A settled row (chunk 228) keeps no call attributes, so it takes the customer's only company for
+its warehouse, read from the facts; a warehouse filed under two companies is left alone, and a
+re-settle of those keys fills it from their calls. Used by `scripts/backfill_fact_company.py`;
+nothing in the serving path imports this.
 """
 
 from __future__ import annotations
@@ -23,8 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import SessionFactory
 
-#: The only tables this module may write: both carry the fact columns and the company.
+#: The fact tables this module may write: both carry the fact columns and the company.
 TABLES = ("analytics_facts", "analytics_fact_ledger")
+#: The settled rows, filled by `fill_settled_rows` from the facts' companies.
+SETTLED_ROWS = "analytics_settled_rows"
 _NAME = re.compile(r"^[a-z0-9_]+$")
 
 
@@ -149,6 +155,105 @@ async def fill_batch(db: AsyncSession, partition: str, customer_code: str, *, fi
     return Batch(read=int(row.read), filled=int(row.filled))
 
 
+async def single_companies(db: AsyncSession, customer_code: str) -> dict[str, str]:
+    """Each warehouse the customer's facts file under exactly one company.
+
+    (BRI under 915 only; BIC under 920 and 940) -> {"BRI": "915"}
+    """
+    rows = await db.execute(text(
+        "SELECT warehouse, min(company) FROM analytics_facts "
+        "WHERE customer_code = :cc AND warehouse IS NOT NULL AND company IS NOT NULL "
+        "GROUP BY warehouse HAVING count(DISTINCT company) = 1"), {"cc": customer_code})
+    return {warehouse: company for warehouse, company in rows}
+
+
+def _settled_sql(singles: dict[str, str], *, dry_run: bool) -> str:
+    """The statement for one batch of settled rows: a block range, each row's warehouse looked
+    up in the single-company list.
+
+    (dry_run) -> the same rows and the same count of fillable rows, with no UPDATE
+    """
+    pairs = ", ".join(f"(CAST(:w{i} AS text), CAST(:c{i} AS text))" for i in range(len(singles)))
+    one = (f"(VALUES {pairs})" if singles else
+           "(SELECT CAST(NULL AS text), CAST(NULL AS text) WHERE false)")
+    if dry_run:
+        write, filled = "", "SELECT count(*) FROM todo WHERE company IS NOT NULL"
+    else:
+        write = (f", done AS (UPDATE {SETTLED_ROWS} f SET company = todo.company FROM todo "
+                 "WHERE f.ctid = todo.row AND f.company IS NULL AND todo.company IS NOT NULL "
+                 "RETURNING 1)")
+        filled = "SELECT count(*) FROM done"
+    return f"""
+        WITH todo AS MATERIALIZED (
+            SELECT block.row, one.company
+              FROM (SELECT ctid AS row, customer_code, company, warehouse FROM {SETTLED_ROWS}
+                     WHERE ctid >= CAST(:lo AS tid) AND ctid < CAST(:hi AS tid)
+                    OFFSET 0) block
+              LEFT JOIN {one} one(warehouse, company) ON one.warehouse = block.warehouse
+             WHERE block.customer_code = :cc AND block.company IS NULL
+               AND block.warehouse IS NOT NULL)
+        {write}
+        SELECT (SELECT count(*) FROM todo) AS read, ({filled}) AS filled
+    """
+
+
+async def fill_settled_rows(session_factory: SessionFactory, customer_code: str, *,
+                            blocks: int = 500, pause_seconds: float = 0.0, dry_run: bool = False,
+                            max_batches: int | None = None,
+                            on_batch: Callable[[str, Batch], None] | None = None) -> Totals:
+    """Fill the company on the customer's settled rows that lack it, a block range at a time.
+
+    (3 old rows, BRI under 915 only) -> Totals(read=3, filled=3, is_finished=True)
+    ; (BRI under 915 and 920) -> Totals(read=3, filled=0): left for a re-settle
+    """
+    # Step 1: Read the single-company list once, so that every batch of the run judges a
+    # warehouse the same way even while new facts arrive.
+    async with session_factory() as db:
+        singles = await single_companies(db, customer_code)
+    params = {"cc": customer_code}
+    for i, (warehouse, company) in enumerate(sorted(singles.items())):
+        params[f"w{i}"], params[f"c{i}"] = warehouse, company
+    sql = _settled_sql(singles, dry_run=dry_run)
+    totals = Totals()
+    totals.is_finished = await _walk(session_factory, SETTLED_ROWS, sql, params, totals,
+                                     blocks=blocks, pause_seconds=pause_seconds,
+                                     max_batches=max_batches, on_batch=on_batch)
+    return totals
+
+
+async def _walk(session_factory: SessionFactory, relation: str, sql: str, params: dict,
+                totals: Totals, *, blocks: int, pause_seconds: float, max_batches: int | None,
+                on_batch: Callable[[str, Batch], None] | None) -> bool:
+    """Run one batch statement over every block range of a table; False when stopped early.
+
+    (a 250 block table, blocks 100) -> three transactions, True ; (max_batches reached) -> False
+    """
+    # Step 1: Fix the end of the walk now, because every update writes a new copy of its row at
+    # the end of the table and following those would never finish.
+    async with session_factory() as db:
+        total_blocks = await block_count(db, relation)
+    for first_block, end_block in block_ranges(total_blocks, blocks):
+        if max_batches is not None and totals.batches >= max_batches:
+            return False
+        # Step 2: One short transaction per range, because a long one would hold row locks the
+        # writers wait on and would lose everything on a cancelled statement.
+        async with session_factory() as db:
+            row = (await db.execute(text(sql), {
+                **params, "lo": (first_block, 0), "hi": (end_block, 0)})).one()
+            await db.commit()
+        done = Batch(read=int(row.read), filled=int(row.filled))
+        if done.read == 0:
+            continue
+        totals.read += done.read
+        totals.filled += done.filled
+        totals.batches += 1
+        if on_batch is not None:
+            on_batch(relation, done)
+        if pause_seconds:
+            await asyncio.sleep(pause_seconds)
+    return True
+
+
 async def explain_batch(db: AsyncSession, partition: str, customer_code: str, *, first_block: int,
                         blocks: int) -> str:
     """The query plan of one batch's read, as text; nothing is executed.
@@ -176,28 +281,14 @@ async def fill_table(session_factory: SessionFactory, table: str, customer_code:
     # one table's blocks.
     async with session_factory() as db:
         partitions = await partitions_of(db, table)
+    # Step 2: Walk each partition with the same statement shape; stop the whole run as soon as
+    # one of them is stopped early, so that `is_finished` is true only when all were walked.
     for partition in partitions:
-        # Step 2: Fix the end of the walk now, because every update writes a new copy of its row
-        # at the end of the table and following those would never finish.
-        async with session_factory() as db:
-            total_blocks = await block_count(db, partition)
-        for first_block, end_block in block_ranges(total_blocks, blocks):
-            if max_batches is not None and totals.batches >= max_batches:
-                return totals
-            # Step 3: One short transaction per range, because a long one would hold row locks
-            # the fact writer waits on and would lose everything on a cancelled statement.
-            async with session_factory() as db:
-                done = await fill_batch(db, partition, customer_code, first_block=first_block,
-                                        blocks=end_block - first_block, dry_run=dry_run)
-                await db.commit()
-            if done.read == 0:
-                continue
-            totals.read += done.read
-            totals.filled += done.filled
-            totals.batches += 1
-            if on_batch is not None:
-                on_batch(partition, done)
-            if pause_seconds:
-                await asyncio.sleep(pause_seconds)
+        is_walked = await _walk(session_factory, partition,
+                                _batch_sql(partition, dry_run=dry_run), {"cc": customer_code},
+                                totals, blocks=blocks, pause_seconds=pause_seconds,
+                                max_batches=max_batches, on_batch=on_batch)
+        if not is_walked:
+            return totals
     totals.is_finished = True
     return totals

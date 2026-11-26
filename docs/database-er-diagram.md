@@ -892,6 +892,7 @@ erDiagram
         date business_date
         string method
         string transaction_name
+        string company "nullable; the WMS company of the calls behind the row, chunk 228"
         string warehouse
         string item_number
         string delivery_number

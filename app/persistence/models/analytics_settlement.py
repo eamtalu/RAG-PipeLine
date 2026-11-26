@@ -87,6 +87,9 @@ class AnalyticsSettledRow(Base):
     # --- the fact row's typed columns, filled where the settlement carries them ---
     method: Mapped[str | None] = mapped_column(String(128), nullable=True)
     transaction_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: The WMS company (M3 CONO) of the calls behind the row (chunk 228). Taken by every settled
+    #: row, whatever the settlement carries: with the warehouse it names the row's place.
+    company: Mapped[str | None] = mapped_column(String(16), nullable=True)
     warehouse: Mapped[str | None] = mapped_column(String(64), nullable=True)
     item_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
     delivery_number: Mapped[str | None] = mapped_column(String(64), nullable=True)

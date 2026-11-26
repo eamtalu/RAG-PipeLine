@@ -41,8 +41,8 @@ KEY_SEP = "\x1f"
 
 #: Typed columns a settled row shares with a fact row. A carried field with one of these names lands
 #: in its column as well as in the attribute bag, so the existing group-by reads it.
-TYPED = ("method", "transaction_name", "warehouse", "item_number", "delivery_number", "lot_number",
-         "user_name")
+TYPED = ("method", "transaction_name", "company", "warehouse", "item_number", "delivery_number",
+         "lot_number", "user_name")
 
 
 # ============================================================== declaration <-> row
@@ -158,7 +158,10 @@ def _stringify(value: Any) -> Any:
 
 def _to_row(customer_code: str, settlement: st.Settlement, settled: st.SettledRow,
             now: datetime, tz: tzinfo | None = None) -> dict:
-    attributes = {k: _stringify(v) for k, v in settled.carried.items()}
+    # The bag holds what the settlement asked to carry. A field every row takes anyway (the
+    # company) lands in its typed column only, so no stored bag changes shape because of it.
+    asked_for = {st._carry_name(name) for name in settlement.carry}
+    attributes = {k: _stringify(v) for k, v in settled.carried.items() if k in asked_for}
     attributes.update({k: _stringify(v) for k, v in settled.values.items()})
     row = {
         "id": uuid.uuid4(), "customer_code": customer_code, "settlement": settlement.name,
@@ -480,7 +483,8 @@ async def read_key(db: AsyncSession, customer_code: str, settlement: st.Settleme
 def _row_json(r: AnalyticsSettledRow) -> dict:
     return {"key": r.key.split(KEY_SEP), "event_time": r.event_time.isoformat() if r.event_time else None,
             "business_date": r.business_date.isoformat() if r.business_date else None,
-            "method": r.method, "transaction_name": r.transaction_name, "warehouse": r.warehouse,
+            "method": r.method, "transaction_name": r.transaction_name, "company": r.company,
+            "warehouse": r.warehouse,
             "item_number": r.item_number, "delivery_number": r.delivery_number,
             "lot_number": r.lot_number, "user_name": r.user_name,
             "attributes": r.attributes or {}, "calls": r.calls,

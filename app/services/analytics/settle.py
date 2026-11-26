@@ -116,6 +116,22 @@ class Settlement:
     values: tuple[Settled, ...]
 
 
+#: Fields every settled row takes from its calls, whatever its settlement carries (chunk 228).
+#: The company is part of the place a row belongs to, with the warehouse, and the data scope
+#: matches on it: a settlement that forgot to carry it would hide its rows from a person limited
+#: to a company and warehouse pair.
+ALWAYS_CARRIED: tuple[str, ...] = ("company",)
+
+
+def carried_fields(settlement: "Settlement") -> tuple[str, ...]:
+    """The fields copied onto a settled row: the settlement's own, then the ones every row takes.
+
+    (carry = delivery_number, warehouse) -> (delivery_number, warehouse, company)
+    ; (carry = company, warehouse) -> (company, warehouse)
+    """
+    return (*settlement.carry, *(name for name in ALWAYS_CARRIED if name not in settlement.carry))
+
+
 @dataclass
 class SettledRow:
     """One row per key. `carried` and `values` both land in the row's attribute bag when stored, so
@@ -210,7 +226,7 @@ def _settle_key(rows: list[Mapping[str, Any]], settlement: Settlement, tz: tzinf
     first_at = next((r["event_time"] for r in ordered if r.get("event_time") is not None), None)
 
     carried: dict[str, Any] = {}
-    for name in settlement.carry:
+    for name in carried_fields(settlement):
         for r in ordered:
             v = _read(r, name)
             if v is not None:
@@ -374,7 +390,7 @@ def validate(settlement: Settlement) -> list[str]:
         problems.append("a settlement needs a key: the field or fields whose values become the rows")
 
     seen: set[str] = set()
-    carried_names = {_carry_name(c) for c in settlement.carry}
+    carried_names = {_carry_name(c) for c in carried_fields(settlement)}
     for s in settlement.values:
         if s.name in seen:
             problems.append(f"settled value {s.name!r} is defined twice")
