@@ -27,8 +27,8 @@ from app.services.analytics import settle as st
 OPS = ("==", "!=", "<=", ">=", "<", ">")
 STAT_KINDS = ("median", "p90", "p95", "p99", "mean", "min", "max", "distinct")
 BUCKETS = ("hour", "hour_start", "day", "week", "month")
-TYPED = ("method", "transaction_name", "warehouse", "item_number", "delivery_number", "lot_number",
-         "user_name")
+TYPED = ("method", "transaction_name", "company", "warehouse", "item_number", "delivery_number",
+         "lot_number", "user_name")
 
 _FILTER = re.compile(r"^\s*(?P<field>[^<>=!]+?)\s*(?P<op>==|!=|<=|>=|<|>)\s*(?P<value>.*?)\s*$")
 _STAT = re.compile(r"^\s*(?P<kind>[a-z0-9]+)\s*:\s*(?P<field>.+?)\s*$")

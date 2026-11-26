@@ -1,4 +1,4 @@
-"""Fill the WMS company on facts and ledger versions written before chunk 226.
+"""Fill the WMS company on facts, ledger versions and settled rows written before they had one.
 
     PYTHONPATH=. venv/bin/python scripts/backfill_fact_company.py tmp-live --dry-run
     PYTHONPATH=. venv/bin/python scripts/backfill_fact_company.py tmp-live
@@ -8,8 +8,10 @@
 A row takes the company its own WMS call carried (`Company` or `CONO` in its attributes), which
 is the value ingestion files the transaction under; a call that carried none stays empty. Each
 batch is its own transaction, so the run can be stopped with Ctrl-C at any time and started
-again: it picks up the rows that still lack a company. `--vacuum` cleans each partition of
-the table afterwards, because an update leaves the old copy of every row behind.
+again: it picks up the rows that still lack a company. A settled row (`--table
+analytics_settled_rows`) takes the customer's only company for its warehouse, from the facts.
+`--vacuum` cleans the table afterwards, because an update leaves the old copy of every row
+behind.
 """
 
 from __future__ import annotations
@@ -28,7 +30,8 @@ from app.services.analytics import company_backfill as backfill
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("customer_code")
-    parser.add_argument("--table", choices=backfill.TABLES, default=backfill.TABLES[0])
+    parser.add_argument("--table", choices=(*backfill.TABLES, backfill.SETTLED_ROWS),
+                        default=backfill.TABLES[0])
     parser.add_argument("--blocks", type=int, default=1000,
                         help="table blocks (8 kB each) read per transaction")
     parser.add_argument("--pause", type=float, default=0.5, help="seconds between batches")
@@ -42,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
 async def vacuum(table: str) -> None:
     """Vacuum every partition of the table, outside a transaction and with no statement timeout."""
     async with async_session() as db:
-        partitions = await backfill.partitions_of(db, table)
+        partitions = await backfill.partitions_of(db, table) or [table]
     async with engine.connect() as raw:
         conn = await raw.execution_options(isolation_level="AUTOCOMMIT")
         await conn.execute(text("SET statement_timeout = 0"))
@@ -61,9 +64,12 @@ async def run(args: argparse.Namespace) -> int:
               flush=True)
         last[0] = now
 
-    totals = await backfill.fill_table(
-        async_session, args.table, args.customer_code, blocks=args.blocks, pause_seconds=args.pause,
-        dry_run=args.dry_run, max_batches=args.max_batches, on_batch=report)
+    options = dict(blocks=args.blocks, pause_seconds=args.pause, dry_run=args.dry_run,
+                   max_batches=args.max_batches, on_batch=report)
+    if args.table == backfill.SETTLED_ROWS:
+        totals = await backfill.fill_settled_rows(async_session, args.customer_code, **options)
+    else:
+        totals = await backfill.fill_table(async_session, args.table, args.customer_code, **options)
     word = "would fill" if args.dry_run else "filled"
     print(f"{args.table} for {args.customer_code}: read {totals.read}, {word} {totals.filled}, "
           f"left empty {totals.read - totals.filled}, {totals.batches} batches, "
