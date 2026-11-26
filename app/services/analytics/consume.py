@@ -632,6 +632,8 @@ async def _expand_records(db: AsyncSession, customer_code: str, *, outcomes,
                 "source_started_at": fact.get("source_started_at"),
                 "record_index": index,
                 "event_time": fact.get("event_time"), "business_date": fact.get("business_date"),
+                # a record belongs to the place of the call that returned it (chunk 232)
+                "company": fact.get("company"), "warehouse": fact.get("warehouse"),
                 "method": fact.get("method"), "transaction_name": fact.get("transaction_name"),
                 "mi_program": rec["mi_program"], "mi_transaction": rec["mi_transaction"],
                 "attributes": {**kept, _EXP_V_KEY: exp_v},

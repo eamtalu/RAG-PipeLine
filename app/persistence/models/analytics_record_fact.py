@@ -81,6 +81,10 @@ class AnalyticsRecordFact(Base):
 
     #: Denormalised from the parent so a record metric can filter without a join - the same reasoning
     #: that puts them on `analytics_facts`.
+    #: The place of the parent fact (chunk 232): its WMS company and warehouse.
+    company: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    warehouse: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
     method: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     transaction_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     mi_program: Mapped[str | None] = mapped_column(String(64), nullable=True)

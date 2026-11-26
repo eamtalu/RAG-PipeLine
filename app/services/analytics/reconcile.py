@@ -182,8 +182,9 @@ async def facts_vs_transactions(db: AsyncSession, customer_code: str, *,
 
 
 def _stored_key(row) -> tuple:
+    """A stored rollup row's key as the fold spells it: the six dimensions, then its place."""
     return (row.measure_name,
-            tuple(getattr(row, f"dim{i + 1}") for i in range(DIMENSION_SLOTS)))
+            tuple(getattr(row, f"dim{i + 1}") for i in range(DIMENSION_SLOTS)) + n5.place_of(row))
 
 
 async def _stored_rollups(db: AsyncSession, customer_code: str, model, definition_id,
@@ -271,7 +272,7 @@ async def _compare_rollups(db: AsyncSession, customer_code: str, *, window: UtcW
                 continue
             # The SAME fold the writer uses. See the module docstring: the bug class is a bucket that
             # was never recomputed, not arithmetic that disagrees with itself.
-            expected = n5.group_fold(facts, definition, bucket_of)
+            expected = n5.group_fold(facts, definition, bucket_of, with_place=True)
             stored = await _stored_rollups(db, customer_code, model, definition_id, column, window,
                                            is_date=is_date)
             # Both sides clipped to whole buckets, or a partially covered stored row would surface as

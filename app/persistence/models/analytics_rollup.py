@@ -77,6 +77,13 @@ class RollupColumns:
     #: Which of the definition's measures. Part of the key, per C5.
     measure_name: Mapped[str] = mapped_column(String(64), nullable=False)
 
+    # --- place ---
+    #: The WMS company and warehouse the row's facts belong to (chunk 232). Real columns and not
+    #: dimension slots: a slot means something different per metric, and the data scope has to
+    #: filter every metric's rows the same way. NULL on rows folded from calls with no warehouse.
+    company: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    warehouse: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # --- dimension slots ---
     # Positional, interpreted through the definition's `dimensions` list. A row is meaningless without
     # its definition, which is why definition_id is in every index that matters.
@@ -122,7 +129,7 @@ class AnalyticsHourlyRollup(RollupColumns, Base):
 
     __table_args__ = (
         UniqueConstraint("customer_code", "definition_id", "measure_name", "bucket_start",
-                         "dim1", "dim2", "dim3", "dim4", "dim5", "dim6",
+                         "company", "warehouse", "dim1", "dim2", "dim3", "dim4", "dim5", "dim6",
                          name="uq_analytics_hourly_bucket", postgresql_nulls_not_distinct=True),
         Index("ix_analytics_hourly_read", "customer_code", "definition_id", "bucket_start"),
         # Cut DAILY though the bucket is hourly: a day's worth of hourly rows is the unit retention
@@ -150,7 +157,7 @@ class AnalyticsDailyRollup(RollupColumns, Base):
 
     __table_args__ = (
         UniqueConstraint("customer_code", "definition_id", "measure_name", "business_date",
-                         "dim1", "dim2", "dim3", "dim4", "dim5", "dim6",
+                         "company", "warehouse", "dim1", "dim2", "dim3", "dim4", "dim5", "dim6",
                          name="uq_analytics_daily_bucket", postgresql_nulls_not_distinct=True),
         Index("ix_analytics_daily_read", "customer_code", "definition_id", "business_date"),
         # YEARLY partitions: kept forever, and a year of daily rows per key is small.
@@ -170,7 +177,7 @@ class AnalyticsMonthlyRollup(RollupColumns, Base):
 
     __table_args__ = (
         UniqueConstraint("customer_code", "definition_id", "measure_name", "month_start",
-                         "dim1", "dim2", "dim3", "dim4", "dim5", "dim6",
+                         "company", "warehouse", "dim1", "dim2", "dim3", "dim4", "dim5", "dim6",
                          name="uq_analytics_monthly_bucket", postgresql_nulls_not_distinct=True),
         Index("ix_analytics_monthly_read", "customer_code", "definition_id", "month_start"),
     )
