@@ -59,7 +59,8 @@ async def reconcile(db: AsyncSession, customer_code: str, agent: str, findings: 
             opened += 1
         # Step 3: Refresh the words and the severity every run, because the delivery's progress
         # and the count's gap move while the row stays open
-        row.site_id, row.severity, row.title = f.site_id, f.severity, f.title[:200]
+        row.site_id, row.company = f.site_id, f.company
+        row.severity, row.title = f.severity, f.title[:200]
         row.evidence, row.impact, row.recommended = f.evidence, f.impact, f.recommended
         row.confidence, row.due_at, row.source, row.actions = f.confidence, f.due_at, dict(f.source), list(f.actions)
         row.kind, row.about = f.kind, dict(f.about)

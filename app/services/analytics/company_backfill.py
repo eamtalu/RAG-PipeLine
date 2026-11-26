@@ -31,6 +31,8 @@ from app.config.database import SessionFactory
 TABLES = ("analytics_facts", "analytics_fact_ledger")
 #: The settled rows, filled by `fill_settled_rows` from the facts' companies.
 SETTLED_ROWS = "analytics_settled_rows"
+#: The advisories, filled by `fill_advisories` the same way.
+ADVISORIES = "advisories"
 _NAME = re.compile(r"^[a-z0-9_]+$")
 
 
@@ -219,6 +221,38 @@ async def fill_settled_rows(session_factory: SessionFactory, customer_code: str,
                                      blocks=blocks, pause_seconds=pause_seconds,
                                      max_batches=max_batches, on_batch=on_batch)
     return totals
+
+
+_ADVISORIES_WHERE = "a.customer_code = :cc AND a.company IS NULL AND a.site_id = one.warehouse"
+
+
+async def fill_advisories(session_factory: SessionFactory, customer_code: str, *,
+                          dry_run: bool = False) -> int:
+    """Give stored advisories the customer's only company for their warehouse; how many.
+
+    (632 advisories at BRI, BRI under 915 only) -> 632 ; (LON under two companies) -> 0 for LON
+    """
+    async with session_factory() as db:
+        # Step 1: The same single-company list the settled rows use, because an advisory keeps
+        # only the warehouse of the row its agent read.
+        singles = await single_companies(db, customer_code)
+        if not singles:
+            return 0
+        params: dict = {"cc": customer_code}
+        for i, (warehouse, company) in enumerate(sorted(singles.items())):
+            params[f"w{i}"], params[f"c{i}"] = warehouse, company
+        pairs = ", ".join(f"(CAST(:w{i} AS text), CAST(:c{i} AS text))"
+                          for i in range(len(singles)))
+        one = f"(VALUES {pairs}) one(warehouse, company)"
+        if dry_run:
+            return int(await db.scalar(text(
+                f"SELECT count(*) FROM advisories a JOIN {one} ON {_ADVISORIES_WHERE}"), params))
+        # Step 2: One statement: the table holds a few hundred rows per customer.
+        filled = await db.scalar(text(
+            f"WITH done AS (UPDATE advisories a SET company = one.company FROM {one} "
+            f"WHERE {_ADVISORIES_WHERE} RETURNING 1) SELECT count(*) FROM done"), params)
+        await db.commit()
+    return int(filled or 0)
 
 
 async def _walk(session_factory: SessionFactory, relation: str, sql: str, params: dict,

@@ -26,6 +26,8 @@ class Finding:
     recommended: str | None = None
     confidence: float | None = None
     site_id: str | None = None
+    #: The WMS company of the row behind the finding (chunk 231); with `site_id`, its place.
+    company: str | None = None
     due_at: datetime | None = None
     source: dict[str, Any] = field(default_factory=dict)
     actions: tuple[str, ...] = ("ask_why", "acknowledge", "assign", "snooze")

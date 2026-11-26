@@ -28,7 +28,8 @@ MIN_GAP_UNITS = Decimal("2")
 MIN_GAP_SHARE = Decimal("0.10")
 HIGH_GAP_SHARE = Decimal("0.25")
 CHRONIC_RELEASES = 3
-ITEM_GROUP = ["item_number", "lookup:item description.ItemDescription", "warehouse"]
+#: The company comes last, so the positions the existing readers use do not move (chunk 231).
+ITEM_GROUP = ["item_number", "lookup:item description.ItemDescription", "warehouse", "company"]
 DESCRIPTION_LOOKUP, DESCRIPTION_ATTRIBUTE = "item description", "ItemDescription"
 
 
@@ -80,11 +81,12 @@ async def latest_counts(db: AsyncSession, customer_code: str, since: datetime) -
               .group_by(f.item_number, loc).subquery())
     rows = (await db.execute(
         select(f.item_number, loc, f.attributes["CountedQuantity"].astext, f.attributes["BalanceQuantity"].astext,
-               f.event_time, f.warehouse)
+               f.event_time, f.warehouse, f.company)
         .join(latest, (f.item_number == latest.c.item_number) & (loc == latest.c.location) & (f.event_time == latest.c.at))
         .where(f.customer_code == customer_code, f.method == COUNT_METHOD)
     )).all()
-    return [{"item": r[0], "location": r[1], "counted": r[2], "balance": r[3], "at": r[4], "warehouse": r[5]} for r in rows]
+    return [{"item": r[0], "location": r[1], "counted": r[2], "balance": r[3], "at": r[4],
+             "warehouse": r[5], "company": r[6]} for r in rows]
 
 
 async def chronic_shorts(db: AsyncSession, customer_code: str, now: datetime) -> list[dict]:
@@ -103,6 +105,7 @@ async def chronic_shorts(db: AsyncSession, customer_code: str, now: datetime) ->
             units = -(_dec(row.get("shortfall")) or Decimal(0))
             out.append({"item": str(dims[0]), "description": str(dims[1]) if len(dims) > 1 and dims[1] else "",
                         "warehouse": str(dims[2]) if len(dims) > 2 and dims[2] else None,
+                        "company": str(dims[3]) if len(dims) > 3 and dims[3] else None,
                         "releases": releases, "units_short": units})
     return out
 
@@ -151,7 +154,7 @@ async def run(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo)
             impact="Picks from this location will be short until the balance is corrected"
                    if gap < 0 else "More stock here than the system knows; a pick may be sent elsewhere",
             recommended=f"Recount {c['location']} and adjust the balance for item {c['item']}",
-            site_id=c["warehouse"],
+            site_id=c["warehouse"], company=c["company"],
             source={"kind": "count", "item": c["item"], "location": c["location"]},
             kind="count_gap", about=about,
         ))
@@ -163,7 +166,7 @@ async def run(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo)
             severity="medium",
             title=f"{label} short on {s['releases']} releases this week",
             evidence=f"{plain(s['units_short'])} units short over 7 days",
-            site_id=s["warehouse"],
+            site_id=s["warehouse"], company=s["company"],
             impact="Customers on tomorrow's releases of this item are likely to be short again",
             recommended="Check the stock and the replenishment of this item before tomorrow's picks",
             source={"kind": "item", "item": s["item"]},

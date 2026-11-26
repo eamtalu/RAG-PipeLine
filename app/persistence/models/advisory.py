@@ -38,6 +38,9 @@ class Advisory(Base):
     customer_code: Mapped[str] = mapped_column(
         String(64), ForeignKey("customers.customer_code", ondelete="CASCADE"), nullable=False)
     site_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    #: The WMS company (M3 CONO) of the row the agent read (chunk 231). `site_id` holds that
+    #: row's warehouse, so the two together name the place the advisory is about.
+    company: Mapped[str | None] = mapped_column(String(16), nullable=True)
     agent: Mapped[str] = mapped_column(String(32), nullable=False)
     severity: Mapped[str] = mapped_column(String(8), nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)

@@ -71,9 +71,9 @@ def test_a_table_without_a_company_column_is_limited_by_the_warehouse():
 
 
 def test_a_table_keyed_by_site_id_matches_the_site_ids_and_the_places_warehouses():
-    from app.persistence.models.advisory import Advisory
+    from app.persistence.models.teams_conversation import TeamsConversation
     scope = DataScope(CC, site_ids=("BRI-911",), places=(Place("911", "BRI"),))
-    assert "advisories.site_id IN ('BRI', 'BRI-911')" in _sql(Advisory, scope)
+    assert "teams_conversations.site_id IN ('BRI', 'BRI-911')" in _sql(TeamsConversation, scope)
 
 
 # --- on real rows -------------------------------------------------------------------------------

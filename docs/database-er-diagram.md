@@ -1532,6 +1532,7 @@ erDiagram
         uuid id PK
         string customer_code FK "customers; unique with dedup_key; indexed with status, opened_at"
         string site_id
+        string company "nullable; the WMS company of the row the agent read, chunk 231"
         string agent "delivery | stock | location | ..."
         string severity "high | medium | low"
         string title

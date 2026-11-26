@@ -68,7 +68,7 @@ async def run(db: AsyncSession, customer_code: str, now: datetime, tz: ZoneInfo)
             impact=impact,
             recommended="Check the picker on the route; hold the van if the lines are close.",
             confidence=confidence,
-            site_id=row.warehouse,
+            site_id=row.warehouse, company=row.company,
             due_at=row.usual_ready_at or row.departure_at,
             source={"kind": "delivery", "delivery_number": row.delivery_number,
                     "departure_date": row.departure_date.isoformat(), "route": row.route,
