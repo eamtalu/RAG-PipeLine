@@ -3,7 +3,7 @@
     PYTHONPATH=. venv/bin/python scripts/backfill_fact_company.py tmp-live --dry-run
     PYTHONPATH=. venv/bin/python scripts/backfill_fact_company.py tmp-live
     PYTHONPATH=. venv/bin/python scripts/backfill_fact_company.py tmp-live \
-        --table analytics_fact_ledger --batch 2000 --pause 1 --vacuum
+        --table analytics_fact_ledger --blocks 500 --pause 1 --vacuum
 
 A row takes the company its own WMS call carried (`Company` or `CONO` in its attributes), which
 is the value ingestion files the transaction under; a call that carried none stays empty. Each
@@ -29,9 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("customer_code")
     parser.add_argument("--table", choices=backfill.TABLES, default=backfill.TABLES[0])
-    parser.add_argument("--batch", type=int, default=5000, help="rows per transaction")
+    parser.add_argument("--blocks", type=int, default=1000,
+                        help="table blocks (8 kB each) read per transaction")
     parser.add_argument("--pause", type=float, default=0.5, help="seconds between batches")
-    parser.add_argument("--max-batches", type=int, default=None, help="stop after this many")
+    parser.add_argument("--max-batches", type=int, default=None,
+                        help="stop after this many batches that found rows to fill")
     parser.add_argument("--dry-run", action="store_true", help="count, write nothing")
     parser.add_argument("--vacuum", action="store_true", help="vacuum the partitions afterwards")
     return parser
@@ -60,7 +62,7 @@ async def run(args: argparse.Namespace) -> int:
         last[0] = now
 
     totals = await backfill.fill_table(
-        async_session, args.table, args.customer_code, batch=args.batch, pause_seconds=args.pause,
+        async_session, args.table, args.customer_code, blocks=args.blocks, pause_seconds=args.pause,
         dry_run=args.dry_run, max_batches=args.max_batches, on_batch=report)
     word = "would fill" if args.dry_run else "filled"
     print(f"{args.table} for {args.customer_code}: read {totals.read}, {word} {totals.filled}, "
