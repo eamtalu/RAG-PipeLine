@@ -1196,6 +1196,7 @@ erDiagram
         string route
         string customer_name
         string customer_number
+        string company "nullable; the WMS company of the route rows, chunk 229"
         string warehouse "the site the route rows carry; NULL on rows closed before d3b7e9f1a2c4"
         string tier "none | watch | at_risk | late"
         string max_tier "highest ever reached"

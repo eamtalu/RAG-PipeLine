@@ -82,6 +82,9 @@ class AnalyticsAtRiskDelivery(Base):
     route: Mapped[str | None] = mapped_column(String(32), nullable=True)
     customer_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     customer_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: The WMS company (M3 CONO) of the delivery's route rows (chunk 229). With the warehouse it
+    #: names the place the delivery belongs to.
+    company: Mapped[str | None] = mapped_column(String(16), nullable=True)
     #: The warehouse (site) the delivery's route rows carry, so the board can be shown per site
     #: (stage D, step 4). NULL on rows closed before the column existed: those count as "all sites".
     warehouse: Mapped[str | None] = mapped_column(String(64), nullable=True)

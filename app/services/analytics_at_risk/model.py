@@ -83,6 +83,8 @@ class DeliveryState:
     route_loading_from: datetime | None = None
     #: The warehouse (site) on the delivery's route rows, for the per-site board; None when unknown.
     warehouse: str | None = None
+    #: The WMS company on the same route rows (chunk 229); None when the calls carried none.
+    company: str | None = None
 
     @property
     def last_at(self) -> datetime | None:

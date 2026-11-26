@@ -99,6 +99,9 @@ def _write_progress(row: AnalyticsAtRiskDelivery, state: model.DeliveryState) ->
         row.route_loading_from = state.route_loading_from
     if state.warehouse is not None:
         row.warehouse = state.warehouse
+    # as with the warehouse: a state that could not name the company must not erase a known one
+    if state.company is not None:
+        row.company = state.company
 
 
 def _write_clock(row: AnalyticsAtRiskDelivery, clock: model.RouteClock) -> None:
@@ -135,7 +138,7 @@ def state_from_row(row: AnalyticsAtRiskDelivery) -> model.DeliveryState:
         last_pick_at=row.last_pick_at, last_load_at=row.last_load_at,
         loading_expected=True if row.loading_expected is None else bool(row.loading_expected),
         transaction_names=tuple(row.transaction_names or ()), route_loaded_at=row.route_loaded_at,
-        route_loading_from=row.route_loading_from, warehouse=row.warehouse)
+        route_loading_from=row.route_loading_from, warehouse=row.warehouse, company=row.company)
 
 
 def _clock_from_row(row: AnalyticsAtRiskDelivery, *, warn_before: timedelta, gone_after: timedelta) -> model.RouteClock:
