@@ -35,6 +35,9 @@ Row types so far:
 - user_prefs (program step 2): one person's preferences: every area resolved for them (built-in
   default, then their role's, then their own, narrowed by their access) and what they set
   themselves; rewritten after every preference command.
+- site_admin (program step 4): every site with its name, whether it is active and the WMS
+  company and warehouse pairs it stands for, plus the pairs seen in the last 30 days of data
+  with the site each belongs to; rewritten after every site command and by the sweep.
 Later steps add their rows here, and the edge's `KEY_LAYOUT` test keeps the Terraform prefix list
 in step with this table.
 """
@@ -136,6 +139,8 @@ KEY_LAYOUT: dict[str, KeySpec] = {
     "user_prefs": KeySpec(
         pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USER#{user_id}#PREFS", ttl_seconds=None
     ),
+    #: program step 4: what the Admin tab's Sites section draws
+    "site_admin": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="SITES#ADMIN", ttl_seconds=None),
     "watchables": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="WATCHABLES", ttl_seconds=600),
     #: step 30: the Forecast page opened from Overview, per site and for "all", rewritten every five minutes
     "site_forecast": KeySpec(

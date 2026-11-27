@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.26"
+CONTRACT_REVISION = "3.27"
 
 
 def _now() -> datetime:
@@ -61,6 +61,9 @@ def _now() -> datetime:
 #: preference_set {area, settings, role?} ; preference_reset {area, role?} (3.26, program step 2:
 #:   the sender's own preferences, or a role's defaults when `role` is named and the sender may
 #:   manage users; `settings` holds only the fields being changed)
+#: site_set {site_id, name?, active?, sort_order?} ; site_places_set {site_id, places: [{company?,
+#:   warehouse}]} (3.27, program step 4: an Admin adds, renames or retires a site and says which
+#:   WMS company and warehouse pairs it stands for; needs manage_users)
 #: demo_act {action_id, form_id, values} (step 18: a confirmed demo form; one audit line marked demo,
 #:   nothing else changes, the receipt's status is "demo"). A confirmed form of any kind may also
 #:   arrive as {form_id, values, via}: the service unwraps it into its own fields (step 18).
@@ -90,6 +93,8 @@ ACCESS_COMMAND_KINDS = (
     "watch_not_now",
     "preference_set",
     "preference_reset",
+    "site_set",
+    "site_places_set",
 )
 
 
@@ -128,6 +133,8 @@ class Command(BaseModel):
         "watch_not_now",
         "preference_set",
         "preference_reset",
+        "site_set",
+        "site_places_set",
     ]
     #: The at-risk fields; required for the two at-risk kinds, checked by the backend's runner.
     delivery_number: str | None = Field(default=None, max_length=64)

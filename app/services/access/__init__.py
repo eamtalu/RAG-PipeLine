@@ -48,6 +48,10 @@ from app.services.access.people.users import (
 from app.services.access.tenancy.binding_mirror import BindingMirror, InMemoryMirror as InMemoryBindingMirror
 from app.services.access.tenancy.binding_mirror import build_mirror_from_settings as build_binding_mirror
 from app.services.access.tenancy.binding_sweep import sweep_once as sweep_bindings
+from app.services.access.tenancy.site_admin import KINDS as SITE_COMMAND_KINDS
+from app.services.access.tenancy.site_admin import overview as sites_overview
+from app.services.access.tenancy.site_admin import run as run_site_command
+from app.services.access.tenancy.site_admin import sweep_once as sweep_site_rows
 from app.services.access.usage import PeopleActivity, audit_action_counts, audit_actor_counts, people_activity
 
 __all__ = [
@@ -63,6 +67,8 @@ __all__ = [
     "record_audit_event", "purge_audit_events",
     # tenancy
     "BindingMirror", "InMemoryBindingMirror", "build_binding_mirror", "sweep_bindings",
+    # the customer's sites and their places, set up from Teams
+    "SITE_COMMAND_KINDS", "run_site_command", "sites_overview", "sweep_site_rows",
     # the edge's copy and the Admin tab's commands
     "mirror_customer", "roles_payload", "sweep_edge_rows", "run_admin_command",
     # usage

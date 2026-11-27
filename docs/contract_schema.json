@@ -55,6 +55,11 @@
       "sk": "ROLES",
       "ttl_seconds": null
     },
+    "site_admin": {
+      "pk": "EYE#{customer_code}",
+      "sk": "SITES#ADMIN",
+      "ttl_seconds": null
+    },
     "site_forecast": {
       "pk": "EYE#{customer_code}",
       "sk": "SITE#{site_id}#FORECAST",
@@ -1657,7 +1662,9 @@
                 "watch_seen",
                 "watch_not_now",
                 "preference_set",
-                "preference_reset"
+                "preference_reset",
+                "site_set",
+                "site_places_set"
               ],
               "title": "Kind",
               "type": "string"
@@ -1818,5 +1825,5 @@
       "type": "object"
     }
   },
-  "revision": "3.26"
+  "revision": "3.27"
 }
