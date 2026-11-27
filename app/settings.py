@@ -163,6 +163,8 @@ class Settings(BaseSettings):
     # a range the search sorted every kept day of the customer and ran into the 30 s statement
     # timeout. The answer names the range it used, so a person can ask for a wider one; raise
     # this (env LOG_SEARCH_DEFAULT_DAYS) if most questions need more than a week.
+    # A customer's Admin can set its own value (1 to 14 days) from the Ask page; this is what
+    # applies until they do (app/services/preferences, area `ask`).
     log_search_default_days: int = 7
     # The analytics fold's own statement timeout, in ms. The web tier's 30 s guard is wrong for a
     # background worker - Stage 1's bulk insert relaxes it for the same reason. 120 s is comfortable

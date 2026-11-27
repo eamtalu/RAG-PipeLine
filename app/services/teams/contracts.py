@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.28"
+CONTRACT_REVISION = "3.29"
 
 
 def _now() -> datetime:
@@ -61,6 +61,10 @@ def _now() -> datetime:
 #: preference_set {area, settings, role?} ; preference_reset {area, role?} (3.26, program step 2:
 #:   the sender's own preferences, or a role's defaults when `role` is named and the sender may
 #:   manage users; `settings` holds only the fields being changed)
+#:   3.29, program step 4: a sender who may manage users names one target. `role` with area
+#:   `<page>_default` sets what "Default" shows on that page for the role (one whole page);
+#:   `customer: true` with area `ask` sets {line_search_days: 1..14} for everyone; `user` with a
+#:   page area, on preference_reset only, forgets that person's saved views of the page.
 #: site_set {site_id, name?, active?, sort_order?} ; site_places_set {site_id, places: [{company?,
 #:   warehouse}]} (3.27, program step 4: an Admin adds, renames or retires a site and says which
 #:   WMS company and warehouse pairs it stands for; needs manage_users)

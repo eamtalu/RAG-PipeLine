@@ -1,7 +1,7 @@
 # preference.py - what a person or a role wants to see first (program step 2)
 #
-#   One row per customer, subject and area. A subject is a role ("role", "supervisor") or a
-#   person ("user", their Entra object id). An area is a named group of settings with a
+#   One row per customer, subject and area. A subject is the customer itself ("customer", its
+#   code), a role ("role", "supervisor") or a person ("user", their Entra object id). An area is a named group of settings with a
 #   validated shape (app/services/preferences/areas.py); `settings` holds only the fields that
 #   were set, so a field left out falls through to the role's value and then to the built-in
 #   default. A preference never widens access: it is narrowed again every time it is read.
@@ -15,7 +15,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.config.database import Base
 
-SUBJECT_KINDS = ("role", "user")
+SUBJECT_KINDS = ("customer", "role", "user")
 
 
 def _now() -> datetime:

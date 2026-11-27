@@ -1,10 +1,14 @@
 """The areas a preference can be about, each with the shape of its settings.
 
 An area is a pydantic model whose every field has a default, so "nothing chosen" is always a
-complete answer. `app` holds what the whole app remembers by itself. Every page with a view
-switch is an area too (`PAGES`): a short list of named views saved whole, and `use`, the one
-the page opens on. A new page is one entry in `PAGES`; nothing needs a new table. Used by the
-store, the resolver and the commands of this package.
+complete answer. `app` holds what the whole app remembers by itself. `ask` holds how far back
+a line search looks. Every page with a view switch is an area too (`PAGES`): a short list of
+named views saved whole, and `use`, the one the page opens on. A new page is one entry in
+`PAGES`; nothing needs a new table.
+
+Each area also says who may hold it (`holders`): a person's saved views are theirs alone, and
+a role holds a page's default as one whole page under `<page>_default`. Used by the store, the
+resolver and the commands of this package.
 """
 
 from __future__ import annotations
@@ -28,6 +32,19 @@ class App(_Area):
     default_site: str | None = None
     #: Open until the person hides it, as the app has always started.
     is_history_open: bool = True
+
+
+#: The most days an Admin may set for a line search. A week of lines limited to a site took
+#: over 30 s before the search was bounded, and the server ends a statement at 30 s.
+MAX_LINE_SEARCH_DAYS = 14
+
+
+class Ask(_Area):
+    """How Ask searches when the question does not say."""
+
+    #: Days a line search looks back when the question names no time range; None for the
+    #: server's own setting.
+    line_search_days: int | None = Field(default=None, ge=1, le=MAX_LINE_SEARCH_DAYS)
 
 
 #: An advisory kind or agent as the backend names it: "count_gap", "delivery_at_risk".
@@ -95,8 +112,52 @@ class PageViews(_Area, Generic[PageT]):
 #: The pages that have views, each with the shape of what a view holds.
 PAGES: dict[str, type[_Area]] = {"advisories": AdvisoriesPage}
 
-AREAS: dict[str, type[_Area]] = {"app": App,
+#: What a person's values are resolved for: the app, Ask, and each page's views.
+AREAS: dict[str, type[_Area]] = {"app": App, "ask": Ask,
                                  **{page: PageViews[shape] for page, shape in PAGES.items()}}
+
+_DEFAULT_SUFFIX = "_default"
+#: What "Default" shows on a page for a role: one whole page, held by the role only.
+ROLE_DEFAULT_AREAS: dict[str, type[_Area]] = {
+    f"{page}{_DEFAULT_SUFFIX}": shape for page, shape in PAGES.items()}
+
+USER, ROLE, CUSTOMER = "user", "role", "customer"
+
+
+def default_area(page: str) -> str:
+    """The area that holds a role's default of one page.
+
+    >>> default_area("advisories")
+    'advisories_default'
+    """
+    if page not in PAGES:
+        raise ValueError(f"unknown page {page!r}; the pages are {', '.join(sorted(PAGES))}")
+    return f"{page}{_DEFAULT_SUFFIX}"
+
+
+def page_of(area: str) -> str | None:
+    """The page an area belongs to, for an area that is about one page.
+
+    >>> page_of("advisories"), page_of("advisories_default"), page_of("app")
+    ('advisories', 'advisories', None)
+    """
+    if area in PAGES:
+        return area
+    return area[:-len(_DEFAULT_SUFFIX)] if area in ROLE_DEFAULT_AREAS else None
+
+
+def holders(area: str) -> tuple[str, ...]:
+    """Who may hold values of an area, widest first.
+
+    >>> holders("ask"), holders("app"), holders("advisories"), holders("advisories_default")
+    (('customer', 'role', 'user'), ('role', 'user'), ('user',), ('role',))
+    """
+    _shape(area)
+    if area in ROLE_DEFAULT_AREAS:
+        return (ROLE,)
+    if area in PAGES:
+        return (USER,)
+    return (CUSTOMER, ROLE, USER) if area == "ask" else (ROLE, USER)
 
 
 def page_defaults(page: str) -> dict:
@@ -119,17 +180,28 @@ def defaults(area: str) -> dict:
     return _shape(area)().model_dump()
 
 
-def validate(area: str, settings: dict) -> dict:
+_HOLDER_WORDS = {USER: "a person", ROLE: "a role", CUSTOMER: "the whole customer"}
+
+
+def validate(area: str, settings: dict, subject_kind: str = USER) -> dict:
     """The given fields, checked; fields not given stay out, so they fall through when read.
 
     >>> validate("app", {"is_history_open": False})
     {'is_history_open': False}
+    >>> validate("advisories", {"use": "default"}, "role")
+    Traceback (most recent call last):
+    ...
+    ValueError: advisories belongs to a person, not to a role
     >>> validate("app", {"shoe_size": 9})
     Traceback (most recent call last):
     ...
     ValueError: shoe_size: Extra inputs are not permitted
     """
     shape = _shape(area)
+    if subject_kind not in holders(area):
+        owners = " or ".join(_HOLDER_WORDS[kind] for kind in holders(area))
+        raise ValueError(f"{area} belongs to {owners}, "
+                         f"not to {_HOLDER_WORDS.get(subject_kind, subject_kind)}")
     try:
         checked = shape.model_validate(settings or {})
     except ValidationError as exc:
@@ -140,6 +212,7 @@ def validate(area: str, settings: dict) -> dict:
 
 
 def _shape(area: str) -> type[_Area]:
-    if area not in AREAS:
-        raise ValueError(f"unknown area {area!r}; the areas are {', '.join(sorted(AREAS))}")
-    return AREAS[area]
+    known = {**AREAS, **ROLE_DEFAULT_AREAS}
+    if area not in known:
+        raise ValueError(f"unknown area {area!r}; the areas are {', '.join(sorted(known))}")
+    return known[area]
