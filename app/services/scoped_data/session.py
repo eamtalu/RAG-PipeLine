@@ -5,12 +5,12 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Callable
 
-from sqlalchemy import Table, event
+from sqlalchemy import Table, event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import ORMExecuteState, with_loader_criteria
 from sqlalchemy.sql import visitors
 
-from app.services.scoped_data import registry
+from app.services.scoped_data import database_lock, registry
 from app.services.scoped_data.scope import DataScope
 
 
@@ -62,7 +62,15 @@ def limit_session(db: AsyncSession, scope: DataScope) -> AsyncSession:
             with_loader_criteria(entry.model, entry.condition(scope), include_aliases=True)
             for entry in registry.RULES))
 
+    def name_customer(_session, _transaction, connection) -> None:
+        # In every transaction, because the setting ends with the transaction: the database's
+        # own row rules (database_lock) return no row to the reader user until it is set.
+        connection.execute(text("SELECT set_config(:name, :customer, true)"),
+                           {"name": database_lock.READER_CUSTOMER,
+                            "customer": scope.customer_code})
+
     event.listen(db.sync_session, "do_orm_execute", add_scope)
+    event.listen(db.sync_session, "after_begin", name_customer)
     db.info[SCOPE] = scope
     return db
 
