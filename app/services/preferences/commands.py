@@ -2,8 +2,8 @@
 
 `preference_set` saves some fields of one area and `preference_reset` forgets an area, for the
 sender's own preferences, or for a role's defaults when the payload names a `role` and the
-sender may manage users. The sender's own access record decides; every change is one audit
-line; the rows of everyone whose resolved values moved are mirrored at once. Used by
+sender may manage users. The sender's own access record decides; a change to a role's defaults
+is one audit line; the rows of everyone whose resolved values moved are mirrored at once. Used by
 app/services/teams/commands.py.
 """
 
@@ -65,11 +65,15 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
                 text = f"Saved · {_title(area)}"
         except ValueError as exc:
             raise Refused(str(exc)) from None
-        await access.record_audit_event(
-            db, job.customer_code, actor_object_id=record.object_id, actor_name=job.sender_name,
-            action=command.kind, decision="allowed", subject_kind=f"preference_{subject[0]}",
-            subject_id=subject[1], site_id=job.site_id, request_id=job.job_id,
-            text=f"{job.sender_name or record.object_id}: {text}", detail={"area": area}, at=now)
+        # Only a role's defaults are audited: they change what other people see. A person
+        # re-sorting their own list is not an access event and would bury the Admin's list.
+        if role is not None:
+            await access.record_audit_event(
+                db, job.customer_code, actor_object_id=record.object_id,
+                actor_name=job.sender_name, action=command.kind, decision="allowed",
+                subject_kind="preference_role", subject_id=subject[1], site_id=job.site_id,
+                request_id=job.job_id, text=f"{job.sender_name or record.object_id}: {text}",
+                detail={"area": area}, at=now)
         await db.commit()
         # Step 3: Mirror everyone whose resolved values moved, so their apps follow at once.
         writer = mirror if mirror is not None else build_mirror_writer_from_settings()

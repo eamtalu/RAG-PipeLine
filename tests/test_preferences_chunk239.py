@@ -97,7 +97,8 @@ def test_an_area_checks_its_values_and_names_the_field():
 def test_every_area_has_complete_built_in_defaults():
     assert areas.defaults("advisories_view") == {
         "group_by": "kind", "sort_by": "severity", "reversed": False}
-    assert areas.defaults("app") == {"default_site": None, "is_history_open": False}
+    # the app shows past conversations until the person hides them
+    assert areas.defaults("app") == {"default_site": None, "is_history_open": True}
 
 
 # ==================================================== 2. resolving
@@ -193,6 +194,25 @@ async def test_a_roles_defaults_need_the_capability_to_manage_users():
     assert written == {"USER#u-sup#PREFS", "USER#u-two#PREFS"}
 
 
+async def test_only_a_roles_defaults_are_written_to_the_audit_log():
+    from app.persistence.models.access import AuditEvent
+
+    async def lines() -> list[str]:
+        async with async_session() as db:
+            return list((await db.execute(select(AuditEvent.action).where(
+                AuditEvent.customer_code == CC,
+                AuditEvent.action.like("preference%")))).scalars())
+
+    # a person changing their own view is not an access event; the Admin's list stays readable
+    await preferences.run(_job("u-sup", "preference_set", {
+        "area": "advisories_view", "settings": {"reversed": True}}), mirror=InMemoryMirrorWriter())
+    assert await lines() == []
+    await preferences.run(_job("u-adm", "preference_set", {
+        "area": "advisories_view", "settings": {"reversed": True}, "role": "supervisor"}),
+        mirror=InMemoryMirrorWriter())
+    assert await lines() == ["preference_set"]
+
+
 async def test_a_person_without_an_active_record_is_refused():
     with pytest.raises(Refused, match="no active access record"):
         await preferences.run(_job("u-ghost", "preference_set", {
@@ -210,7 +230,7 @@ async def test_the_persons_row_holds_the_resolved_values_and_follows_a_change():
     assert row["areas"]["advisories_view"] == {
         "group_by": "holder", "sort_by": "severity", "reversed": False}
     assert row["own"] == {"advisories_view": {"group_by": "holder"}}
-    assert row["areas"]["app"] == {"default_site": None, "is_history_open": False}
+    assert row["areas"]["app"] == {"default_site": None, "is_history_open": True}
 
 
 # ==================================================== 5. the boundary
