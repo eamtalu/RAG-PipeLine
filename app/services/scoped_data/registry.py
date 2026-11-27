@@ -216,10 +216,10 @@ RULES: tuple[Rule, ...] = (
     # no site column until step 1d
     AllSitesOnly(LogEntry),
     AllSitesOnly(LogEntryAssignment),
-    AllSitesOnly(AnalyticsRecordFact),
-    AllSitesOnly(rollup.AnalyticsHourlyRollup),
-    AllSitesOnly(rollup.AnalyticsDailyRollup),
-    AllSitesOnly(rollup.AnalyticsMonthlyRollup),
+    SiteLimited(AnalyticsRecordFact, "warehouse", company_column="company"),
+    SiteLimited(rollup.AnalyticsHourlyRollup, "warehouse", company_column="company"),
+    SiteLimited(rollup.AnalyticsDailyRollup, "warehouse", company_column="company"),
+    SiteLimited(rollup.AnalyticsMonthlyRollup, "warehouse", company_column="company"),
     # settings and reference data
     CustomerWide(Customer),
     CustomerWide(CustomerDisplayName),
