@@ -22,14 +22,15 @@ async def save(db: AsyncSession, customer_code: str, subject_kind: str, subject_
                area: str, settings: dict, *, by: str | None, now: datetime | None = None) -> dict:
     """Set some fields of one subject's area, keeping the fields not named; what is now stored.
 
-    (user u-7, "advisories_view", {"sort_by": "due"}) -> {"group_by": "area", "sort_by": "due"}
-    when group_by was stored before ; (a wrong value) -> ValueError naming the field
+    (user u-7, "app", {"default_site": "BRI"}) -> {"is_history_open": False, "default_site":
+    "BRI"} when the panel was stored before ; (a wrong value) -> ValueError naming the field
     """
     if subject_kind not in SUBJECT_KINDS:
         raise ValueError(f"a preference belongs to a role or a user, not {subject_kind!r}")
-    checked = areas.validate(area, settings)
     stored = await _own(db, customer_code, subject_kind, subject_id)
-    merged = {**stored.get(area, {}), **checked}
+    # Checked after merging with what is stored, because some fields only make sense together:
+    # a page's `use` must name one of its saved views, whichever of the two is being sent.
+    merged = areas.validate(area, {**stored.get(area, {}), **(settings or {})})
     statement = pg_insert(Preference).values(
         customer_code=customer_code, subject_kind=subject_kind, subject_id=subject_id, area=area,
         settings=merged, updated_at=now or datetime.now(timezone.utc), updated_by=by)
@@ -50,15 +51,15 @@ async def reset(db: AsyncSession, customer_code: str, subject_kind: str, subject
 
 
 async def own(db: AsyncSession, record: access.AccessRecord) -> dict[str, dict]:
-    """Only what the person set themselves, by area: {"advisories_view": {"sort_by": "due"}}."""
+    """Only what the person set themselves, by area: {"app": {"default_site": "BRI"}}."""
     return await _own(db, record.customer_code, "user", record.object_id)
 
 
 async def resolve(db: AsyncSession, record: access.AccessRecord) -> dict[str, dict]:
     """Every area's values for one person, complete and inside their access.
 
-    (role says group by area, the person says sort by due) ->
-    {"advisories_view": {"group_by": "area", "sort_by": "due", "reversed": False}, "app": {...}}
+    (role says the Ask panel is closed, the person chose site LON) ->
+    {"app": {"default_site": "LON", "is_history_open": False}, "advisories": {"use": ...}}
     """
     by_role = await _own(db, record.customer_code, "role", record.role_code)
     by_user = await _own(db, record.customer_code, "user", record.object_id)

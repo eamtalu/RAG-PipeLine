@@ -3,7 +3,9 @@
 Layer 3 of the model: what do I want to see first. Until now the Teams app kept the site, the
 Ask history panel and the Advisories view in the browser only, so they were lost on another
 device. They become rows of one table, saved by a command and mirrored to the edge as one row
-per person. A preference never widens access: a value the person may no longer use is replaced
+per person. Since chunk 242 a page's preference is a list of saved views (see
+tests/test_saved_views_chunk242.py); these tests keep to the `app` area, which is still saved
+field by field. A preference never widens access: a value the person may no longer use is replaced
 when it is read.
 
 Pinned here
@@ -85,9 +87,9 @@ async def _resolved(object_id: str) -> dict:
 # ==================================================== 1. the areas
 
 def test_an_area_checks_its_values_and_names_the_field():
-    assert areas.validate("advisories_view", {"group_by": "area"}) == {"group_by": "area"}
-    with pytest.raises(ValueError, match="group_by"):
-        areas.validate("advisories_view", {"group_by": "colour"})
+    assert areas.validate("app", {"is_history_open": False}) == {"is_history_open": False}
+    with pytest.raises(ValueError, match="is_history_open"):
+        areas.validate("app", {"is_history_open": "perhaps"})
     with pytest.raises(ValueError, match="shoe_size"):
         areas.validate("app", {"shoe_size": 9})
     with pytest.raises(ValueError, match="unknown area"):
@@ -95,55 +97,41 @@ def test_an_area_checks_its_values_and_names_the_field():
 
 
 def test_every_area_has_complete_built_in_defaults():
-    assert areas.defaults("advisories_view") == {
-        "group_by": "kind", "sort_by": "severity", "reversed": False}
     # the app shows past conversations until the person hides them
     assert areas.defaults("app") == {"default_site": None, "is_history_open": True}
-
-
-def test_the_focus_area_holds_the_kinds_and_severities_a_person_wants_first():
-    # chunk 241 (slice 3): empty kinds means every kind; at least one severity must stay
-    assert areas.defaults("advisories_focus") == {
-        "kinds": [], "severities": ["high", "medium", "low"]}
-    assert areas.validate("advisories_focus", {"kinds": ["stock", "delivery"]}) == {
-        "kinds": ["stock", "delivery"]}
-    assert areas.validate("advisories_focus", {"severities": ["high"]}) == {
-        "severities": ["high"]}
-    for wrong, field in (({"severities": []}, "severities"),
-                         ({"severities": ["urgent"]}, "severities"),
-                         ({"kinds": ["Not A Kind!"]}, "kinds"),
-                         ({"kinds": ["x"] * 40}, "kinds")):
-        with pytest.raises(ValueError, match=field):
-            areas.validate("advisories_focus", wrong)
+    # a page starts on its default with no saved view (chunk 242)
+    assert areas.defaults("advisories") == {"use": "default", "views": []}
 
 
 # ==================================================== 2. resolving
 
 async def test_values_resolve_from_default_then_role_then_person_field_by_field():
-    assert (await _resolved("u-sup"))["advisories_view"] == areas.defaults("advisories_view")
+    assert (await _resolved("u-two"))["app"] == areas.defaults("app")
     async with async_session() as db:
-        await preferences.save(db, CC, "role", "supervisor", "advisories_view",
-                               {"group_by": "area", "sort_by": "newest"}, by="u-adm", now=NOW)
-        await preferences.save(db, CC, "user", "u-sup", "advisories_view",
-                               {"sort_by": "due"}, by="u-sup", now=NOW)
+        await preferences.save(db, CC, "role", "supervisor", "app",
+                               {"default_site": "BRI", "is_history_open": False},
+                               by="u-adm", now=NOW)
+        await preferences.save(db, CC, "user", "u-two", "app", {"default_site": "LON"},
+                               by="u-two", now=NOW)
         await db.commit()
-    assert (await _resolved("u-sup"))["advisories_view"] == {
-        "group_by": "area", "sort_by": "due", "reversed": False}
+    # the person's site, the role's panel setting
+    assert (await _resolved("u-two"))["app"] == {"default_site": "LON", "is_history_open": False}
     # another supervisor gets the role's values, an Admin the built-in ones
-    assert (await _resolved("u-two"))["advisories_view"]["sort_by"] == "newest"
-    assert (await _resolved("u-adm"))["advisories_view"]["group_by"] == "kind"
+    assert (await _resolved("u-sup"))["app"] == {"default_site": "BRI", "is_history_open": False}
+    assert (await _resolved("u-adm"))["app"] == areas.defaults("app")
 
 
 async def test_a_second_save_changes_only_the_fields_it_names():
     async with async_session() as db:
-        await preferences.save(db, CC, "user", "u-sup", "advisories_view",
-                               {"group_by": "item"}, by="u-sup", now=NOW)
-        await preferences.save(db, CC, "user", "u-sup", "advisories_view",
-                               {"reversed": True}, by="u-sup", now=NOW)
+        await preferences.save(db, CC, "user", "u-sup", "app", {"default_site": "BRI"},
+                               by="u-sup", now=NOW)
+        await preferences.save(db, CC, "user", "u-sup", "app", {"is_history_open": False},
+                               by="u-sup", now=NOW)
         await db.commit()
         rows = (await db.execute(select(Preference).where(
             Preference.customer_code == CC))).scalars().all()
-    assert len(rows) == 1 and rows[0].settings == {"group_by": "item", "reversed": True}
+    assert len(rows) == 1
+    assert rows[0].settings == {"default_site": "BRI", "is_history_open": False}
 
 
 async def test_a_default_site_the_person_may_not_see_resolves_to_one_of_their_own():
@@ -166,12 +154,11 @@ async def test_a_default_site_the_person_may_not_see_resolves_to_one_of_their_ow
 async def test_a_person_saves_and_resets_their_own_preferences_by_command():
     mirror = InMemoryMirrorWriter()
     out = await preferences.run(_job("u-sup", "preference_set", {
-        "area": "advisories_view", "settings": {"group_by": "location"}}), mirror=mirror)
+        "area": "app", "settings": {"is_history_open": False}}), mirror=mirror)
     assert "saved" in out.text.lower()
-    assert (await _resolved("u-sup"))["advisories_view"]["group_by"] == "location"
-    await preferences.run(_job("u-sup", "preference_reset", {"area": "advisories_view"}),
-                          mirror=mirror)
-    assert (await _resolved("u-sup"))["advisories_view"] == areas.defaults("advisories_view")
+    assert (await _resolved("u-sup"))["app"]["is_history_open"] is False
+    await preferences.run(_job("u-sup", "preference_reset", {"area": "app"}), mirror=mirror)
+    assert (await _resolved("u-sup"))["app"] == areas.defaults("app")
 
 
 async def test_the_command_reaches_the_service_through_the_dispatcher():
@@ -182,7 +169,7 @@ async def test_the_command_reaches_the_service_through_the_dispatcher():
 
 
 @pytest.mark.parametrize("payload, words", [
-    ({"area": "advisories_view", "settings": {"group_by": "colour"}}, "group_by"),
+    ({"area": "app", "settings": {"is_history_open": "perhaps"}}, "is_history_open"),
     ({"area": "weather", "settings": {}}, "unknown area"),
     ({"area": "app", "settings": {"default_site": "MARS"}}, "MARS"),
     ({"area": "app", "settings": {"default_site": "LON"}}, "LON"),      # not Sam's site
@@ -197,14 +184,14 @@ async def test_a_wrong_value_is_refused_and_nothing_is_stored(payload, words):
 
 
 async def test_a_roles_defaults_need_the_capability_to_manage_users():
-    role_payload = {"area": "advisories_view", "settings": {"sort_by": "oldest"},
+    role_payload = {"area": "app", "settings": {"is_history_open": False},
                     "role": "supervisor"}
     with pytest.raises(Refused, match="manage users"):
         await preferences.run(_job("u-sup", "preference_set", role_payload),
                               mirror=InMemoryMirrorWriter())
     mirror = InMemoryMirrorWriter()
     await preferences.run(_job("u-adm", "preference_set", role_payload), mirror=mirror)
-    assert (await _resolved("u-sup"))["advisories_view"]["sort_by"] == "oldest"
+    assert (await _resolved("u-sup"))["app"]["is_history_open"] is False
     # everyone with that role is mirrored again, because their resolved values moved
     written = {env.sk for env in mirror.items.values()}
     assert written == {"USER#u-sup#PREFS", "USER#u-two#PREFS"}
@@ -221,10 +208,10 @@ async def test_only_a_roles_defaults_are_written_to_the_audit_log():
 
     # a person changing their own view is not an access event; the Admin's list stays readable
     await preferences.run(_job("u-sup", "preference_set", {
-        "area": "advisories_view", "settings": {"reversed": True}}), mirror=InMemoryMirrorWriter())
+        "area": "app", "settings": {"is_history_open": False}}), mirror=InMemoryMirrorWriter())
     assert await lines() == []
     await preferences.run(_job("u-adm", "preference_set", {
-        "area": "advisories_view", "settings": {"reversed": True}, "role": "supervisor"}),
+        "area": "app", "settings": {"is_history_open": False}, "role": "supervisor"}),
         mirror=InMemoryMirrorWriter())
     assert await lines() == ["preference_set"]
 
@@ -241,12 +228,11 @@ async def test_the_persons_row_holds_the_resolved_values_and_follows_a_change():
     assert KEY_LAYOUT["user_prefs"].key(CC, user_id="u-sup") == (f"EYE#{CC}", "USER#u-sup#PREFS")
     mirror = InMemoryMirrorWriter()
     await preferences.run(_job("u-sup", "preference_set", {
-        "area": "advisories_view", "settings": {"group_by": "holder"}}), mirror=mirror)
+        "area": "app", "settings": {"is_history_open": False}}), mirror=mirror)
     row = json.loads(mirror.items[(f"EYE#{CC}", "USER#u-sup#PREFS")].payload_json)
-    assert row["areas"]["advisories_view"] == {
-        "group_by": "holder", "sort_by": "severity", "reversed": False}
-    assert row["own"] == {"advisories_view": {"group_by": "holder"}}
-    assert row["areas"]["app"] == {"default_site": None, "is_history_open": True}
+    assert row["areas"]["app"] == {"default_site": None, "is_history_open": False}
+    assert row["own"] == {"app": {"is_history_open": False}}
+    assert row["areas"]["advisories"] == {"use": "default", "views": []}
 
 
 # ==================================================== 5. the boundary

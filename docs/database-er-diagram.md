@@ -1906,8 +1906,8 @@ erDiagram
         string customer_code FK
         string subject_kind "role or user"
         string subject_id "role code or Entra object id"
-        string area "app, advisories_view, advisories_focus"
-        jsonb settings "only the fields that were set"
+        string area "app, or a page: advisories"
+        jsonb settings "the fields that were set; for a page: use and views"
         timestamptz updated_at
         string updated_by
     }
