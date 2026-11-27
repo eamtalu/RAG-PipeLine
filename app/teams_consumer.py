@@ -43,6 +43,7 @@ from app.services.teams.freshness import freshness_for
 from app.services import access, scoped_data
 from app.services.ask import mirror as ask_mirror
 from app.services.advisories import runner as advisories_runner
+from app.services import preferences
 from app.services.watchlist import ask_hooks
 from app.services.watchlist import mirror as watch_mirror
 from app.services.watchlist import runner as watch_runner
@@ -598,6 +599,9 @@ async def _watches_loop(stop: asyncio.Event) -> None:
                 logger.info("watch events %s", events)
             if asyncio.get_running_loop().time() - last_sweep >= 60:
                 await watch_mirror.sweep_once(mirror, tracker=tracker)
+                # each person's preferences row too (program step 2): it moves without a
+                # command when an Admin changes their sites or role
+                await preferences.sweep_once(mirror, tracker=tracker)
                 last_sweep = asyncio.get_running_loop().time()
         except Exception:
             logger.exception("watches tick failed")
