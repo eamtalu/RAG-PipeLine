@@ -18,6 +18,21 @@ from app.services.scoped_data.scope import DataScope
 TABLES_READ = "scoped_data.tables_read"
 
 
+#: The key under which a limited session keeps the scope it reads within.
+SCOPE = "scoped_data.scope"
+
+
+def is_site_limited(db: AsyncSession) -> bool:
+    """Whether this session reads for a person who may not see every site.
+
+    (a BRI session) -> True ; (an all-sites session, or one that was never limited) -> False
+
+    For a tool that can answer faster when it knows; the limit itself never depends on it.
+    """
+    scope = db.info.get(SCOPE)
+    return scope is not None and not scope.all_sites
+
+
 def tables_read(db: AsyncSession) -> set[str]:
     """Every table a limited session has read so far, for the run's trace.
 
@@ -48,6 +63,7 @@ def limit_session(db: AsyncSession, scope: DataScope) -> AsyncSession:
             for entry in registry.RULES))
 
     event.listen(db.sync_session, "do_orm_execute", add_scope)
+    db.info[SCOPE] = scope
     return db
 
 

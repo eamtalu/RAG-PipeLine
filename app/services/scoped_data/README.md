@@ -15,7 +15,9 @@ It answers one question: which rows may this run read.
 
 - `SiteLimited` - rows of one customer and one site, named by a column.
 - `SubjectLimited` - forecast rows; a site-limited person reads their sites' subjects and never the customer total.
-- `AllSitesOnly` - operational rows that have no site column yet; only a person who may see every site reads them.
+- `ThroughTransaction` - log lines and their assignment rows, which carry no site; read by whoever may read the transaction they belong to.
+- `AllSitesOnly` - operational rows that have no site; only a person who may see every site reads them.
+  No table uses it today; a new table without a site starts here.
 - `CustomerWide` - settings and reference data.
 - `OwnedBy` - a child table with no customer column, limited through the row that owns it.
 - `Shared` - a list that is the same for every customer and names no one.

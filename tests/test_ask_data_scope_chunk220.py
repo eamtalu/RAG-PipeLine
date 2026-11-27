@@ -176,11 +176,18 @@ def test_a_site_limited_person_reads_their_sites_forecast_and_never_the_total():
     assert "subject_kind = 'warehouse'" in sql and "subject IN ('BRI')" in sql
 
 
-def test_a_table_with_no_site_yet_is_read_only_by_an_all_sites_person():
+def test_a_table_with_no_site_is_read_only_by_an_all_sites_person():
+    # The rule itself: no table uses it since chunk 236, where log lines began to follow
+    # their transaction; it stays for the next table that arrives without a site.
     from app.persistence.models.log_entry import LogEntry
-    assert _sql(LogEntry, scoped_data.DataScope.from_record(_record())) == "false"
+    rule = scoped_data.registry.AllSitesOnly(LogEntry)
+
+    def sql(scope):
+        return str(rule.condition(scope).compile(compile_kwargs={"literal_binds": True}))
+
+    assert sql(scoped_data.DataScope.from_record(_record())) == "false"
     everything = scoped_data.DataScope.from_record(_record(all_sites=True, sites=()))
-    assert _sql(LogEntry, everything) == f"log_entries.customer_code = '{CC}'"
+    assert sql(everything) == f"log_entries.customer_code = '{CC}'"
 
 
 # --- the Teams consumer hands the asker's scope to the run ------------------------------------

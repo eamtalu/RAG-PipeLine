@@ -111,7 +111,12 @@ async def test_a_tool_call_notes_the_tables_it_read_and_the_ones_closed_to_the_a
     assert notes["tables"] == ["advisories"] and notes["closed"] == []
 
 
-def test_a_closed_table_is_one_a_site_limited_person_reads_nothing_from():
+def test_a_closed_table_is_one_a_site_limited_person_reads_nothing_from(monkeypatch):
+    # No table is closed since chunk 236 (log lines follow their transaction), so one is closed
+    # here to keep the rule itself pinned for the next table that arrives without a site.
+    from app.persistence.models.log_entry import LogEntry
+    registry = scoped_data.registry
+    monkeypatch.setitem(registry.BY_TABLE, "log_entries", registry.AllSitesOnly(LogEntry))
     limited = scoped_data.DataScope(CC, site_ids=("BRI",))
     everything = scoped_data.DataScope.for_system(CC)
     assert scoped_data.closed_tables({"log_entries", "advisories"}, limited) == ["log_entries"]

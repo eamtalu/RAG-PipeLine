@@ -4,8 +4,10 @@ A table is classified once, here, with one of these rules:
 - `SiteLimited`: rows belong to one customer and one site, named by a column (the warehouse code,
   which is the site id).
 - `SubjectLimited`: forecast rows, whose subject is a site or the customer's total.
-- `AllSitesOnly`: operational rows that carry no site yet (step 1d adds the column), so only a
-  person who may see every site reads them.
+- `ThroughTransaction`: log lines and their assignment rows, which carry no site and are read
+  by whoever may read the transaction they belong to.
+- `AllSitesOnly`: operational rows that carry no site, so only a person who may see every site
+  reads them. No table uses it today; a new table without a site starts here.
 - `CustomerWide`: settings and reference data, the same for every site of a customer.
 - `OwnedBy`: a child table with no customer column, limited through the row that owns it.
 - `Shared`: a list that is the same for every customer and names no one.
@@ -17,10 +19,11 @@ someone classifies it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import timedelta
 from typing import Any, Protocol
 
-from sqlalchemy import ColumnElement, and_, false, or_, select, true
+from sqlalchemy import ColumnElement, and_, exists, false, literal_column, or_, select, true
 
 from app.persistence.models import analytics_at_risk as at_risk
 from app.persistence.models import analytics_forecast as forecast
@@ -161,6 +164,57 @@ class AllSitesOnly:
 
 
 @dataclass(frozen=True, slots=True)
+class ThroughTransaction:
+    """Log lines and their assignment rows: read by whoever may read their transaction.
+
+    A log line has no site and gets none (`log_entries` is insert-only), but the assignment row
+    names the transaction it belongs to and the transaction has its company and warehouse. The
+    transaction's own rule is applied to it here, so a change to that rule changes both. A line
+    that belongs to no transaction yet is read by everyone of the customer who has a site (the
+    owner's decision, 27 Nov 2026: nothing is hidden for lack of grouping). A line with no
+    timestamp cannot be matched to its transaction here, so only a person who may see every
+    site reads it. That person's condition is the customer alone, as it was before.
+    """
+
+    model: Any
+    category: str = "operations"
+
+    def condition(self, scope: DataScope) -> ColumnElement[bool]:
+        mine = self.model.customer_code == scope.customer_code
+        if scope.category_is_closed(self.category):
+            return false()
+        if scope.all_sites:
+            return mine
+        if not scope.site_places:
+            return false()
+        # Plain table aliases, so that the session's own limit is not added a second time to
+        # the transaction inside this condition.
+        owner = LogTransaction.__table__.alias("owner_txn")
+        may_read_owner = replace(TRANSACTION_RULE, model=owner.c).condition(scope)
+
+        def owned(transaction_id, line_time) -> ColumnElement[bool]:
+            # A transaction starts at its first line, so it is looked for only in the day up
+            # to the line's own time; otherwise every check opens all the daily partitions
+            # (measured on live data: 10 s against 2 s for one search).
+            return exists().where(owner.c.id == transaction_id,
+                                  owner.c.started_at <= line_time,
+                                  owner.c.started_at >= line_time - _LONGEST_SQL,
+                                  may_read_owner)
+
+        if self.model is LogEntryAssignment:
+            return and_(mine, owned(LogEntryAssignment.transaction_id,
+                                    LogEntryAssignment.entry_ts))
+        link = LogEntryAssignment.__table__.alias("owner_link")
+        # "No link to a transaction this person may not read": true for a line of their own
+        # transaction and for a line with no transaction at all. Equality on both partition
+        # keys of the link, entry id and timestamp, so that one partition is opened per line.
+        is_someone_elses = exists().where(link.c.entry_id == LogEntry.id,
+                                          link.c.entry_ts == LogEntry.timestamp,
+                                          ~owned(link.c.transaction_id, link.c.entry_ts))
+        return and_(mine, LogEntry.timestamp.isnot(None), ~is_someone_elses)
+
+
+@dataclass(frozen=True, slots=True)
 class CustomerWide:
     """Settings and reference data: every row of the customer, whatever the person's sites."""
 
@@ -196,9 +250,19 @@ class Shared:
         return true()
 
 
+#: No transaction lasts longer than this. Measured on live data: the longest of 444,403 took
+#: under five minutes, and none took an hour.
+LONGEST_TRANSACTION = timedelta(days=1)
+#: The same length for a condition; written out so the SQL reads the same in every dialect
+#: of test and log output.
+_LONGEST_SQL = literal_column("INTERVAL '1 day'")
+
+#: How a transaction is limited; its log lines follow it (`ThroughTransaction`).
+TRANSACTION_RULE = SiteLimited(LogTransaction, "warehouse", company_column="company")
+
 RULES: tuple[Rule, ...] = (
     # the WMS activity and what is derived from it, each row with its warehouse
-    SiteLimited(LogTransaction, "warehouse", company_column="company"),
+    TRANSACTION_RULE,
     SiteLimited(AnalyticsFact, "warehouse", company_column="company"),
     # by warehouse alone: part of the ledger's history has no company, and no data tool reads it
     SiteLimited(AnalyticsFactLedger, "warehouse"),
@@ -213,9 +277,9 @@ RULES: tuple[Rule, ...] = (
     SubjectLimited(forecast.AnalyticsForecastSeries),
     SubjectLimited(forecast.AnalyticsForecastAccuracy),
     SubjectLimited(AnalyticsPrediction),
-    # no site column until step 1d
-    AllSitesOnly(LogEntry),
-    AllSitesOnly(LogEntryAssignment),
+    # log lines carry no site: they follow their transaction
+    ThroughTransaction(LogEntry),
+    ThroughTransaction(LogEntryAssignment),
     SiteLimited(AnalyticsRecordFact, "warehouse", company_column="company"),
     SiteLimited(rollup.AnalyticsHourlyRollup, "warehouse", company_column="company"),
     SiteLimited(rollup.AnalyticsDailyRollup, "warehouse", company_column="company"),
