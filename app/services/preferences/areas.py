@@ -23,7 +23,8 @@ class App(_Area):
 
     #: A site id, "all" for the all-sites view, or None for "the app decides".
     default_site: str | None = None
-    is_history_open: bool = False
+    #: Open until the person hides it, as the app has always started.
+    is_history_open: bool = True
 
 
 class AdvisoriesView(_Area):
