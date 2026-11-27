@@ -152,6 +152,13 @@ class Settings(BaseSettings):
     #   "on"      eligible windows are applied by the head lane; everything surprising still falls
     #             back to the rebuild lane. Flip only after the shadow has earned trust.
     stage2_head_lane: str = "shadow"
+    # The database lock for the agent's data reads (step 1b). With `agent_row_rules` on, the
+    # data tools read through `agent_database_url`: a database user that can only select, only
+    # the registry's tables, and only the rows of the customer its transaction names. Off is
+    # the application's own user, as before. The connection line holds a password, so it is
+    # set in the server's environment file and never in the repository.
+    agent_row_rules: str = "off"
+    agent_database_url: str | None = None
     # How many days back a log line search looks when the question gives no time range. Without
     # a range the search sorted every kept day of the customer and ran into the 30 s statement
     # timeout. The answer names the range it used, so a person can ask for a wider one; raise

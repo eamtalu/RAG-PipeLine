@@ -31,6 +31,46 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
 
+_agent_engine = None
+_agent_sessions: async_sessionmaker | None = None
+
+
+def agent_session_factory() -> async_sessionmaker:
+    """Sessions of the agent's reader user, on its own small pool, made on first use.
+
+    (AGENT_DATABASE_URL set) -> a session factory ; (not set) -> raises RuntimeError
+    """
+    global _agent_engine, _agent_sessions
+    if not settings.agent_database_url:
+        raise RuntimeError("AGENT_ROW_RULES is on but AGENT_DATABASE_URL is not set")
+    if _agent_sessions is None:
+        _agent_engine = create_async_engine(settings.agent_database_url, echo=settings.debug,
+                                            connect_args=_connect_args, pool_size=3,
+                                            max_overflow=5)
+        _agent_sessions = async_sessionmaker(_agent_engine, class_=AsyncSession,
+                                             expire_on_commit=False)
+    return _agent_sessions
+
+
+def reader_session_factory(session_factory: SessionFactory) -> SessionFactory:
+    """The session factory a data tool reads with: the reader user's when the lock is on.
+
+    (AGENT_ROW_RULES=off) -> the factory given ; (on) -> sessions of the reader user
+    ; (on, no AGENT_DATABASE_URL) -> raises, because reading unlocked in silence is worse
+    """
+    if settings.agent_row_rules != "on":
+        return session_factory
+    return agent_session_factory()
+
+
+async def dispose_agent_engine() -> None:
+    """Close the reader user's connections, so the next use opens them again."""
+    global _agent_engine, _agent_sessions
+    if _agent_engine is not None:
+        await _agent_engine.dispose()
+    _agent_engine, _agent_sessions = None, None
+
+
 class Base(DeclarativeBase):
     pass
 

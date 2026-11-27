@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.capabilities.spec import Namespace, ToolSpec
 from app.agent.contracts import AgentRequest, ExecutionContext
 from app.agent.runtime.trace import note_call
-from app.config.database import SessionFactory, async_session
+from app.config.database import SessionFactory, async_session, reader_session_factory
 from app.services.analytics_agent import (
     activity_tools,
     story_tools,
@@ -55,7 +55,8 @@ async def _scoped(session_factory: SessionFactory, context: ExecutionContext,
     (a BRI supervisor's call that read advisories) -> note tables=["advisories"], closed=[]
     """
     scope = _scope(context, request)
-    async with scoped_data.open_session(session_factory, scope) as db:
+    # The reader user's sessions when the database lock is on (step 1b), else the one given.
+    async with scoped_data.open_session(reader_session_factory(session_factory), scope) as db:
         try:
             yield db
         finally:
