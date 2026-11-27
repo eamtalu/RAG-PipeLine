@@ -1919,9 +1919,9 @@ erDiagram
     preferences {
         uuid id PK
         string customer_code FK
-        string subject_kind "role or user"
-        string subject_id "role code or Entra object id"
-        string area "app, or a page: advisories"
+        string subject_kind "customer, role or user"
+        string subject_id "customer code, role code or Entra object id"
+        string area "app, ask, a page (advisories) or a role's page default (advisories_default)"
         jsonb settings "the fields that were set; for a page: use and views"
         timestamptz updated_at
         string updated_by
@@ -1929,7 +1929,8 @@ erDiagram
 ```
 
 - One row per customer, subject and area (`uq_preferences_subject_area`).
-- A person's value is the area's built-in default, then the role's row, then their own, field by field (`app/services/preferences/store.py`).
+- A person's value is the area's built-in default, then the customer's row, then the role's, then their own, field by field, each only where the area may be held at that level (`app/services/preferences/store.py`, `areas.holders`).
+- Since chunk 246 (27 Nov 2026, no migration: the columns already fit) a subject can be the customer itself, which holds the line search range (`ask`), and a role holds what "Default" shows on a page as one whole page (`<page>_default`).
 - The table is customer-wide data in the scoped data registry and carries the agent reader's row rule.
 
 ## Row security for the agent's reader user

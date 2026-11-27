@@ -9,7 +9,7 @@ table, one row per subject (a role or a person) and area; an area is a validated
 from app.services.preferences.areas import AREAS
 from app.services.preferences.commands import KINDS, run
 from app.services.preferences.mirror import mirror_user, sweep_once, user_payload
-from app.services.preferences.store import own, reset, resolve, save
+from app.services.preferences.store import line_search_days, own, reset, resolve, save
 
-__all__ = ["AREAS", "KINDS", "mirror_user", "own", "reset", "resolve", "run", "save",
-           "sweep_once", "user_payload"]
+__all__ = ["AREAS", "KINDS", "line_search_days", "mirror_user", "own", "reset", "resolve", "run",
+           "save", "sweep_once", "user_payload"]

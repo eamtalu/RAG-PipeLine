@@ -20,7 +20,7 @@ from app.services.log_agent import analytics_tools
 from app.services.mnp_log_ingestion.pipeline import assignments, time_bounds
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc
-from app.services import scoped_data
+from app.services import preferences, scoped_data
 from app.settings import settings
 
 # ---------------------------------------------------------------------------
@@ -415,7 +415,10 @@ async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> d
             time_from, time_to = time_from or t.started_at, time_to or t.ended_at
     # Step 2: Always bound the search in time, otherwise it sorts every kept day of the
     # customer and runs into the statement timeout; the range used goes back with the answer.
-    window = _search_window(time_from, time_to)
+    # How far back is the customer's own choice (set by its Admin on the Ask page), else the
+    # server's setting.
+    window = _search_window(time_from, time_to,
+                            days=await preferences.line_search_days(db, customer_code))
     limit = _clamp(args.get("limit"), 30, 100)
 
     async def newest(start: datetime, end: datetime, is_oldest: bool, wanted: int) -> list:

@@ -28,6 +28,7 @@ from app.services.access.authorization.records import (
     record_for_user,
     set_matrix_cell,
 )
+from app.services.access.authorization.roles import role_names
 from app.services.access.edge_mirror import mirror_customer, roles_payload
 from app.services.access.edge_mirror import sweep_once as sweep_edge_rows
 from app.services.access.tables import ACCESS_TABLES, AccessTable
@@ -62,7 +63,7 @@ __all__ = [
     "access_record_for", "record_for_user", "load_matrix", "set_matrix_cell",
     # people: who has access and how they get it
     "Actor", "UserChange", "create_user", "update_user", "invite_user", "get_user", "list_users",
-    "user_payload", "touch_last_active", "expire_invites_once",
+    "user_payload", "touch_last_active", "expire_invites_once", "role_names",
     "pending_approvals", "request_approval", "expire_approvals",
     # audit
     "record_audit_event", "purge_audit_events",
