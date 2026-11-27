@@ -14,7 +14,10 @@ Pinned here
     no owner     a line with no transaction is read by an all-sites person only
     nobody       a person with no site reads nothing
     not closed   the two tables are no longer reported as closed
-    the search   with no time range it looks at a set number of days and says so
+    the search   with no time range it looks at a set number of days and says so; a search
+                 inside one transaction covers that transaction's own time, however old
+    cheap        each check is bounded to the line's own day, and a person whose sites have
+                 no transaction in the range gets an empty answer without a line search
 """
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -207,6 +210,45 @@ async def test_a_search_with_its_own_time_range_is_not_changed():
         out = await tools._search_entries(db, {"q": "window-word", "time_from": start}, CC)
     assert [e["message"] for e in out["entries"]] == ["window-word old"]
     assert out["window"]["defaulted"] is False and "note" not in out
+
+
+async def test_a_search_inside_one_transaction_covers_that_transactions_own_time():
+    old = await _plant("915", "BRI", ["inside-word a", "inside-word b"], minutes=-60 * 24 * 20)
+    async with scoped_data.open_session(async_session, BRI) as db:
+        out = await tools._search_entries(db, {"transaction_id": str(old)}, CC)
+    assert sorted(e["message"] for e in out["entries"]) == ["inside-word a", "inside-word b"]
+    assert out["window"]["defaulted"] is False and "note" not in out
+    async with scoped_data.open_session(async_session, LON) as db:
+        out = await tools._search_entries(db, {"transaction_id": str(old)}, CC)
+    assert out["entries"] == []
+
+
+async def test_a_person_whose_sites_have_no_transaction_gets_an_answer_without_a_line_search():
+    await _plant("915", "BRI", ["busy-word line"])
+    async with scoped_data.open_session(async_session, LON) as db:
+        out = await tools._search_entries(db, {"q": "busy-word"}, CC)
+        assert "log_entries" not in scoped_data.tables_read(db)
+    assert out["entries"] == [] and out["returned"] == 0 and out["window"]["days"] > 0
+
+
+def test_a_session_knows_whether_it_is_limited_to_some_sites():
+    async def probe(scope) -> bool:
+        async with scoped_data.open_session(async_session, scope) as db:
+            return scoped_data.is_site_limited(db)
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        assert loop.run_until_complete(probe(BRI)) is True
+        assert loop.run_until_complete(probe(ALL)) is False
+    finally:
+        loop.close()
+
+
+@pytest.mark.parametrize("model", [LogEntry, LogEntryAssignment])
+def test_each_check_is_bounded_to_the_lines_own_day(model):
+    rule = scoped_data.registry.BY_TABLE[model.__tablename__]
+    sql = str(rule.condition(BRI).compile(compile_kwargs={"literal_binds": True}))
+    assert "owner_txn.started_at <=" in sql and "owner_txn.started_at >=" in sql
 
 
 def test_the_tool_description_tells_the_model_about_the_default_range():

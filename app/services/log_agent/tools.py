@@ -20,6 +20,7 @@ from app.services.log_agent import analytics_tools
 from app.services.mnp_log_ingestion.pipeline import assignments, time_bounds
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc
+from app.services import scoped_data
 from app.settings import settings
 
 # ---------------------------------------------------------------------------
@@ -354,6 +355,18 @@ def _search_window(time_from: datetime | None, time_to: datetime | None, *,
     return {"from": end - timedelta(days=days), "to": end, "defaulted": True, "days": days}
 
 
+async def _has_transaction_in(db: AsyncSession, customer_code: str, window: dict) -> bool:
+    """Whether the session can read any transaction that could own a line of the range.
+
+    (a BRI session, a week with BRI picks) -> True ; (a LON session, the same week) -> False
+    """
+    found = await db.scalar(select(LogTransaction.id).where(
+        LogTransaction.customer_code == customer_code,
+        LogTransaction.started_at >= window["from"] - scoped_data.registry.LONGEST_TRANSACTION,
+        LogTransaction.started_at <= window["to"]).limit(1))
+    return found is not None
+
+
 async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> dict:
     conds = [LogEntry.customer_code == customer_code]
     if args.get("q"):
@@ -362,23 +375,40 @@ async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> d
         conds.append(LogEntry.mi_program == args["mi_program"])
     if args.get("level"):
         conds.append(LogEntry.level == args["level"].upper())
+    time_from = _parse_dt(args["time_from"]) if args.get("time_from") else None
+    time_to = _parse_dt(args["time_to"]) if args.get("time_to") else None
+    is_inside_one = False
     if args.get("transaction_id"):
         try:
-            conds.append(assignments.belongs_to_transaction(uuid.UUID(str(args["transaction_id"]))))
+            tid = uuid.UUID(str(args["transaction_id"]))
         except (ValueError, AttributeError):
             return {"error": f"Not a valid transaction id: {args['transaction_id']!r}"}
-    # Always bound the search in time, otherwise it sorts every kept day of the customer and
-    # runs into the statement timeout; the range used goes back with the answer.
-    window = _search_window(_parse_dt(args["time_from"]) if args.get("time_from") else None,
-                            _parse_dt(args["time_to"]) if args.get("time_to") else None)
+        conds.append(assignments.belongs_to_transaction(tid))
+        # Step 1: Search inside the transaction's own time, because its lines can be older
+        # than the default range and a narrow range keeps the search to one or two days.
+        t = await db.get(LogTransaction, tid)
+        if t is not None and t.customer_code == customer_code and t.started_at and t.ended_at:
+            is_inside_one = True
+            time_from, time_to = time_from or t.started_at, time_to or t.ended_at
+    # Step 2: Always bound the search in time, otherwise it sorts every kept day of the
+    # customer and runs into the statement timeout; the range used goes back with the answer.
+    window = _search_window(time_from, time_to)
     conds += [LogEntry.timestamp >= window["from"], LogEntry.timestamp <= window["to"]]
     limit = _clamp(args.get("limit"), 30, 100)
 
-    rows = (await db.execute(
-        select(LogEntry).where(*conds)
-        .order_by(LogEntry.timestamp.desc().nullslast(), LogEntry.line_number.desc())
-        .limit(limit)
-    )).scalars().all()
+    rows = []
+    # Step 3: For a person limited to some sites, look for one transaction of theirs in the
+    # range first. With none there is nothing to find, and finding that out line by line means
+    # checking every line of the customer (measured: over 30 s on a week of live data).
+    if is_inside_one or not scoped_data.is_site_limited(db) \
+            or await _has_transaction_in(db, customer_code, window):
+        # Newest first on the timestamp alone (the range leaves no line without one), so the
+        # database can walk the days backwards and stop at the limit instead of sorting them.
+        rows = (await db.execute(
+            select(LogEntry).where(*conds)
+            .order_by(LogEntry.timestamp.desc(), LogEntry.line_number.desc())
+            .limit(limit)
+        )).scalars().all()
 
     # one bulk lookup for the page rather than one per row; an entry missing from the map is not
     # stitched yet.

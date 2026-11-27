@@ -9,7 +9,8 @@ and the persistence layer.
 from app.services.scoped_data.registry import UnclassifiedTable, closed_tables
 from app.services.scoped_data.places import scope_for
 from app.services.scoped_data.scope import DataScope, Place
-from app.services.scoped_data.session import limit_session, open_session, scope_of, tables_read
+from app.services.scoped_data.session import (is_site_limited, limit_session, open_session,
+                                              scope_of, tables_read)
 
-__all__ = ["DataScope", "Place", "UnclassifiedTable", "closed_tables", "limit_session",
-           "open_session", "scope_for", "scope_of", "tables_read"]
+__all__ = ["DataScope", "Place", "UnclassifiedTable", "closed_tables", "is_site_limited",
+           "limit_session", "open_session", "scope_for", "scope_of", "tables_read"]

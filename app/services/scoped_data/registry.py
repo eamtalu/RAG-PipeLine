@@ -20,9 +20,10 @@ someone classifies it.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from typing import Any, Protocol
 
-from sqlalchemy import ColumnElement, and_, exists, false, or_, select, true
+from sqlalchemy import ColumnElement, and_, exists, false, literal_column, or_, select, true
 
 from app.persistence.models import analytics_at_risk as at_risk
 from app.persistence.models import analytics_forecast as forecast
@@ -189,15 +190,25 @@ class ThroughTransaction:
         # the transaction inside this condition.
         owner = LogTransaction.__table__.alias("owner_txn")
         may_read_owner = replace(TRANSACTION_RULE, model=owner.c).condition(scope)
+
+        def owned(transaction_id, line_time) -> ColumnElement[bool]:
+            # A transaction starts at its first line, so it is looked for only in the day up
+            # to the line's own time; otherwise every check opens all the daily partitions
+            # (measured on live data: 10 s against 2 s for one search).
+            return exists().where(owner.c.id == transaction_id,
+                                  owner.c.started_at <= line_time,
+                                  owner.c.started_at >= line_time - _LONGEST_SQL,
+                                  may_read_owner)
+
         if self.model is LogEntryAssignment:
-            return and_(mine, exists().where(owner.c.id == LogEntryAssignment.transaction_id,
-                                             may_read_owner))
+            return and_(mine, owned(LogEntryAssignment.transaction_id,
+                                    LogEntryAssignment.entry_ts))
         link = LogEntryAssignment.__table__.alias("owner_link")
-        # Equality on both partition keys, entry id and timestamp: measured on live data, a
-        # looser match made a seven-day search run past the 30 second limit.
+        # Equality on both partition keys of the link, entry id and timestamp, so that one
+        # partition is opened for each line.
         return and_(mine, exists().where(link.c.entry_id == LogEntry.id,
                                          link.c.entry_ts == LogEntry.timestamp,
-                                         owner.c.id == link.c.transaction_id, may_read_owner))
+                                         owned(link.c.transaction_id, link.c.entry_ts)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +246,13 @@ class Shared:
     def condition(self, scope: DataScope) -> ColumnElement[bool]:
         return true()
 
+
+#: No transaction lasts longer than this. Measured on live data: the longest of 444,403 took
+#: under five minutes, and none took an hour.
+LONGEST_TRANSACTION = timedelta(days=1)
+#: The same length for a condition; written out so the SQL reads the same in every dialect
+#: of test and log output.
+_LONGEST_SQL = literal_column("INTERVAL '1 day'")
 
 #: How a transaction is limited; its log lines follow it (`ThroughTransaction`).
 TRANSACTION_RULE = SiteLimited(LogTransaction, "warehouse", company_column="company")
