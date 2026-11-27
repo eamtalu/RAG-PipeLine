@@ -88,7 +88,9 @@ class SiteLimited:
     company and warehouse pair; without one, by the warehouse alone. With `holds_site_id` the
     column holds a site id (written from the warehouse by the advisory agents), so it is matched
     against the person's site ids and their places' warehouses. With both, a row is matched by
-    the pair where it has a company and by its site where it has none (chunk 231).
+    the pair where it has a company and by its site where it has none (chunk 231). With
+    `person_column`, a row that names neither a warehouse nor a person (a handheld's server
+    check) belongs to the whole customer and is read by everyone who has a site (chunk 237).
     """
 
     model: Any
@@ -96,6 +98,7 @@ class SiteLimited:
     category: str = "operations"
     company_column: str | None = None
     holds_site_id: bool = False
+    person_column: str | None = None
 
     def condition(self, scope: DataScope) -> ColumnElement[bool]:
         mine = self.model.customer_code == scope.customer_code
@@ -115,10 +118,14 @@ class SiteLimited:
         # the pair decides: the same warehouse code under another company is another place
         company = getattr(self.model, self.company_column)
         if not self.holds_site_id:
-            return and_(mine, or_(*(
-                site == place.warehouse if place.company is None
-                else and_(site == place.warehouse, company == place.company)
-                for place in places)))
+            own = [site == place.warehouse if place.company is None
+                   else and_(site == place.warehouse, company == place.company)
+                   for place in places]
+            if self.person_column is not None:
+                # No warehouse and no person: it says something about the server, not about
+                # a site. A sign-in has no warehouse either but names a user, so it stays out.
+                own.append(and_(site.is_(None), getattr(self.model, self.person_column).is_(None)))
+            return and_(mine, or_(*own))
         # A row written before it had a company still follows its site, otherwise older
         # advisories would vanish for the people of that site.
         by_place = [
@@ -258,12 +265,13 @@ LONGEST_TRANSACTION = timedelta(days=1)
 _LONGEST_SQL = literal_column("INTERVAL '1 day'")
 
 #: How a transaction is limited; its log lines follow it (`ThroughTransaction`).
-TRANSACTION_RULE = SiteLimited(LogTransaction, "warehouse", company_column="company")
+TRANSACTION_RULE = SiteLimited(LogTransaction, "warehouse", company_column="company",
+                               person_column="user_name")
 
 RULES: tuple[Rule, ...] = (
     # the WMS activity and what is derived from it, each row with its warehouse
     TRANSACTION_RULE,
-    SiteLimited(AnalyticsFact, "warehouse", company_column="company"),
+    SiteLimited(AnalyticsFact, "warehouse", company_column="company", person_column="user_name"),
     # by warehouse alone: part of the ledger's history has no company, and no data tool reads it
     SiteLimited(AnalyticsFactLedger, "warehouse"),
     SiteLimited(AnalyticsSettledRow, "warehouse", company_column="company"),
