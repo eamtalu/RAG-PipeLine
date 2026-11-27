@@ -44,6 +44,7 @@ from app.persistence.models.customer_display_name import CustomerDisplayName
 from app.persistence.models.log_entry import LogEntry
 from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_transaction import LogTransaction
+from app.persistence.models.preference import Preference
 from app.persistence.models.teams_conversation import TeamsConversation
 from app.persistence.models.teams_conversation_turn import TeamsConversationTurn
 from app.persistence.models.tenant_site import TenantSite, TenantSitePlace
@@ -309,6 +310,7 @@ RULES: tuple[Rule, ...] = (
     CustomerWide(at_risk.AnalyticsAtRiskSettings),
     CustomerWide(at_risk.AnalyticsAtRiskTenantState),
     CustomerWide(forecast.AnalyticsForecastRun),
+    CustomerWide(Preference),
     CustomerWide(AdvisoryAgent),
     CustomerWide(AdvisoryAgentRun),
 )

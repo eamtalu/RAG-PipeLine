@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.25"
+CONTRACT_REVISION = "3.26"
 
 
 def _now() -> datetime:
@@ -58,6 +58,9 @@ def _now() -> datetime:
 #:   end_of_day | 7_days | iso, swap_watch_id?, via?} (step 14; a full list answers with a choice block
 #:   whose options carry the swap) ; watch_update {watch_id, action: set_alert | resume, alert?, until?}
 #: watch_stop {watch_id, via?} ; watch_seen {event_ids?} ; watch_not_now {kind, entity_id}
+#: preference_set {area, settings, role?} ; preference_reset {area, role?} (3.26, program step 2:
+#:   the sender's own preferences, or a role's defaults when `role` is named and the sender may
+#:   manage users; `settings` holds only the fields being changed)
 #: demo_act {action_id, form_id, values} (step 18: a confirmed demo form; one audit line marked demo,
 #:   nothing else changes, the receipt's status is "demo"). A confirmed form of any kind may also
 #:   arrive as {form_id, values, via}: the service unwraps it into its own fields (step 18).
@@ -121,6 +124,8 @@ class Command(BaseModel):
         "watch_stop",
         "watch_seen",
         "watch_not_now",
+        "preference_set",
+        "preference_reset",
     ]
     #: The at-risk fields; required for the two at-risk kinds, checked by the backend's runner.
     delivery_number: str | None = Field(default=None, max_length=64)

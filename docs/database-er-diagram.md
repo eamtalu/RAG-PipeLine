@@ -1894,6 +1894,29 @@ erDiagram
     customers ||..o{ tenant_secrets : "tenant of"
 ```
 
+## Preferences
+
+Added on 27 Nov 2026 (migration `a3d8e6f0b2c7`, chunk 239).
+
+```mermaid
+erDiagram
+    customers ||--o{ preferences : "has"
+    preferences {
+        uuid id PK
+        string customer_code FK
+        string subject_kind "role or user"
+        string subject_id "role code or Entra object id"
+        string area "app, advisories_view"
+        jsonb settings "only the fields that were set"
+        timestamptz updated_at
+        string updated_by
+    }
+```
+
+- One row per customer, subject and area (`uq_preferences_subject_area`).
+- A person's value is the area's built-in default, then the role's row, then their own, field by field (`app/services/preferences/store.py`).
+- The table is customer-wide data in the scoped data registry and carries the agent reader's row rule.
+
 ## Row security for the agent's reader user
 
 Added on 27 Nov 2026 (migration `f2c7d5e9a1b6`, chunk 238).

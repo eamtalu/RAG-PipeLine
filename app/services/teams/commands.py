@@ -20,6 +20,7 @@ from app.services.ask import forms as ask_forms
 from app.services.tasks import commands as task_commands
 from app.services.groups import commands as group_commands
 from app.services.watchlist import commands as watch_commands
+from app.services.preferences import commands as preference_commands
 from app.services.teams.contracts import ACCESS_COMMAND_KINDS, QuestionJob
 
 
@@ -54,6 +55,9 @@ async def run_command(job: QuestionJob, *, run_query=None) -> str:
         raise ValueError("the job carries no command")
     job = unwrap_form(job)
     command = job.command
+    # a person's preferences (program step 2) live with the preferences service
+    if command.kind in preference_commands.KINDS:
+        return await preference_commands.run(job)  # a CommandOutcome: the line
     # the watchlist (step 14) lives with the watchlist service
     if command.kind in watch_commands.KINDS:
         return await watch_commands.run(job)  # a CommandOutcome: the line, a receipt or a choice
