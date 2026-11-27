@@ -33,8 +33,10 @@ Row types so far:
   whole customer, four periods, the 30-day fill-rate series, the decisions waiting; rewritten
   every few minutes.
 - user_prefs (program step 2): one person's preferences: every area resolved for them (built-in
-  default, then their role's, then their own, narrowed by their access) and what they set
-  themselves; rewritten after every preference command.
+  default, then their customer's, their role's, then their own, narrowed by their access), what
+  they set themselves, each page's default (their role's where it has one), the limits the
+  screen needs (`limits`) and, for people who may manage users, the roles with a page default of
+  their own (`role_defaults`, 3.29); rewritten after every preference command.
 - site_admin (program step 4): every site with its name, whether it is active and the WMS
   company and warehouse pairs it stands for, plus the pairs seen in the last 30 days of data
   with the site each belongs to; rewritten after every site command and by the sweep.
