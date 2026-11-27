@@ -10,7 +10,7 @@ Everything here is strictly SELECT-only. The agent is never given a tool that wr
 
 import json
 import uuid
-from datetime import date as date_type, datetime
+from datetime import date as date_type, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,7 @@ from app.services.log_agent import analytics_tools
 from app.services.mnp_log_ingestion.pipeline import assignments, time_bounds
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.services.mnp_log_ingestion.timefmt import iso_display, from_display_to_utc
+from app.settings import settings
 
 # ---------------------------------------------------------------------------
 # Tool schemas (sent to Claude)
@@ -123,7 +124,9 @@ TOOLS = [
             "message, MI program, or SQL rather than a whole transaction). Filter by a case-"
             "insensitive substring `q`, mi_program (e.g. MMS200MI), level (INFO/WARN/ERROR), or a "
             "transaction_id. Each result carries its transaction_id so you can pivot to "
-            "get_transaction."
+            "get_transaction. With no time_from it searches a set number of days back from "
+            "time_to (or from now) and the result's `window` and `note` say which; tell the user "
+            "the range searched, and pass time_from and time_to to search another period."
         ),
         "input_schema": {
             "type": "object",
@@ -333,6 +336,24 @@ async def _get_transaction(db: AsyncSession, args: dict, customer_code: str) -> 
     return {"transaction": header, "timeline_entries": len(timeline), "timeline": timeline}
 
 
+def _search_window(time_from: datetime | None, time_to: datetime | None, *,
+                   now: datetime | None = None, days: int | None = None) -> dict:
+    """The time range a line search covers, and whether its start was assumed.
+
+    >>> t = datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
+    >>> w = _search_window(None, None, now=t, days=7)
+    >>> w["from"].isoformat(), w["to"].isoformat(), w["defaulted"], w["days"]
+    ('2026-11-20T12:00:00+00:00', '2026-11-27T12:00:00+00:00', True, 7)
+    >>> _search_window(t - timedelta(days=30), None, now=t, days=7)["defaulted"]
+    False
+    """
+    days = days if days is not None else settings.log_search_default_days
+    end = time_to or now or datetime.now(timezone.utc)
+    if time_from is not None:
+        return {"from": time_from, "to": end, "defaulted": False, "days": days}
+    return {"from": end - timedelta(days=days), "to": end, "defaulted": True, "days": days}
+
+
 async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> dict:
     conds = [LogEntry.customer_code == customer_code]
     if args.get("q"):
@@ -346,10 +367,11 @@ async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> d
             conds.append(assignments.belongs_to_transaction(uuid.UUID(str(args["transaction_id"]))))
         except (ValueError, AttributeError):
             return {"error": f"Not a valid transaction id: {args['transaction_id']!r}"}
-    if args.get("time_from") and (dt := _parse_dt(args["time_from"])):
-        conds.append(LogEntry.timestamp >= dt)
-    if args.get("time_to") and (dt := _parse_dt(args["time_to"])):
-        conds.append(LogEntry.timestamp <= dt)
+    # Always bound the search in time, otherwise it sorts every kept day of the customer and
+    # runs into the statement timeout; the range used goes back with the answer.
+    window = _search_window(_parse_dt(args["time_from"]) if args.get("time_from") else None,
+                            _parse_dt(args["time_to"]) if args.get("time_to") else None)
+    conds += [LogEntry.timestamp >= window["from"], LogEntry.timestamp <= window["to"]]
     limit = _clamp(args.get("limit"), 30, 100)
 
     rows = (await db.execute(
@@ -375,7 +397,13 @@ async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> d
             "message": e.message,
         }
         entries.append({k: v for k, v in row.items() if v is not None})
-    return {"returned": len(entries), "entries": entries}
+    out = {"returned": len(entries), "entries": entries,
+           "window": {**window, "from": iso_display(window["from"]),
+                      "to": iso_display(window["to"])}}
+    if window["defaulted"]:
+        out["note"] = (f"Searched the last {window['days']} days, because no start time was "
+                       "given. Pass time_from and time_to to search another period.")
+    return out
 
 
 _DISPATCH = {

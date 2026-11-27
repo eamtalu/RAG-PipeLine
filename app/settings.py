@@ -152,6 +152,11 @@ class Settings(BaseSettings):
     #   "on"      eligible windows are applied by the head lane; everything surprising still falls
     #             back to the rebuild lane. Flip only after the shadow has earned trust.
     stage2_head_lane: str = "shadow"
+    # How many days back a log line search looks when the question gives no time range. Without
+    # a range the search sorted every kept day of the customer and ran into the 30 s statement
+    # timeout. The answer names the range it used, so a person can ask for a wider one; raise
+    # this (env LOG_SEARCH_DEFAULT_DAYS) if most questions need more than a week.
+    log_search_default_days: int = 7
     # The analytics fold's own statement timeout, in ms. The web tier's 30 s guard is wrong for a
     # background worker - Stage 1's bulk insert relaxes it for the same reason. 120 s is comfortable
     # headroom over ONE ticket span (measured: 23.7 s of reads on a 10,400-transaction day) and stays
