@@ -34,7 +34,7 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
               now: datetime | None = None) -> CommandOutcome:
     """Run one preference command for the job's sender; the line the page shows.
 
-    (preference_set advisories_view {sort_by: due}) -> "Saved" ; (a wrong value) -> Refused
+    (preference_set advisories {use, views}) -> "Saved" ; (a wrong value) -> Refused
     naming the field ; (role defaults without the capability) -> Refused
     """
     command = job.command
