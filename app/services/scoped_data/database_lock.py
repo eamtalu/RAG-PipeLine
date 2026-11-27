@@ -14,6 +14,8 @@ untouched. Used by the migrations, by `session.py` and by the tests.
 
 from __future__ import annotations
 
+from typing import Iterable
+
 from app.services.scoped_data import registry
 
 #: The database user the agent's data tools read as.
@@ -40,19 +42,24 @@ def _visible_rows(rule: registry.Rule) -> str:
     return f"customer_code = {_NAMED}"
 
 
-def tables() -> list[str]:
-    """Every table the reader may select from, in a stable order."""
-    return sorted(registry.BY_TABLE)
+def tables(only: Iterable[str] | None = None) -> list[str]:
+    """Every table the reader may select from, in a stable order; `only` keeps a subset.
+
+    A migration passes the tables that exist at its point in history, because the registry it
+    imports is today's and may already name a table a later migration creates.
+    """
+    wanted = None if only is None else set(only)
+    return sorted(t for t in registry.BY_TABLE if wanted is None or t in wanted)
 
 
-def policy_statements() -> list[str]:
+def policy_statements(only: Iterable[str] | None = None) -> list[str]:
     """Switch row security on for every registry table and give it the reader policy.
 
     Safe to run again: the policy is dropped first. With no customer named the setting is NULL,
     no row matches, and the reader gets nothing.
     """
     statements = []
-    for table in tables():
+    for table in tables(only):
         statements += [
             f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY",
             f"DROP POLICY IF EXISTS {POLICY} ON {table}",
@@ -62,7 +69,7 @@ def policy_statements() -> list[str]:
     return statements
 
 
-def grant_statements() -> list[str]:
+def grant_statements(only: Iterable[str] | None = None) -> list[str]:
     """Let the reader select from the registry tables and from nothing else.
 
     Rights are taken away first, so a table that left the registry stops being readable. Only
@@ -70,13 +77,13 @@ def grant_statements() -> list[str]:
     parent's row policy.
     """
     return [f"REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {ROLE}",
-            *(f"GRANT SELECT ON {table} TO {ROLE}" for table in tables())]
+            *(f"GRANT SELECT ON {table} TO {ROLE}" for table in tables(only))]
 
 
-def removal_statements() -> list[str]:
+def removal_statements(only: Iterable[str] | None = None) -> list[str]:
     """Take the policies and the row security away again, for a downgrade."""
     statements = []
-    for table in tables():
+    for table in tables(only):
         statements += [f"DROP POLICY IF EXISTS {POLICY} ON {table}",
                        f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY"]
     return statements

@@ -32,6 +32,9 @@ Row types so far:
 - exec_home (step 7d): the executive Home of screen 02: the week's figures per site and for the
   whole customer, four periods, the 30-day fill-rate series, the decisions waiting; rewritten
   every few minutes.
+- user_prefs (program step 2): one person's preferences: every area resolved for them (built-in
+  default, then their role's, then their own, narrowed by their access) and what they set
+  themselves; rewritten after every preference command.
 Later steps add their rows here, and the edge's `KEY_LAYOUT` test keeps the Terraform prefix list
 in step with this table.
 """
@@ -128,6 +131,10 @@ KEY_LAYOUT: dict[str, KeySpec] = {
     #: customer's watchable things (open deliveries, routes, sites, zones, locations, items)
     "user_watches": KeySpec(
         pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USER#{user_id}#WATCHES", ttl_seconds=None
+    ),
+    #: program step 2: one row per person with their preferences, resolved and their own
+    "user_prefs": KeySpec(
+        pk=f"{KEY_PREFIX}#{{customer_code}}", sk="USER#{user_id}#PREFS", ttl_seconds=None
     ),
     "watchables": KeySpec(pk=f"{KEY_PREFIX}#{{customer_code}}", sk="WATCHABLES", ttl_seconds=600),
     #: step 30: the Forecast page opened from Overview, per site and for "all", rewritten every five minutes

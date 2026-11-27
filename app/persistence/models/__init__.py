@@ -68,6 +68,7 @@ from app.persistence.models.access import (  # noqa: F401
 )
 from app.persistence.models.advisory import Advisory, AdvisoryAgent, AdvisoryAgentRun  # noqa: F401
 from app.persistence.models.watch import Watch, WatchEvent, WatchNotNow  # noqa: F401
+from app.persistence.models.preference import Preference  # noqa: F401
 from app.persistence.models.task import TeamsTask, TeamsTaskRun  # noqa: F401
 from app.persistence.models.notification_group import (  # noqa: F401
     AdvisoryAnnouncement,
@@ -163,6 +164,7 @@ __all__ = [
     # --- notification groups (stage D, step 12) ---
     "AdvisoryAnnouncement",
     "NotificationGroup",
+    "Preference",
     "Watch",
     "WatchEvent",
     "WatchNotNow",
