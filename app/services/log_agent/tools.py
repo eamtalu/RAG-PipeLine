@@ -355,6 +355,21 @@ def _search_window(time_from: datetime | None, time_to: datetime | None, *,
     return {"from": end - timedelta(days=days), "to": end, "defaulted": True, "days": days}
 
 
+def _widening_steps(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    """A time range cut into steps that grow four times each, newest first, touching once.
+
+    >>> end = datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
+    >>> [(e - s).total_seconds() / 3600 for s, e in _widening_steps(end - timedelta(days=1), end)]
+    [1.0, 4.0, 16.0, 3.0]
+    """
+    steps, span = [], timedelta(hours=1)
+    while end > start:
+        lower = max(start, end - span)
+        steps.append((lower, end))
+        end, span = lower, span * 4
+    return steps
+
+
 async def _has_transaction_in(db: AsyncSession, customer_code: str, window: dict) -> bool:
     """Whether the session can read any transaction that could own a line of the range.
 
@@ -393,22 +408,33 @@ async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> d
     # Step 2: Always bound the search in time, otherwise it sorts every kept day of the
     # customer and runs into the statement timeout; the range used goes back with the answer.
     window = _search_window(time_from, time_to)
-    conds += [LogEntry.timestamp >= window["from"], LogEntry.timestamp <= window["to"]]
     limit = _clamp(args.get("limit"), 30, 100)
 
-    rows = []
-    # Step 3: For a person limited to some sites, look for one transaction of theirs in the
-    # range first. With none there is nothing to find, and finding that out line by line means
-    # checking every line of the customer (measured: over 30 s on a week of live data).
-    if is_inside_one or not scoped_data.is_site_limited(db) \
-            or await _has_transaction_in(db, customer_code, window):
+    async def newest(start: datetime, end: datetime, is_oldest: bool, wanted: int) -> list:
         # Newest first on the timestamp alone (the range leaves no line without one), so the
         # database can walk the days backwards and stop at the limit instead of sorting them.
-        rows = (await db.execute(
-            select(LogEntry).where(*conds)
+        lower = LogEntry.timestamp >= start if is_oldest else LogEntry.timestamp > start
+        return list((await db.execute(
+            select(LogEntry).where(*conds, lower, LogEntry.timestamp <= end)
             .order_by(LogEntry.timestamp.desc(), LogEntry.line_number.desc())
-            .limit(limit)
-        )).scalars().all()
+            .limit(wanted))).scalars().all())
+
+    rows: list = []
+    if not scoped_data.is_site_limited(db) or is_inside_one:
+        rows = await newest(window["from"], window["to"], True, limit)
+    elif await _has_transaction_in(db, customer_code, window):
+        # Step 3: For a person limited to some sites every line is checked against its
+        # transaction, which is quick for an hour and slow for a week (measured: 0.4 s against
+        # 21 s). So the newest hour is searched first and the range widens only while lines
+        # are still missing; most questions are about what just happened.
+        steps = _widening_steps(window["from"], window["to"])
+        for index, (start, end) in enumerate(steps):
+            rows += await newest(start, end, index == len(steps) - 1, limit - len(rows))
+            if len(rows) >= limit:
+                break
+    # else: a person limited to some sites with no transaction of theirs in the range. There
+    # is nothing to find, and finding that out line by line means checking every line of the
+    # customer (measured: over 30 s on a week of live data).
 
     # one bulk lookup for the page rather than one per row; an entry missing from the map is not
     # stitched yet.

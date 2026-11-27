@@ -231,6 +231,30 @@ async def test_a_person_whose_sites_have_no_transaction_gets_an_answer_without_a
     assert out["entries"] == [] and out["returned"] == 0 and out["window"]["days"] > 0
 
 
+async def test_a_limited_search_widens_step_by_step_and_keeps_newest_first():
+    for minutes in (-10, -60 * 3, -60 * 24 * 2, -60 * 24 * 6):
+        await _plant("915", "BRI", [f"widen-word {-minutes:05d}"], minutes=minutes)
+    await _plant("915", "LON", ["widen-word london"], minutes=-30)
+    expected = ["widen-word 00010", "widen-word 00180", "widen-word 02880", "widen-word 08640"]
+    for scope in (BRI, ALL):
+        async with scoped_data.open_session(async_session, scope) as db:
+            out = await tools._search_entries(db, {"q": "widen-word 0"}, CC)
+            two = await tools._search_entries(db, {"q": "widen-word 0", "limit": 2}, CC)
+        assert [e["message"] for e in out["entries"]] == expected, scope
+        assert [e["message"] for e in two["entries"]] == expected[:2], scope
+
+
+def test_the_steps_of_a_widening_search_cover_the_range_once_newest_first():
+    end = datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
+    steps = tools._widening_steps(end - timedelta(days=7), end)
+    assert steps[0] == (end - timedelta(hours=1), end)
+    assert steps[-1][0] == end - timedelta(days=7)
+    assert all(later[1] == earlier[0] for earlier, later in zip(steps, steps[1:]))
+    assert len(steps) <= 6
+    assert tools._widening_steps(end - timedelta(minutes=20), end) == [
+        (end - timedelta(minutes=20), end)]
+
+
 def test_a_session_knows_whether_it_is_limited_to_some_sites():
     async def probe(scope) -> bool:
         async with scoped_data.open_session(async_session, scope) as db:
