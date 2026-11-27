@@ -65,6 +65,7 @@ from app.persistence.models.access import (  # noqa: F401
     TeamsUser,
     TeamsUserCapability,
     TeamsUserSite,
+    AccessCustomerRole,
 )
 from app.persistence.models.advisory import Advisory, AdvisoryAgent, AdvisoryAgentRun  # noqa: F401
 from app.persistence.models.watch import Watch, WatchEvent, WatchNotNow  # noqa: F401

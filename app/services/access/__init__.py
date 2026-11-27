@@ -14,6 +14,7 @@ names below, never a submodule (tests/test_access_boundary_chunk219.py). Inside,
 """
 
 from app.services.access.admin_commands import run as run_admin_command
+from app.services.access.admin_commands import run as run_role_command  # same door, role kinds
 from app.services.access.audit import purge_once as purge_audit_events
 from app.services.access.audit import record_event as record_audit_event
 from app.services.access.authorization.matrix import ALLOWED, NO, STATES, WITH_APPROVAL
@@ -71,6 +72,7 @@ __all__ = [
     "SITE_COMMAND_KINDS", "run_site_command", "sites_overview", "sweep_site_rows",
     # the edge's copy and the Admin tab's commands
     "mirror_customer", "roles_payload", "sweep_edge_rows", "run_admin_command",
+    "run_role_command",
     # usage
     "PeopleActivity", "people_activity", "audit_action_counts", "audit_actor_counts",
 ]

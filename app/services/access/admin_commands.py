@@ -14,9 +14,11 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import async_session
+from app.services.access import audit
 from app.services.access import edge_mirror as access_mirror
 from app.services.access.authorization import matrix as matrix_file
 from app.services.access.authorization import records
+from app.services.access.authorization import roles
 from app.services.access.people import approvals, users
 from app.services.teams.command_outcome import CommandOutcome, Refused, receipt
 from app.services.teams.contracts import ACCESS_COMMAND_KINDS, QuestionJob
@@ -214,6 +216,61 @@ async def _set_matrix_cell(db: AsyncSession, job: QuestionJob, record: records.A
     return f"{capability} for {_role_name(role)}: {state.replace('_', ' ')}"
 
 
+async def _set_role(db: AsyncSession, job: QuestionJob, record: records.AccessRecord,
+                    actor: users.Actor, payload: dict, now: datetime) -> str:
+    """Add a role from an existing one's permissions, or rename one (program step 4).
+
+    ({name: "Night shift lead", copy_from: "shift_lead"}) -> "Role Night shift lead added …"
+    ; ({code: "supervisor", name: "Team leader"}) -> "Role renamed …"
+    """
+    # roles are the Admin's alone, like the matrix: they decide what every person may do
+    if record.role_code != roles.ADMIN:
+        raise Refused("only an Admin may change the roles")
+    code = str(payload["code"]) if payload.get("code") else None
+    copy_from = str(payload["copy_from"]) if payload.get("copy_from") else None
+    before = (await roles.role_names(db, job.customer_code)).get(code or "", "")
+    try:
+        role, is_new = await roles.set_role(
+            db, job.customer_code, name=str(payload.get("name") or ""), code=code,
+            copy_from=copy_from, actor=actor.object_id)
+    except ValueError as exc:
+        raise Refused(str(exc)) from None
+    names = await roles.role_names(db, job.customer_code)
+    text = (f"Role {role.name} added, starting from {names.get(copy_from or '', copy_from)}"
+            if is_new else f"Role {before} renamed to {role.name}")
+    await audit.record_event(
+        db, job.customer_code, actor_object_id=actor.object_id, actor_name=actor.name,
+        actor_kind=actor.kind, action="access.role_added" if is_new else "access.role_renamed",
+        decision="allowed", subject_kind="role", subject_id=role.code, request_id=job.job_id,
+        text=f"{actor.name or actor.object_id}: {text}", detail=dict(payload), at=now)
+    return text
+
+
+async def _retire_role(db: AsyncSession, job: QuestionJob, record: records.AccessRecord,
+                       actor: users.Actor, payload: dict, now: datetime) -> str:
+    """Retire a role nobody carries, or bring one back (program step 4).
+
+    ({code: "executive", active: false}) -> "Role Executive retired" ; (people still carry it)
+    -> Refused with how many ; (admin) -> Refused, always
+    """
+    if record.role_code != roles.ADMIN:
+        raise Refused("only an Admin may change the roles")
+    is_active = bool(payload.get("active"))
+    try:
+        role = await roles.set_active(db, job.customer_code, str(payload.get("code") or ""),
+                                      is_active, actor=actor.object_id)
+    except ValueError as exc:
+        raise Refused(str(exc)) from None
+    text = f"Role {role.name} {'brought back' if is_active else 'retired'}"
+    await audit.record_event(
+        db, job.customer_code, actor_object_id=actor.object_id, actor_name=actor.name,
+        actor_kind=actor.kind,
+        action="access.role_restored" if is_active else "access.role_retired",
+        decision="allowed", subject_kind="role", subject_id=role.code, request_id=job.job_id,
+        text=f"{actor.name or actor.object_id}: {text}", detail=dict(payload), at=now)
+    return text
+
+
 async def _decide(db: AsyncSession, job: QuestionJob, record: records.AccessRecord,
                   actor: users.Actor, payload: dict, now: datetime) -> str:
     decision = records.decide(record, "approve")
@@ -290,6 +347,8 @@ _HANDLERS = {
     "access_set_user": _set_user,
     "access_deactivate_user": _deactivate_user,
     "access_set_matrix_cell": _set_matrix_cell,
+    "role_set": _set_role,
+    "role_retire": _retire_role,
     "access_decide": _decide,
     "access_request": _request,
     "access_undo": _undo,

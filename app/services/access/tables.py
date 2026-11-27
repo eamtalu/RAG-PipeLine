@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from app.persistence.models.access import (
     AccessCapability,
+    AccessCustomerRole,
     AccessRole,
     AccessRoleCapability,
     AuditEvent,
@@ -38,6 +39,7 @@ ACCESS_TABLES: tuple[AccessTable, ...] = (
     AccessTable(TeamsUser, "customer"),
     AccessTable(TeamsUserSite, "customer"),
     AccessTable(AccessRoleCapability, "customer"),
+    AccessTable(AccessCustomerRole, "customer"),
     AccessTable(TeamsTenantBinding, "customer"),
     AccessTable(AuditEvent, "site", key="site_id"),
     AccessTable(TeamsUserCapability, "owner", key="user_id", owner=TeamsUser),

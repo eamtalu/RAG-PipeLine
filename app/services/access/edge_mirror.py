@@ -19,6 +19,7 @@ from app.persistence.models.teams_binding import TeamsTenantBinding
 from app.services.access import audit
 from app.services.access.authorization import matrix as matrix_file
 from app.services.access.authorization import records
+from app.services.access.authorization import roles
 from app.services.access.people import approvals, users
 from app.services.teams.mirror import ChangeTracker, MirrorWriter, envelope, write_if_changed
 from app.services.teams.mirror_rows import invite_key
@@ -38,11 +39,16 @@ async def roles_payload(db: AsyncSession, customer_code: str) -> dict:
     """The matrix and the names, as the Admin tab draws them and the role chip reads them."""
     m = matrix_file.load()
     cells = await records.customer_matrix(db, customer_code)
+    # the customer's own roles (program step 4): built-in ones under its own names, the ones
+    # it added, retired ones marked, each with how many people carry it
+    listed = await roles.customer_roles(db, customer_code)
+    people = await roles.people_per_role(db, customer_code)
     return {
-        "roles": [{"code": r.code, "name": r.name} for r in m.roles],
+        "roles": [{"code": r.code, "name": r.name, "active": r.is_active,
+                   "built_in": r.is_built_in, "people": people.get(r.code, 0)} for r in listed],
         "capabilities": [{"code": c.code, "name": c.name} for c in m.capabilities],
         "matrix": {
-            c.code: {r.code: cells.get((r.code, c.code), "no") for r in m.roles}
+            c.code: {r.code: cells.get((r.code, c.code), "no") for r in listed}
             for c in m.capabilities
         },
     }
@@ -60,6 +66,7 @@ async def mirror_customer(db: AsyncSession, mirror: MirrorWriter, customer_code:
     # Step 1: One record per person, removed for a deactivated one so the edge locks them out
     # on the next request rather than on the next sweep of a stale row
     people = await users.list_users(db, customer_code)
+    role_names = await roles.role_names(db, customer_code)
     sites_by_user: dict = {}
     for row in (await db.execute(
             select(TeamsUserSite).where(TeamsUserSite.customer_code == customer_code))).scalars():
@@ -68,7 +75,8 @@ async def mirror_customer(db: AsyncSession, mirror: MirrorWriter, customer_code:
         # step 43: a pending invite has no object id, so it has an invite row, not a record
         if user.object_id is None:
             if is_open_invite(user, now):
-                env = envelope("invite_access", customer_code, payload=invite_payload(user, sites_by_user),
+                env = envelope("invite_access", customer_code,
+                               payload=invite_payload(user, sites_by_user, role_names),
                                as_of=as_of, now=stamp, user_id=invite_key(user.email))
                 written += int(await write_if_changed(mirror, tracker, env, now=stamp))
             elif now - user.updated_at <= INVITE_CLEANUP:
@@ -85,7 +93,9 @@ async def mirror_customer(db: AsyncSession, mirror: MirrorWriter, customer_code:
                        now=stamp, user_id=user.object_id)
         written += int(await write_if_changed(mirror, tracker, env, now=stamp))
     # Step 2: The customer-wide rows the Admin tab lists
-    listing = {"users": [users.user_payload(u, sorted(sites_by_user.get(u.id, []))) for u in people]}
+    names = await roles.role_names(db, customer_code)
+    listing = {"users": [users.user_payload(u, sorted(sites_by_user.get(u.id, [])), names)
+                         for u in people]}
     queue = {"pending": [approvals.approval_payload(a) for a in await approvals.pending(db, customer_code)],
              "recent": [approvals.approval_payload(a)
                         for a in await approvals.recent(db, customer_code, limit=APPROVAL_ROWS)]}
@@ -104,10 +114,12 @@ def is_open_invite(user: TeamsUser, now: datetime) -> bool:
             and not users.is_invite_expired(user, now))
 
 
-def invite_payload(user: TeamsUser, sites_by_user: dict) -> dict:
+def invite_payload(user: TeamsUser, sites_by_user: dict,
+                   role_names: dict[str, str] | None = None) -> dict:
     """What the edge learns of an invite: who it is for in words and the role, never the email."""
     return {"display_name": user.display_name, "role": user.role_code,
-            "role_name": users._role_name(user.role_code), "all_sites": user.all_sites,
+            "role_name": users._role_name(user.role_code, role_names),
+            "all_sites": user.all_sites,
             "site_ids": sorted(sites_by_user.get(user.id, [])),
             "expires_at": (user.created_at + timedelta(days=settings.teams_invite_days)).isoformat()}
 

@@ -180,7 +180,11 @@ async def record_for_user(db: AsyncSession, user: TeamsUser) -> AccessRecord:
             select(TeamsUserSite).where(TeamsUserSite.user_id == user.id)
         )).scalars()
     ))
-    role_name = next((r.name for r in m.roles if r.code == user.role_code), user.role_code)
+    # the customer's own name for the role: it may have renamed a built-in one or added this one
+    from app.services.access.authorization import roles  # local: roles imports the models only
+
+    role_name = (await roles.role_names(db, user.customer_code)).get(user.role_code,
+                                                                     user.role_code)
     return AccessRecord(
         customer_code=user.customer_code, object_id=user.object_id,
         display_name=user.display_name, role_code=user.role_code, role_name=role_name,
@@ -212,8 +216,10 @@ async def set_matrix_cell(db: AsyncSession, customer_code: str, role_code: str, 
     from app.services.access import audit  # local: audit imports nothing from here
     from app.services.access.authorization.matrix import STATES
 
+    from app.services.access.authorization import roles  # local: roles imports the models only
+
     m = matrix_file.load()
-    if role_code not in m.role_codes:
+    if role_code not in await roles.role_names(db, customer_code):
         raise ValueError(f"unknown role {role_code!r}")
     if capability_code not in m.capability_codes:
         raise ValueError(f"unknown capability {capability_code!r}")
