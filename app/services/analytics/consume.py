@@ -184,8 +184,15 @@ async def _ensure_destination_partitions(customer_code: str, lo: datetime, hi: d
     return created
 
 
-def _lock(customer_code: str):
+def writer_lock(customer_code: str):
+    """The lock one tenant's fact and rollup writes are serialised on, held until the commit.
+
+    (two folds of one tenant) -> the second waits ; (two tenants) -> neither waits
+    """
     return func.pg_advisory_xact_lock(func.hashtext(_LOCK_NAMESPACE + customer_code))
+
+
+_lock = writer_lock
 
 
 def _open_and_due():
@@ -407,6 +414,42 @@ async def _read_stored(db: AsyncSession, customer_code: str, window: UtcWindow,
             window.covers(AnalyticsFact.event_time, include_null=True),
             *([gate] if gate is not None else [])))).mappings().all()
     return [dict(r) for r in rows]
+
+
+def facts_outliving_source(stored: Sequence[Mapping[str, Any]], source_ids: set,
+                           kept_from: datetime) -> list[Mapping[str, Any]]:
+    """The stored facts whose source row retention has removed, which must not be withdrawn.
+
+    A fact is kept much longer than the transaction it came from. Before `kept_from` the source
+    is dropped by age, so "no source row" says nothing about the fact; from `kept_from` on it
+    still means the transaction was merged, split or deleted.
+
+    >>> cut = datetime(2026, 9, 28, tzinfo=timezone.utc)
+    >>> old, new = cut - timedelta(days=3), cut + timedelta(days=3)
+    >>> rows = [{"source_transaction_id": "a", "event_time": old},
+    ...         {"source_transaction_id": "b", "event_time": old},
+    ...         {"source_transaction_id": "c", "event_time": new},
+    ...         {"source_transaction_id": "d", "event_time": None}]
+    >>> [r["source_transaction_id"] for r in facts_outliving_source(rows, {"b"}, cut)]
+    ['a']
+    """
+    present = {str(i) for i in source_ids}
+    return [r for r in stored
+            if r.get("event_time") is not None and dd._as_utc(r["event_time"]) < kept_from
+            and str(r.get("source_transaction_id")) not in present]
+
+
+async def _source_kept_from(db: AsyncSession) -> datetime:
+    """The instant before which retention has dropped the source transactions.
+
+    (database today 27 Nov, 60 days kept) -> 28 Sep 00:00 UTC
+
+    The database clock and the same subtraction `partitioning.expired_days` uses, so a day this
+    calls kept is one retention has not dropped yet.
+    """
+    today = await db.scalar(text("SELECT (now() AT TIME ZONE 'UTC')::date"))
+    cutoff = today - timedelta(days=settings.log_partition_retention_days)
+    return datetime(cutoff.year, cutoff.month, cutoff.day, tzinfo=timezone.utc)
 
 
 def _key_predicate(customer_code: str, key: dd.Key):
@@ -1002,6 +1045,19 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
                 fact["source_version_hash"] = n2._fingerprint(fact)
             (facts if fact is not None else issues).append(fact if fact is not None else issue)
 
+        # Chunk 235: a stored fact older than the source retention, with no source row, is carried
+        # forward like an unchanged one. Otherwise the diff below withdraws it, because it cannot
+        # tell "aged out of a table kept 60 days" from "deleted": on 27 Nov 2026 refold tickets
+        # over September withdrew 111,560 facts that way, and their rollups with them.
+        outlived = facts_outliving_source(stored, {row["id"] for row in source_rows},
+                                          await _source_kept_from(db))
+        facts.extend({k: v for k, v in f.items() if k not in ("id", "created_at")}
+                     for f in outlived)
+        if outlived:
+            logger.warning("Analytics: run %s..%s for %s kept %d fact(s) whose source is past "
+                           "retention; nothing was withdrawn for them", lo, hi, customer_code,
+                           len(outlived))
+
         # Register any transaction name seen for the first time, at capture=on / show=off. Done from
         # the SOURCE rows rather than by a separate query: they are already in hand, and a name can
         # only be new if it appeared in a window somebody is folding.
@@ -1083,6 +1139,7 @@ async def _consume_run(customer_code: str, lo: datetime, hi: datetime,
         await db.commit()
 
     return {**folded, "quarantined": quarantined, "source_rows": len(source_rows),
+            "outlived_source": len(outlived),
             "consumed": len(tickets), "definitions_rolled": rolled["definitions"],
             "definitions_skipped": rolled["skipped"], "buckets_rolled": rolled["buckets"],
             "rollup_rows_written": rolled["rows_written"],
@@ -1134,7 +1191,7 @@ async def consume_tenant(customer_code: str) -> dict:
              "quarantined": 0, "source_rows": 0, "consumed": 0, "failed": 0, "abandoned": 0,
              "definitions_rolled": 0, "definitions_skipped": 0, "buckets_rolled": 0,
              "rollup_rows_written": 0,
-             "record_facts": 0, "record_facts_deleted": 0}
+             "record_facts": 0, "record_facts_deleted": 0, "outlived_source": 0}
     if not tickets:
         return stats
 

@@ -134,3 +134,16 @@ def _configured_secrets_store(monkeypatch):
     if not settings.secrets_master_keys:
         monkeypatch.setattr(settings, "secrets_master_keys", _TEST_MASTER_KEY)
         monkeypatch.setattr(settings, "secrets_active_key_id", "test1")
+
+
+# --- fixed dates and the source retention ---------------------------------------------------
+@pytest.fixture
+def source_still_kept(monkeypatch):
+    """For tests that plant transactions on a fixed date and treat it as today.
+
+    Since chunk 235 the fact writer does not withdraw a fact whose source is older than the source
+    retention, and a fixed date falls behind it as the calendar moves on. A test about a deleted
+    or merged transaction asks for this so its source counts as still kept.
+    """
+    monkeypatch.setattr(settings, "log_partition_retention_days", 100_000)
+

@@ -4,10 +4,11 @@
     PYTHONPATH=. venv/bin/python scripts/refold_rollups_by_day.py tmp-live 2026-09-03 2026-09-10 \\
         --pause 10 --max-write-wait-ms 100
 
-For each day it queues one refold ticket, waits until the fact writer has consumed it, and reads
-the disk's write wait before the next day. It stops when that wait is above the limit, or when a
-ticket is not consumed in time; run it again from the day it names. Safe to repeat: a refold
-recomputes a day's rows from its facts.
+For each day it folds the rollups again from the facts already stored, in one transaction under
+the fact writer's tenant lock, and reads the disk's write wait before the next day. It stops
+when that wait is above the limit; run it again from the day it names. It never reads the source
+transactions and never writes a fact, so it is safe on days older than the source is kept, and
+safe to repeat.
 """
 
 from __future__ import annotations
@@ -36,8 +37,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="stop when a disk write waits longer than this on average")
     parser.add_argument("--device", default="sda", help="the disk to watch in /proc/diskstats")
     parser.add_argument("--sample", type=float, default=2.0, help="seconds per disk reading")
-    parser.add_argument("--timeout", type=float, default=300.0,
-                        help="seconds to wait for the fact writer to consume one day")
     return parser
 
 
@@ -48,14 +47,6 @@ async def run(args: argparse.Namespace) -> int:
         before = DISKSTATS.read_text()
         await asyncio.sleep(args.sample)
         return refold.write_wait_ms(before, DISKSTATS.read_text(), args.device)
-
-    async def wait_until_consumed() -> bool:
-        deadline = time.monotonic() + args.timeout
-        while time.monotonic() < deadline:
-            if await refold.open_tickets(async_session, args.customer_code) == 0:
-                return True
-            await asyncio.sleep(2.0)
-        return False
 
     started, last = time.monotonic(), [time.monotonic()]
 
@@ -71,7 +62,7 @@ async def run(args: argparse.Namespace) -> int:
     progress = await refold.refold_range(
         async_session, args.customer_code, start=args.start, end=args.end, tz=tz,
         max_write_wait_ms=args.max_write_wait_ms, read_write_wait=read_write_wait,
-        wait_until_consumed=wait_until_consumed, pause_seconds=args.pause, on_day=report)
+        pause_seconds=args.pause, on_day=report)
     print(f"{args.customer_code}: {len(progress.days_done)} days refolded in "
           f"{time.monotonic() - started:.0f}s")
     if progress.stopped_at is not None:

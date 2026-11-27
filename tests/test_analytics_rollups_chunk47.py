@@ -45,6 +45,9 @@ from app.services.analytics import diff as dd
 from app.services.analytics import registry
 from app.services.analytics import rollups as n5
 
+#: Fixed dates stand for today in these tests: their source counts as still kept (chunk 235).
+pytestmark = pytest.mark.usefixtures("source_still_kept")
+
 CC = "n5-probe"
 #: 14:30 UTC on a fixed day, so the hour bucket and the London business date are both unambiguous.
 T0 = datetime(2026, 8, 10, 14, 30, tzinfo=timezone.utc)
