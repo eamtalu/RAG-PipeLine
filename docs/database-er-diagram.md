@@ -1376,6 +1376,8 @@ The consumer computes the Home snapshot once for the whole customer and once per
 The turns carry the soft tenant key like the log tables, so a tenant purge can remove them and a turn can never be replayed into another tenant's question.
 Since stage D step 6 the answer row also carries who asked, the site, the typed blocks and the times, so the same table is the Ask history of the Teams app: the consumer mirrors one person's last 30 days to the edge (`EYE#<customer>` / `USER#<object id>#HISTORY` and one `TURN` row per answer) and purges older turns every hour (`teams_history_retention_days`).
 Access control (stage D, step 7) is the matrix of screen 07 as data: `access_roles` and `access_capabilities` are seeded from `app/services/access/matrix.yaml`, `access_role_capabilities` holds one state per cell per customer (seeded from the file on first use, changed by an Admin in the app), `teams_users` is a person (Entra object id) within a customer with a role, `teams_user_sites` the sites they may see (none when `all_sites`), `teams_user_capabilities` a per-person override of a cell set by an Admin or granted for good by an approval, `access_approvals` the queue of "with approval" requests (24 h expiry), and `audit_events` every permission decision that changed data, append-only, purged after 90 days.
+Since 27 Nov 2026 (migration `b4e9f7a1c3d8`) roles are per customer: `access_customer_roles` holds the roles a customer added and a row for each built-in role it renamed or retired; a built-in role it left alone has no row and is read from the matrix file.
+A new role's code is also inserted into the shared `access_roles`, so the foreign keys of `teams_users` and `access_role_capabilities` are unchanged.
 Every one of them is a real foreign key to the customer; the effective record a person gets is computed in `app/services/access/records.py` and mirrored to the edge.
 Since step 43 a person can be invited by email before they sign in: a `teams_users` row with status `pending` and no `object_id`, claimed at their first sign-in (`claimed_at`), expired after `TEAMS_INVITE_DAYS`.
 Emails are stored lower case and are unique per customer, and an invite must be to one of the `email_domains` on the customer's `teams_tenant_bindings`.
@@ -1440,9 +1442,20 @@ erDiagram
     }
 
     access_roles {
-        string code PK "picker | shift_lead | supervisor | ops_manager | executive | admin"
+        string code PK "the six built-in roles, plus every code a customer added"
         string name
         int sort_order
+    }
+
+    access_customer_roles {
+        string customer_code PK,FK
+        string code PK,FK "a role this customer added, or a built-in one it renamed or retired"
+        string name "this customer's name for the role"
+        int sort_order
+        boolean is_active "false = retired"
+        string copied_from "the role a new role's permissions started from"
+        datetime updated_at
+        string updated_by
     }
 
     access_capabilities {
@@ -1850,6 +1863,8 @@ erDiagram
     customers ||--o{ watch_not_now : "not-nows of"
     watches ||--o{ watch_events : "changed as"
     access_roles ||--o{ access_role_capabilities : "row of"
+    access_roles ||--o{ access_customer_roles : "code of"
+    customers ||--o{ access_customer_roles : "own roles of"
     access_capabilities ||--o{ access_role_capabilities : "column of"
     access_roles ||--o{ teams_users : "role of"
     teams_users ||--o{ teams_user_sites : "may see"
@@ -1952,6 +1967,8 @@ No table or column changed.
 | `customers.customer_code` | `tenant_sites.customer_code` | CASCADE |
 | `tenant_sites (customer_code, site_id)` | `tenant_site_places (customer_code, site_id)` | CASCADE |
 | `customers.customer_code` | `access_role_capabilities.customer_code` | CASCADE |
+| `customers.customer_code` | `access_customer_roles.customer_code` | CASCADE |
+| `access_roles.code` | `access_customer_roles.code` | NO ACTION |
 | `customers.customer_code` | `teams_users.customer_code` | CASCADE |
 | `customers.customer_code` | `access_approvals.customer_code` | CASCADE |
 | `customers.customer_code` | `audit_events.customer_code` | CASCADE |

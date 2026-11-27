@@ -22,6 +22,7 @@ from app.persistence.models.access import (
 from app.persistence.models.tenant_site import TenantSite
 from app.services.access import audit
 from app.services.access.authorization import matrix as matrix_file
+from app.services.access.authorization import roles
 from app.services.access.authorization.matrix import STATES
 from app.services.access.tenancy.bindings import customer_email_domains
 from app.services.teams.mirror_rows import email_domain, normalize_email
@@ -56,10 +57,16 @@ class UserChange:
     note: str | None = None
 
 
-def _check(change: UserChange, customer_sites: set[str]) -> None:
+def _check(change: UserChange, customer_sites: set[str],
+           customer_roles: list[roles.RoleInfo], *, current_role: str | None = None) -> None:
     m = matrix_file.load()
-    if change.role_code is not None and change.role_code not in m.role_codes:
+    role = next((r for r in customer_roles if r.code == change.role_code), None)
+    if change.role_code is not None and role is None:
         raise ValueError(f"unknown role {change.role_code!r}")
+    # a person who already carries a retired role keeps it until someone moves them; only
+    # giving it to someone is refused
+    if role is not None and not role.is_active and role.code != current_role:
+        raise ValueError(f"the role {role.name} is retired; bring it back or pick another")
     if change.status is not None and change.status not in USER_STATUSES:
         raise ValueError(f"unknown status {change.status!r}")
     for site_id in change.site_ids or ():
@@ -107,7 +114,8 @@ async def create_user(db: AsyncSession, customer_code: str, object_id: str, *, c
         raise ValueError("a new user needs a display_name and a role_code")
     if change.email and await get_user_by_email(db, customer_code, change.email) is not None:
         raise ValueError(f"{normalize_email(change.email)} is already a user of {customer_code}")
-    _check(change, await _customer_sites(db, customer_code))
+    _check(change, await _customer_sites(db, customer_code),
+           await roles.customer_roles(db, customer_code))
     user = TeamsUser(customer_code=customer_code, object_id=object_id,
                      display_name=change.display_name, email=normalize_email(change.email) or None,
                      role_code=change.role_code, all_sites=bool(change.all_sites),
@@ -122,7 +130,7 @@ async def create_user(db: AsyncSession, customer_code: str, object_id: str, *, c
         actor_kind=actor.kind, action="access.user_created", capability_code="manage_users",
         decision="allowed", subject_kind="user", subject_id=object_id,
         text=f"{actor.name or actor.object_id} created {user.display_name} as "
-             f"{_role_name(user.role_code)}" + _sites_text(change), at=now)
+             f"{await _name_of(db, customer_code, user.role_code)}" + _sites_text(change), at=now)
     return user
 
 
@@ -149,7 +157,8 @@ async def update_user_row(db: AsyncSession, user: TeamsUser, *, change: UserChan
     customer_code = user.customer_code
     if change.email is not None:
         change = _with_email(change, normalize_email(change.email) or None)
-    _check(change, await _customer_sites(db, customer_code))
+    _check(change, await _customer_sites(db, customer_code),
+           await roles.customer_roles(db, customer_code), current_role=user.role_code)
     if user.object_id is None and change.status == "active":
         raise ValueError(f"{user.display_name} has not signed in yet; the invite turns active on "
                          "their first sign-in")
@@ -222,7 +231,8 @@ async def invite_user(db: AsyncSession, customer_code: str, email: str, *, chang
         raise ValueError(f"{email} is already a user of {customer_code}")
     if not change.display_name or not change.role_code:
         raise ValueError("an invite needs a display_name and a role_code")
-    _check(change, await _customer_sites(db, customer_code))
+    _check(change, await _customer_sites(db, customer_code),
+           await roles.customer_roles(db, customer_code))
     # Step 2: The row is the pending user itself, so approving, editing or withdrawing it uses the
     # same code as for any user, and the claim only fills in the object id
     user = TeamsUser(customer_code=customer_code, object_id=None, display_name=change.display_name,
@@ -237,7 +247,7 @@ async def invite_user(db: AsyncSession, customer_code: str, email: str, *, chang
         actor_kind=actor.kind, action="access.user_invited", capability_code="manage_users",
         decision="allowed", subject_kind="user", subject_id=email,
         text=f"{actor.name or actor.object_id} invited {user.display_name} ({email}) as "
-             f"{_role_name(user.role_code)}" + _sites_text(change), at=now)
+             f"{await _name_of(db, customer_code, user.role_code)}" + _sites_text(change), at=now)
     return user
 
 
@@ -273,7 +283,8 @@ async def claim_invite(db: AsyncSession, customer_code: str, email: str, object_
         db, customer_code, actor_object_id=object_id, actor_name=name, actor_kind="user",
         action="access.user_claimed", capability_code=None, decision="allowed",
         subject_kind="user", subject_id=object_id, detail={"email": email},
-        text=f"{who} joined as {user.display_name} ({email}), {_role_name(user.role_code)}", at=now)
+        text=(f"{who} joined as {user.display_name} ({email}), "
+              f"{await _name_of(db, customer_code, user.role_code)}"), at=now)
     return user
 
 
@@ -329,8 +340,16 @@ async def _apply_sites_and_overrides(db: AsyncSession, user: TeamsUser, change: 
     await db.flush()
 
 
-def _role_name(code: str) -> str:
+def _role_name(code: str, names: dict[str, str] | None = None) -> str:
+    """A role's name: the customer's own when `names` is given, else the built-in one."""
+    if names is not None and code in names:
+        return names[code]
     return next((r.name for r in matrix_file.load().roles if r.code == code), code)
+
+
+async def _name_of(db: AsyncSession, customer_code: str, code: str) -> str:
+    """The customer's own name for a role, for a sentence in the audit log."""
+    return (await roles.role_names(db, customer_code)).get(code, code)
 
 
 def _sites_text(change: UserChange) -> str:
@@ -339,11 +358,12 @@ def _sites_text(change: UserChange) -> str:
     return f" for {', '.join(change.site_ids)}" if change.site_ids else ""
 
 
-def user_payload(user: TeamsUser, site_ids: list[str]) -> dict:
-    """One user as the Admin tab lists them (no secrets)."""
+def user_payload(user: TeamsUser, site_ids: list[str],
+                 role_names: dict[str, str] | None = None) -> dict:
+    """One user as the Admin tab lists them (no secrets); `role_names` are the customer's own."""
     return {
         "object_id": user.object_id, "display_name": user.display_name, "email": user.email,
-        "role": user.role_code, "role_name": _role_name(user.role_code),
+        "role": user.role_code, "role_name": _role_name(user.role_code, role_names),
         "all_sites": user.all_sites, "site_ids": site_ids, "status": user.status,
         "starts_on": user.starts_on.isoformat() if user.starts_on else None, "note": user.note,
         "last_active_at": user.last_active_at.isoformat() if user.last_active_at else None,

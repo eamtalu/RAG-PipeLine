@@ -59,6 +59,30 @@ class AccessCapability(Base):
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
 
+class AccessCustomerRole(Base):
+    """A role as one customer has it (program step 4): a role the customer added, or a built-in
+    role it renamed or retired. A built-in role the customer left alone has no row here; it is
+    read from the matrix file. The code also lives in `access_roles`, the shared list the
+    foreign keys of the users and the matrix cells point at."""
+
+    __tablename__ = "access_customer_roles"
+
+    customer_code: Mapped[str] = mapped_column(
+        String(64), ForeignKey("customers.customer_code", ondelete="CASCADE"), primary_key=True)
+    code: Mapped[str] = mapped_column(
+        String(32), ForeignKey("access_roles.code"), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=100,
+                                            server_default="100")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True,
+                                            server_default="true")
+    #: The role whose permissions a new role started from; None for a built-in role's row.
+    copied_from: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
+    updated_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
 class AccessRoleCapability(Base):
     """One cell of a customer's matrix: allowed | with_approval | no."""
 

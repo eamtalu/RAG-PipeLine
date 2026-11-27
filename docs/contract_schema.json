@@ -1664,7 +1664,9 @@
                 "preference_set",
                 "preference_reset",
                 "site_set",
-                "site_places_set"
+                "site_places_set",
+                "role_set",
+                "role_retire"
               ],
               "title": "Kind",
               "type": "string"
@@ -1825,5 +1827,5 @@
       "type": "object"
     }
   },
-  "revision": "3.27"
+  "revision": "3.28"
 }
