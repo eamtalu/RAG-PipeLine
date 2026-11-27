@@ -170,9 +170,10 @@ class ThroughTransaction:
     A log line has no site and gets none (`log_entries` is insert-only), but the assignment row
     names the transaction it belongs to and the transaction has its company and warehouse. The
     transaction's own rule is applied to it here, so a change to that rule changes both. A line
-    that belongs to no transaction, or has no timestamp, is read only by a person who may see
-    every site: nothing says whose it is. That person's condition is the customer alone, as it
-    was before the lines were limited.
+    that belongs to no transaction yet is read by everyone of the customer who has a site (the
+    owner's decision, 27 Nov 2026: nothing is hidden for lack of grouping). A line with no
+    timestamp cannot be matched to its transaction here, so only a person who may see every
+    site reads it. That person's condition is the customer alone, as it was before.
     """
 
     model: Any
@@ -204,11 +205,13 @@ class ThroughTransaction:
             return and_(mine, owned(LogEntryAssignment.transaction_id,
                                     LogEntryAssignment.entry_ts))
         link = LogEntryAssignment.__table__.alias("owner_link")
-        # Equality on both partition keys of the link, entry id and timestamp, so that one
-        # partition is opened for each line.
-        return and_(mine, exists().where(link.c.entry_id == LogEntry.id,
-                                         link.c.entry_ts == LogEntry.timestamp,
-                                         owned(link.c.transaction_id, link.c.entry_ts)))
+        # "No link to a transaction this person may not read": true for a line of their own
+        # transaction and for a line with no transaction at all. Equality on both partition
+        # keys of the link, entry id and timestamp, so that one partition is opened per line.
+        is_someone_elses = exists().where(link.c.entry_id == LogEntry.id,
+                                          link.c.entry_ts == LogEntry.timestamp,
+                                          ~owned(link.c.transaction_id, link.c.entry_ts))
+        return and_(mine, LogEntry.timestamp.isnot(None), ~is_someone_elses)
 
 
 @dataclass(frozen=True, slots=True)

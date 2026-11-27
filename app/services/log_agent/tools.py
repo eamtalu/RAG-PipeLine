@@ -355,6 +355,10 @@ def _search_window(time_from: datetime | None, time_to: datetime | None, *,
     return {"from": end - timedelta(days=days), "to": end, "defaulted": True, "days": days}
 
 
+#: How far back ungrouped lines are looked for, for a person whose sites were quiet.
+_UNGROUPED_LOOKBACK = timedelta(days=1)
+
+
 def _widening_steps(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
     """A time range cut into steps that grow four times each, newest first, touching once.
 
@@ -420,9 +424,20 @@ async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> d
             .limit(wanted))).scalars().all())
 
     rows: list = []
+    quiet_note = None
     if not scoped_data.is_site_limited(db) or is_inside_one:
         rows = await newest(window["from"], window["to"], True, limit)
-    elif await _has_transaction_in(db, customer_code, window):
+    elif not await _has_transaction_in(db, customer_code, window):
+        # A person limited to some sites, none of which has a transaction in the range. All
+        # they can be shown is lines not grouped into a transaction yet, and those are recent
+        # by nature; proving there is none in a whole week means checking every line of the
+        # customer (measured: 24 s on live data). So only the last day is looked at, and the
+        # answer says so.
+        start = max(window["from"], window["to"] - _UNGROUPED_LOOKBACK)
+        rows = await newest(start, window["to"], True, limit)
+        quiet_note = ("None of your sites has activity in this period. Only lines not yet "
+                      "grouped into a transaction were looked for, in its last 24 hours.")
+    else:
         # Step 3: For a person limited to some sites every line is checked against its
         # transaction, which is quick for an hour and slow for a week (measured: 0.4 s against
         # 21 s). So the newest hour is searched first and the range widens only while lines
@@ -432,9 +447,6 @@ async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> d
             rows += await newest(start, end, index == len(steps) - 1, limit - len(rows))
             if len(rows) >= limit:
                 break
-    # else: a person limited to some sites with no transaction of theirs in the range. There
-    # is nothing to find, and finding that out line by line means checking every line of the
-    # customer (measured: over 30 s on a week of live data).
 
     # one bulk lookup for the page rather than one per row; an entry missing from the map is not
     # stitched yet.
@@ -456,9 +468,12 @@ async def _search_entries(db: AsyncSession, args: dict, customer_code: str) -> d
     out = {"returned": len(entries), "entries": entries,
            "window": {**window, "from": iso_display(window["from"]),
                       "to": iso_display(window["to"])}}
+    notes = [quiet_note] if quiet_note else []
     if window["defaulted"]:
-        out["note"] = (f"Searched the last {window['days']} days, because no start time was "
-                       "given. Pass time_from and time_to to search another period.")
+        notes.append(f"Searched the last {window['days']} days, because no start time was "
+                     "given. Pass time_from and time_to to search another period.")
+    if notes:
+        out["note"] = " ".join(notes)
     return out
 
 

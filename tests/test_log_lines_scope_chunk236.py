@@ -11,13 +11,15 @@ Pinned here
     one txn      a Brighton person reads the lines of a Brighton transaction, in order
     another      and no line of a London transaction, by either tool
     the pair     the same warehouse code under another company is another place
-    no owner     a line with no transaction is read by an all-sites person only
+    no owner     a line with no transaction is read by everyone of the customer who has a
+                 site (owner's decision, 27 Nov 2026); one with no timestamp only by an
+                 all-sites person
     nobody       a person with no site reads nothing
     not closed   the two tables are no longer reported as closed
     the search   with no time range it looks at a set number of days and says so; a search
                  inside one transaction covers that transaction's own time, however old
     cheap        each check is bounded to the line's own day, and a person whose sites have
-                 no transaction in the range gets an empty answer without a line search
+                 no transaction in the range is shown the last day's ungrouped lines only
 """
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -168,10 +170,30 @@ async def test_the_search_returns_only_the_lines_of_the_persons_sites():
     assert await _found(NOBODY, q="shared-word") == []
 
 
-async def test_a_line_with_no_transaction_is_read_by_an_all_sites_person_only():
+async def test_a_line_with_no_transaction_is_read_by_everyone_who_has_a_site():
     await _plant("915", "BRI", ["orphan-word line"], is_assigned=False)
-    assert await _found(BRI, q="orphan-word") == []
+    assert await _found(BRI, q="orphan-word") == ["orphan-word line"]
+    assert await _found(LON, q="orphan-word") == ["orphan-word line"]
     assert await _found(ALL, q="orphan-word") == ["orphan-word line"]
+    assert await _found(NOBODY, q="orphan-word") == []
+
+
+async def test_a_line_with_no_timestamp_is_read_by_an_all_sites_person_only():
+    async with async_session() as db:
+        job = Job(customer_code=CC, filename="t.log", document_type="transaction_log",
+                  storage_key=f"{CC}/{uuid.uuid4().hex}/t.log", status="completed")
+        db.add(job)
+        await db.flush()
+        db.add(LogEntry(customer_code=CC, job_id=job.id, source_file="t.log", line_number=1,
+                        timestamp=None, level="INFO", entry_type=LogEntryType.info,
+                        message="no clock", entry_hash=uuid.uuid4().hex))
+        await db.commit()
+    seen = {}
+    for label, scope in (("BRI", BRI), ("ALL", ALL)):
+        async with scoped_data.open_session(async_session, scope) as db:
+            seen[label] = (await db.execute(select(LogEntry.message).where(
+                LogEntry.message == "no clock"))).scalars().all()
+    assert seen == {"BRI": [], "ALL": ["no clock"]}
 
 
 async def test_a_limited_read_reports_no_closed_table():
@@ -223,12 +245,17 @@ async def test_a_search_inside_one_transaction_covers_that_transactions_own_time
     assert out["entries"] == []
 
 
-async def test_a_person_whose_sites_have_no_transaction_gets_an_answer_without_a_line_search():
-    await _plant("915", "BRI", ["busy-word line"])
+async def test_a_person_whose_sites_have_no_transaction_sees_the_last_days_ungrouped_lines():
+    await _plant("915", "BRI", ["quiet-word grouped"])
+    await _plant("915", "BRI", ["quiet-word loose new"], minutes=-30, is_assigned=False)
+    await _plant("915", "BRI", ["quiet-word loose old"], minutes=-60 * 24 * 3, is_assigned=False)
     async with scoped_data.open_session(async_session, LON) as db:
-        out = await tools._search_entries(db, {"q": "busy-word"}, CC)
-        assert "log_entries" not in scoped_data.tables_read(db)
-    assert out["entries"] == [] and out["returned"] == 0 and out["window"]["days"] > 0
+        out = await tools._search_entries(db, {"q": "quiet-word"}, CC)
+    assert [e["message"] for e in out["entries"]] == ["quiet-word loose new"]
+    assert "none of your sites" in out["note"].lower() and "24 hours" in out["note"]
+    # a person of a site with transactions searches the whole range
+    assert await _found(BRI, q="quiet-word") == [
+        "quiet-word grouped", "quiet-word loose new", "quiet-word loose old"]
 
 
 async def test_a_limited_search_widens_step_by_step_and_keeps_newest_first():
