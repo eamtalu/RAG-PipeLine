@@ -144,6 +144,36 @@ async def test_the_persons_row_carries_each_pages_default_view():
     assert row["own"]["advisories"]["use"] == "v1"
 
 
+# ==================================================== 2b. the row is kept fresh (chunk 243)
+
+async def test_the_rows_of_people_with_preferences_are_refreshed_without_a_command():
+    # a row changes without a command when rows are converted, or when an Admin changes a
+    # person's sites or role; the consumer's sweep writes it again
+    from app.services.teams.mirror import ChangeTracker
+    async with async_session() as db:
+        db.add(Preference(customer_code=CC, subject_kind="user", subject_id="u-sup",
+                          area="advisories", settings={"use": "v1", "views": [VIEW]},
+                          updated_at=NOW))
+        await db.commit()
+    mirror, tracker = InMemoryMirrorWriter(), ChangeTracker(max_age_seconds=3600)
+    assert await preferences.sweep_once(mirror, only=[CC], tracker=tracker) == {CC: 1}
+    row = json.loads(mirror.items[(f"EYE#{CC}", "USER#u-sup#PREFS")].payload_json)
+    assert row["areas"]["advisories"]["use"] == "v1"
+    # nothing changed: the tracker keeps the second pass from writing again
+    assert await preferences.sweep_once(mirror, only=[CC], tracker=tracker) == {CC: 0}
+
+
+async def test_a_roles_defaults_reach_everyone_of_the_role_in_the_sweep():
+    async with async_session() as db:
+        db.add(Preference(customer_code=CC, subject_kind="role", subject_id="supervisor",
+                          area="app", settings={"is_history_open": False}, updated_at=NOW))
+        await db.commit()
+    mirror = InMemoryMirrorWriter()
+    assert await preferences.sweep_once(mirror, only=[CC]) == {CC: 1}
+    row = json.loads(mirror.items[(f"EYE#{CC}", "USER#u-sup#PREFS")].payload_json)
+    assert row["areas"]["app"]["is_history_open"] is False and row["own"] == {}
+
+
 # ==================================================== 3. the conversion
 
 def test_what_was_saved_under_the_old_areas_becomes_one_view():
