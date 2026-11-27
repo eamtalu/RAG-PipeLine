@@ -583,6 +583,9 @@ async def _tasks_loop(stop: asyncio.Event) -> None:
             pass
 
 
+SITES_SWEEP_SECONDS = 900.0
+
+
 async def _watches_loop(stop: asyncio.Event) -> None:
     """The watchlist (step 14): every tick checks the watches whose cadence is due and rewrites the
     rows of the people touched; once a minute every watch row and the customer's watchable things."""
@@ -592,8 +595,15 @@ async def _watches_loop(stop: asyncio.Event) -> None:
         return
     tracker = ChangeTracker(max_age_seconds=settings.teams_watches_tick_seconds * 20)
     last_sweep = 0.0
+    # the Admin tab's Sites row (program step 4): its pairs come from the data, read every
+    # quarter of an hour because that read is about a second on a busy customer
+    sites_tracker = ChangeTracker(max_age_seconds=6 * 3600)
+    last_sites = 0.0
     while not stop.is_set():
         try:
+            if asyncio.get_running_loop().time() - last_sites >= SITES_SWEEP_SECONDS:
+                await access.sweep_site_rows(mirror, tracker=sites_tracker)
+                last_sites = asyncio.get_running_loop().time()
             events = await watch_runner.sweep_once(mirror, tracker=tracker)
             if any(events.values()):
                 logger.info("watch events %s", events)

@@ -58,6 +58,9 @@ async def run_command(job: QuestionJob, *, run_query=None) -> str:
     # a person's preferences (program step 2) live with the preferences service
     if command.kind in preference_commands.KINDS:
         return await preference_commands.run(job)  # a CommandOutcome: the line
+    # the customer's sites and their places (program step 4) live with access tenancy
+    if command.kind in access.SITE_COMMAND_KINDS:
+        return await access.run_site_command(job)  # a CommandOutcome: the line
     # the watchlist (step 14) lives with the watchlist service
     if command.kind in watch_commands.KINDS:
         return await watch_commands.run(job)  # a CommandOutcome: the line, a receipt or a choice
