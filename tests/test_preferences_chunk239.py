@@ -101,6 +101,22 @@ def test_every_area_has_complete_built_in_defaults():
     assert areas.defaults("app") == {"default_site": None, "is_history_open": True}
 
 
+def test_the_focus_area_holds_the_kinds_and_severities_a_person_wants_first():
+    # chunk 241 (slice 3): empty kinds means every kind; at least one severity must stay
+    assert areas.defaults("advisories_focus") == {
+        "kinds": [], "severities": ["high", "medium", "low"]}
+    assert areas.validate("advisories_focus", {"kinds": ["stock", "delivery"]}) == {
+        "kinds": ["stock", "delivery"]}
+    assert areas.validate("advisories_focus", {"severities": ["high"]}) == {
+        "severities": ["high"]}
+    for wrong, field in (({"severities": []}, "severities"),
+                         ({"severities": ["urgent"]}, "severities"),
+                         ({"kinds": ["Not A Kind!"]}, "kinds"),
+                         ({"kinds": ["x"] * 40}, "kinds")):
+        with pytest.raises(ValueError, match=field):
+            areas.validate("advisories_focus", wrong)
+
+
 # ==================================================== 2. resolving
 
 async def test_values_resolve_from_default_then_role_then_person_field_by_field():
