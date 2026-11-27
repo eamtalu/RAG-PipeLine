@@ -7,9 +7,9 @@ needs a new table. Used by the store, the resolver and the commands of this pack
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 
 class _Area(BaseModel):
@@ -37,7 +37,24 @@ class AdvisoriesView(_Area):
     reversed: bool = False
 
 
-AREAS: dict[str, type[_Area]] = {"app": App, "advisories_view": AdvisoriesView}
+#: An advisory kind as the agents name it: "stock", "delivery", "short_pick".
+Kind = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,31}$")]
+
+
+class AdvisoriesFocus(_Area):
+    """What a person wants first on the Advisories list. It opens the list on that selection;
+    "Everything" stays one tap away and the counts still count every advisory they may see."""
+
+    #: The kinds to show first; empty means every kind. A kind the agents no longer use is
+    #: simply never matched.
+    kinds: list[Kind] = Field(default_factory=list, max_length=20)
+    #: The severities to show first; at least one, or the list would open empty for ever.
+    severities: list[Literal["high", "medium", "low"]] = Field(
+        default_factory=lambda: ["high", "medium", "low"], min_length=1, max_length=3)
+
+
+AREAS: dict[str, type[_Area]] = {"app": App, "advisories_view": AdvisoriesView,
+                                 "advisories_focus": AdvisoriesFocus}
 
 
 def defaults(area: str) -> dict:
