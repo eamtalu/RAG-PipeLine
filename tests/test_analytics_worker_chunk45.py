@@ -40,6 +40,9 @@ from app.persistence.models.log_transaction import LogTransaction, LogTransactio
 from app.services.analytics import consume as n3
 from app.services.analytics import diff as dd
 
+#: Fixed dates stand for today in these tests: their source counts as still kept (chunk 235).
+pytestmark = pytest.mark.usefixtures("source_still_kept")
+
 CC = "n3-probe"
 CC2 = "n3-probe-lagging"
 T0 = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)

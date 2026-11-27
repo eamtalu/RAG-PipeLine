@@ -47,6 +47,9 @@ from app.persistence.models.log_entry_assignment import LogEntryAssignment
 from app.persistence.models.log_transaction import LogTransaction, LogTransactionStatus
 from app.services.analytics import consume as n3
 
+#: Fixed dates stand for today in these tests: their source counts as still kept (chunk 235).
+pytestmark = pytest.mark.usefixtures("source_still_kept")
+
 CC = "test_chunk78"
 T0 = datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc)
 WIDE = timedelta(hours=6)

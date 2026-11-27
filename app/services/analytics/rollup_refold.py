@@ -1,12 +1,12 @@
-"""Rebuilding stored rollups from facts, one local day at a time.
+"""Rebuilding stored rollups from the stored facts, one local day at a time.
 
 Used after a change to what a rollup row holds (chunk 232 gave every row its place): the rows
-already stored keep their old shape until their buckets are folded again. The fact writer does
-the folding in its normal cycle when it finds a ticket marked `refold_rollups`, so this module
-only queues one such ticket per day, waits for the writer to consume it, and looks at the disk
-before the next. One day at a time on purpose: tickets close to each other are merged into one
-run, and a run over many days reads all their facts in one transaction. Used by
-`scripts/refold_rollups_by_day.py`; nothing in the serving path imports this.
+already stored keep their old shape until their buckets are folded again. Each day is folded
+straight from the facts with the writer's own fold, under the writer's tenant lock, and the disk
+is looked at before the next day. It queues no ticket on purpose (chunk 235): a ticket makes the
+fact writer compare the facts with the source transactions, which are kept 60 days only, and a
+rebuild has no business touching facts. Used by `scripts/refold_rollups_by_day.py`; nothing in
+the serving path imports this.
 """
 
 from __future__ import annotations
@@ -17,11 +17,11 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import select, text
 
 from app.config.database import SessionFactory
-from app.persistence.models.analytics_pending_window import AnalyticsPendingWindow
-from app.services.analytics import pending_windows
+from app.services.analytics import capture, consume, registry, rollups
+from app.settings import settings
 
 #: Positions in a `/proc/diskstats` line, after the three leading columns (major, minor, name).
 _WRITES_COMPLETED, _MS_WRITING = 4, 7
@@ -84,34 +84,39 @@ def write_wait_ms(before: str, after: str, device: str) -> float | None:
     return 0.0 if writes <= 0 else waited / writes
 
 
-async def open_tickets(session_factory: SessionFactory, customer_code: str) -> int:
-    """How many of the customer's tickets the fact writer has still to consume.
+async def fold_day(session_factory: SessionFactory, customer_code: str, day: date, tz: str, *,
+                   now: datetime | None = None) -> dict:
+    """Fold every rollup bucket of one local day again from the stored facts; the fold's counts.
 
-    (one day queued, writer not yet run) -> 1 or more ; (writer has caught up) -> 0
-    """
-    async with session_factory() as db:
-        return int(await db.scalar(select(func.count()).select_from(AnalyticsPendingWindow).where(
-            AnalyticsPendingWindow.customer_code == customer_code,
-            AnalyticsPendingWindow.consumed_at.is_(None),
-            AnalyticsPendingWindow.abandoned_at.is_(None))) or 0)
-
-
-async def queue_day(session_factory: SessionFactory, customer_code: str, day: date, tz: str) -> int:
-    """Ask the fact writer to fold every rollup bucket of one local day again; tickets written.
-
-    (10 Sep, Europe/London) -> 1 or 2 tickets over 9 Sep 23:00 to 10 Sep 23:00 UTC, padded
+    (10 Sep with facts) -> {"definitions": 2, "rows_written": 14, ...} ; (a day with none) -> its
+    buckets are emptied
     """
     lo, hi = local_day(day, tz)
+    now = now or datetime.now(timezone.utc)
+    # Step 1: Leave the hourly level alone for a day older than hourly rows are kept, otherwise
+    # the fold writes hourly rows that retention has already dropped once.
+    is_hourly_kept = day >= now.date() - timedelta(days=rollups.HOURLY_RETENTION_DAYS)
+    hours = rollups.hours_in(lo, hi - timedelta(hours=1)) if is_hourly_kept else set()
     async with session_factory() as db:
-        written = await pending_windows.publish(db, customer_code, lo=lo, hi=hi, refold=True)
+        # Step 2: Take the fact writer's tenant lock, so that the rollup tables still have one
+        # writer at a time and a live fold of the same bucket cannot interleave with this one.
+        await db.execute(select(consume.writer_lock(customer_code)))
+        await db.execute(text(
+            f"SET LOCAL statement_timeout = {settings.analytics_fold_statement_timeout_ms}"))
+        # Step 3: Fold with the writer's own function and switches, because a second way to
+        # compute a total would be a second answer to the same question.
+        await registry.ensure_seed(db, customer_code)
+        stats = await rollups.fold_all(
+            db, customer_code, await registry.active_definitions(db, customer_code),
+            hours=hours, dates={day}, rec_hours=hours, rec_dates={day},
+            hidden=await capture.hidden_names(db, customer_code), tz=tz, now=now, changed=None)
         await db.commit()
-    return written
+    return stats
 
 
 async def refold_range(session_factory: SessionFactory, customer_code: str, *, start: date,
                        end: date, tz: str, max_write_wait_ms: float,
                        read_write_wait: Callable[[], Awaitable[float | None]],
-                       wait_until_consumed: Callable[[], Awaitable[bool]],
                        pause_seconds: float = 0.0,
                        on_day: Callable[[date, float | None], None] | None = None) -> Progress:
     """Refold the rollups of every day in the range, oldest first, one day at a time.
@@ -128,13 +133,9 @@ async def refold_range(session_factory: SessionFactory, customer_code: str, *, s
             progress.stopped_at = day
             progress.reason = f"disk write wait {waited:.0f} ms is above {max_write_wait_ms:.0f} ms"
             return progress
-        # Step 2: Queue one day and let the fact writer fold it, so the rollup tables keep a
-        # single writer and the run takes the same locks as ordinary traffic.
-        await queue_day(session_factory, customer_code, day, tz)
-        if not await wait_until_consumed():
-            progress.stopped_at = day
-            progress.reason = "the fact writer did not consume the ticket in time"
-            return progress
+        # Step 2: Fold one day in its own transaction, so that a failure keeps the days already
+        # done and the lock is never held across the pause.
+        await fold_day(session_factory, customer_code, day, tz)
         progress.days_done.append(day)
         if on_day is not None:
             on_day(day, waited)
