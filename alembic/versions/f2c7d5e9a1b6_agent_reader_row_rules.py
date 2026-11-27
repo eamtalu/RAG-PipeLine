@@ -50,13 +50,24 @@ def _run_each_in_its_own_transaction(statements: list[str]) -> None:
         bind.execute(text("RESET lock_timeout"))
 
 
+def _existing_tables() -> set[str]:
+    """The tables that exist at this point in history.
+
+    The registry imported above is today's: it may name a table that a later migration
+    creates, and on a fresh database that table is not there yet when this one runs.
+    """
+    return set(op.get_bind().scalars(
+        text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")))
+
+
 def upgrade() -> None:
-    _run_each_in_its_own_transaction(database_lock.policy_statements())
+    existing = _existing_tables()
+    _run_each_in_its_own_transaction(database_lock.policy_statements(existing))
     has_role = op.get_bind().scalar(text("SELECT 1 FROM pg_roles WHERE rolname = :role"),
                                     {"role": database_lock.ROLE})
     if has_role:
-        _run_each_in_its_own_transaction(database_lock.grant_statements())
+        _run_each_in_its_own_transaction(database_lock.grant_statements(existing))
 
 
 def downgrade() -> None:
-    _run_each_in_its_own_transaction(database_lock.removal_statements())
+    _run_each_in_its_own_transaction(database_lock.removal_statements(_existing_tables()))

@@ -41,9 +41,8 @@ def upgrade() -> None:
                             name="uq_preferences_subject_area"),
     )
     # The new table only: it is empty and nothing reads it yet, so its lock is free.
-    for statement in database_lock.policy_statements():
-        if f" {TABLE} " in f"{statement} " or statement.endswith(f" {TABLE}"):
-            op.execute(statement)
+    for statement in database_lock.policy_statements([TABLE]):
+        op.execute(statement)
     has_role = op.get_bind().scalar(text("SELECT 1 FROM pg_roles WHERE rolname = :role"),
                                     {"role": database_lock.ROLE})
     if has_role:

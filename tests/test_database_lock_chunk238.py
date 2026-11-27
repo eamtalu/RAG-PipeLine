@@ -125,6 +125,14 @@ def test_the_policy_text_follows_the_kind_of_table():
     assert all(" IN (SELECT id FROM " in by_table[t] and setting in by_table[t] for t in owned)
 
 
+def test_a_migration_can_keep_to_the_tables_that_exist_at_its_point_in_history():
+    # the registry a migration imports is today's and may name a table created later
+    only = database_lock.policy_statements(["log_transactions", "not_created_yet"])
+    assert len(only) == 3 and all(" log_transactions" in s for s in only)
+    assert database_lock.grant_statements(["customers"])[1:] == [
+        f"GRANT SELECT ON customers TO {database_lock.ROLE}"]
+
+
 # ==================================================== 2. what the reader user can do
 
 async def test_a_plain_select_returns_the_named_customers_rows_only():
