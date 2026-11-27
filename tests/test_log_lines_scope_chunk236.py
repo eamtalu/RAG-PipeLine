@@ -242,7 +242,9 @@ async def test_a_search_inside_one_transaction_covers_that_transactions_own_time
     assert out["window"]["defaulted"] is False and "note" not in out
     async with scoped_data.open_session(async_session, LON) as db:
         out = await tools._search_entries(db, {"transaction_id": str(old)}, CC)
-    assert out["entries"] == []
+        # a transaction the person may not read has no line for them: no line search at all
+        assert "log_entries" not in scoped_data.tables_read(db)
+    assert out["entries"] == [] and out["returned"] == 0
 
 
 async def test_a_person_whose_sites_have_no_transaction_sees_the_last_days_ungrouped_lines():
