@@ -88,6 +88,8 @@ ACCESS_COMMAND_KINDS = (
     "watch_stop",
     "watch_seen",
     "watch_not_now",
+    "preference_set",
+    "preference_reset",
 )
 
 
