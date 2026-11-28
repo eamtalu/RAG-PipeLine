@@ -211,8 +211,10 @@ async def set_group_form(db: AsyncSession, customer_code: str, actor_object_id: 
     -> form with Stock, Stock ticked, High, the channel chosen ; (picker) -> ValueError
     """
     record = await access.access_record_for(db, customer_code, actor_object_id)
-    decision = access.decide(record, "configure_agents")
-    if not decision.is_allowed:
+    # making groups is its own capability (program step 3); whoever configures agents manages
+    # every group. Whose group may be changed is decided when the form is confirmed.
+    decision = access.decide(record, "manage_groups")
+    if not decision.is_allowed and not access.decide(record, "configure_agents").is_allowed:
         raise ValueError(f"you cannot change notification groups: {decision.reason}")
     groups = await groups_store.list_groups(db, customer_code)
     channels = await groups_store.customer_channels(db, customer_code)

@@ -117,7 +117,7 @@ TOPICS: tuple[TopicSpec, ...] = (
             QuestionSpec("Make Sam Super a supervisor of Brighton", ACTION, "manage_users"),
             QuestionSpec("Deactivate Lee London", ACTION, "manage_users"),
             QuestionSpec("Approve the waiting request USR-2041", ACTION, "approve"),
-            QuestionSpec("Send high stock advisories to the stock-control channel", ACTION, "configure_agents"),
+            QuestionSpec("Send high stock advisories to the stock-control channel", ACTION, "manage_groups"),
             QuestionSpec("Add a handheld for Fiona Nachon", DEMO, "run_actions"),
             QuestionSpec("Move a picker to Route 14", DEMO, "run_actions"),
             QuestionSpec("Substitute item 104568 on today's releases", DEMO, "run_actions"),

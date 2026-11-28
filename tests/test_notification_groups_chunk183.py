@@ -112,7 +112,8 @@ async def test_groups_are_made_changed_looked_up_and_deleted():
 async def test_managing_needs_configure_agents_and_everyone_may_join_or_leave():
     mirror = InMemoryMirrorWriter()
     # a Supervisor may not manage; an Ops manager may
-    with pytest.raises(access_commands.Refused, match="configure_agents"):
+    # since chunk 249 making a group is its own capability, which a Supervisor does not have
+    with pytest.raises(access_commands.Refused, match="may not make groups"):
         await commands.run(_command("u-sup", "group_set", {"name": "Stock", "topics": ["advisory:stock"]}), mirror=mirror, now=NOW)
     outcome = await commands.run(_command("u-ops", "group_set", {
         "name": "Stock", "topics": ["advisory:stock"], "min_severity": "medium", "channel_ids": [str(uuid.UUID(int=2))],

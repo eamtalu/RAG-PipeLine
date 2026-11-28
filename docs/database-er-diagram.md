@@ -1462,7 +1462,7 @@ erDiagram
     }
 
     access_capabilities {
-        string code PK "view_own_site, view_all_sites, ask, run_actions, manage_users, approve, configure_agents, export"
+        string code PK "view_own_site, view_all_sites, ask, run_actions, manage_users, approve, configure_agents, manage_groups, export"
         string name
         int sort_order
     }

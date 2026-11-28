@@ -1,8 +1,14 @@
 """What people do with groups and channels (stage D, step 12), arriving as commands on the
-question queue: an Admin or an Ops manager (`configure_agents`) makes, changes or deletes a group,
-adds a channel by its webhook, tests it or deletes it; anyone active joins or leaves a group.
-A group is about some sites (program step 3) and nobody gives it more sites than they may see
-themselves. Every change is one audit line; the GROUPS rows are mirrored at once. Used by
+question queue. Since program step 3:
+
+- whoever may make groups (`manage_groups`) makes one, inside their own sites, and changes or
+  deletes the ones they made; whoever may configure agents (`configure_agents`) does so for
+  every group, and alone adds, tests or deletes a channel;
+- nobody changes a group that is about a site they may not see;
+- anyone active joins or leaves a group, and a member, the maker or someone who manages every
+  group adds a colleague.
+
+Every change is one audit line; the GROUPS rows are mirrored at once. Used by
 app/services/teams/commands.py.
 """
 
@@ -30,8 +36,14 @@ from app.services.teams.mirror import MirrorWriter, build_mirror_writer_from_set
 
 logger = logging.getLogger(__name__)
 
-KINDS = ("group_set", "group_delete", "group_join", "group_leave", "channel_set", "channel_delete", "channel_test")
-MANAGING = ("group_set", "group_delete", "channel_set", "channel_delete", "channel_test")
+KINDS = ("group_set", "group_delete", "group_join", "group_leave", "group_member_add",
+         "channel_set", "channel_delete", "channel_test")
+#: Making a group and changing one's own; every group for those who may configure agents.
+GROUP_MANAGING = ("group_set", "group_delete")
+#: A channel is a way out of the system, so it stays with those who configure agents.
+CHANNEL_MANAGING = ("channel_set", "channel_delete", "channel_test")
+MANAGING = GROUP_MANAGING + CHANNEL_MANAGING
+MAKE_GROUPS, MANAGE_EVERY_GROUP = "manage_groups", "configure_agents"
 
 
 async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | None = None,
@@ -48,21 +60,30 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
     actor = access.Actor(job.sender_object_id, job.sender_name)
     factory = session_factory or async_session
     async with factory() as db:
-        # Step 1: The actor's own record decides: managing needs configure_agents, which Admins and
-        # Ops managers hold; joining and leaving need an active record only
+        # Step 1: The actor's own record decides: a channel needs configure_agents, a group
+        # needs that or the capability to make groups; joining, leaving and adding a colleague
+        # need an active record only (who may add whom is the handler's to check)
         record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
         if record is None or not record.is_active:
             raise Refused("you have no active access record")
-        if command.kind in MANAGING:
-            decision = access.decide(record, "configure_agents")
-            if not decision.is_allowed:
-                raise Refused(decision.reason or "managing groups and channels needs configure_agents")
+        manages_every_group = access.decide(record, MANAGE_EVERY_GROUP).is_allowed
+        if command.kind in CHANNEL_MANAGING and not manages_every_group:
+            raise Refused(access.decide(record, MANAGE_EVERY_GROUP).reason
+                          or "managing channels needs configure_agents")
+        if command.kind in GROUP_MANAGING and not manages_every_group \
+                and not access.decide(record, MAKE_GROUPS).is_allowed:
+            raise Refused(f"{record.role_name or record.role_code} may not make groups; "
+                          "an Admin sets that under What each role can do")
         # a confirmed Ask form (step 18) was unwrapped into its own fields by the router
         payload = dict(command.payload)
         handler = _HANDLERS[command.kind]
         try:
-            if command.kind in ("group_set", "group_delete") and payload.get("group_id"):
+            if command.kind in GROUP_MANAGING and payload.get("group_id"):
+                if not manages_every_group:
+                    await _check_owner(db, record, str(payload["group_id"]))
                 await _check_reach(db, record, str(payload["group_id"]))
+            if command.kind == "group_member_add":
+                payload["_manages_every_group"] = manages_every_group
             if command.kind == "group_set":
                 # resolved here, because which sites a group may get depends on who asks
                 payload["_sites"] = await _wanted_sites(db, record, payload)
@@ -71,7 +92,7 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
             raise Refused(str(exc))
         await access.record_audit_event(
             db, job.customer_code, actor_object_id=actor.object_id, actor_name=actor.name, action=f"{command.kind}",
-            capability_code="configure_agents" if command.kind in MANAGING else None, decision="allowed",
+            capability_code=_capability_used(command.kind, manages_every_group), decision="allowed",
             subject_kind=subject_kind, subject_id=subject_id, request_id=job.job_id,
             text=f"{actor.name or actor.object_id}: {text}", detail=detail, at=now)
         await db.commit()
@@ -79,10 +100,37 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
         writer = mirror if mirror is not None else build_mirror_writer_from_settings()
         if writer is not None:
             try:
-                await groups_mirror.mirror_customer(db, writer, job.customer_code, now=now, people=[actor.object_id])
+                people = [actor.object_id, *([str(payload["object_id"])] if command.kind == "group_member_add" else [])]
+                await groups_mirror.mirror_customer(db, writer, job.customer_code, now=now, people=people)
             except Exception:
                 logger.warning("group rows for %s not mirrored after %s", job.customer_code, command.kind, exc_info=True)
         return CommandOutcome(text, (receipt(text, reference=subject_id, now=now),))
+
+
+def _capability_used(kind: str, manages_every_group: bool) -> str | None:
+    """The capability an audit line names for a command.
+
+    >>> _capability_used("channel_set", True), _capability_used("group_set", False)
+    ('configure_agents', 'manage_groups')
+    >>> _capability_used("group_set", True), _capability_used("group_join", False) is None
+    ('configure_agents', True)
+    """
+    if kind in CHANNEL_MANAGING or (kind in GROUP_MANAGING and manages_every_group):
+        return MANAGE_EVERY_GROUP
+    return MAKE_GROUPS if kind in GROUP_MANAGING else None
+
+
+async def _check_owner(db: AsyncSession, record: access.AccessRecord, group_id: str) -> None:
+    """Refuse a change to a group someone else made, for a person who manages only their own.
+
+    (Sam, the group Sam made) -> fine ; (Sue, the group Sam made) -> ValueError naming Sam
+    """
+    group = await store.get_group(db, record.customer_code, group_id)
+    if group is None or group.created_by == record.object_id:
+        return  # a group that is gone is reported by the handler
+    maker = await access.get_user(db, record.customer_code, group.created_by) if group.created_by else None
+    name = (maker.display_name if maker is not None else None) or "someone else"
+    raise ValueError(f"this group was made by {name}; they or someone who manages every group change it")
 
 
 async def _check_reach(db: AsyncSession, record: access.AccessRecord, group_id: str) -> None:
@@ -178,6 +226,29 @@ async def _group_leave(db: AsyncSession, job: QuestionJob, actor: access.Actor, 
     return f"left {group.name}", "group", str(group.id), None
 
 
+async def _group_member_add(db: AsyncSession, job: QuestionJob, actor: access.Actor, payload: dict, now: datetime):
+    """A member, the group's maker or someone who manages every group adds a colleague to it.
+    A member sees the group's name in the app; what anyone is sent follows their own sites.
+
+    (Pat, a member, adds Sue) -> "Sue Super added to BRI · Night shift" ; (a stranger adds) -> ValueError
+    """
+    group = await store.get_group(db, job.customer_code, str(payload.get("group_id") or ""))
+    if group is None:
+        raise ValueError("that group no longer exists")
+    is_member = any(g.id == group.id for g in await store.groups_of(db, job.customer_code, actor.object_id))
+    if not (is_member or group.created_by == actor.object_id or payload.get("_manages_every_group")):
+        raise ValueError("a colleague is added by a member of the group, by who made it or by an Admin")
+    colleague = await access.get_user(db, job.customer_code, str(payload.get("object_id") or ""))
+    if colleague is None or colleague.status != "active":
+        raise ValueError("there is no such person with access for this customer")
+    await store.set_membership(db, job.customer_code, str(group.id), colleague.object_id, join=True,
+                               actor_object_id=actor.object_id, now=now)
+    sites = await store.sites_of(db, job.customer_code, group.id, include_disabled=True) or store.GroupSites()
+    shown = routing.display_name(group.name, sites.all_sites, sites.site_ids)
+    return (f"{colleague.display_name or colleague.object_id} added to {shown}", "group", str(group.id),
+            {"added": colleague.object_id})
+
+
 async def _channel_set(db: AsyncSession, job: QuestionJob, actor: access.Actor, payload: dict, now: datetime):
     """Add a Teams channel by its webhook, or rename one / replace its webhook; the webhook goes
     into the secret store, never into the row."""
@@ -254,6 +325,7 @@ _HANDLERS = {
     "group_delete": _group_delete,
     "group_join": _group_join,
     "group_leave": _group_leave,
+    "group_member_add": _group_member_add,
     "channel_set": _channel_set,
     "channel_delete": _channel_delete,
     "channel_test": _channel_test,

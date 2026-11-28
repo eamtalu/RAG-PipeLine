@@ -48,7 +48,10 @@ def test_seal_and_open_round_trip_under_the_active_key():
 def test_a_tampered_ciphertext_is_refused():
     master = envelope.MasterKeys.parse(f"k1={_key()}", active="k1")
     sealed = envelope.seal(b"hunter2", master)
-    broken = envelope.Sealed(sealed.key_id, sealed.wrapped_key, sealed.ciphertext[:-1] + b"x")
+    # flip a bit of the last byte: writing a fixed byte there left the ciphertext untouched
+    # once in 256 runs, when it already ended in that byte, and the test failed for no reason
+    last = bytes([sealed.ciphertext[-1] ^ 0x01])
+    broken = envelope.Sealed(sealed.key_id, sealed.wrapped_key, sealed.ciphertext[:-1] + last)
     with pytest.raises(envelope.SecretsError):
         envelope.open_sealed(broken, master)
 
