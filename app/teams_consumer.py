@@ -49,6 +49,7 @@ from app.services.watchlist import mirror as watch_mirror
 from app.services.watchlist import runner as watch_runner
 from app.services.groups import mirror as groups_mirror
 from app.services.groups import store as groups_store
+from app.services.teams import bell
 from app.services.notifications import dispatcher as notifications
 from app.services.tasks import mirror as tasks_mirror
 from app.services.tasks import runner as tasks_runner
@@ -572,6 +573,10 @@ async def _tasks_loop(stop: asyncio.Event) -> None:
         logger.info("tasks loop off: TEAMS_EDGE_DYNAMODB_TABLE is not set")
         return
     tracker = ChangeTracker(max_age_seconds=settings.teams_tasks_tick_seconds * 20)
+    # without the edge's address there is nobody to hand a notification to; they stay queued
+    bell_url = bell.notifications_url(settings.teams_edge_answers_url)
+    bell_poster = (bell.HttpBellPoster(bell_url, settings.teams_edge_shared_secret)
+                   if bell_url and settings.teams_edge_shared_secret else None)
     last_sweep = 0.0
     last_purge = 0.0
     while not stop.is_set():
@@ -580,6 +585,9 @@ async def _tasks_loop(stop: asyncio.Event) -> None:
                                             tracker=tracker, catch_up_hours=settings.teams_tasks_catch_up_hours)
             if any(fired.values()):
                 logger.info("tasks fired %s", fired)
+            # the bell: what the runs just queued is handed to the edge (program step 3)
+            if bell_poster is not None:
+                await bell.deliver_pending(bell_poster)
             if asyncio.get_running_loop().time() - last_sweep >= 60:
                 await tasks_mirror.sweep_once(mirror, tracker=tracker)
                 last_sweep = asyncio.get_running_loop().time()

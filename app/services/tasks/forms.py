@@ -180,6 +180,10 @@ def schedule_from_form(values: Mapping[str, Any], *, tz: ZoneInfo, groups: list[
     # the name as offered, or without its sites label, which an older page still sends
     group_id = next((gid for gid, name in groups
                      if send_to in (f"Group: {name}", f"Group: {name.split(' · ', 1)[-1]}")), None)
-    return {"kind": "schedule", "title": what[:200], "when": when, "query_text": what,
-            "target": "channel" if group_id else "me", "target_group_id": group_id,
-            "show_as": SHOW_AS_CODES.get(str(values.get("show_as")), "table"), "until": until}
+    fields = {"kind": "schedule", "title": what[:200], "when": when, "query_text": what,
+              "target": "channel" if group_id else "me", "target_group_id": group_id,
+              "show_as": SHOW_AS_CODES.get(str(values.get("show_as")), "table"), "until": until}
+    # the dialog's "ring my Teams bell" tick; a form that does not carry it changes nothing
+    if "ring_bell" in values:
+        fields["notify_bell"] = str(values.get("ring_bell") or "").strip().lower() in ("yes", "true", "on", "1")
+    return fields

@@ -71,6 +71,7 @@ from app.persistence.models.advisory import Advisory, AdvisoryAgent, AdvisoryAge
 from app.persistence.models.watch import Watch, WatchEvent, WatchNotNow  # noqa: F401
 from app.persistence.models.preference import Preference  # noqa: F401
 from app.persistence.models.task import TeamsTask, TeamsTaskProposal, TeamsTaskRun  # noqa: F401
+from app.persistence.models.teams_notification import TeamsNotification  # noqa: F401
 from app.persistence.models.notification_group import (  # noqa: F401
     AdvisoryAnnouncement,
     NotificationGroup,

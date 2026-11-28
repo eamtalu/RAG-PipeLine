@@ -208,6 +208,7 @@ async def _create(db: AsyncSession, job: QuestionJob, record: access.AccessRecor
             note=payload.get("note"), site_id=site_id, query_text=payload.get("query_text"),
             skip_if=payload.get("skip_if"), target=str(payload.get("target") or "me"),
             show_as=str(payload.get("show_as") or "table"), target_group_id=payload.get("target_group_id"),
+            notify_bell=bool(payload.get("notify_bell")),
             until=datetime.fromisoformat(str(until).replace("Z", "+00:00")) if until else None,
             created_via=str(payload.get("via") or "tab"), source=payload.get("source") or {})
     except ValueError as exc:

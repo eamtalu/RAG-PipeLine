@@ -1392,6 +1392,8 @@ Since chunks 249 and 250 (28 Nov 2026, migrations `d6a1b9c3e5f0` and `e7b2c0d4f6
 Since chunk 251 (28 Nov 2026, migration `f8c3d1e5a7b2`, program step 3) a routine set up for a colleague is a row in `teams_task_proposals` until the colleague answers.
 Accepting makes a `teams_tasks` row the colleague owns, marked with `proposed_by`, so a run always reads with the access of the person it is for.
 A person has at most as many active routines as the customer allows (`preferences` area `routines`, 20 until an Admin sets another), and a routine pauses itself after three failed runs in a row or when its owner no longer has access (`teams_tasks.pause_reason`).
+Since chunk 252 (28 Nov 2026, migration `a9d4e2f6b8c3`, program step 3) `teams_notifications` is the ledger of what a person is told under their Teams bell.
+A row is written with the routine run it is about, when the routine's owner ticked `teams_tasks.notify_bell`, and the consumer hands queued rows to the edge, which speaks to Microsoft.
 Routing is one lookup at dispatch; a finding no group takes goes nowhere, so a new channel receives nothing until a group takes it.
 The cap (stage D, step 13) bounds how many: a group sends at most `notification_groups.max_per_hour` advisory cards per clock hour, and `advisory_announcements` is its ledger, one line per advisory sent or held in an hour (`window_start`) plus the hour's `notice` line (the card that says the group went quiet) and `summary` line (the card that lists what was held once the hour is over).
 Held is recorded, not dropped, so which findings a summary covered stays answerable; the summary line is written before the card is sent, so a restart never repeats it.
@@ -1636,6 +1638,7 @@ erDiagram
         string proposed_by_name
         int failed_in_a_row "failed runs since the last good one; pauses itself at the limit"
         string pause_reason "why eSmart Eye paused it; null for a person's own pause"
+        boolean notify_bell "its owner is told under the Teams bell when it has run (chunk 252)"
         datetime created_at
         datetime updated_at
         datetime done_at
@@ -1725,6 +1728,22 @@ erDiagram
         string object_id PK
         string added_by
         datetime added_at
+    }
+
+    teams_notifications {
+        uuid id PK
+        string customer_code FK "customers"
+        string object_id "the person told"
+        string kind "routine_ran | routine_paused; unique with subject_id"
+        string subject_id "what it is about: a routine run's id"
+        string title
+        string text "the preview line, at most 150 characters"
+        string tab "the page of the app it opens"
+        string status "queued | sent | refused | failed | not_configured | expired"
+        int attempts
+        string error
+        datetime created_at
+        datetime sent_at
     }
 
     teams_task_proposals {
@@ -1882,6 +1901,8 @@ erDiagram
     customers ||--o{ teams_task_runs : "task firings of"
     teams_tasks ||--o{ teams_task_runs : "fired as"
     customers ||--o{ teams_task_proposals : "proposals of"
+    customers ||--o{ teams_notifications : "bell ledger of"
+    teams_task_runs ||..o| teams_notifications : "told about (subject_id)"
     teams_tasks ||--o| teams_task_proposals : "made from (SET NULL)"
     teams_tasks ||..o{ audit_events : "changed (subject_kind task)"
     customers ||--o{ notification_groups : "routes of"
@@ -2017,6 +2038,7 @@ No table or column changed.
 | `teams_tasks.id` | `teams_task_runs.task_id` | CASCADE |
 | `teams_tasks.id` | `teams_task_proposals.task_id` | SET NULL |
 | `customers.customer_code` | `teams_task_proposals.customer_code` | CASCADE |
+| `customers.customer_code` | `teams_notifications.customer_code` | CASCADE |
 | `customers.customer_code` | `notification_groups.customer_code` | CASCADE |
 | `notification_groups.id` | `notification_group_channels.group_id` | CASCADE |
 | `customer_notification_channels.id` | `notification_group_channels.channel_id` | CASCADE |
@@ -2041,6 +2063,7 @@ The nine `analytics_*` tables add **no rows to this table**. They have no enforc
 | --- | --- | --- |
 | `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, agent_runs, agent_traces, quota_windows, agent_in_flight, usage_daily, tenant_secrets, the notification tables, and every `analytics_*` table including the ML and forecast ones | tenant partition key |
 | `tenant_sites.site_id` | `notification_group_sites.site_id` | a site a notification group is about; no FK, as on the access tables' site lists |
+| `teams_task_runs.id` | `teams_notifications.subject_id` | the run a bell notification is about; a string, no FK, so other kinds can point elsewhere later |
 | `analytics_metrics.id` | `definition_id` on the three rollup tables | which definition a rollup row belongs to; no FK because a FK from a partitioned child made the log partitions undroppable once already |
 | `analytics_feature_sets.id` | `analytics_predictions.feature_set_id` | which training set the model behind a prediction was built from; nullable |
 | `analytics_forecast_runs.id` | `analytics_predictions.run_id`, `analytics_forecast_series.last_run_id` | which forecast pass wrote the row; nullable, no FK |
