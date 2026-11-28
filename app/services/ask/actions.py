@@ -134,7 +134,7 @@ ACTIONS: tuple[ActionSpec, ...] = (
             "min_severity": _arg("high | medium | low."),
             "channel": _arg("The channel's name when said."),
         },
-        required=(), form_id="set_group", capability="configure_agents", command_kind="group_set",
+        required=(), form_id="set_group", capability="manage_groups", command_kind="group_set",
         builder=forms.set_group_form,
     ),
     ActionSpec(

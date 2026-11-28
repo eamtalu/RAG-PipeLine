@@ -1653,6 +1653,7 @@
                 "group_delete",
                 "group_join",
                 "group_leave",
+                "group_member_add",
                 "channel_set",
                 "channel_delete",
                 "channel_test",
@@ -1827,5 +1828,5 @@
       "type": "object"
     }
   },
-  "revision": "3.30"
+  "revision": "3.31"
 }

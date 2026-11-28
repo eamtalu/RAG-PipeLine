@@ -131,8 +131,11 @@ def decide(record: AccessRecord | None, capability: str, site_id: str | None = N
 
 async def ensure_matrix(db: AsyncSession, customer_code: str) -> int:
     """Seed the customer's matrix cells from the file where they are missing; how many were added.
+    A role the customer added gets "no" for a capability it has no cell for, so a capability
+    that arrives later starts closed for it and its cell can be clicked in the Admin tab.
 
-    (new customer) -> 48 ; (seeded already) -> 0 ; (one new capability in the file) -> 6
+    (new customer) -> 54 ; (seeded already) -> 0 ; (one new capability in the file) -> 6, plus
+    one per role the customer added
     """
     m = matrix_file.load()
     existing = {
@@ -142,7 +145,11 @@ async def ensure_matrix(db: AsyncSession, customer_code: str) -> int:
         )).scalars()
     }
     added = 0
-    for (role_code, capability_code), state in m.defaults.items():
+    wanted = dict(m.defaults)
+    # the roles this customer added are not in the file: the cells they already have name them
+    for role_code in sorted({role for role, _ in existing} - set(m.role_codes)):
+        wanted.update({(role_code, capability): NO for capability in m.capability_codes})
+    for (role_code, capability_code), state in wanted.items():
         if (role_code, capability_code) not in existing:
             db.add(AccessRoleCapability(customer_code=customer_code, role_code=role_code,
                                         capability_code=capability_code, state=state))

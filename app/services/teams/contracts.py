@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.30"
+CONTRACT_REVISION = "3.31"
 
 
 def _now() -> datetime:
@@ -56,6 +56,10 @@ def _now() -> datetime:
 #:   nobody adds a site they may not see. A GROUPS row's group carries all_sites, site_ids,
 #:   sites_label and display_name ("BRI · Stock"), the name to show.
 #: group_join {group_id} ; group_leave {group_id}
+#:   3.31, program step 3: group_member_add {group_id, object_id} lets a member, the group's maker
+#:   or someone who manages every group add a colleague. A group belongs to who made it: they
+#:   (with manage_groups) or someone with configure_agents change or delete it. A GROUPS row's
+#:   group carries created_by_name.
 #: channel_set {channel_id?, name, webhook_url?, channel_type?}
 #: channel_delete {channel_id} ; channel_test {channel_id}
 #: watch_add {kind: delivery | route | location | zone | product | measure, entity_id, alert?, until?:
@@ -94,6 +98,7 @@ ACCESS_COMMAND_KINDS = (
     "group_delete",
     "group_join",
     "group_leave",
+    "group_member_add",
     "channel_set",
     "channel_delete",
     "channel_test",
@@ -136,6 +141,7 @@ class Command(BaseModel):
         "group_delete",
         "group_join",
         "group_leave",
+        "group_member_add",
         "channel_set",
         "channel_delete",
         "channel_test",

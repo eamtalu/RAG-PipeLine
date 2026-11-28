@@ -69,7 +69,8 @@ async def test_the_matrix_is_seeded_from_the_file_once_and_a_cell_can_be_changed
     m = load()
     assert m.default("supervisor", "export") == WITH_APPROVAL and m.default("picker", "ask") == WITH_APPROVAL
     async with async_session() as db:
-        assert await records.ensure_matrix(db, CC) == 48
+        # six roles by nine capabilities (manage_groups arrived with chunk 249)
+        assert await records.ensure_matrix(db, CC) == 54
         assert await records.ensure_matrix(db, CC) == 0
         await records.set_matrix_cell(db, CC, "supervisor", "export", ALLOWED, actor=SUPER)
         await db.commit()

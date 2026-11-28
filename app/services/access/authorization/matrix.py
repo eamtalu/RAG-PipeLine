@@ -51,11 +51,11 @@ class Matrix:
 
 @lru_cache(maxsize=1)
 def load(path: Path = MATRIX_FILE) -> Matrix:
-    """The matrix file parsed once and checked: six roles, eight capabilities, every cell a state.
+    """The matrix file parsed once and checked: six roles, nine capabilities, every cell a state.
 
     >>> m = load()
     >>> m.role_codes[0], m.role_codes[-1], len(m.capability_codes)
-    ('picker', 'admin', 8)
+    ('picker', 'admin', 9)
     """
     raw = yaml.safe_load(path.read_text())
     roles = tuple(Named(r["code"], r["name"], i) for i, r in enumerate(raw["roles"]))

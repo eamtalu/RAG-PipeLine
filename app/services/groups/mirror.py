@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import access
 from app.services.groups import caps, routing, store
 from app.services.notifications import channel_secrets
 from app.services.teams.mirror import ChangeTracker, MirrorWriter, envelope, write_if_changed
@@ -24,6 +25,8 @@ async def groups_payload(db: AsyncSession, customer_code: str, *, now: datetime 
     channels = await store.customer_channels(db, customer_code)
     names = {c.id: c.name for c in channels}
     views = await store.list_groups(db, customer_code)
+    # who made each group, by name, so an Admin sees the groups per person (program step 3)
+    names_of = {u.object_id: u.display_name for u in await access.list_users(db, customer_code) if u.object_id}
     window = routing.window_start(now)
     counts = await caps.window_counts(db, customer_code, window)
     return {
@@ -32,7 +35,8 @@ async def groups_payload(db: AsyncSession, customer_code: str, *, now: datetime 
         "window_start": window.isoformat(),
         "channels": [{"id": str(c.id), "name": c.name, "channel_type": c.channel_type, "enabled": c.enabled,
                       "config": channel_secrets.public_config(c.config)} for c in channels],
-        "groups": [store.group_payload(v, names, counts.get(v.group.id)) for v in views],
+        "groups": [{**store.group_payload(v, names, counts.get(v.group.id)),
+                    "created_by_name": names_of.get(v.group.created_by)} for v in views],
     }
 
 

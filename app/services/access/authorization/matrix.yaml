@@ -32,6 +32,11 @@ capabilities:
     name: Approve requests
   - code: configure_agents
     name: Configure agents & routing
+  # program step 3: making notification groups is its own permission. Whoever holds it makes
+  # groups inside their own sites and manages the ones they made; configure_agents manages
+  # every group and the channels.
+  - code: manage_groups
+    name: Make & manage own groups
   - code: export
     name: Export data & board packs
 
@@ -45,4 +50,5 @@ matrix:
   manage_users:     ["no", "no", with_approval, allowed, "no", allowed]
   approve:          ["no", "no", "no", allowed, allowed, allowed]
   configure_agents: ["no", "no", "no", allowed, "no", allowed]
+  manage_groups:    ["no", "no", "no", allowed, "no", allowed]
   export:           ["no", "no", with_approval, allowed, allowed, allowed]
