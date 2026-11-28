@@ -23,10 +23,12 @@ async def groups_payload(db: AsyncSession, customer_code: str, *, now: datetime 
     """The customer's groups and channels as the Admin tab draws them; no secrets."""
     now = now or datetime.now(timezone.utc)
     channels = await store.customer_channels(db, customer_code)
+    # who made each group and connected each channel, by name, so an Admin sees them per
+    # person, and the active people a member can add as a colleague (program step 3)
+    people = [u for u in await access.list_users(db, customer_code) if u.object_id]
+    names_of = {u.object_id: u.display_name for u in people}
     names = {c.id: c.name for c in channels}
     views = await store.list_groups(db, customer_code)
-    # who made each group, by name, so an Admin sees the groups per person (program step 3)
-    names_of = {u.object_id: u.display_name for u in await access.list_users(db, customer_code) if u.object_id}
     window = routing.window_start(now)
     counts = await caps.window_counts(db, customer_code, window)
     return {
@@ -34,7 +36,11 @@ async def groups_payload(db: AsyncSession, customer_code: str, *, now: datetime 
         "topics": ["advisory:delivery", "advisory:stock", "advisory:location", "schedule"],
         "window_start": window.isoformat(),
         "channels": [{"id": str(c.id), "name": c.name, "channel_type": c.channel_type, "enabled": c.enabled,
-                      "config": channel_secrets.public_config(c.config)} for c in channels],
+                      "config": channel_secrets.public_config(c.config),
+                      "created_by": c.created_by, "created_by_name": names_of.get(c.created_by)}
+                     for c in channels],
+        "people": [{"object_id": u.object_id, "name": u.display_name or u.object_id}
+                   for u in people if u.status == "active"],
         "groups": [{**store.group_payload(v, names, counts.get(v.group.id)),
                     "created_by_name": names_of.get(v.group.created_by)} for v in views],
     }

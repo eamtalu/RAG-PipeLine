@@ -57,7 +57,7 @@ async def _wipe() -> None:
 
 @pytest.fixture(autouse=True)
 async def _customer():
-    """Three sites (Brighton stands for 915/BRI), an all-sites Ops manager and a Brighton one."""
+    """Three sites (Brighton stands for 915/BRI), an all-sites Admin and a Brighton Ops manager."""
     await _wipe()
     async with async_session() as s:
         s.add(Customer(customer_code=CC, display_name="C247", timezone="Europe/London"))
@@ -66,15 +66,17 @@ async def _customer():
                    TenantSite(customer_code=CC, site_id="LON", name="London", sort_order=3),
                    TenantSite(customer_code=CC, site_id="OLD", name="Old depot", sort_order=4,
                               active=False)])
+        # connected by Bea: a group posts only where its maker connected (chunk 250)
         s.add(CustomerNotificationChannel(id=CHANNEL, customer_code=CC, channel_type="teams",
-                                          name="shift leads", config={}))
+                                          name="shift leads", config={}, created_by="u-bri"))
         await s.flush()
         s.add(TenantSitePlace(customer_code=CC, site_id="BRI", company="915", warehouse="BRI"))
         await s.commit()
-        for oid, name, sites in (("u-ops", "Olu Ops", ()), ("u-bri", "Bea Brighton", ("BRI",))):
+        # Olu is an Admin, who manages every group and channel; Bea manages her own (chunk 250)
+        for oid, name, role, sites in (("u-ops", "Olu Ops", "admin", ()),
+                                       ("u-bri", "Bea Brighton", "ops_manager", ("BRI",))):
             await users.create_user(s, CC, oid, actor=SUPER, now=NOW, change=users.UserChange(
-                display_name=name, role_code="ops_manager", site_ids=sites or None,
-                all_sites=not sites))
+                display_name=name, role_code=role, site_ids=sites or None, all_sites=not sites))
         await s.commit()
     yield
     await _wipe()
@@ -201,11 +203,18 @@ async def test_a_change_keeps_the_sites_unless_it_names_them():
     out = await commands.run(_job("u-ops", "group_set", {**edit, "site_ids": ["BRI"]}),
                              mirror=mirror, now=NOW)
     assert out.text.startswith("group BRI · Wide desk saved")
-    # Bea of Brighton may change a Brighton group, and cannot bring London into it
-    await commands.run(_job("u-bri", "group_set", {**edit, "name": "Bea's desk"}),
+    # Bea of Brighton changes a Brighton group she made, and cannot bring London into it
+    await commands.run(_job("u-bri", "group_set", {"name": "Bea's desk",
+                                                   "topics": ["advisory:stock"]}),
+                       mirror=mirror, now=NOW)
+    async with async_session() as db:
+        beas = next(str(v.group.id) for v in await store.list_groups(db, CC)
+                    if v.group.name == "Bea's desk")
+    mine = {"group_id": beas, "name": "Bea's desk", "topics": ["advisory:stock"]}
+    await commands.run(_job("u-bri", "group_set", {**mine, "name": "Bea's own desk"}),
                        mirror=mirror, now=NOW)
     with pytest.raises(Refused, match="LON is not one of your sites"):
-        await commands.run(_job("u-bri", "group_set", {**edit, "site_ids": ["BRI", "LON"]}),
+        await commands.run(_job("u-bri", "group_set", {**mine, "site_ids": ["BRI", "LON"]}),
                            mirror=mirror, now=NOW)
 
 

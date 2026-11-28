@@ -713,6 +713,7 @@ erDiagram
         string name "unique w/ customer_code+type"
         jsonb config "transport settings; a secret value is a reference into tenant_secrets"
         bool enabled
+        string created_by "Entra object id of who connected it (chunk 250); null = only an Admin manages it"
         datetime created_at
         datetime updated_at
     }
@@ -1387,6 +1388,7 @@ Notification groups (stage D, step 12) route what the agents and the schedules p
 Since chunk 247 (28 Nov 2026, migration `c5f0a8b2d4e9`, program step 3) a group is about some sites: every site of the customer (`notification_groups.all_sites`) or the ones listed in `notification_group_sites`.
 An advisory reaches a group only when its place is one of the group's sites, and a routine sent to a group's channels reads inside those sites and its owner's own.
 The group's name is shown and posted with its sites in front ("BRI · Stock alerts"); the stored `name` stays plain.
+Since chunks 249 and 250 (28 Nov 2026, migrations `d6a1b9c3e5f0` and `e7b2c0d4f6a1`) a group and a channel belong to who made them (`notification_groups.created_by`, `customer_notification_channels.created_by`) and to Admins: whoever holds the capability `manage_groups` makes groups and connects channels and manages their own, the Admin role manages all of them, and a group posts only to channels its maker connected.
 Routing is one lookup at dispatch; a finding no group takes goes nowhere, so a new channel receives nothing until a group takes it.
 The cap (stage D, step 13) bounds how many: a group sends at most `notification_groups.max_per_hour` advisory cards per clock hour, and `advisory_announcements` is its ledger, one line per advisory sent or held in an hour (`window_start`) plus the hour's `notice` line (the card that says the group went quiet) and `summary` line (the card that lists what was held once the hour is over).
 Held is recorded, not dropped, so which findings a summary covered stays answerable; the summary line is written before the card is sent, so a restart never repeats it.

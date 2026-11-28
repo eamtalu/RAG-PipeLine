@@ -69,6 +69,9 @@ class CustomerNotificationChannel(Base):
     # transport config; for webhook channels: {"webhook_url": "https://..."}. Secrets live here.
     config: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    # who connected it from the Teams app (program step 3): a channel belongs to that person and
+    # to Admins. None for one made before this or by the ops API, which only an Admin manages.
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),

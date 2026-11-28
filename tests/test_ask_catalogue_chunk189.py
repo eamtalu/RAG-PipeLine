@@ -202,7 +202,8 @@ async def test_a_confirmed_change_user_form_becomes_access_set_user_and_decide_b
 
 async def test_a_confirmed_group_form_becomes_group_set_with_its_topics_and_channel():
     async with async_session() as db:
-        channel = CustomerNotificationChannel(customer_code=CC, channel_type="teams", name="stock-control", config={})
+        channel = CustomerNotificationChannel(customer_code=CC, channel_type="teams", name="stock-control", config={},
+                                              created_by="u-ops")  # a group posts only where its maker connected
         db.add(channel)
         await db.commit()
         channel_id = str(channel.id)

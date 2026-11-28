@@ -218,6 +218,9 @@ async def set_group_form(db: AsyncSession, customer_code: str, actor_object_id: 
         raise ValueError(f"you cannot change notification groups: {decision.reason}")
     groups = await groups_store.list_groups(db, customer_code)
     channels = await groups_store.customer_channels(db, customer_code)
+    # a group posts only where its maker connected; an Admin posts anywhere (program step 3)
+    if record.role_code != "admin":
+        channels = [c for c in channels if c.created_by == actor_object_id]
     name = _text(args.get("name"), 80) or ""
     existing = next((g for g in groups if g.group.name.lower() == name.lower()), None) if name else None
     wanted_topics = {str(t).lower() for t in (args.get("topics") or [])}
