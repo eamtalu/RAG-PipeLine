@@ -1649,6 +1649,9 @@
                 "demo_act",
                 "task_create",
                 "task_update",
+                "task_propose",
+                "task_proposal_answer",
+                "task_proposal_withdraw",
                 "group_set",
                 "group_delete",
                 "group_join",
@@ -1828,5 +1831,5 @@
       "type": "object"
     }
   },
-  "revision": "3.31"
+  "revision": "3.32"
 }

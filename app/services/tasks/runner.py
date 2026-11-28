@@ -21,12 +21,14 @@ from app.persistence.models.advisory import Advisory
 from app.persistence.models.analytics_at_risk import AnalyticsAtRiskDelivery
 from app.persistence.models.task import TeamsTask, TeamsTaskRun
 from app.persistence.repositories.customer_repository import get_customer_timezone
+from app.services import access
 from app.services.notifications.events import NotificationEvent
 from app.services.tasks import store
 from app.services.tasks import mirror as tasks_mirror
 from app.services.groups import store as groups_store
 from app.services.groups.store import Route
 from app.services.teams.mirror import ChangeTracker, MirrorWriter
+from app.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -118,8 +120,29 @@ async def fire(db: AsyncSession, task: TeamsTask, *, now: datetime, tz: ZoneInfo
     # Step 2: Book the next firing from the planned time, not from now, so a late tick does not
     # drift the clock
     store.advance(task, fired_at=planned if planned > now - catch_up else now, tz=tz)
+    # Step 3: Count failures in a row; at the limit the routine pauses itself and says why,
+    # otherwise a broken question would fail at every firing for ever with nobody told
+    _count_failure(task, run, now=now)
     await db.flush()
     return run
+
+
+def _count_failure(task: TeamsTask, run: TeamsTaskRun, *, now: datetime) -> None:
+    """Keep the count of failed runs in a row, and pause the routine when it reaches the limit.
+
+    (2 failed, this one failed, limit 3) -> paused with the reason ; (this one sent) -> count 0 ;
+    (a missed or skipped run) -> the count is left as it is
+    """
+    if run.outcome == "sent":
+        task.failed_in_a_row = 0
+        return
+    if run.outcome != "failed":
+        return
+    task.failed_in_a_row = (task.failed_in_a_row or 0) + 1
+    limit = settings.teams_tasks_pause_after_failures
+    if task.failed_in_a_row >= limit and task.status == "active":
+        why = (run.error or "").split(": ", 1)[-1] or "the run failed"
+        store.pause_by_system(task, f"Paused after {limit} failed runs in a row: {why}", now=now)
 
 
 def _last_result(run: TeamsTaskRun, now: datetime) -> dict[str, Any]:
@@ -211,6 +234,14 @@ async def tick(mirror: MirrorWriter | None, *, run_query: RunQuery | None, enque
         # ledger row and the unique constraint refuses a second attempt at that planned time
         for task in await store.claim_due(db, now=now):
             if task.customer_code not in codes:
+                continue
+            # A person who no longer has access gets no answers: their routine is paused once,
+            # not left firing a refusal at every planned time
+            owner = await access.access_record_for(db, task.customer_code, task.owner_object_id)
+            if owner is None or not owner.is_active:
+                store.pause_by_system(
+                    task, f"Paused: {task.owner_name or 'its owner'} no longer has access", now=now)
+                touched.add((task.customer_code, task.owner_object_id))
                 continue
             tz = ZoneInfo(await get_customer_timezone(db, task.customer_code))
             await fire(db, task, now=now, tz=tz, run_query=run_query, enqueue=enqueue,

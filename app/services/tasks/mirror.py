@@ -18,10 +18,11 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.persistence.models.task import TeamsTask
+from app.persistence.models.task import TeamsTask, TeamsTaskProposal
 from app.persistence.repositories.customer_repository import get_customer_timezone
 from app.persistence.repositories.teams_repository import TeamsConversationRepository
-from app.services.tasks import store
+from app.services import preferences
+from app.services.tasks import proposals, store
 from app.services.teams.mirror import ChangeTracker, MirrorWriter, envelope, write_if_changed
 from app.settings import settings
 
@@ -98,6 +99,9 @@ async def user_payload(db: AsyncSession, customer_code: str, owner_object_id: st
     pairs = await repo.user_exchanges(customer_code, owner_object_id, since=now - timedelta(days=SUGGEST_DAYS), limit=200)
     asked = [(q.content, q.asked_at or q.created_at) for q, _ in pairs if q.content]
     scheduled = {normalise(t.query_text) for t in tasks if t.query_text and t.status == "active"}
+    # Step 2: What a colleague set up for them and what they set up for others (program step
+    # 3), and how much room the customer's limit leaves. The colleagues to propose to are not
+    # here: the edge takes them from the GROUPS row, so a person with no routine yet has them.
     return {
         "owner_object_id": owner_object_id,
         "as_of": now.isoformat(),
@@ -110,6 +114,9 @@ async def user_payload(db: AsyncSession, customer_code: str, owner_object_id: st
         "coming_up": coming[:COMING_UP],
         "today": today,
         "suggested": suggestions(asked, tz=tz, scheduled=scheduled),
+        "proposals": await proposals.for_person(db, customer_code, owner_object_id, tz=tz),
+        "limit": {"max_active": await preferences.max_active_routines(db, customer_code),
+                  "active": sum(1 for r in rows if r["status"] == "active")},
     }
 
 
@@ -192,8 +199,13 @@ async def mirror_user(db: AsyncSession, mirror: MirrorWriter, customer_code: str
 
 
 async def owners_with_tasks(db: AsyncSession, customer_code: str) -> list[str]:
-    return sorted(r for r in (await db.execute(
+    owners = set((await db.execute(
         select(distinct(TeamsTask.owner_object_id)).where(TeamsTask.customer_code == customer_code))).scalars())
+    # someone who only has a proposal, waiting for them or sent by them, has a row too
+    for column in (TeamsTaskProposal.receiver_object_id, TeamsTaskProposal.sender_object_id):
+        owners.update((await db.execute(
+            select(distinct(column)).where(TeamsTaskProposal.customer_code == customer_code))).scalars())
+    return sorted(owners)
 
 
 async def sweep_once(mirror: MirrorWriter, *, only: list[str] | None = None, tracker: ChangeTracker | None = None,

@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.31"
+CONTRACT_REVISION = "3.32"
 
 
 def _now() -> datetime:
@@ -49,6 +49,13 @@ def _now() -> datetime:
 #:   done and skip record the person's own outcome with a note; plan_again books the same routine at a
 #:   new `when`; copy makes a new one from it with `fields` on top; repeat turns a one-off into a
 #:   recurring one with `when`)
+#: task_propose {to: [object_id], kind, title, when, query_text?, note?, show_as?, until?} ;
+#:   task_proposal_answer {proposal_id, accept} ; task_proposal_withdraw {proposal_id} (3.32,
+#:   program step 3: a routine set up for a colleague is a proposal; accepting makes it the
+#:   colleague's own routine, declining removes it, its sender withdraws one not yet answered.
+#:   A USER#<id>#TASKS row carries `proposals` {waiting, sent}, `people` and `limit`.)
+#:   preference_set / preference_reset with `customer: true` also take area `routines`
+#:   {max_active: 1..100}, how many active routines one person may have.
 #: group_set {group_id?, name, topics, min_severity, channel_ids, members, max_per_hour?} (step 12;
 #:   max_per_hour 1..60 is step 13, the cards a group sends per clock hour) ; group_delete {group_id}
 #:   3.30, program step 3: group_set also takes all_sites? and site_ids?, the sites the group is
@@ -94,6 +101,9 @@ ACCESS_COMMAND_KINDS = (
     "demo_act",
     "task_create",
     "task_update",
+    "task_propose",
+    "task_proposal_answer",
+    "task_proposal_withdraw",
     "group_set",
     "group_delete",
     "group_join",
@@ -137,6 +147,9 @@ class Command(BaseModel):
         "demo_act",
         "task_create",
         "task_update",
+        "task_propose",
+        "task_proposal_answer",
+        "task_proposal_withdraw",
         "group_set",
         "group_delete",
         "group_join",

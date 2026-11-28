@@ -7,6 +7,10 @@
 #   loop acts, so a restart loses nothing. teams_task_runs is the ledger, one row per planned
 #   firing, unique, so a firing happens exactly once.
 #
+#   Program step 3 adds teams_task_proposals: a routine one person sets up for a colleague is a
+#   proposal until the colleague answers. Accepting makes a task the colleague owns (marked
+#   with who proposed it), so a run always reads with the access of the person it is for.
+#
 #   customer_code is a real foreign key, as on the access tables.
 
 import uuid
@@ -29,6 +33,9 @@ SHOW_AS = ("table", "chart", "summary")
 RUN_OUTCOMES = ("sent", "done", "skipped", "missed", "failed")
 #: time: the clock; hand: "Run now"; tick: the person recording done or skipped (step 15).
 RUN_TRIGGERS = ("time", "hand", "tick")
+#: waiting: not answered yet; accepted: became the receiver's routine; declined: the receiver
+#: said no; withdrawn: its sender took it back before an answer.
+PROPOSAL_STATUSES = ("waiting", "accepted", "declined", "withdrawn")
 
 
 def _now() -> datetime:
@@ -72,9 +79,42 @@ class TeamsTask(Base):
     source: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)  # what it was made from
     #: The latest firing's words: {"text", "blocks", "at", "outcome"}; the card's "Right now".
     last_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    #: Who proposed it, when it was made by accepting a colleague's proposal (program step 3).
+    proposed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    proposed_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: Failed runs since the last good one; at the limit the routine pauses itself.
+    failed_in_a_row: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    #: Why eSmart Eye paused it, for the card; None for a pause the person made themselves.
+    pause_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TeamsTaskProposal(Base):
+    """A routine one person set up for a colleague, until the colleague answers."""
+
+    __tablename__ = "teams_task_proposals"
+    __table_args__ = (
+        Index("ix_teams_task_proposals_receiver", "customer_code", "receiver_object_id", "status"),
+        Index("ix_teams_task_proposals_sender", "customer_code", "sender_object_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    customer_code: Mapped[str] = mapped_column(
+        String(64), ForeignKey("customers.customer_code", ondelete="CASCADE"), nullable=False)
+    sender_object_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    sender_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    receiver_object_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    receiver_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: The routine as proposed: kind, title, when, query_text, note, show_as, until.
+    fields: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="waiting", server_default="waiting")
+    #: The routine made from it when it was accepted.
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("teams_tasks.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class TeamsTaskRun(Base):

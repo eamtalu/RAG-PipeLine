@@ -37,7 +37,8 @@ async def user_payload(db: AsyncSession, record: access.AccessRecord) -> dict:
     """
     payload = {"areas": await store.resolve(db, record), "own": await store.own(db, record),
                "defaults": await store.page_defaults(db, record),
-               "limits": {"line_search_days_max": areas.MAX_LINE_SEARCH_DAYS}}
+               "limits": {"line_search_days_max": areas.MAX_LINE_SEARCH_DAYS,
+                          "routines_max_active_max": areas.MAX_ACTIVE_ROUTINES}}
     # Which roles differ is for the people who set it; nobody else can act on it
     if access.decide(record, MANAGE_USERS).is_allowed:
         payload["role_defaults"] = await store.roles_with_a_default(db, record.customer_code)
