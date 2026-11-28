@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, select
+from sqlalchemy import func, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.task import SHOW_AS, TARGETS, TASK_KINDS, TeamsTask, TeamsTaskRun
@@ -75,6 +75,25 @@ async def list_for_owner(db: AsyncSession, customer_code: str, owner_object_id: 
         .order_by(TeamsTask.created_at.desc()).limit(limit))).scalars())
 
 
+async def active_count(db: AsyncSession, customer_code: str, owner_object_id: str) -> int:
+    """How many routines of one person are active: the ones that will fire, which the limit counts.
+
+    (3 active, 1 paused, 2 stopped) -> 3
+    """
+    return int(await db.scalar(select(func.count()).select_from(TeamsTask).where(
+        TeamsTask.customer_code == customer_code, TeamsTask.owner_object_id == owner_object_id,
+        TeamsTask.status == "active")) or 0)
+
+
+def pause_by_system(task: TeamsTask, reason: str, *, now: datetime) -> None:
+    """Pause a routine that eSmart Eye stops itself, keeping why for its card.
+
+    (active, "Paused after 3 failed runs in a row: …") -> paused, no next firing, the reason kept
+    """
+    task.status, task.next_fire_at, task.updated_at = "paused", None, now
+    task.pause_reason = reason[:300]
+
+
 async def claim_due(db: AsyncSession, *, now: datetime, limit: int = 50) -> list[TeamsTask]:
     """The active tasks whose time has come, locked for this transaction so a second consumer
     cannot fire them too (SKIP LOCKED); oldest due first."""
@@ -127,7 +146,8 @@ def apply(task: TeamsTask, action: str, fields: dict[str, Any], *, now: datetime
         task.status, task.next_fire_at = "paused", None
         return f"paused · {task.title}"
     if action == "resume":
-        task.status = "active"
+        # a routine eSmart Eye paused starts clean: the reason goes and the count begins again
+        task.status, task.pause_reason, task.failed_in_a_row = "active", None, 0
         task.next_fire_at = specs.next_fire(task.when, now, tz)
         if task.next_fire_at is None:
             raise ValueError("that time has already passed; edit the task first")
@@ -246,6 +266,8 @@ def task_payload(task: TeamsTask, tz: ZoneInfo) -> dict:
         "target": task.target, "target_group_id": str(task.target_group_id) if task.target_group_id else None,
         "show_as": task.show_as, "until": _iso(task.until),
         "created_via": task.created_via, "source": dict(task.source or {}), "last_result": _without_blocks(task.last_result),
+        "proposed_by": task.proposed_by, "proposed_by_name": task.proposed_by_name,
+        "pause_reason": task.pause_reason,
         "created_at": _iso(task.created_at), "updated_at": _iso(task.updated_at), "done_at": _iso(task.done_at),
         "can_undo_until": _iso(task.created_at + timedelta(minutes=10)) if task.status == "active" else None,
     }

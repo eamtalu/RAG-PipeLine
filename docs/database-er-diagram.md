@@ -1389,6 +1389,9 @@ Since chunk 247 (28 Nov 2026, migration `c5f0a8b2d4e9`, program step 3) a group 
 An advisory reaches a group only when its place is one of the group's sites, and a routine sent to a group's channels reads inside those sites and its owner's own.
 The group's name is shown and posted with its sites in front ("BRI · Stock alerts"); the stored `name` stays plain.
 Since chunks 249 and 250 (28 Nov 2026, migrations `d6a1b9c3e5f0` and `e7b2c0d4f6a1`) a group and a channel belong to who made them (`notification_groups.created_by`, `customer_notification_channels.created_by`) and to Admins: whoever holds the capability `manage_groups` makes groups and connects channels and manages their own, the Admin role manages all of them, and a group posts only to channels its maker connected.
+Since chunk 251 (28 Nov 2026, migration `f8c3d1e5a7b2`, program step 3) a routine set up for a colleague is a row in `teams_task_proposals` until the colleague answers.
+Accepting makes a `teams_tasks` row the colleague owns, marked with `proposed_by`, so a run always reads with the access of the person it is for.
+A person has at most as many active routines as the customer allows (`preferences` area `routines`, 20 until an Admin sets another), and a routine pauses itself after three failed runs in a row or when its owner no longer has access (`teams_tasks.pause_reason`).
 Routing is one lookup at dispatch; a finding no group takes goes nowhere, so a new channel receives nothing until a group takes it.
 The cap (stage D, step 13) bounds how many: a group sends at most `notification_groups.max_per_hour` advisory cards per clock hour, and `advisory_announcements` is its ledger, one line per advisory sent or held in an hour (`window_start`) plus the hour's `notice` line (the card that says the group went quiet) and `summary` line (the card that lists what was held once the hour is over).
 Held is recorded, not dropped, so which findings a summary covered stays answerable; the summary line is written before the card is sent, so a restart never repeats it.
@@ -1629,6 +1632,10 @@ erDiagram
         string created_via "tab | ask | advisory"
         jsonb source
         jsonb last_result "the latest firing's words"
+        string proposed_by "who proposed it, when made by accepting a proposal (chunk 251)"
+        string proposed_by_name
+        int failed_in_a_row "failed runs since the last good one; pauses itself at the limit"
+        string pause_reason "why eSmart Eye paused it; null for a person's own pause"
         datetime created_at
         datetime updated_at
         datetime done_at
@@ -1718,6 +1725,20 @@ erDiagram
         string object_id PK
         string added_by
         datetime added_at
+    }
+
+    teams_task_proposals {
+        uuid id PK
+        string customer_code FK "customers"
+        string sender_object_id
+        string sender_name
+        string receiver_object_id
+        string receiver_name
+        jsonb fields "the routine as proposed: kind, title, when, query_text, note, show_as, until"
+        string status "waiting | accepted | declined | withdrawn"
+        uuid task_id FK "teams_tasks, the routine made from it; SET NULL"
+        datetime created_at
+        datetime answered_at
     }
 
     teams_task_runs {
@@ -1860,6 +1881,8 @@ erDiagram
     customers ||--o{ teams_tasks : "tasks of"
     customers ||--o{ teams_task_runs : "task firings of"
     teams_tasks ||--o{ teams_task_runs : "fired as"
+    customers ||--o{ teams_task_proposals : "proposals of"
+    teams_tasks ||--o| teams_task_proposals : "made from (SET NULL)"
     teams_tasks ||..o{ audit_events : "changed (subject_kind task)"
     customers ||--o{ notification_groups : "routes of"
     notification_groups ||--o{ notification_group_channels : "posts to"
@@ -1934,7 +1957,7 @@ erDiagram
         string customer_code FK
         string subject_kind "customer, role or user"
         string subject_id "customer code, role code or Entra object id"
-        string area "app, ask, a page (advisories) or a role's page default (advisories_default)"
+        string area "app, ask, routines, a page (advisories) or a role's page default (advisories_default)"
         jsonb settings "the fields that were set; for a page: use and views"
         timestamptz updated_at
         string updated_by
@@ -1992,6 +2015,8 @@ No table or column changed.
 | `customers.customer_code` | `teams_tasks.customer_code` | CASCADE |
 | `customers.customer_code` | `teams_task_runs.customer_code` | CASCADE |
 | `teams_tasks.id` | `teams_task_runs.task_id` | CASCADE |
+| `teams_tasks.id` | `teams_task_proposals.task_id` | SET NULL |
+| `customers.customer_code` | `teams_task_proposals.customer_code` | CASCADE |
 | `customers.customer_code` | `notification_groups.customer_code` | CASCADE |
 | `notification_groups.id` | `notification_group_channels.group_id` | CASCADE |
 | `customer_notification_channels.id` | `notification_group_channels.channel_id` | CASCADE |

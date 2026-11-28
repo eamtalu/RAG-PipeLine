@@ -68,7 +68,7 @@ async def run_command(job: QuestionJob, *, run_query=None) -> str:
     if command.kind in group_commands.KINDS:
         return await group_commands.run(job)  # a CommandOutcome: the line and the receipt
     # the Tasks tab's actions (step 10) live with the tasks service
-    if command.kind in ("task_create", "task_update"):
+    if command.kind in task_commands.KINDS:
         return await task_commands.run(job, run_query=run_query)  # a CommandOutcome: the line and the receipt
     # the Advisories tab's actions (step 9) live with the advisories service
     if command.kind == "advisory_act":

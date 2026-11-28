@@ -47,6 +47,17 @@ class Ask(_Area):
     line_search_days: int | None = Field(default=None, ge=1, le=MAX_LINE_SEARCH_DAYS)
 
 
+#: The most active routines per person an Admin may set.
+MAX_ACTIVE_ROUTINES = 100
+
+
+class Routines(_Area):
+    """What applies to everyone's routines."""
+
+    #: Active routines one person may have; None for the server's own setting.
+    max_active: int | None = Field(default=None, ge=1, le=MAX_ACTIVE_ROUTINES)
+
+
 #: An advisory kind or agent as the backend names it: "count_gap", "delivery_at_risk".
 Kind = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,31}$")]
 #: A saved view's id, made by the page; short and plain so it can sit in a key or a link.
@@ -113,7 +124,7 @@ class PageViews(_Area, Generic[PageT]):
 PAGES: dict[str, type[_Area]] = {"advisories": AdvisoriesPage}
 
 #: What a person's values are resolved for: the app, Ask, and each page's views.
-AREAS: dict[str, type[_Area]] = {"app": App, "ask": Ask,
+AREAS: dict[str, type[_Area]] = {"app": App, "ask": Ask, "routines": Routines,
                                  **{page: PageViews[shape] for page, shape in PAGES.items()}}
 
 _DEFAULT_SUFFIX = "_default"
@@ -151,13 +162,20 @@ def holders(area: str) -> tuple[str, ...]:
 
     >>> holders("ask"), holders("app"), holders("advisories"), holders("advisories_default")
     (('customer', 'role', 'user'), ('role', 'user'), ('user',), ('role',))
+    >>> holders("routines")
+    ('customer',)
     """
     _shape(area)
     if area in ROLE_DEFAULT_AREAS:
         return (ROLE,)
     if area in PAGES:
         return (USER,)
+    if area == "routines":
+        return (CUSTOMER,)  # one number for everyone: a limit a person set for themselves is none
     return (CUSTOMER, ROLE, USER) if area == "ask" else (ROLE, USER)
+
+#: The areas that are set for the whole customer from the app.
+CUSTOMER_AREAS = ("ask", "routines")
 
 
 def page_defaults(page: str) -> dict:

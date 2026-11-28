@@ -191,7 +191,8 @@ async def test_the_customers_range_reaches_everyone_and_is_one_audit_line(monkey
     for person in ("u-pic", "u-sup", "u-adm"):
         row = _row(mirror, person)
         assert row["areas"]["ask"] == {"line_search_days": 10}
-        assert row["limits"] == {"line_search_days_max": 14}
+        # the routine limit's own maximum joined with chunk 251
+        assert row["limits"] == {"line_search_days_max": 14, "routines_max_active_max": 100}
     assert await _audit() == [("preference_set", "preference_customer", CC)]
     # back to the server's setting
     outcome = await preferences.run(_job("u-adm", "preference_reset", {

@@ -76,7 +76,22 @@ async def resolve(db: AsyncSession, record: access.AccessRecord) -> dict[str, di
     # The screen shows a number, so "the server's setting" is resolved to it here
     resolved["ask"]["line_search_days"] = (resolved["ask"]["line_search_days"]
                                            or app_settings.log_search_default_days)
+    resolved["routines"]["max_active"] = (resolved["routines"]["max_active"]
+                                          or app_settings.teams_tasks_max_active)
     return resolved
+
+
+async def max_active_routines(db: AsyncSession, customer_code: str) -> int:
+    """How many active routines one person of a customer may have: the customer's own number,
+    else the server's setting.
+
+    (a customer whose Admin chose 5) -> 5 ; (nothing chosen) -> settings.teams_tasks_max_active
+    """
+    own_value = (await db.execute(select(Preference.settings).where(
+        Preference.customer_code == customer_code, Preference.subject_kind == "customer",
+        Preference.subject_id == customer_code,
+        Preference.area == "routines"))).scalar_one_or_none()
+    return (own_value or {}).get("max_active") or app_settings.teams_tasks_max_active
 
 
 async def page_defaults(db: AsyncSession, record: access.AccessRecord) -> dict[str, dict]:

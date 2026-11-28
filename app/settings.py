@@ -551,6 +551,13 @@ class Settings(BaseSettings):
     # was down fires once if it is under the catch-up window late, else it is skipped with a note.
     teams_tasks_tick_seconds: float = 30.0
     teams_tasks_catch_up_hours: float = 6.0
+    # How many active routines one person may have, until a customer's Admin sets its own
+    # number from the Routines page (1 to 100; app/services/preferences, area `routines`).
+    # Each routine runs a question through the assistant, so an open number is an open cost.
+    teams_tasks_max_active: int = 20
+    # A routine that fails this many runs in a row pauses itself and says why on its card,
+    # otherwise a broken question would fail every day for ever with nobody told.
+    teams_tasks_pause_after_failures: int = 3
     #: step 15: how long a routine's runs stay in the ledger and the History view
     teams_task_runs_retention_days: int = 30
     # The watches loop (step 14) ticks this often; each watch is checked on its kind's cadence

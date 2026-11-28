@@ -150,12 +150,16 @@ def _check_level(area: str, subject: _Subject) -> None:
     ("ask", a role) -> ValueError ; ("ask", the customer) -> fine ; ("app", the customer) ->
     ValueError ; anything else is left to the area's own holder rule
     """
-    if area == "ask" and subject.kind != areas.CUSTOMER:
-        raise ValueError("the line search range is set for the whole customer")
-    if subject.kind == areas.CUSTOMER and area != "ask":
-        raise ValueError("only the line search range is set for the whole customer")
+    if area in areas.CUSTOMER_AREAS and subject.kind != areas.CUSTOMER:
+        raise ValueError(f"{_CUSTOMER_WORDS[area]} is set for the whole customer")
+    if subject.kind == areas.CUSTOMER and area not in areas.CUSTOMER_AREAS:
+        raise ValueError("only the line search range and the number of routines are set "
+                         "for the whole customer")
     if subject.kind == areas.USER and not subject.is_own and areas.page_of(area) != area:
         raise ValueError("only a person's saved views of a page are reset for them")
+
+
+_CUSTOMER_WORDS = {"ask": "the line search range", "routines": "the number of routines"}
 
 
 def _saved_text(area: str, subject: _Subject, stored: dict) -> str:
@@ -166,6 +170,8 @@ def _saved_text(area: str, subject: _Subject, stored: dict) -> str:
     """
     if area == "ask":
         return f"Line search now covers the last {stored.get('line_search_days')} days"
+    if area == "routines":
+        return f"Each person can now have up to {stored.get('max_active')} active routines"
     if area in areas.ROLE_DEFAULT_AREAS:
         return f"Default view of {areas.page_of(area)} set for {subject.name}"
     return f"Saved · {_title(area)}"
@@ -175,6 +181,9 @@ def _reset_text(area: str, subject: _Subject) -> str:
     """The one line the page shows after a reset."""
     if area == "ask":
         return f"Line search covers the last {app_settings.log_search_default_days} days again"
+    if area == "routines":
+        return (f"Each person can have up to {app_settings.teams_tasks_max_active} "
+                "active routines again")
     if area in areas.ROLE_DEFAULT_AREAS:
         return (f"Default view of {areas.page_of(area)} for {subject.name} "
                 "is the built-in one again")
