@@ -27,6 +27,7 @@ from app.services.tasks import store
 from app.services.tasks import mirror as tasks_mirror
 from app.services.groups import store as groups_store
 from app.services.groups.store import Route
+from app.services.teams import bell
 from app.services.teams.mirror import ChangeTracker, MirrorWriter
 from app.settings import settings
 
@@ -122,9 +123,36 @@ async def fire(db: AsyncSession, task: TeamsTask, *, now: datetime, tz: ZoneInfo
     store.advance(task, fired_at=planned if planned > now - catch_up else now, tz=tz)
     # Step 3: Count failures in a row; at the limit the routine pauses itself and says why,
     # otherwise a broken question would fail at every firing for ever with nobody told
+    had_reason = task.pause_reason is not None
     _count_failure(task, run, now=now)
+    # Step 4: Tell the owner under their Teams bell when they asked for it: that it has run,
+    # or that it paused itself. Written with the run, so it is queued exactly once.
+    await _ring(db, task, run, has_just_paused=not had_reason and task.pause_reason is not None,
+                now=now)
     await db.flush()
     return run
+
+
+async def _ring(db: AsyncSession, task: TeamsTask, run: TeamsTaskRun, *, has_just_paused: bool,
+                now: datetime) -> None:
+    """Queue the bell for a routine's owner, when the routine is theirs to be told about.
+
+    (ticked, it ran) -> "Open picks" with the answer's first line ; (it paused itself) -> the
+    reason ; (not ticked) -> nothing
+
+    The bell is the owner's own choice and independent of where the result goes: a routine
+    can post its result to a group's channel and ring its owner's bell as well.
+    """
+    if not task.notify_bell:
+        return
+    if has_just_paused:
+        await bell.queue(db, task.customer_code, object_id=task.owner_object_id, kind="routine_paused",
+                         subject_id=str(run.id), title=task.title, text=task.pause_reason or "",
+                         tab="routines", now=now)
+    elif run.outcome == "sent":
+        await bell.queue(db, task.customer_code, object_id=task.owner_object_id, kind="routine_ran",
+                         subject_id=str(run.id), title=task.title, text=run.text or "", tab="routines",
+                         now=now)
 
 
 def _count_failure(task: TeamsTask, run: TeamsTaskRun, *, now: datetime) -> None:

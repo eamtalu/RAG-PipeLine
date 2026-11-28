@@ -16,7 +16,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -86,6 +86,8 @@ class TeamsTask(Base):
     failed_in_a_row: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     #: Why eSmart Eye paused it, for the card; None for a pause the person made themselves.
     pause_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    #: Whether its owner is told under the Teams bell when it has run (program step 3, slice 4).
+    notify_bell: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
