@@ -76,6 +76,7 @@ from app.persistence.models.notification_group import (  # noqa: F401
     NotificationGroup,
     NotificationGroupChannel,
     NotificationGroupMember,
+    NotificationGroupSite,
 )
 from app.persistence.models.agent_run import AgentRun
 from app.persistence.models.agent_trace import AgentTrace

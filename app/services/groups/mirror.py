@@ -49,7 +49,8 @@ async def mirror_customer(db: AsyncSession, mirror: MirrorWriter, customer_code:
     for g in payload["groups"]:
         members.update(g["members"])
     for object_id in sorted(members):
-        mine = [{"id": g["id"], "name": g["name"], "topics": g["topics"]} for g in payload["groups"] if object_id in g["members"]]
+        mine = [{"id": g["id"], "name": g["name"], "display_name": g["display_name"], "topics": g["topics"]}
+                for g in payload["groups"] if object_id in g["members"]]
         env = envelope("user_groups", customer_code, payload={"object_id": object_id, "as_of": payload["as_of"], "groups": mine},
                        as_of=payload["as_of"], now=now.timestamp(), user_id=object_id)
         written += int(await write_if_changed(mirror, tracker, env, now=now.timestamp()))

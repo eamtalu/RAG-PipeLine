@@ -148,6 +148,15 @@ def schedule_from_form(values: Mapping[str, Any], *, tz: ZoneInfo, groups: list[
     >>> schedule_from_form({"what": "x", "send_to": "Group: Stock"}, tz=ZoneInfo("Europe/London"),
     ...                    groups=[("g-1", "Stock")])["target_group_id"]
     'g-1'
+
+    A group is offered with its sites in front (program step 3); a page that still sends the
+    plain name is understood too:
+
+    >>> named = [("g-1", "BRI · Stock")]
+    >>> [schedule_from_form({"what": "x", "send_to": to}, tz=ZoneInfo("Europe/London"),
+    ...                     groups=named)["target_group_id"]
+    ...  for to in ("Group: BRI · Stock", "Group: Stock", "Group: Other")]
+    ['g-1', 'g-1', None]
     """
     what = str(values.get("what") or "").strip()
     how = str(values.get("how_often") or HOW_OFTEN[0])
@@ -168,7 +177,9 @@ def schedule_from_form(values: Mapping[str, Any], *, tz: ZoneInfo, groups: list[
     if values.get("until") and how != HOW_OFTEN[3]:
         until = datetime.combine(date.fromisoformat(str(values["until"]).strip()), time(23, 59), tzinfo=tz).isoformat()
     send_to = str(values.get("send_to") or "")
-    group_id = next((gid for gid, name in groups if send_to == f"Group: {name}"), None)
+    # the name as offered, or without its sites label, which an older page still sends
+    group_id = next((gid for gid, name in groups
+                     if send_to in (f"Group: {name}", f"Group: {name.split(' · ', 1)[-1]}")), None)
     return {"kind": "schedule", "title": what[:200], "when": when, "query_text": what,
             "target": "channel" if group_id else "me", "target_group_id": group_id,
             "show_as": SHOW_AS_CODES.get(str(values.get("show_as")), "table"), "until": until}

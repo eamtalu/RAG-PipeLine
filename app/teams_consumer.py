@@ -48,6 +48,7 @@ from app.services.watchlist import ask_hooks
 from app.services.watchlist import mirror as watch_mirror
 from app.services.watchlist import runner as watch_runner
 from app.services.groups import mirror as groups_mirror
+from app.services.groups import store as groups_store
 from app.services.notifications import dispatcher as notifications
 from app.services.tasks import mirror as tasks_mirror
 from app.services.tasks import runner as tasks_runner
@@ -106,16 +107,23 @@ def framed_question(job: QuestionJob) -> str:
     return job.question
 
 
-async def _asker(job: QuestionJob) -> tuple[access.AccessRecord | None, scoped_data.DataScope]:
+async def _asker(job: QuestionJob, within=None) -> tuple[access.AccessRecord | None, scoped_data.DataScope]:
     """The asker's record as it is now and the data it lets them read; no record reads nothing.
+    `within` (a group's sites) cuts that down further, for an answer that is posted to a group.
 
     (u-7, supervisor of BRI) -> (record, DataScope(sites=("BRI",))) ;
+    (an all-sites owner, within the group "BRI · Stock") -> (record, DataScope(sites=("BRI",))) ;
     (no user row) -> (None, a scope with no sites)
     """
     async with async_session() as db:
         record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
         # each site is resolved to the company and warehouse pairs it stands for (chunk 223)
         scope = await scoped_data.scope_for(db, record, customer_code=job.customer_code)
+        if within is not None:
+            # what is posted to a channel is read by people nobody checked one by one, so it
+            # stays inside the group's sites as well as the owner's own (program step 3)
+            scope = await scoped_data.narrow(db, scope, all_sites=within.all_sites,
+                                             site_ids=within.site_ids)
     return record, scope
 
 
@@ -155,7 +163,7 @@ async def _run_agent(job: QuestionJob, history: list[dict], progress=None) -> di
 
 
 async def _run_agent_traced(job: QuestionJob, history: list[dict],
-                            progress=None) -> tuple[dict, str | None]:
+                            progress=None, within=None) -> tuple[dict, str | None]:
     """The answer as `_run_agent` gives it, with the trace id of the run that produced it.
 
     (a question the model answered) -> ({"answer": ...}, "9f3c...") ;
@@ -171,7 +179,7 @@ async def _run_agent_traced(job: QuestionJob, history: list[dict],
     # model runs; the gateway builds the context and the runtime never reads settings.
     # The asker's sites become the limit every data tool reads within (step 45), and the model is
     # told of a limit so that it names it instead of answering "no data" for another site.
-    record, data_scope = await _asker(job)
+    record, data_scope = await _asker(job, within)
     request = AgentRequest(
         request_id=job.job_id, tenant=job.customer_code,
         principal=Principal(tenant=job.customer_code, object_id=job.sender_object_id,
@@ -545,8 +553,14 @@ async def _run_task_query(task) -> dict:
     refusal = await _check_access(job)
     if refusal:
         return {"answer": refusal, "blocks": []}
+    # A routine sent to a group's channels reads inside that group's sites (program step 3);
+    # one sent to its owner reads as its owner does.
+    within = None
+    if getattr(task, "target", None) == "channel" and getattr(task, "target_group_id", None):
+        async with async_session() as db:
+            within = await groups_store.sites_of(db, task.customer_code, task.target_group_id)
     # the run's trace id rides with the answer, so the routine's run row can name it (chunk 221)
-    answer, trace_id = await _run_agent_traced(job, [])
+    answer, trace_id = await _run_agent_traced(job, [], within=within)
     return {**answer, "trace_id": trace_id}
 
 

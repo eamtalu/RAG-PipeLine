@@ -42,6 +42,31 @@ def admits(group_topics: list[str], min_severity: str, topic: str, severity: str
     return RANK.get(severity, 99) <= RANK.get(min_severity, -1)
 
 
+ALL_SITES_LABEL = "All sites"
+NO_SITE_LABEL = "No site"
+
+
+def sites_label(all_sites: bool, site_ids) -> str:
+    """The sites a group is about, as people read them.
+
+    >>> sites_label(True, []), sites_label(False, ["LON", "BRI"]), sites_label(False, [])
+    ('All sites', 'BRI, LON', 'No site')
+    """
+    if all_sites:
+        return ALL_SITES_LABEL
+    return ", ".join(sorted(site_ids)) or NO_SITE_LABEL
+
+
+def display_name(name: str, all_sites: bool, site_ids) -> str:
+    """A group's name as it is shown everywhere: its sites in front, written by the system so
+    nobody has to keep a naming convention by hand.
+
+    >>> display_name("Stock alerts", False, ["BRI"]), display_name("Ops", True, [])
+    ('BRI · Stock alerts', 'All sites · Ops')
+    """
+    return f"{sites_label(all_sites, site_ids)} · {name}"
+
+
 def clean_topics(topics) -> list[str]:
     """The known topics among those given, in the canonical order; ValueError when none is known.
 

@@ -87,7 +87,7 @@ async def test_groups_are_made_changed_looked_up_and_deleted():
         await db.commit()
         # the lookup: a MEDIUM stock finding goes to Stock; a MEDIUM delivery one to nobody; HIGH delivery to the desk
         route = await store.routes_for(db, CC, "advisory:stock", "medium")
-        assert route.group_names == ("Stock",) and route.channel_ids == (str(uuid.UUID(int=2)),) and set(route.member_object_ids) == {"u-sup", "u-ops"}
+        assert route.group_names == ("All sites · Stock",) and route.channel_ids == (str(uuid.UUID(int=2)),) and set(route.member_object_ids) == {"u-sup", "u-ops"}
         assert (await store.routes_for(db, CC, "advisory:delivery", "medium")).is_empty
         assert (await store.routes_for(db, CC, "advisory:delivery", "high")).group_ids == (str(desk.id),)
         assert (await store.group_route(db, CC, str(desk.id))).channel_ids == (str(uuid.UUID(int=1)),)
@@ -117,7 +117,7 @@ async def test_managing_needs_configure_agents_and_everyone_may_join_or_leave():
     outcome = await commands.run(_command("u-ops", "group_set", {
         "name": "Stock", "topics": ["advisory:stock"], "min_severity": "medium", "channel_ids": [str(uuid.UUID(int=2))],
         "members": ["u-ops"]}, "Olu"), mirror=mirror, now=NOW)
-    assert outcome.text == "group Stock saved · 1 channel · 1 member · 5 cards an hour"
+    assert outcome.text == "group All sites · Stock saved · 1 channel · 1 member · 5 cards an hour"
     group_id = outcome.blocks[0]["reference"]
     # the supervisor joins, then leaves
     assert (await commands.run(_command("u-sup", "group_join", {"group_id": group_id}, "Sam"), mirror=mirror, now=NOW)).text == "joined Stock"
