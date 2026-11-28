@@ -1,12 +1,13 @@
 """What people do with groups and channels (stage D, step 12), arriving as commands on the
 question queue. Since program step 3:
 
-- whoever may make groups (`manage_groups`) makes one, inside their own sites, and changes or
-  deletes the ones they made; whoever may configure agents (`configure_agents`) does so for
-  every group, and alone adds, tests or deletes a channel;
+- whoever may make groups (`manage_groups`) makes one, inside their own sites, connects a
+  Teams channel for it, and changes or deletes the groups and channels they made;
+- an Admin (the role) does so for every group and channel, whoever made it;
+- a group posts only to channels its maker connected, so one person's group cannot be pointed
+  at a channel whose readers they do not know;
 - nobody changes a group that is about a site they may not see;
-- anyone active joins or leaves a group, and a member, the maker or someone who manages every
-  group adds a colleague.
+- anyone active joins or leaves a group, and a member, the maker or an Admin adds a colleague.
 
 Every change is one audit line; the GROUPS rows are mirrored at once. Used by
 app/services/teams/commands.py.
@@ -38,12 +39,14 @@ logger = logging.getLogger(__name__)
 
 KINDS = ("group_set", "group_delete", "group_join", "group_leave", "group_member_add",
          "channel_set", "channel_delete", "channel_test")
-#: Making a group and changing one's own; every group for those who may configure agents.
+#: Making a group and changing one's own; every group for an Admin.
 GROUP_MANAGING = ("group_set", "group_delete")
-#: A channel is a way out of the system, so it stays with those who configure agents.
+#: Connecting a channel and changing one's own; every channel for an Admin.
 CHANNEL_MANAGING = ("channel_set", "channel_delete", "channel_test")
 MANAGING = GROUP_MANAGING + CHANNEL_MANAGING
-MAKE_GROUPS, MANAGE_EVERY_GROUP = "manage_groups", "configure_agents"
+MAKE_GROUPS = "manage_groups"
+#: The role that manages every group and channel (the owner's decision, 28 Nov 2026).
+ADMIN_ROLE = "admin"
 
 
 async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | None = None,
@@ -60,17 +63,14 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
     actor = access.Actor(job.sender_object_id, job.sender_name)
     factory = session_factory or async_session
     async with factory() as db:
-        # Step 1: The actor's own record decides: a channel needs configure_agents, a group
-        # needs that or the capability to make groups; joining, leaving and adding a colleague
-        # need an active record only (who may add whom is the handler's to check)
+        # Step 1: The actor's own record decides: making or changing a group or a channel
+        # needs the capability to make groups, or the Admin role; joining, leaving and adding
+        # a colleague need an active record only (who may add whom is the handler's to check)
         record = await access.access_record_for(db, job.customer_code, job.sender_object_id)
         if record is None or not record.is_active:
             raise Refused("you have no active access record")
-        manages_every_group = access.decide(record, MANAGE_EVERY_GROUP).is_allowed
-        if command.kind in CHANNEL_MANAGING and not manages_every_group:
-            raise Refused(access.decide(record, MANAGE_EVERY_GROUP).reason
-                          or "managing channels needs configure_agents")
-        if command.kind in GROUP_MANAGING and not manages_every_group \
+        manages_every_group = record.role_code == ADMIN_ROLE
+        if command.kind in MANAGING and not manages_every_group \
                 and not access.decide(record, MAKE_GROUPS).is_allowed:
             raise Refused(f"{record.role_name or record.role_code} may not make groups; "
                           "an Admin sets that under What each role can do")
@@ -79,9 +79,14 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
         handler = _HANDLERS[command.kind]
         try:
             if command.kind in GROUP_MANAGING and payload.get("group_id"):
+                # the site first: it is the stronger reason, and true for an Admin as well
+                await _check_reach(db, record, str(payload["group_id"]))
                 if not manages_every_group:
                     await _check_owner(db, record, str(payload["group_id"]))
-                await _check_reach(db, record, str(payload["group_id"]))
+            if command.kind in CHANNEL_MANAGING and payload.get("channel_id") and not manages_every_group:
+                await _check_channel_owner(db, record, str(payload["channel_id"]))
+            if command.kind == "group_set" and not manages_every_group:
+                await _check_own_channels(db, record, payload)
             if command.kind == "group_member_add":
                 payload["_manages_every_group"] = manages_every_group
             if command.kind == "group_set":
@@ -108,16 +113,15 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
 
 
 def _capability_used(kind: str, manages_every_group: bool) -> str | None:
-    """The capability an audit line names for a command.
+    """The capability an audit line names for a command; none for what the Admin role does
+    as an Admin, and none for joining.
 
-    >>> _capability_used("channel_set", True), _capability_used("group_set", False)
-    ('configure_agents', 'manage_groups')
-    >>> _capability_used("group_set", True), _capability_used("group_join", False) is None
-    ('configure_agents', True)
+    >>> _capability_used("channel_set", False), _capability_used("group_set", False)
+    ('manage_groups', 'manage_groups')
+    >>> _capability_used("group_set", True) is None, _capability_used("group_join", False) is None
+    (True, True)
     """
-    if kind in CHANNEL_MANAGING or (kind in GROUP_MANAGING and manages_every_group):
-        return MANAGE_EVERY_GROUP
-    return MAKE_GROUPS if kind in GROUP_MANAGING else None
+    return MAKE_GROUPS if kind in MANAGING and not manages_every_group else None
 
 
 async def _check_owner(db: AsyncSession, record: access.AccessRecord, group_id: str) -> None:
@@ -130,7 +134,46 @@ async def _check_owner(db: AsyncSession, record: access.AccessRecord, group_id: 
         return  # a group that is gone is reported by the handler
     maker = await access.get_user(db, record.customer_code, group.created_by) if group.created_by else None
     name = (maker.display_name if maker is not None else None) or "someone else"
-    raise ValueError(f"this group was made by {name}; they or someone who manages every group change it")
+    raise ValueError(f"this group was made by {name}; they or an Admin change it")
+
+
+async def _check_channel_owner(db: AsyncSession, record: access.AccessRecord, channel_id: str) -> None:
+    """Refuse a change, a test or a delete of a channel someone else connected.
+
+    (Sam, the channel Sam connected) -> fine ; (Sam, one connected by Ada, or before channels
+    had an owner) -> ValueError
+    """
+    try:
+        key = uuid.UUID(channel_id)
+    except ValueError:
+        return  # the handler names a bad id
+    row = await db.get(CustomerNotificationChannel, key)
+    if row is None or row.customer_code != record.customer_code or row.created_by == record.object_id:
+        return  # a channel that is gone is reported by the handler
+    raise ValueError("this channel was connected by someone else; they or an Admin change it")
+
+
+async def _check_own_channels(db: AsyncSession, record: access.AccessRecord, payload: dict) -> None:
+    """Refuse a group that posts to a channel its maker did not connect, unless the group
+    already posts there.
+
+    (Sam ticks the channel Sam connected) -> fine ; (Sam ticks "london-ops", connected by Ada)
+    -> ValueError naming it
+
+    A group's sites limit what is posted; who reads a channel is known only to whoever
+    connected it. So a maker posts only where they connected, and an Admin anywhere.
+    """
+    wanted = {str(c) for c in (payload.get("channel_ids") or [])}
+    if not wanted:
+        return
+    kept: set[str] = set()
+    if payload.get("group_id"):
+        kept = {str(c) for v in await store.list_groups(db, record.customer_code)
+                if str(v.group.id) == str(payload["group_id"]) for c in v.channel_ids}
+    for channel in await store.customer_channels(db, record.customer_code):
+        if str(channel.id) in wanted - kept and channel.created_by != record.object_id:
+            raise ValueError(f"{channel.name} was connected by someone else; "
+                             "pick a channel you connected, or connect one")
 
 
 async def _check_reach(db: AsyncSession, record: access.AccessRecord, group_id: str) -> None:
@@ -277,7 +320,7 @@ async def _channel_set(db: AsyncSession, job: QuestionJob, actor: access.Actor, 
         previous=existing.config if existing is not None else None)
     if existing is None:
         db.add(CustomerNotificationChannel(id=channel_id, customer_code=job.customer_code, channel_type=channel_type,
-                                           name=name, config=config, enabled=True))
+                                           name=name, config=config, enabled=True, created_by=actor.object_id))
     else:
         existing.name, existing.config, existing.enabled = name, config, bool(payload.get("enabled", existing.enabled))
     await db.flush()

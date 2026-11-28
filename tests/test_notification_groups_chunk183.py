@@ -47,8 +47,8 @@ async def _customer():
     async with async_session() as s:
         s.add(Customer(customer_code=CC, display_name="C183", timezone="Europe/London"))
         s.add(TenantSite(customer_code=CC, site_id="BRI", name="Brighton", sort_order=1))
-        s.add_all([CustomerNotificationChannel(id=uuid.UUID(int=1), customer_code=CC, channel_type="teams", name="ops", config={}),
-                   CustomerNotificationChannel(id=uuid.UUID(int=2), customer_code=CC, channel_type="teams", name="stock", config={})])
+        s.add_all([CustomerNotificationChannel(id=uuid.UUID(int=1), customer_code=CC, channel_type="teams", name="ops", config={}, created_by="u-ops"),
+                   CustomerNotificationChannel(id=uuid.UUID(int=2), customer_code=CC, channel_type="teams", name="stock", config={}, created_by="u-ops")])
         await s.commit()
         await users.create_user(s, CC, "u-ops", actor=SUPER, now=NOW,
                                 change=users.UserChange(display_name="Olu Ops", role_code="ops_manager", all_sites=True))

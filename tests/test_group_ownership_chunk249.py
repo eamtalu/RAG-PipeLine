@@ -1,18 +1,20 @@
-"""Chunk 249: a group belongs to who made it (program step 3, slice 2, backend).
+"""Chunks 249 and 250: a group belongs to who made it (program step 3, slice 2, backend).
 
 Until now only people who may configure agents (Admins and Ops managers) could make a group,
 and each of them could change every group. The owner's decisions (28 Nov 2026): making groups
 is a permission of its own, set per role; a group belongs to the person who made it, who
-manages it, and to those who manage every group; a member may add a colleague.
+manages it, and to Admins (the role, nobody else); whoever makes a group connects a Teams
+channel for it; a member may add a colleague.
 
 Pinned here
 -----------
     the capability   `manage_groups`, in the matrix, for Admin and Ops manager until an Admin
                      gives it to another role; a role the customer added starts without it
     making           whoever holds it makes a group, inside their own sites
-    ownership        its maker changes and deletes it; someone who may configure agents does so
-                     for every group; nobody else
-    channels         adding, changing, testing and deleting a channel stays with configure agents
+    ownership        its maker changes and deletes it; an Admin does so for every group;
+                     nobody else, not even an Ops manager
+    channels         a maker connects a channel, and changes, tests and deletes their own; a
+                     group posts only where its maker connected, an Admin's anywhere
     members          a member, the maker, or someone who manages every group adds a colleague
     the row          each group names who made it
 """
@@ -90,9 +92,9 @@ async def _run(sender: str, kind: str, payload: dict, mirror=None):
                               mirror=mirror or InMemoryMirrorWriter(), now=NOW)
 
 
-async def _make(sender: str, name: str) -> str:
+async def _make(sender: str, name: str, channels: tuple[str, ...] = ()) -> str:
     await _run(sender, "group_set", {"name": name, "topics": ["advisory:stock"],
-                                     "channel_ids": [str(CHANNEL)]})
+                                     "channel_ids": list(channels)})
     async with async_session() as db:
         return next(str(v.group.id) for v in await store.list_groups(db, CC)
                     if v.group.name == name)
@@ -137,9 +139,8 @@ async def test_a_role_the_customer_added_starts_without_it_and_can_be_given_it()
 # ==================================================== 2. making and owning
 
 async def test_whoever_may_make_groups_makes_one_inside_their_own_sites():
-    out = await _run("u-sam", "group_set", {"name": "Night shift", "topics": ["advisory:stock"],
-                                            "channel_ids": [str(CHANNEL)]})
-    assert out.text.startswith("group BRI · Night shift saved · 1 channel")
+    out = await _run("u-sam", "group_set", {"name": "Night shift", "topics": ["advisory:stock"]})
+    assert out.text.startswith("group BRI · Night shift saved · 0 channels")
     with pytest.raises(Refused, match="LON is not one of your sites"):
         await _run("u-sam", "group_set", {"name": "London too", "topics": ["advisory:stock"],
                                           "site_ids": ["BRI", "LON"]})
@@ -147,16 +148,17 @@ async def test_whoever_may_make_groups_makes_one_inside_their_own_sites():
         await _run("u-pat", "group_set", {"name": "Mine", "topics": ["advisory:stock"]})
 
 
-async def test_a_group_is_changed_and_deleted_by_its_maker_and_by_those_who_manage_every_group():
+async def test_a_group_is_changed_and_deleted_by_its_maker_and_by_an_admin_only():
     sams = await _make("u-sam", "Night shift")
     edit = {"group_id": sams, "name": "Night shift B", "topics": ["advisory:stock"]}
-    # Sue may make groups too, but this one is Sam's
-    for kind, payload in (("group_set", edit), ("group_delete", {"group_id": sams})):
-        with pytest.raises(Refused, match="made by Sam Super"):
-            await _run("u-sue", kind, payload)
+    # Sue may make groups too, and Olu is an Ops manager, but this one is Sam's
+    for other in ("u-sue", "u-ops"):
+        for kind, payload in (("group_set", edit), ("group_delete", {"group_id": sams})):
+            with pytest.raises(Refused, match="made by Sam Super; they or an Admin"):
+                await _run(other, kind, payload)
     await _run("u-sam", "group_set", edit)
-    # the Ops manager and the Admin manage every group
-    await _run("u-ops", "group_set", {**edit, "name": "Night shift C"})
+    # the Admin manages every group
+    await _run("u-adm", "group_set", {**edit, "name": "Night shift C"})
     await _run("u-adm", "group_delete", {"group_id": sams})
     async with async_session() as db:
         assert await store.list_groups(db, CC) == []
@@ -172,16 +174,52 @@ async def test_someone_who_lost_the_capability_no_longer_changes_their_own_group
         await _run("u-sam", "group_delete", {"group_id": sams})
 
 
-async def test_channels_stay_with_those_who_configure_agents():
-    for kind, payload in (("channel_set", {"name": "mine", "webhook_url": "https://x.test/hook"}),
+async def _channel_of(name: str) -> str:
+    async with async_session() as db:
+        return next(str(c.id) for c in await store.customer_channels(db, CC) if c.name == name)
+
+
+async def test_a_maker_connects_a_channel_and_manages_only_their_own():
+    out = await _run("u-sam", "channel_set", {"name": "night shift",
+                                              "webhook_url": "https://x.test/hook"})
+    assert out.text == "channel night shift saved"
+    sams = await _channel_of("night shift")
+    await _run("u-sam", "channel_set", {"channel_id": sams, "name": "night shift B"})
+    # the channel that was there before belongs to nobody, so only an Admin touches it
+    for kind, payload in (("channel_set", {"channel_id": str(CHANNEL), "name": "mine now"}),
                           ("channel_test", {"channel_id": str(CHANNEL)}),
                           ("channel_delete", {"channel_id": str(CHANNEL)})):
-        with pytest.raises(Refused, match="configure_agents"):
+        with pytest.raises(Refused, match="connected by someone else"):
             await _run("u-sam", kind, payload)
-    # but a group's maker picks from the channels that exist
-    sams = await _make("u-sam", "Night shift")
+    # Sue cannot delete Sam's; Sam and the Admin can
+    with pytest.raises(Refused, match="connected by someone else"):
+        await _run("u-sue", "channel_delete", {"channel_id": sams})
+    await _run("u-adm", "channel_set", {"channel_id": sams, "name": "night shift C"})
+    await _run("u-sam", "channel_delete", {"channel_id": sams})
+    with pytest.raises(Refused, match="may not make groups"):
+        await _run("u-pat", "channel_set", {"name": "x", "webhook_url": "https://x.test/hook"})
+
+
+async def test_a_group_posts_only_where_its_maker_connected():
+    await _run("u-sam", "channel_set", {"name": "night shift",
+                                        "webhook_url": "https://x.test/hook"})
+    sams = await _channel_of("night shift")
+    # Sam's group to Sam's channel: fine. To the channel someone else connected: refused,
+    # because only whoever connected a channel knows who reads it
+    group = await _make("u-sam", "Night shift", (sams,))
+    with pytest.raises(Refused, match="shift leads was connected by someone else"):
+        await _make("u-sam", "Sneaky", (str(CHANNEL),))
+    with pytest.raises(Refused, match="night shift was connected by someone else"):
+        await _make("u-sue", "Sue's", (sams,))
+    # an Admin posts a group anywhere, and a channel the group already has may stay
+    await _run("u-adm", "group_set", {"group_id": group, "name": "Night shift",
+                                      "topics": ["advisory:stock"],
+                                      "channel_ids": [sams, str(CHANNEL)]})
+    await _run("u-sam", "group_set", {"group_id": group, "name": "Night shift 2",
+                                      "topics": ["advisory:stock"],
+                                      "channel_ids": [sams, str(CHANNEL)]})
     async with async_session() as db:
-        assert (await store.group_route(db, CC, sams)).channel_ids == (str(CHANNEL),)
+        assert set((await store.group_route(db, CC, group)).channel_ids) == {sams, str(CHANNEL)}
 
 
 # ==================================================== 3. members add colleagues
@@ -222,7 +260,10 @@ async def test_each_group_names_who_made_it():
     await _make("u-ops", "Everything")
     mirror = InMemoryMirrorWriter()
     await _run("u-ops", "group_join", {"group_id": await _make("u-adm", "Board")}, mirror)
-    row = json.loads(mirror.items[(f"EYE#{CC}", "GROUPS")].payload_json)["groups"]
-    assert {g["name"]: (g["created_by"], g["created_by_name"]) for g in row} == {
+    payload = json.loads(mirror.items[(f"EYE#{CC}", "GROUPS")].payload_json)
+    assert {g["name"]: (g["created_by"], g["created_by_name"]) for g in payload["groups"]} == {
         "Night shift": ("u-sam", "Sam Super"), "Everything": ("u-ops", "Olu Ops"),
         "Board": ("u-adm", "Ada Admin")}
+    # the people a member can add as a colleague, and who connected each channel
+    assert {p["object_id"]: p["name"] for p in payload["people"]}["u-pat"] == "Pat Picker"
+    assert payload["channels"][0]["created_by"] is None
