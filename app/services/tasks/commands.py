@@ -112,6 +112,13 @@ async def _proposal(db: AsyncSession, job: QuestionJob, record: access.AccessRec
     kind = job.command.kind
     try:
         if kind == "task_propose":
+            # the Routines tab's dialog sends its form values, as it does for one's own routine
+            if payload.get("form_id") in FORM_IDS:
+                values = dict(payload.get("values") or {})
+                parsed = (forms.reminder_from_form(values, tz=tz) if payload["form_id"] == "new_reminder"
+                          else forms.schedule_from_form(values, tz=tz))
+                # a colleague's routine is shown to them in the app, whatever the form said
+                payload = {**payload, **parsed, "target": "me"}
             fields = proposals.clean_fields(payload, now=now, tz=tz)
             made = await proposals.propose(db, job.customer_code, sender=actor,
                                            receiver_ids=list(payload.get("to") or []), fields=fields, now=now)

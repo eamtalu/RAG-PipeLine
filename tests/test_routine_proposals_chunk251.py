@@ -146,6 +146,18 @@ async def test_a_proposal_is_checked_like_a_routine_and_goes_to_real_colleagues(
     assert await _proposals() == []
 
 
+async def test_the_routine_dialogs_form_values_are_read_as_for_ones_own_routine():
+    values = {"what": "short products today", "how_often": "Every weekday (Mon – Fri)",
+              "time": "16:00", "send_to": "Me, in the app", "show_as": "A table"}
+    out = await _run("u-adm", "task_propose", {"form_id": "new_schedule", "values": values,
+                                               "to": ["u-sam"]})
+    assert out.text == ("proposed to Sam Super · Every weekday at 16:00 · "
+                        "short products today")
+    fields = (await _proposals())[0].fields
+    assert (fields["kind"], fields["query_text"], fields["show_as"]) == (
+        "schedule", "short products today", "table")
+
+
 async def test_anyone_may_propose_and_the_same_proposal_is_not_sent_twice():
     await _run("u-pat", "task_propose", {**ROUTINE, "to": ["u-sam"]})
     with pytest.raises(Refused, match="already waiting for Sam Super"):
