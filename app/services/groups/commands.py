@@ -61,6 +61,8 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
         payload = dict(command.payload)
         handler = _HANDLERS[command.kind]
         try:
+            if command.kind in ("group_set", "group_delete") and payload.get("group_id"):
+                await _check_reach(db, record, str(payload["group_id"]))
             if command.kind == "group_set":
                 # resolved here, because which sites a group may get depends on who asks
                 payload["_sites"] = await _wanted_sites(db, record, payload)
@@ -81,6 +83,27 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
             except Exception:
                 logger.warning("group rows for %s not mirrored after %s", job.customer_code, command.kind, exc_info=True)
         return CommandOutcome(text, (receipt(text, reference=subject_id, now=now),))
+
+
+async def _check_reach(db: AsyncSession, record: access.AccessRecord, group_id: str) -> None:
+    """Refuse a change to a group that is about a site the person may not see.
+
+    (Bea of BRI, "LON · Stock") -> ValueError naming LON ; (Bea, "All sites · Ops") -> ValueError ;
+    (Bea, "BRI · Stock") -> fine ; (Olu of all sites, any group) -> fine
+
+    Changing a group can point it at another channel, so whoever changes it must be allowed
+    everything it carries; otherwise a London group's alerts could be sent to a channel a
+    Brighton person linked.
+    """
+    current = await store.sites_of(db, record.customer_code, group_id, include_disabled=True)
+    if current is None or record.all_sites:
+        return  # a group that is gone is reported by the handler
+    if current.all_sites:
+        raise ValueError("this group is about every site; someone who may see every site changes it")
+    beyond = [site for site in current.site_ids if not record.may_see(site)]
+    if beyond:
+        raise ValueError(f"this group is about {', '.join(beyond)}, which you may not see; "
+                         "someone who may see it changes it")
 
 
 async def _wanted_sites(db: AsyncSession, record: access.AccessRecord, payload: dict) -> store.GroupSites | None:

@@ -241,14 +241,16 @@ async def _reaches(db: AsyncSession, customer_code: str, view: GroupView, adviso
     return await scoped_data.can_read(db, scope, Advisory, advisory_id)
 
 
-async def sites_of(db: AsyncSession, customer_code: str, group_id) -> GroupSites | None:
-    """The sites of one enabled group, or None when it is gone or switched off.
+async def sites_of(db: AsyncSession, customer_code: str, group_id, *,
+                   include_disabled: bool = False) -> GroupSites | None:
+    """The sites of one enabled group, or None when it is gone or switched off (a switched-off
+    one counts with `include_disabled`, for deciding who may change it).
 
     ("BRI · Stock") -> GroupSites(False, ("BRI",)) ; (an unknown id) -> None
     """
     if not group_id:
         return None
-    for view in await list_groups(db, customer_code, include_disabled=False):
+    for view in await list_groups(db, customer_code, include_disabled=include_disabled):
         if str(view.group.id) == str(group_id):
             return view.sites
     return None

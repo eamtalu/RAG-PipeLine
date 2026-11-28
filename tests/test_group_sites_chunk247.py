@@ -192,22 +192,46 @@ async def test_a_group_made_without_naming_sites_gets_its_makers_own():
     assert names == ["BRI · Mine", "All sites · Wide"]
 
 
-async def test_a_change_keeps_the_sites_unless_it_names_them_and_cannot_widen_past_the_editor():
+async def test_a_change_keeps_the_sites_unless_it_names_them():
     mirror = InMemoryMirrorWriter()
     wide = await _make("Wide", GroupSites(True, ()))
     edit = {"group_id": wide, "name": "Wide desk", "topics": ["advisory:stock"]}
-    # a Brighton person renames an all-sites group: its sites are not theirs to widen, but
-    # leaving them as they are is not a widening
-    await commands.run(_job("u-bri", "group_set", edit), mirror=mirror, now=NOW)
-    await commands.run(_job("u-bri", "group_set", {**edit, "all_sites": True}), mirror=mirror,
-                       now=NOW)
-    # narrowing to their own site is theirs to do; after that they cannot bring London back
-    out = await commands.run(_job("u-bri", "group_set", {**edit, "site_ids": ["BRI"]}),
+    out = await commands.run(_job("u-ops", "group_set", edit), mirror=mirror, now=NOW)
+    assert out.text.startswith("group All sites · Wide desk saved")
+    out = await commands.run(_job("u-ops", "group_set", {**edit, "site_ids": ["BRI"]}),
                              mirror=mirror, now=NOW)
     assert out.text.startswith("group BRI · Wide desk saved")
+    # Bea of Brighton may change a Brighton group, and cannot bring London into it
+    await commands.run(_job("u-bri", "group_set", {**edit, "name": "Bea's desk"}),
+                       mirror=mirror, now=NOW)
     with pytest.raises(Refused, match="LON is not one of your sites"):
         await commands.run(_job("u-bri", "group_set", {**edit, "site_ids": ["BRI", "LON"]}),
                            mirror=mirror, now=NOW)
+
+
+async def test_a_group_is_changed_or_deleted_only_by_someone_who_may_see_all_its_sites():
+    # Otherwise Bea of Brighton could link her own channel to a London group and read
+    # London's alerts there, or switch off a group other sites rely on.
+    mirror = InMemoryMirrorWriter()
+    london = await _make("Stock", GroupSites(False, ("LON",)))
+    mixed = await _make("South", GroupSites(False, ("BRI", "LON")))
+    wide = await _make("Everything", GroupSites(True, ()))
+    for group_id, words in ((london, "LON"), (mixed, "LON"), (wide, "every site")):
+        with pytest.raises(Refused, match=words):
+            await commands.run(_job("u-bri", "group_set", {
+                "group_id": group_id, "name": "Mine now", "topics": ["advisory:stock"],
+                "channel_ids": [str(CHANNEL)]}), mirror=mirror, now=NOW)
+        with pytest.raises(Refused, match=words):
+            await commands.run(_job("u-bri", "group_delete", {"group_id": group_id}),
+                               mirror=mirror, now=NOW)
+    async with async_session() as db:
+        names = sorted(v.display_name for v in await store.list_groups(db, CC))
+    assert names == ["All sites · Everything", "BRI, LON · South", "LON · Stock"]
+    # someone who may see every site changes and deletes any of them
+    await commands.run(_job("u-ops", "group_delete", {"group_id": london}), mirror=mirror,
+                       now=NOW)
+    # joining and leaving stay open to everyone: a member sees the group's name, not its data
+    await commands.run(_job("u-bri", "group_join", {"group_id": wide}), mirror=mirror, now=NOW)
 
 
 # ==================================================== 4. groups made before this
