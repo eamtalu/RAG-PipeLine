@@ -1,7 +1,8 @@
 """The notification groups tables (stage D, step 12): making, changing and removing groups, their
 channels and their members, and the one lookup the dispatchers make: which channels and which
-people take a finding of a topic and severity. Used by commands.py, mirror.py and the advisories
-and tasks runners.
+people take a finding of a topic and severity. Since program step 3 a group is about some sites
+(`GroupSites`), and a finding reaches it only when its place is one of them. Used by commands.py,
+mirror.py and the advisories and tasks runners.
 """
 
 from __future__ import annotations
@@ -13,13 +14,33 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.persistence.models.advisory import Advisory
 from app.persistence.models.notification import CustomerNotificationChannel
 from app.persistence.models.notification_group import (
     NotificationGroup,
     NotificationGroupChannel,
     NotificationGroupMember,
+    NotificationGroupSite,
 )
+from app.services import scoped_data
 from app.services.groups import routing
+
+
+@dataclass(frozen=True)
+class GroupSites:
+    """The sites a group is about: every site of the customer, or the ones listed."""
+
+    all_sites: bool = True
+    site_ids: tuple[str, ...] = ()
+
+    @classmethod
+    def of(cls, all_sites: bool, site_ids) -> "GroupSites":
+        """The same choice in one shape: no list for every site, a sorted one otherwise.
+
+        >>> GroupSites.of(True, ["BRI"]), GroupSites.of(False, ["LON", "BRI", "BRI"])
+        (GroupSites(all_sites=True, site_ids=()), GroupSites(all_sites=False, site_ids=('BRI', 'LON')))
+        """
+        return cls(True, ()) if all_sites else cls(False, tuple(sorted(set(site_ids))))
 
 
 @dataclass(frozen=True)
@@ -43,20 +64,32 @@ class GroupView:
     group: NotificationGroup
     channel_ids: list[uuid.UUID] = field(default_factory=list)
     member_object_ids: list[str] = field(default_factory=list)
+    #: The listed sites; not read while the group is about every site.
+    site_ids: list[str] = field(default_factory=list)
+
+    @property
+    def sites(self) -> GroupSites:
+        return GroupSites.of(self.group.all_sites is not False, self.site_ids)
+
+    @property
+    def display_name(self) -> str:
+        """The name as it is shown and posted, its sites in front: "BRI · Stock alerts"."""
+        return routing.display_name(self.group.name, self.sites.all_sites, self.sites.site_ids)
 
 
 def route_of(views: list[GroupView] | tuple[GroupView, ...]) -> Route:
     """The one route for a set of groups: their ids and names in order, their channels and members
     without repeats.
 
-    ([Stock on ch1 with u-1, Ops on ch1 and ch2]) -> Route((s, o), ("Stock", "Ops"), (ch1, ch2), (u-1,)) ; ([]) -> empty
+    ([BRI Stock on ch1 with u-1, all-sites Ops on ch1 and ch2]) ->
+    Route((s, o), ("BRI · Stock", "All sites · Ops"), (ch1, ch2), (u-1,)) ; ([]) -> empty
     """
     channels: list[str] = []
     members: list[str] = []
     for v in views:
         channels.extend(str(c) for c in v.channel_ids if str(c) not in channels)
         members.extend(m for m in v.member_object_ids if m not in members)
-    return Route(group_ids=tuple(str(v.group.id) for v in views), group_names=tuple(v.group.name for v in views),
+    return Route(group_ids=tuple(str(v.group.id) for v in views), group_names=tuple(v.display_name for v in views),
                  channel_ids=tuple(channels), member_object_ids=tuple(members))
 
 
@@ -71,7 +104,11 @@ async def list_groups(db: AsyncSession, customer_code: str, *, include_disabled:
     ids = [g.id for g in groups]
     channels = (await db.execute(select(NotificationGroupChannel).where(NotificationGroupChannel.group_id.in_(ids)))).scalars()
     members = (await db.execute(select(NotificationGroupMember).where(NotificationGroupMember.group_id.in_(ids)))).scalars()
+    sites = (await db.execute(select(NotificationGroupSite).where(
+        NotificationGroupSite.group_id.in_(ids)).order_by(NotificationGroupSite.site_id))).scalars()
     views = {g.id: GroupView(group=g) for g in groups}
+    for s in sites:
+        views[s.group_id].site_ids.append(s.site_id)
     for c in channels:
         views[c.group_id].channel_ids.append(c.channel_id)
     for m in members:
@@ -96,9 +133,11 @@ async def customer_channels(db: AsyncSession, customer_code: str) -> list[Custom
 
 async def set_group(db: AsyncSession, customer_code: str, *, group_id: str | None, name: str, topics, min_severity,
                     channel_ids, member_object_ids, actor_object_id: str, now: datetime,
-                    max_per_hour=None) -> NotificationGroup:
-    """Make or change a group with its channels and members; ValueError for a bad field or a
-    channel that is not the customer's. A cap left out keeps the group's own (5 for a new one).
+                    max_per_hour=None, sites: GroupSites | None = None) -> NotificationGroup:
+    """Make or change a group with its channels, members and sites; ValueError for a bad field
+    or a channel that is not the customer's. A cap left out keeps the group's own (5 for a new
+    one); sites left out keep the group's own (every site for a new one). Who may choose which
+    sites is the command's to check, because it knows the person.
 
     (None, "Stock", ["advisory:stock"], "medium", [ch1], ["u-1"], max_per_hour=3) -> a new group ; (id, ...) -> changed
     """
@@ -137,9 +176,13 @@ async def set_group(db: AsyncSession, customer_code: str, *, group_id: str | Non
             raise ValueError(f"a group named {clean_name!r} already exists")
         group = NotificationGroup(id=uuid.uuid4(), customer_code=customer_code, name=clean_name, topics=clean_topics,
                                   min_severity=severity, max_per_hour=cap if cap is not None else routing.CAP_DEFAULT,
-                                  enabled=True, created_by=actor_object_id, created_at=now, updated_at=now)
+                                  enabled=True, all_sites=True, created_by=actor_object_id, created_at=now, updated_at=now)
         db.add(group)
         await db.flush()
+    if sites is not None:
+        group.all_sites = sites.all_sites
+        await db.execute(delete(NotificationGroupSite).where(NotificationGroupSite.group_id == group.id))
+        db.add_all([NotificationGroupSite(group_id=group.id, site_id=s) for s in sites.site_ids])
     db.add_all([NotificationGroupChannel(group_id=group.id, channel_id=c) for c in wanted_channels])
     db.add_all([NotificationGroupMember(group_id=group.id, object_id=m, added_by=actor_object_id, added_at=now)
                 for m in members])
@@ -173,11 +216,42 @@ async def set_membership(db: AsyncSession, customer_code: str, group_id: str, ob
     return group
 
 
-async def takers(db: AsyncSession, customer_code: str, topic: str, severity: str) -> list[GroupView]:
+async def takers(db: AsyncSession, customer_code: str, topic: str, severity: str, *,
+                 advisory_id: uuid.UUID | None = None) -> list[GroupView]:
     """The enabled groups that take a finding of this topic and severity, by name; the cap then
-    decides which of them still have room (step 13)."""
-    return [v for v in await list_groups(db, customer_code, include_disabled=False)
-            if routing.admits(list(v.group.topics or []), v.group.min_severity, topic, severity)]
+    decides which of them still have room (step 13). With `advisory_id`, only the groups whose
+    sites that advisory's place belongs to (program step 3).
+
+    (a London stock gap; groups "BRI · Stock" and "All sites · Ops") -> ["All sites · Ops"] ;
+    (a Brighton one) -> both
+    """
+    views = [v for v in await list_groups(db, customer_code, include_disabled=False)
+             if routing.admits(list(v.group.topics or []), v.group.min_severity, topic, severity)]
+    if advisory_id is None:
+        return views
+    return [v for v in views if await _reaches(db, customer_code, v, advisory_id)]
+
+
+async def _reaches(db: AsyncSession, customer_code: str, view: GroupView, advisory_id: uuid.UUID) -> bool:
+    """Whether an advisory's place is one of a group's sites, by the rule that limits a person's
+    reading, so a channel is never posted what its site's people could not open in the app."""
+    if view.sites.all_sites:
+        return True
+    scope = await scoped_data.sites_scope(db, customer_code, all_sites=False, site_ids=view.sites.site_ids)
+    return await scoped_data.can_read(db, scope, Advisory, advisory_id)
+
+
+async def sites_of(db: AsyncSession, customer_code: str, group_id) -> GroupSites | None:
+    """The sites of one enabled group, or None when it is gone or switched off.
+
+    ("BRI · Stock") -> GroupSites(False, ("BRI",)) ; (an unknown id) -> None
+    """
+    if not group_id:
+        return None
+    for view in await list_groups(db, customer_code, include_disabled=False):
+        if str(view.group.id) == str(group_id):
+            return view.sites
+    return None
 
 
 async def routes_for(db: AsyncSession, customer_code: str, topic: str, severity: str) -> Route:
@@ -197,7 +271,7 @@ async def group_route(db: AsyncSession, customer_code: str, group_id) -> Route:
     if not views:
         return Route()
     v = views[0]
-    return Route((str(v.group.id),), (v.group.name,), tuple(str(c) for c in v.channel_ids), tuple(v.member_object_ids))
+    return Route((str(v.group.id),), (v.display_name,), tuple(str(c) for c in v.channel_ids), tuple(v.member_object_ids))
 
 
 async def groups_of(db: AsyncSession, customer_code: str, object_id: str) -> list[NotificationGroup]:
@@ -214,7 +288,10 @@ def group_payload(view: GroupView, channel_names: dict[uuid.UUID, str], hour_cou
     g = view.group
     counts = hour_counts or {}
     return {
-        "id": str(g.id), "name": g.name, "topics": list(g.topics or []), "min_severity": g.min_severity,
+        "id": str(g.id), "name": g.name, "display_name": view.display_name,
+        "all_sites": view.sites.all_sites, "site_ids": list(view.sites.site_ids),
+        "sites_label": routing.sites_label(view.sites.all_sites, view.sites.site_ids),
+        "topics": list(g.topics or []), "min_severity": g.min_severity,
         "max_per_hour": int(g.max_per_hour or routing.CAP_DEFAULT),
         "sent_this_hour": int(counts.get("sent", 0)), "held_this_hour": int(counts.get("held", 0)),
         "enabled": g.enabled, "created_by": g.created_by,

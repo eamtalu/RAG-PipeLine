@@ -281,7 +281,7 @@ async def test_the_runner_seeds_the_switches_runs_what_is_due_announces_high_onc
     assert event.event_type == "advisory" and event.customer_code == CC and event.severity == "warning"
     assert event.title == "Delivery: Route R14 (Hove Deli) likely to leave 24 lines behind"
     assert event.dedup_key == f"advisory:{row.id}" and event.payload["site_id"] == "BRI"
-    assert event.target_channel_ids == [str(channel.id)] and event.payload["groups"] == ["Delivery desk"]
+    assert event.target_channel_ids == [str(channel.id)] and event.payload["groups"] == ["All sites · Delivery desk"]
     # Step 3: the ADVISORIES row the edge reads
     env = mirror.items[(f"EYE#{CC}", "ADVISORIES")]
     assert env.row_type == "advisories"

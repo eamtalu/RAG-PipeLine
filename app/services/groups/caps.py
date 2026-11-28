@@ -151,7 +151,7 @@ def notice_for(view: GroupView, customer_code: str, *, now: datetime, tz: ZoneIn
     cap = view.group.max_per_hour
     return NotificationEvent(
         event_type=NOTICE_EVENT, customer_code=customer_code, severity="info",
-        title=f"{view.group.name}: quiet until {until}",
+        title=f"{view.display_name}: quiet until {until}",
         summary=(f"{cap} card{'s' if cap != 1 else ''} sent this hour, the cap. New findings keep going to the "
                  f"Advisories tab in eSmart Eye; one summary follows at {until}."),
         dedup_key=f"advisory-cap:{view.group.id}:{start.isoformat()}",
@@ -172,7 +172,7 @@ def summary_for(summary: Summary, customer_code: str, *, tz: ZoneInfo) -> Notifi
     agents = ", ".join(f"{agent} {n}" for agent, n in sorted(summary.by_agent.items()))
     return NotificationEvent(
         event_type=SUMMARY_EVENT, customer_code=customer_code, severity="info",
-        title=(f"{view.group.name}: {summary.held} more finding{'s' if summary.held != 1 else ''} between "
+        title=(f"{view.display_name}: {summary.held} more finding{'s' if summary.held != 1 else ''} between "
                f"{_clock(start, tz)} and {_clock(start + routing.WINDOW, tz)}"),
         summary=f"{severities} · {agents} · open the Advisories tab in eSmart Eye",
         dedup_key=f"advisory-summary:{view.group.id}:{start.isoformat()}",

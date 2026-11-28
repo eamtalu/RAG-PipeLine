@@ -205,7 +205,7 @@ def test_a_routines_job_is_marked_as_a_routine_run():
 
 @pytest.mark.asyncio
 async def test_a_routine_run_keeps_the_trace_of_the_run_that_answered_it(monkeypatch):
-    async def answered(job, history, progress=None):
+    async def answered(job, history, progress=None, within=None):
         return {"answer": "fine", "blocks": []}, "trace-9"
 
     async def allowed(job):

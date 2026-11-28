@@ -1384,6 +1384,9 @@ Emails are stored lower case and are unique per customer, and an invite must be 
 Advisories (stage D, step 9) are what the agents found: `advisories` holds one row per thing (unique on `customer_code` + `dedup_key`), kept open while the agent keeps finding it, resolved with reason `cleared` when it stops, reopened on the same row when it returns, and moved by people to `acknowledged`, `snoozed`, `dismissed` or `resolved` with an `audit_events` line each (`advisory.<action>`; since step 17 one command may act on up to 50 at once, one line each); since step 17 each row says its `kind` and what it is `about` in words (`app/services/advisories/kinds.py`), so the tab groups the feed without parsing titles; `advisory_agents` is each agent's switch and cadence per customer, seeded from `app/services/advisories/registry.py` on the first tick (Delivery, Stock controller and Location on; the others off with a reason); `advisory_agent_runs` the ledger of every run with what it opened, resolved or raised.
 All three are real foreign keys to the customer; the agents read `analytics_at_risk_deliveries` and `analytics_facts`, never a table of their own.
 Notification groups (stage D, step 12) route what the agents and the schedules produce: `notification_groups` is a named route per customer (the topics it takes as a JSON list, the lowest severity it takes, enabled), `notification_group_channels` the Teams channels it posts to (`customer_notification_channels`, by webhook), `notification_group_members` the people who see it in the app; `teams_tasks.target_group_id` names the group a schedule posts to.
+Since chunk 247 (28 Nov 2026, migration `c5f0a8b2d4e9`, program step 3) a group is about some sites: every site of the customer (`notification_groups.all_sites`) or the ones listed in `notification_group_sites`.
+An advisory reaches a group only when its place is one of the group's sites, and a routine sent to a group's channels reads inside those sites and its owner's own.
+The group's name is shown and posted with its sites in front ("BRI · Stock alerts"); the stored `name` stays plain.
 Routing is one lookup at dispatch; a finding no group takes goes nowhere, so a new channel receives nothing until a group takes it.
 The cap (stage D, step 13) bounds how many: a group sends at most `notification_groups.max_per_hour` advisory cards per clock hour, and `advisory_announcements` is its ledger, one line per advisory sent or held in an hour (`window_start`) plus the hour's `notice` line (the card that says the group went quiet) and `summary` line (the card that lists what was held once the hour is over).
 Held is recorded, not dropped, so which findings a summary covered stays answerable; the summary line is written before the card is sent, so a restart never repeats it.
@@ -1637,9 +1640,15 @@ erDiagram
         string min_severity "high | medium | low"
         int max_per_hour "advisory cards per clock hour; default 5"
         boolean enabled
+        boolean all_sites "every site of the customer; true for a group made before chunk 247"
         string created_by
         datetime created_at
         datetime updated_at
+    }
+
+    notification_group_sites {
+        uuid group_id PK,FK "notification_groups"
+        string site_id PK "a tenant_sites.site_id; read only while all_sites is false"
     }
 
     advisory_announcements {
@@ -1854,6 +1863,8 @@ erDiagram
     notification_groups ||--o{ notification_group_channels : "posts to"
     customer_notification_channels ||--o{ notification_group_channels : "taken by"
     notification_groups ||--o{ notification_group_members : "seen by"
+    notification_groups ||--o{ notification_group_sites : "is about"
+    tenant_sites ||..o{ notification_group_sites : "named by (site_id)"
     notification_groups ||--o{ teams_tasks : "target of (SET NULL)"
     customers ||--o{ advisory_announcements : "announcement ledger of"
     notification_groups ||--o{ advisory_announcements : "sent or held by"
@@ -1983,6 +1994,7 @@ No table or column changed.
 | `notification_groups.id` | `notification_group_channels.group_id` | CASCADE |
 | `customer_notification_channels.id` | `notification_group_channels.channel_id` | CASCADE |
 | `notification_groups.id` | `notification_group_members.group_id` | CASCADE |
+| `notification_groups.id` | `notification_group_sites.group_id` | CASCADE |
 | `notification_groups.id` | `teams_tasks.target_group_id` | SET NULL |
 | `customers.customer_code` | `advisory_announcements.customer_code` | CASCADE |
 | `notification_groups.id` | `advisory_announcements.group_id` | CASCADE |
@@ -2001,6 +2013,7 @@ The nine `analytics_*` tables add **no rows to this table**. They have no enforc
 | Logical parent | Referencing column | Meaning |
 | --- | --- | --- |
 | `customers.customer_code` | `customer_code` on jobs, log_entries, log_transactions, log_regroup_pending, log_regroup_runs, log_ssh_sources, log_ssh_file_checkpoints, log_ssh_fetch_runs, log_source_objects, saved_views, idempotency_keys, teams_conversation_turns, agent_runs, agent_traces, quota_windows, agent_in_flight, usage_daily, tenant_secrets, the notification tables, and every `analytics_*` table including the ML and forecast ones | tenant partition key |
+| `tenant_sites.site_id` | `notification_group_sites.site_id` | a site a notification group is about; no FK, as on the access tables' site lists |
 | `analytics_metrics.id` | `definition_id` on the three rollup tables | which definition a rollup row belongs to; no FK because a FK from a partitioned child made the log partitions undroppable once already |
 | `analytics_feature_sets.id` | `analytics_predictions.feature_set_id` | which training set the model behind a prediction was built from; nullable |
 | `analytics_forecast_runs.id` | `analytics_predictions.run_id`, `analytics_forecast_series.last_run_id` | which forecast pass wrote the row; nullable, no FK |

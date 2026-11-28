@@ -119,10 +119,10 @@ async def test_a_group_sends_its_cap_then_one_notice_then_one_summary_after_the_
         assert await _tick(db, [_finding(n) for n in (1, 2, 3, 4)], NOW, announced) == 2
         cards = [e for e in announced if e.event_type == "advisory"]
         notices = [e for e in announced if e.event_type == "advisory_cap"]
-        assert len(cards) == 2 and all(e.target_channel_ids == [str(CH1)] and e.payload["groups"] == ["Stock"] for e in cards)
+        assert len(cards) == 2 and all(e.target_channel_ids == [str(CH1)] and e.payload["groups"] == ["All sites · Stock"] for e in cards)
         assert len(notices) == 1
         notice = notices[0]
-        assert notice.title == "Stock: quiet until 16:00" and notice.target_channel_ids == [str(CH1)]
+        assert notice.title == "All sites · Stock: quiet until 16:00" and notice.target_channel_ids == [str(CH1)]
         assert notice.dedup_key == f"advisory-cap:{stock.id}:2026-11-13T15:00:00+00:00"
         assert "2 cards sent this hour" in notice.summary and "Advisories tab" in notice.summary
         assert await _ledger(db, stock.id) == {"sent": 2, "held": 2, "notice": 1}
@@ -140,7 +140,7 @@ async def test_a_group_sends_its_cap_then_one_notice_then_one_summary_after_the_
         summaries = [e for e in announced if e.event_type == "advisory_summary"]
         assert len(summaries) == 1
         summary = summaries[0]
-        assert summary.title == "Stock: 3 more findings between 15:00 and 16:00"
+        assert summary.title == "All sites · Stock: 3 more findings between 15:00 and 16:00"
         assert summary.summary == "3 HIGH · stock 3 · open the Advisories tab in eSmart Eye"
         assert summary.dedup_key == f"advisory-summary:{stock.id}:2026-11-13T15:00:00+00:00"
         assert summary.target_channel_ids == [str(CH1)] and summary.payload["held"] == 3
@@ -160,10 +160,10 @@ async def test_only_the_groups_with_room_get_the_card():
         wide = await _group(db, "Wide", cap=5, channels=[CH2])
         assert await _tick(db, [_finding(1), _finding(2)], NOW, announced) == 2
         cards = [e for e in announced if e.event_type == "advisory"]
-        assert sorted(cards[0].target_channel_ids) == sorted([str(CH1), str(CH2)]) and cards[0].payload["groups"] == ["Narrow", "Wide"]
-        assert cards[1].target_channel_ids == [str(CH2)] and cards[1].payload["groups"] == ["Wide"]
+        assert sorted(cards[0].target_channel_ids) == sorted([str(CH1), str(CH2)]) and cards[0].payload["groups"] == ["All sites · Narrow", "All sites · Wide"]
+        assert cards[1].target_channel_ids == [str(CH2)] and cards[1].payload["groups"] == ["All sites · Wide"]
         notices = [e for e in announced if e.event_type == "advisory_cap"]
-        assert [n.title for n in notices] == ["Narrow: quiet until 16:00"]
+        assert [n.title for n in notices] == ["All sites · Narrow: quiet until 16:00"]
         assert await _ledger(db, narrow.id) == {"sent": 1, "held": 1, "notice": 1}
         assert await _ledger(db, wide.id) == {"sent": 2}
 
@@ -191,7 +191,7 @@ async def test_the_cap_is_set_through_the_command_and_checked():
                            mirror=mirror, now=NOW)
     outcome = await commands.run(_command("group_set", {"name": "Stock", "topics": ["advisory:stock"], "max_per_hour": 3,
                                                         "channel_ids": [str(CH1)]}), mirror=mirror, now=NOW)
-    assert outcome.text == "group Stock saved · 1 channel · 0 members · 3 cards an hour"
+    assert outcome.text == "group All sites · Stock saved · 1 channel · 0 members · 3 cards an hour"
     group_id = outcome.blocks[0]["reference"]
     row = json.loads(mirror.items[(f"EYE#{CC}", "GROUPS")].payload_json)["groups"][0]
     assert row["max_per_hour"] == 3 and row["sent_this_hour"] == 0 and row["held_this_hour"] == 0

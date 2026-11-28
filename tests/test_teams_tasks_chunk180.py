@@ -198,7 +198,7 @@ async def test_a_schedule_aimed_at_a_group_goes_through_the_outbox_to_its_channe
     assert await runner.tick(None, run_query=run_query, enqueue=enqueue, only=[CC], now=monday) == {CC: 1}
     assert len(sent) == 1 and sent[0].event_type == "schedule" and sent[0].title == "Weekly deliveries graph"
     assert sent[0].summary == "265 departures this week." and sent[0].payload["show_as"] == "chart"
-    assert sent[0].target_channel_ids == [channel_id] and sent[0].payload["groups"] == ["Ops"]
+    assert sent[0].target_channel_ids == [channel_id] and sent[0].payload["groups"] == ["All sites · Ops"]
 
 
 # ==================================================== 2. people make and change their own tasks

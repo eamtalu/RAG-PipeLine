@@ -117,7 +117,9 @@ async def notify(db: AsyncSession, customer_code: str, *, now: datetime, enqueue
     # Step 1: Every new advisory is stamped on this tick whether sent or held, so a group made
     # later never receives today's backlog and a held finding is never retried as new
     for row in await store.unnotified(db, customer_code):
-        takers = await groups_store.takers(db, customer_code, routing.topic_of(row.agent), row.severity)
+        # only the groups whose sites this advisory's place belongs to (program step 3)
+        takers = await groups_store.takers(db, customer_code, routing.topic_of(row.agent), row.severity,
+                                           advisory_id=row.id)
         row.notified_at = now
         if not takers:
             continue

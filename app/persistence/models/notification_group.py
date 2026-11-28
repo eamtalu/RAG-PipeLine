@@ -11,6 +11,11 @@
 #   went quiet and the summary it sent once the hour was over. Held is recorded, not dropped, so
 #   "which findings were in that summary?" stays answerable.
 #
+#   Program step 3 adds the sites: a group is about every site of the customer (`all_sites`) or
+#   about the ones listed in notification_group_sites. A finding reaches it only when its place
+#   is one of those, and a routine sent to its channels reads inside them, so a channel that
+#   holds the people of one site is not shown another site's data.
+#
 #   customer_code is a real foreign key, as on the access tables.
 
 import uuid
@@ -43,9 +48,22 @@ class NotificationGroup(Base):
     min_severity: Mapped[str] = mapped_column(String(8), nullable=False, default="high", server_default="high")
     max_per_hour: Mapped[int] = mapped_column(Integer, nullable=False, default=5, server_default="5")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    #: Every site of the customer, including any added later. True for a group made before
+    #: groups had sites, so it behaves as it did until someone narrows it.
+    all_sites: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
+
+
+class NotificationGroupSite(Base):
+    """One site a group is about; read only while the group's `all_sites` is false."""
+
+    __tablename__ = "notification_group_sites"
+
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("notification_groups.id", ondelete="CASCADE"), primary_key=True)
+    site_id: Mapped[str] = mapped_column(String(16), primary_key=True)
 
 
 class NotificationGroupChannel(Base):

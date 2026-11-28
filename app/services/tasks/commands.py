@@ -68,7 +68,8 @@ async def run(job: QuestionJob, *, session_factory=None, mirror: MirrorWriter | 
 
 async def sendable_groups(db: AsyncSession, customer_code: str, object_id: str) -> list[tuple[str, str]]:
     """The groups a schedule of this person may post to: every enabled group of the customer, as
-    (id, name) pairs by name (a schedule posts with its owner's access either way)."""
+    (id, name) pairs by name. What is posted is read inside the group's sites and the owner's
+    own, whichever is narrower (program step 3), so any group is safe to offer."""
     from app.services.groups import store as groups_store
 
     return [(str(v.group.id), v.group.name) for v in await groups_store.list_groups(db, customer_code, include_disabled=False)]

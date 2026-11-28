@@ -215,7 +215,7 @@ async def test_a_confirmed_group_form_becomes_group_set_with_its_topics_and_chan
     values = {f["name"]: f.get("value") or "" for f in out["block"]["fields"]}
     outcome = await group_commands.run(unwrap_form(_job("u-ops", "group_set", {"form_id": "set_group", "values": values, "via": "ask"})),
                                        mirror=InMemoryMirrorWriter(), now=NOW)
-    assert outcome.text.startswith("group Stock saved")
+    assert outcome.text.startswith("group All sites · Stock saved")
     async with async_session() as db:
         group = (await db.execute(select(NotificationGroup).where(NotificationGroup.customer_code == CC))).scalar_one()
         assert group.topics == ["advisory:stock", "advisory:location"] and group.min_severity == "high"
