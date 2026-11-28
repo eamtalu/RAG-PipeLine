@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 #: Logged by both sides at start-up, so an operator can see which revision each runs. The
 #: schema_version fields below stay: every addition since v2 is optional, so an older side
 #: ignores what it does not know and a newer side fills in defaults.
-CONTRACT_REVISION = "3.29"
+CONTRACT_REVISION = "3.30"
 
 
 def _now() -> datetime:
@@ -51,6 +51,10 @@ def _now() -> datetime:
 #:   recurring one with `when`)
 #: group_set {group_id?, name, topics, min_severity, channel_ids, members, max_per_hour?} (step 12;
 #:   max_per_hour 1..60 is step 13, the cards a group sends per clock hour) ; group_delete {group_id}
+#:   3.30, program step 3: group_set also takes all_sites? and site_ids?, the sites the group is
+#:   about. Neither named keeps an existing group's sites and gives a new one its maker's own;
+#:   nobody adds a site they may not see. A GROUPS row's group carries all_sites, site_ids,
+#:   sites_label and display_name ("BRI · Stock"), the name to show.
 #: group_join {group_id} ; group_leave {group_id}
 #: channel_set {channel_id?, name, webhook_url?, channel_type?}
 #: channel_delete {channel_id} ; channel_test {channel_id}
